@@ -1,7 +1,7 @@
 //! The typed schema model: parses raw definitions, indexes them by name
 //! (case-insensitive, alias-aware), and resolves SUP inheritance.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use chumsky::Parser;
 use ldap_types::schema::{attribute_type_parser, object_class_parser, AttributeType, ObjectClass};
@@ -92,6 +92,61 @@ impl SchemaModel {
     pub fn attribute_type_count(&self) -> usize {
         self.attribute_types.len()
     }
+
+    /// The canonical (primary) name of an attribute, or the referenced name if
+    /// the attribute type is unknown. Lets set operations dedup consistently.
+    fn canonical_attr(&self, referenced: &str) -> String {
+        self.attribute_type(referenced)
+            .and_then(|at| at.name.first())
+            .map(|n| n.to_string())
+            .unwrap_or_else(|| referenced.to_string())
+    }
+
+    /// Resolve the effective MUST/MAY attributes for a set of object classes,
+    /// walking SUP inheritance. An attribute required by any class is MUST and
+    /// is excluded from MAY.
+    pub fn effective_attributes(&self, object_classes: &[&str]) -> ResolvedAttributes {
+        let mut must = BTreeSet::new();
+        let mut may = BTreeSet::new();
+        let mut visited = HashSet::new();
+        for &name in object_classes {
+            self.collect_class(name, &mut must, &mut may, &mut visited);
+        }
+        for m in &must {
+            may.remove(m);
+        }
+        ResolvedAttributes { must, may }
+    }
+
+    fn collect_class(
+        &self,
+        name: &str,
+        must: &mut BTreeSet<String>,
+        may: &mut BTreeSet<String>,
+        visited: &mut HashSet<String>,
+    ) {
+        if !visited.insert(name.to_lowercase()) {
+            return; // already processed (also guards against SUP cycles)
+        }
+        let Some(oc) = self.object_class(name) else {
+            return;
+        };
+        // Clone the referenced names out before recursing (avoids borrow conflicts).
+        let must_names: Vec<String> = oc.must.iter().map(|a| a.to_string()).collect();
+        let may_names: Vec<String> = oc.may.iter().map(|a| a.to_string()).collect();
+        let sups: Vec<String> = oc.sup.iter().map(|s| s.to_string()).collect();
+        for a in must_names {
+            let c = self.canonical_attr(&a);
+            must.insert(c);
+        }
+        for a in may_names {
+            let c = self.canonical_attr(&a);
+            may.insert(c);
+        }
+        for sup in sups {
+            self.collect_class(&sup, must, may, visited);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -133,5 +188,49 @@ mod tests {
         // alias: 'surname' resolves to the same attribute as 'sn'
         assert!(m.attribute_type("surname").is_some());
         assert!(m.attribute_type("SN").is_some());
+    }
+
+    fn inheritance_raw() -> RawSubschema {
+        RawSubschema {
+            object_classes: vec![
+                "( 2.5.6.0 NAME 'top' ABSTRACT MUST objectClass )".to_string(),
+                "( 2.5.6.6 NAME 'person' SUP top STRUCTURAL MUST ( sn $ cn ) \
+                  MAY ( userPassword $ description ) )"
+                    .to_string(),
+                "( 2.5.6.7 NAME 'organizationalPerson' SUP person STRUCTURAL \
+                  MAY ( title $ ou ) )"
+                    .to_string(),
+                "( 2.16.840.1.113730.3.2.2 NAME 'inetOrgPerson' SUP organizationalPerson \
+                  STRUCTURAL MAY ( mail $ givenName ) )"
+                    .to_string(),
+            ],
+            attribute_types: vec![],
+            ldap_syntaxes: vec![],
+        }
+    }
+
+    #[test]
+    fn effective_attributes_walk_the_sup_chain() {
+        let m = SchemaModel::from_raw(&inheritance_raw());
+        let r = m.effective_attributes(&["inetOrgPerson"]);
+        // MUST inherited from person (and objectClass from top):
+        assert!(r.must.contains("sn"), "must={:?}", r.must);
+        assert!(r.must.contains("cn"));
+        assert!(r.must.contains("objectClass"));
+        // MAY from the chain:
+        assert!(r.may.contains("mail"));
+        assert!(r.may.contains("title"));
+        assert!(r.may.contains("description"));
+        // An attribute that is MUST anywhere must NOT also appear in MAY:
+        assert!(!r.may.contains("sn"));
+    }
+
+    #[test]
+    fn unknown_object_class_yields_empty() {
+        let m = SchemaModel::from_raw(&inheritance_raw());
+        assert_eq!(
+            m.effective_attributes(&["doesNotExist"]),
+            ResolvedAttributes::default()
+        );
     }
 }
