@@ -2,3 +2,4 @@
 //! touches the network).
 
 pub mod tls;
+pub mod worker;
