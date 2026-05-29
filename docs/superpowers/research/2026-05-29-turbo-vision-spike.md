@@ -721,3 +721,356 @@ prefer `app.run()`, use the overlay-widget `IdleView` variant (probe above,
 ✅ compiles) which drains the channel in `idle()`.
 
 Rect is corners (x1,y1,x2,y2).
+
+---
+
+## 10. Embedding the DIT tree as a real TV Window (selection events, mouse, focus)
+
+**Date:** 2026-05-30. **Crate:** `turbo-vision = "1.2"` (1.2.0). **Method:** fresh
+throwaway `/tmp/tv-embed/e` (`cargo add turbo-vision@1.2`); four probes
+(`examples/probe10_window_outline.rs`, `probe10b_selection_and_asany.rs`,
+`probe10c_multi_window.rs`, `probe10d_size.rs`) plus a final
+`cargo build --examples`. **All compiled; final ALL_EXIT=0.** Every claim below is
+either a quoted real signature from the 1.2.0 source or marked ✅ compiled /
+⚠️ source-only (not runtime-observed).
+
+> **Scope honesty:** this is a *compile + source-read* spike. It proves the APIs
+> exist, type-check, and what the code paths do. It does **not** observe pixels.
+> Three things are asserted-by-construction / from source, NOT runtime-observed,
+> and the M4.1 implementer should sanity-check them on a real tty: (1) the window
+> **frame** renders (§10.9 — the prior app's missing frame is the open symptom);
+> (2) on **window resize**, `Group::set_bounds` propagates to the wrapper's
+> `set_bounds` → `inner.set_bounds` (the wrapper forwards it), so the outline
+> should redraw at the new size — wired correctly in source, not seen running;
+> (3) selection-after-click ordering (§10.4 — argued from the dispatch order in
+> source). Everything else here is `cargo`-compiled.
+
+### 10.0 Why this section exists — and what the prior author got wrong
+
+A prior build bolted the `OutlineViewer` on as a typed field on the app shell,
+hand-drew it on the desktop every frame, and manually forwarded keystrokes.
+Claimed reasons: (a) no focused-view / typed get-back from the desktop, and
+(b) `View::as_any()` panics so an inserted outline can't be downcast.
+
+The first claim is moot and the second is true-but-irrelevant. The real failure
+was architectural: real TV mouse/keyboard events flow **desktop → window →
+interior Group → focused child**. A view drawn *outside* that hierarchy never
+receives them, so it had no working mouse — **and** a hand-draw painted over the
+window frame (see §10.9), so it also had no chrome. **One root cause (drawing
+outside the hierarchy) produced both symptoms.** The fix is to put the outline
+*inside* a `Window` inserted into `app.desktop` and read its selection back
+through its own public accessor / the shared `Rc` node tree — no downcast, no
+`as_any`, no hand-draw.
+
+**Decisive source fact (refutes "the outline can't respond to the mouse"):**
+`OutlineViewer::handle_event` (src/views/outline.rs:334-359) handles arrows /
+Enter / Left / Right, then falls through to `self.handle_list_event(event)`. And
+`ListViewer::handle_list_event` (src/views/list_viewer.rs:331-350) has a real
+`EventType::MouseDown` arm that hit-tests by bounds and selects the clicked row:
+
+```rust
+EventType::MouseDown => {
+    if event.mouse.buttons & MB_LEFT_BUTTON != 0 {
+        let mouse_pos = event.mouse.pos;          // ABSOLUTE screen coords
+        let bounds = self.bounds();               // ABSOLUTE (Group::add converted)
+        if bounds.contains(mouse_pos) {
+            let relative_y = (mouse_pos.y - bounds.a.y) as usize;  // abs - abs = local row
+            let clicked_item = self.list_state().top_item + relative_y;
+            if clicked_item < self.item_count() {
+                self.select_item(clicked_item);   // moves selection
+                event.clear();
+                return true;
+            }
+        }
+    }
+    false
+}
+```
+
+**Coordinate identity (why the click lands on the right row):** when the outline
+is an interior child of a `Window` on the desktop, `Group::add` has already
+converted its bounds to **absolute** screen coordinates (group.rs:49-65), and the
+`Desktop` dispatches **absolute** mouse positions. So `mouse_pos.y - bounds.a.y`
+is absolute-minus-absolute = the correct local row index. The arithmetic is sound
+*only* because the widget lives in the hierarchy (the same precondition that makes
+the event arrive at all). `OutlineViewer` **is** mouse-capable already.
+
+### 10.1 Q1 — Window on the desktop; mouse/keyboard auto-route — ✅ compiled
+
+Real signatures (src/views/window.rs):
+- `Window::new(bounds: Rect, title: &str) -> Window` (window.rs:65) — blue,
+  resizable, draggable, closable; constructs a `Frame` and an interior `Group`
+  inset by 1 (`interior_bounds = bounds; interior_bounds.grow(-1,-1)`,
+  window.rs:123-127).
+- `Window::add(&mut self, Box<dyn View>) -> ViewId` (window.rs:159) — adds to the
+  interior `Group`; child bounds are **relative to the interior** (Group::add
+  converts relative→absolute).
+- `Window::set_initial_focus(&mut self)` (window.rs:205).
+- `Desktop::add(&mut self, Box<dyn View>) -> ViewId` (src/views/desktop.rs:47) —
+  inserts the window and focuses it (last child becomes current; desktop.rs:79-88).
+- Sizing the window: `Application::desktop` is public; **two working ways** to get
+  dimensions (both compiled in probe10d):
+  - `app.desktop.get_bounds() -> Rect` (desktop.rs:203), then `.width()/.height()`
+    — **preferred**, because the desktop is already inset for any menu bar /
+    status line.
+  - `app.terminal.size() -> (i16, i16)` (src/terminal/mod.rs:239) — full terminal,
+    ignores menu/status insets.
+
+```rust
+let db = app.desktop.get_bounds();
+let (w, h) = (db.width(), db.height());          // preferred (excludes menu/status)
+let mut win = Window::new(Rect::new(1, 1, w / 2, h - 1), "DIT");
+win.add(Box::new(outline));      // interior child; bounds relative to interior
+win.set_initial_focus();
+let _win_id = app.desktop.add(Box::new(win));    // <- the proper insert
+```
+
+**Auto-routing proof** (`Desktop`/`Window`-interior are `Group`s):
+`Group::handle_event` (group.rs:498-575) dispatches `MouseDown` to the top-most
+child whose `bounds.contains(mouse_pos)` (reverse z-order), focuses it, then
+forwards the event; keyboard/command events use three-phase processing to the
+**focused** child, with `Tab`/`Shift-Tab` cycling focus (group.rs:623-632). Once
+the window is a desktop child and the outline is its focused interior child, real
+mouse + keyboard reach the outline with zero manual forwarding.
+
+**App dispatch (so your command survives back to the loop):**
+`Application::handle_event` (src/app/application.rs:457) dispatches
+**menu_bar → desktop → status_line**, each step guarded by
+`event.what != EventType::Nothing`. Nothing in that method sets an *unrecognized*
+command to `Nothing`, so a custom command that no view consumes is still present
+in `event` when `handle_event` returns and the loop can match it. (Source-observed
+structure.)
+
+### 10.2 Q2 — OutlineViewer inside a Window, mouse-clickable — ✅ compiled
+
+`probe10c` puts an `OutlineViewer<String>` inside a `Window` sized to the interior
+and inserts it on the desktop; `probe10` does the same with a rich payload. Both
+compile. The click path: `Desktop(Group)::handle_event` → finds the window by
+bounds, brings it to front (OF_TOP_SELECT, desktop.rs:547-573) →
+`Window::handle_event` → interior `Group::handle_event` → finds the outline by
+bounds, focuses it, forwards the `MouseDown` → `OutlineViewer::handle_event` →
+`handle_list_event` selects the clicked row (§10.0). The frame (title + borders)
+is drawn by `Window::draw` → `self.frame.draw(terminal)` (window.rs:451) **before**
+the interior. The crate's own `tree_view.rs` example demonstrates the identical
+containment with a `Dialog` (which *is* a `Window`): `dialog.add(Box::new(
+tree_view)); app.desktop.add(Box::new(dialog));`.
+
+### 10.3 Q3 — reacting to selection/expansion the TV way — ✅ compiled
+
+There is **no** built-in "selection changed" broadcast emitted by `OutlineViewer`
+(unlike `ListBox`, which takes an `on_select_command`;
+`OutlineViewer::new(bounds, format_fn)` has no command parameter). So the
+event-driven hook is a **thin wrapper `View`** that embeds the `OutlineViewer`,
+lets it process the event, then (a) publishes its selection and (b) emits an app
+command by transforming the event — the documented TV child→parent pattern
+(view.rs:38-62: "Transform event to send message upward … Event bubbles up
+through Group::handle_event"; `Group::handle_event` re-dispatches a child-produced
+`Command`/`Broadcast`, group.rs:558-573).
+
+```rust
+struct DitOutline { inner: OutlineViewer<DitNode>, last_selected: Rc<RefCell<Option<...>>> }
+
+impl View for DitOutline {
+    fn can_focus(&self) -> bool { true }                 // so the Group focuses it
+    fn handle_event(&mut self, event: &mut Event) {
+        // CLICK-ONLY activation (this is what probe10 ships). Do NOT treat Enter
+        // as activate: OutlineViewer consumes Enter as an expand/collapse toggle,
+        // so emitting on Enter double-fires on every toggle (see matrix below).
+        let was_click = event.what == EventType::MouseDown;
+        self.inner.handle_event(event);                  // real nav + mouse hit-test
+        *self.last_selected.borrow_mut() = self.inner.selected_node();   // publish (no downcast)
+        if was_click { *event = Event::command(CM_DIT_ACTIVATE); }
+    }
+    /* bounds/draw/state/palette delegate to self.inner */
+}
+```
+
+**Exact activation matrix (read this — the naive wrapper has a footgun):**
+
+| User input | What `inner` does | event after `inner` | Wrapper emits |
+|---|---|---|---|
+| Left-click on row | `handle_list_event` selects that row, clears event | Nothing | `CM_DIT_ACTIVATE` (select **+** activate) |
+| Enter | `OutlineViewer` **toggles expand/collapse**, clears event | Nothing | `CM_DIT_ACTIVATE` — ⚠️ **fires activate on every expand/collapse** |
+| ↑/↓/PgUp/PgDn/Home/End | moves `list_state.focused`, clears event | Nothing | nothing (but `last_selected` is republished) |
+| ←/→ | collapse/expand, clears event | Nothing | nothing |
+
+So "Enter = activate" double-fires with the expand toggle, and arrow-move emits no
+command. **Recommendation:** decide the semantics deliberately. Either (a) gate
+`CM_DIT_ACTIVATE` to clicks only (Enter stays pure expand/collapse), or (b) compare
+the selected node identity before/after with **`Rc::ptr_eq`** (not a value
+`PartialEq`) and emit a distinct `CM_DIT_SELECT` whenever it changed (drives a live
+detail pane on arrow-move), plus `CM_DIT_ACTIVATE` only on click. There is **no
+double-click event** in what the crate exposes here (only `MouseDown`), so
+TV-style double-click activation is not available — single-click select+activate is
+the intended choice, not an accident.
+
+### 10.4 Q4 — getting the selection back; the `as_any` claim — ✅ compiled
+
+The prior `as_any` claim is **literally true but irrelevant**:
+- `View::as_any(&self) -> &dyn Any` defaults to `panic!("as_any() not implemented
+  …")` (view.rs:165-167), and `OutlineViewer` does **not** override it (it would
+  panic if called). `probe10b` type-checks a closure that *names* `as_any()`
+  (proving it compiles) but never invokes it. (Note: `Window` *does* override
+  `as_any` → `self`, window.rs:765 — but a downcast to `Window` still doesn't reach
+  the outline.)
+- **You never need it.** `OutlineViewer::selected_node(&self) ->
+  Option<Rc<RefCell<Node<T>>>>` is a **public `&self` accessor** (outline.rs:233-243).
+  Two compiled readback paths:
+
+```rust
+// PATH A — direct accessor (needs a &self ref to the widget):
+let sel: Option<Rc<RefCell<Node<DitNode>>>> = outline.selected_node();
+
+// PATH B (recommended) — shared-Rc handle the app keeps independently of where
+// the view lives: the wrapper writes inner.selected_node() into an
+// Rc<RefCell<Option<Rc<RefCell<Node<DitNode>>>>>> the app also holds; the app
+// reads last_selected.borrow().clone() with NO view reference, NO downcast.
+```
+
+**Ordering guarantee (why the post-event read is current):** the wrapper publishes
+`inner.selected_node()` *after* `inner.handle_event`. For a click,
+`handle_list_event` → `select_item` → `ListViewerState::focus_item` sets
+`self.focused = Some(item)` **synchronously** before returning (list_viewer.rs:101-106),
+so the `selected_node()` read immediately after `handle_event` reflects the row
+just clicked — no deferred update, no extra redraw needed.
+
+Path B is the recommendation **and** the robust way to react: poll `last_selected`
+each loop iteration regardless of whether the `CM_DIT_ACTIVATE` command path fires.
+(`Application::handle_event` leaves unknown commands intact — §10.1 — so the
+command path also works; the shared-`Rc` poll is just immune to any future
+event-clearing.) The `Node<T>` tree being `Rc<RefCell<…>>` throughout is what makes
+all of this downcast-free.
+
+### 10.5 Q5 — worker idle-bridge composes with the windowed outline — ✅ compiled
+
+The §9 overlay-`IdleView` bridge composes unchanged. The outline's roots are
+`Rc<RefCell<Node<DitNode>>>`; the worker bridge holds clones of the **same `Rc`
+nodes** and on each idle tick drains its channel and mutates the tree
+(`parent.borrow_mut().add_child(...)`, set `children_loaded = true`). For lazy
+load, push children **then** expand the parent — expanding calls `rebuild_display`
+(outline.rs:246-255), re-flattening so the new children appear. The bridge needs
+only the `Rc`, not the view, so it doesn't conflict with the outline living inside
+the window. `probe10` wires `app.add_overlay_widget(Box::new(LazyLoadBridge{ rx,
+.. }))` alongside the windowed outline and compiles. (Mechanism + caveats per §9:
+overlay `idle()` runs ~50×/s incl. during modal dialogs; `Terminal`/`Backend`
+aren't `Sync`, so the worker hands data over `mpsc` and the UI thread applies it.)
+
+### 10.6 Q6 — standard window UX: what's free vs. what needs wiring — ✅ compiled
+
+- **Free (inside `Window::handle_event` via mouse / `Frame`):** drag (title-bar
+  `MouseDown`+`MouseMove`), resize (corner), close. The close box generates
+  `CM_CLOSE`; with default `auto_close` the window marks itself `SF_CLOSED` and the
+  desktop's `remove_closed_windows()` sweep removes it (window.rs:628-650).
+  `Window::set_auto_close(false)` (window.rs:235) lets an owner intercept for a
+  "save changes?" prompt — useful for the entry editor.
+- **Needs command wiring (app/menu/key must emit the command):** zoom — the method
+  `Window::zoom(max_bounds)` exists (window.rs:697) and `Desktop::zoom_top_window()`
+  (desktop.rs:440) drives it, but it must be triggered by a `cmZoom`-style command;
+  and window cycling `Desktop::select_next()/select_prev()` (desktop.rs:375,402) /
+  `CM_NEXT`/`CM_PREV` (desktop.rs:583-624). `Tab`/`Shift-Tab` cycle focus among the
+  focused window's interior children (group.rs:623-632) for free.
+- `probe10c` opens a **tree window + detail window** side by side and compiles —
+  the M4.1 shape. Clicking either brings it to front (OF_TOP_SELECT,
+  desktop.rs:547-573).
+
+### 10.7 Probe status
+
+| Probe | Topic | Status |
+|-------|-------|--------|
+| probe10_window_outline | Window+outline wrapper, CM activation, shared-Rc selection, worker idle-bridge, full manual loop | ✅ compiled |
+| probe10b_selection_and_asany | `selected_node()` (Path A), shared-`Rc` (Path B), `as_any` panic claim | ✅ compiled |
+| probe10c_multi_window | two real Windows (tree + detail) + `select_next/prev` | ✅ compiled |
+| probe10d_size | both `app.terminal.size()` and `app.desktop.get_bounds()` | ✅ compiled |
+
+Final `cargo build --examples` in `/tmp/tv-embed/e`: **ALL_EXIT=0**. (Correction
+to an in-progress assumption: `Terminal::size()` *does* exist — probe10d proves
+`app.terminal.size()` compiles. `app.desktop.get_bounds()` is still preferred
+because it accounts for menu/status insets.)
+
+### 10.8 Verdict & recommended M4.1 design
+
+**Real-TV, embedded, mouse-driven, lazy `OutlineViewer`-in-a-`Window` in
+turbo-vision 1.2? → YES (with one ~40-line wrapper view).**
+
+One-line mechanism: put the `OutlineViewer` inside a `Window`, insert the window
+into `app.desktop`, wrap the outline in a small `View` that forwards events to it,
+publishes `selected_node()` into a shared `Rc`, and emits an app `Command` on
+activate.
+
+Concrete M4.1 shape:
+1. **Tree window.** `Window::new(bounds, "DIT")`; `win.add(Box::new(
+   DitOutline::new(Rect::new(0,0,w-2,h-2), root, sel_handle.clone())))` — interior
+   child bounds are **relative and inset** (`0,0,w-2,h-2`, *not* the full window —
+   see §10.9); `win.set_initial_focus()`; `app.desktop.add(Box::new(win))`.
+2. **Wrapper `DitOutline`** (only custom code, ~40 lines, compiled in probe10):
+   embeds `OutlineViewer<DitNode>`; `can_focus()->true`; in `handle_event` call
+   `inner.handle_event`, publish `*sel_handle.borrow_mut() = inner.selected_node()`,
+   then emit a command per the chosen activation policy (§10.3). Delegate
+   bounds/draw/state/palette to `inner`.
+3. **React** by polling the **shared `Rc` handle** each loop iteration
+   (`sel_handle.borrow().clone()`), optionally also matching `CM_DIT_ACTIVATE`
+   after `app.handle_event(&mut e)` (the command survives — §10.1). Never `as_any`,
+   never a `dyn View` downcast.
+4. **Lazy load via the §9 idle bridge:** on activate/expand of an unloaded node,
+   hand the node's `Rc` (or DN) to the LDAP worker over `mpsc`; the overlay
+   `IdleView` drains results on the UI thread, `add_child`s into the shared node
+   tree, then expand the parent (triggers `rebuild_display`). Same `Rc` the
+   windowed outline holds → next draw shows the children.
+5. **Detail editor as a second `Window`** (probe10c): drag/resize/close + Tab focus
+   for free; `set_auto_close(false)` to prompt "save changes?".
+
+**Honest support note.** Supported, but **not 100% turnkey**: the crate gives mouse
++ keyboard + frame + focus + scrolling for free once the outline is in the
+hierarchy, plus a downcast-free selection accessor. It does **not** give a built-in
+selection/activation command (write the wrapper), an `as_any` override on
+`OutlineViewer` (read selection via the wrapper / shared `Rc`), a double-click event
+(single-click activate), or automatic zoom/window-cycling (wire the commands). That
+wrapper is the entire delta — small, compiled, idiomatic.
+
+**Three biggest changes the rebuild must make vs. the bolted-on approach:**
+1. **Put the outline in the hierarchy.** Build it inside a `Window` and
+   `app.desktop.add(window)`; draw via the normal `app.draw()`→desktop→window path.
+   Stop hand-drawing it on the desktop and stop manually forwarding keys. This fixes
+   **both** the dead mouse and the missing frame (§10.9), and gives focus + chrome
+   for free.
+2. **Stop trying to downcast the inserted view.** Keep an
+   `Rc<RefCell<Option<Rc<RefCell<Node<…>>>>>>` selection handle shared with the
+   wrapper; read selection from it. `as_any` genuinely panics for `OutlineViewer`,
+   but `selected_node()` + shared `Rc` make it unnecessary.
+3. **React via command/shared-`Rc`, not polling-from-outside.** The wrapper emits
+   `CM_DIT_ACTIVATE` (and optionally `CM_DIT_SELECT` on `Rc::ptr_eq` change); handle
+   it in the loop and/or read the shared handle. The §9 worker idle-bridge stays,
+   feeding the shared node tree for lazy expansion.
+
+### 10.9 The "dialog/window has no frame" symptom — root cause (source-grounded, ⚠️ not runtime-observed)
+
+Reported during this spike: the prior app's dialog showed **no frame** — "very odd
+in TV terms." Diagnosis from source (this spike is compile-only and cannot observe
+pixels, so this is a source-grounded hypothesis with a verification step):
+
+- **A frame DOES exist structurally.** `Window::draw` draws the frame then the
+  interior: shadow (if any), `self.frame.draw(terminal)` (window.rs:451), then
+  `self.interior.draw(terminal)`. `Dialog` is just `Window::new_for_dialog` and
+  delegates `draw` to that `Window` (`Dialog::draw` → `self.window.draw(terminal)`,
+  dialog.rs:238-239; constructed via `Window::new_for_dialog`, dialog.rs:21). So
+  *constructing* a `Window`/`Dialog` and drawing it through the normal path yields a
+  frame. **A frameless dialog is therefore not the framework default — something is
+  overpainting or mis-sizing.**
+- **Most likely root cause: the bolted-on hand-draw painted over the frame.** If the
+  outline was drawn directly to the terminal at the window's rect every frame
+  *after* `app.draw()`/`desktop.draw()` (exactly the bolted-on pattern that also
+  broke the mouse), it overwrites the frame border regardless of containment. **This
+  ties the section together: the missing frame and the dead mouse are the same root
+  cause — drawing outside the hierarchy.**
+- **Second suspect: an interior child sized to the full window instead of the inset
+  interior.** `Group::draw` does `clip_bounds = self.bounds; grow(1,1); push_clip`
+  (group.rs:471-475) — the interior Group's clip is grown by 1, re-expanding to
+  exactly the frame line. A child whose bounds fill the *window* (rather than
+  `0,0,w-2,h-2`) can then paint onto that frame line. Always size the interior child
+  to the inset interior.
+- **Verification step (needs a tty, out of scope here):** run a real `Window`/dialog
+  with **no** hand-draw and the outline sized to the inset interior; look for the
+  box-drawing border + title bar. If the frame appears there but not in the app, the
+  app is hand-drawing over it (suspect #1) or over-sizing the interior child
+  (suspect #2). Fix = remove the hand-draw and size children to the inset interior;
+  the frame survives via the normal `Window::draw` path.
