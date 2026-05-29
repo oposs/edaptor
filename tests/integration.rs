@@ -78,3 +78,37 @@ fn wrong_password_is_rejected() {
         "expected a bind rejection, got: {err}"
     );
 }
+
+#[test]
+fn resolves_inetorgperson_schema() {
+    let uri = match std::env::var("EDAPTOR_TEST_LDAP_URI") {
+        Ok(uri) => uri,
+        Err(_) => {
+            eprintln!("SKIP resolves_inetorgperson_schema: set EDAPTOR_TEST_LDAP_URI to run");
+            return;
+        }
+    };
+
+    let (config, password) = test_config(uri);
+    let report = edaptor::run_schema(config, password, "inetOrgPerson")
+        .expect("run_schema should resolve inetOrgPerson");
+
+    let names: Vec<&str> = report.attributes.iter().map(|a| a.name.as_str()).collect();
+    // cn and sn are MUST (inherited from person); mail is MAY.
+    assert!(
+        names.iter().any(|n| n.eq_ignore_ascii_case("cn")),
+        "attrs={names:?}"
+    );
+    assert!(
+        names.iter().any(|n| n.eq_ignore_ascii_case("sn")),
+        "attrs={names:?}"
+    );
+    assert!(report
+        .attributes
+        .iter()
+        .any(|a| a.name.eq_ignore_ascii_case("sn") && a.required));
+    assert!(
+        names.iter().any(|n| n.eq_ignore_ascii_case("mail")),
+        "attrs={names:?}"
+    );
+}
