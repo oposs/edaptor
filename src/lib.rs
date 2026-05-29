@@ -2,6 +2,7 @@
 
 pub mod config;
 pub mod ldap;
+pub mod schema;
 
 use anyhow::{anyhow, Result};
 
