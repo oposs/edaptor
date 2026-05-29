@@ -18,14 +18,18 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use turbo_vision::app::Application;
-use turbo_vision::core::command::{CM_CANCEL, CM_OK, CM_QUIT, CM_YES};
-use turbo_vision::core::event::{EventType, KB_ALT_X, KB_ENTER, KB_F10};
+use turbo_vision::core::command::{CommandId, CM_CANCEL, CM_OK, CM_QUIT, CM_YES};
+use turbo_vision::core::event::{Event, EventType, KB_ALT_X, KB_F10};
 use turbo_vision::core::geometry::Rect;
 use turbo_vision::core::menu_data::MenuBuilder;
+use turbo_vision::core::palette::Palette;
+use turbo_vision::core::palette_chain::PaletteChainNode;
+use turbo_vision::core::state::StateFlags;
 use turbo_vision::helpers::msgbox::{
     message_box, MF_CONFIRMATION, MF_ERROR, MF_INFORMATION, MF_NO_BUTTON, MF_OK_BUTTON,
     MF_YES_BUTTON,
 };
+use turbo_vision::terminal::Terminal;
 use turbo_vision::views::button::Button;
 use turbo_vision::views::dialog::Dialog;
 use turbo_vision::views::input_line::InputLine;
@@ -33,6 +37,7 @@ use turbo_vision::views::menu_bar::{MenuBar, SubMenu};
 use turbo_vision::views::outline::{Node, OutlineViewer};
 use turbo_vision::views::static_text::StaticText;
 use turbo_vision::views::status_line::{StatusItem, StatusLine};
+use turbo_vision::views::window::Window;
 use turbo_vision::views::View;
 
 use crate::app::{menu_action, LoopEvent, MenuDef, UiAction};
@@ -41,6 +46,20 @@ use crate::form::validate::ValidationError;
 use crate::ldap::ldif::render_changeset;
 use crate::ui::form::{FormModel, WidgetSpec};
 use crate::workflows::browser::{BrowserNode, ExpandableNode};
+
+/// App-local command emitted by [`DitOutline`] when the user activates (clicks) a
+/// tree node. Chosen above Turbo Vision's standard `CM_*` ids and distinct from
+/// the app-layer menu command ids in [`crate::app`]. The loop reads the published
+/// selection on every tick, so this command mainly serves as a wakeup; the
+/// shared-`Rc` selection handle is the source of truth (spike §10.3/§10.4).
+const CM_DIT_ACTIVATE: CommandId = 2100;
+
+/// App-local broadcast id the facade fires after the idle loop attaches freshly
+/// fetched children to a node. [`DitOutline`] matches it and calls
+/// `OutlineViewer::set_roots` to trigger the (private) `rebuild_display`, so the
+/// new children appear on the next `app.draw()` (the pre-solved lazy-expand
+/// refresh, spike §10.4/§10.5).
+const CM_DIT_REFRESH: CommandId = 2101;
 
 /// Compile-time proof that the crate links against Turbo Vision.
 ///
@@ -87,24 +106,146 @@ pub fn build_status_line(size_w: i16, size_h: i16) -> StatusLine {
     )
 }
 
-/// The application shell: owns the Turbo Vision [`Application`] and the DIT
-/// outline, and drives the manual event loop. Construction requires a real
-/// terminal.
+/// Shared selection handle: the DN + `loaded` flag of the currently selected tree
+/// node, published by [`DitOutline`] after every event and read by `run_loop`. A
+/// downcast-free, view-reference-free readback path (spike §10.4 Path B). `None`
+/// when no node is selected.
+type Selection = Rc<RefCell<Option<(String, bool)>>>;
+
+/// A thin `View` wrapper that owns the real [`OutlineViewer`] and lives inside a
+/// [`Window`] on the desktop, so Turbo Vision routes mouse + keyboard to it and
+/// draws its frame (spike §10.3/§10.8). The wrapper:
+/// * forwards every event to the inner outline (navigation / expand-collapse /
+///   mouse hit-test are all the outline's own behaviour);
+/// * publishes the inner outline's `selected_node()` (DN + `loaded`) into a
+///   shared [`Selection`] handle the app also holds — no `as_any`, no downcast
+///   (the `OutlineViewer` View impl does not override `as_any`, which would
+///   panic; spike §10.4);
+/// * on a left-click (`MouseDown`) emits [`CM_DIT_ACTIVATE`] so the loop wakes and
+///   reacts (Enter stays a pure expand/collapse toggle — emitting on Enter would
+///   double-fire on every toggle, spike §10.3 activation matrix);
+/// * on the [`CM_DIT_REFRESH`] broadcast rebuilds the flattened display via
+///   `set_roots`, so children attached to the shared `Rc` tree during idle become
+///   visible (spike §10.4/§10.5).
 ///
-/// Design note (deviation from the plan, documented): the turbo-vision
-/// `OutlineViewer<BrowserNode>` is held as a **typed field on the Shell rather
-/// than inserted into `app.desktop`**. The desktop exposes neither a focused-view
-/// accessor nor a typed get-back of inserted views, and `View::as_any()` defaults
-/// to `panic!` (the `OutlineViewer` View impl does not override it — verified in
-/// the crate source). So a "downcast the desktop child back to the outline" path
-/// would panic at runtime. Keeping the outline as a typed field lets us call its
-/// `selected_node()` directly (no downcast, no panic) while we draw it manually
-/// each frame and forward keyboard events to it for navigation/expand/collapse.
+/// All other `View` methods delegate to the inner outline so palette, focus,
+/// bounds, and resize behave exactly as a bare `OutlineViewer` would.
+struct DitOutline {
+    inner: OutlineViewer<BrowserNode>,
+    selection: Selection,
+    root: BrowserNodeRef,
+}
+
+impl DitOutline {
+    /// Build the wrapper over a fresh `OutlineViewer` rooted at `root`, sharing
+    /// `selection` with the app. `bounds` are relative to the host window's inset
+    /// interior (`0,0,w-2,h-2`); never the full window (spike §10.9).
+    fn new(bounds: Rect, root: BrowserNodeRef, selection: Selection) -> Self {
+        let mut inner = OutlineViewer::new(bounds, |n: &BrowserNode| n.label.clone());
+        inner.add_root(root.clone());
+        DitOutline {
+            inner,
+            selection,
+            root,
+        }
+    }
+
+    /// Publish the inner outline's current selection (DN + `loaded`) into the
+    /// shared handle. Called after every forwarded event so the loop reads a
+    /// current value (`select_item` updates focus synchronously; spike §10.4).
+    fn publish_selection(&self) {
+        let next = self.inner.selected_node().map(|node| {
+            let n = node.borrow();
+            (n.data.dn.clone(), n.data.loaded)
+        });
+        *self.selection.borrow_mut() = next;
+    }
+}
+
+impl View for DitOutline {
+    fn bounds(&self) -> Rect {
+        self.inner.bounds()
+    }
+
+    fn set_bounds(&mut self, bounds: Rect) {
+        self.inner.set_bounds(bounds);
+    }
+
+    fn draw(&mut self, terminal: &mut Terminal) {
+        self.inner.draw(terminal);
+    }
+
+    fn handle_event(&mut self, event: &mut Event) {
+        // Refresh broadcast: rebuild the flattened display from the shared Rc tree
+        // so lazily attached children become visible. `set_roots` calls the
+        // private `rebuild_display` (spike §10.4). Consume the broadcast.
+        if event.what == EventType::Broadcast && event.command == CM_DIT_REFRESH {
+            self.inner.set_roots(vec![self.root.clone()]);
+            self.publish_selection();
+            event.clear();
+            return;
+        }
+
+        // Click-only activation: remember whether this was a left-click before the
+        // inner outline clears the event (it selects the row and clears on a hit).
+        let was_click = event.what == EventType::MouseDown;
+        self.inner.handle_event(event);
+        self.publish_selection();
+        if was_click {
+            // Transform the (now-cleared) event into an app command so the loop
+            // wakes and reacts to the new selection (spike §10.3 child→parent
+            // pattern). The shared-Rc selection is already published above.
+            *event = Event::command(CM_DIT_ACTIVATE);
+        }
+    }
+
+    fn can_focus(&self) -> bool {
+        true
+    }
+
+    fn state(&self) -> StateFlags {
+        self.inner.state()
+    }
+
+    fn set_state(&mut self, state: StateFlags) {
+        self.inner.set_state(state);
+    }
+
+    fn update_cursor(&self, terminal: &mut Terminal) {
+        self.inner.update_cursor(terminal);
+    }
+
+    fn set_palette_chain(&mut self, node: Option<PaletteChainNode>) {
+        self.inner.set_palette_chain(node);
+    }
+
+    fn get_palette_chain(&self) -> Option<&PaletteChainNode> {
+        self.inner.get_palette_chain()
+    }
+
+    fn get_palette(&self) -> Option<Palette> {
+        self.inner.get_palette()
+    }
+}
+
+/// The application shell: owns the Turbo Vision [`Application`] and the shared
+/// handles needed to drive the DIT tree, and runs the manual event loop.
+/// Construction requires a real terminal.
+///
+/// Design note (M4.1 rebuild, spike §10): the DIT outline is wrapped in a
+/// [`DitOutline`] view and inserted into a real [`Window`] on `app.desktop`, so
+/// `app.draw()` renders it (with a frame) and Turbo Vision routes mouse +
+/// keyboard to it through the normal desktop→window→interior hierarchy. The Shell
+/// no longer holds the `OutlineViewer`; it keeps only the shared [`Selection`]
+/// handle (read each loop tick) and the `root` `Rc` (used to resolve nodes by DN
+/// on expansion and to drive the refresh broadcast). This fixes the prior
+/// bolted-on approach's dead mouse and missing frame (both caused by hand-drawing
+/// outside the view hierarchy; spike §10.0/§10.9).
 pub struct Shell {
     app: Application,
-    /// The DIT outline, owned here (not on the desktop) so we can read its
-    /// selection with a direct typed call.
-    outline: Option<OutlineViewer<BrowserNode>>,
+    /// The currently selected node (DN + `loaded`), published by the windowed
+    /// [`DitOutline`] and read by `run_loop`. `None` until a node is selected.
+    selection: Selection,
 }
 
 impl Shell {
@@ -116,46 +257,65 @@ impl Shell {
         let (w, h) = app.terminal.size();
         app.set_menu_bar(build_menu_bar(w, defs));
         app.set_status_line(build_status_line(w, h));
-        Ok(Shell { app, outline: None })
+        Ok(Shell {
+            app,
+            selection: Rc::new(RefCell::new(None)),
+        })
     }
 
-    /// Build and install the DIT outline rooted at `root` (spike §6). The Shell
-    /// owns the viewer; `run_loop` draws it and feeds it keyboard events. Not
-    /// tty-testable.
+    /// Build the DIT outline rooted at `root`, wrap it in a [`DitOutline`] view
+    /// inside a "DIT" [`Window`], and insert that window into `app.desktop` so the
+    /// tree is a real, framed, mouse-driven view (spike §10.1/§10.8). The window
+    /// occupies the left pane; the interior child is inset (`0,0,w-2,h-2`) so the
+    /// frame survives (spike §10.9). The outline shares the node `Rc` tree with
+    /// `root`, and the Shell keeps the shared selection handle. Not tty-testable.
     pub fn mount_outline(&mut self, root: BrowserNodeRef) {
-        let (_w, h) = self.app.terminal.size();
-        let mut viewer = OutlineViewer::new(Rect::new(0, 1, 42, h - 1), |n: &BrowserNode| {
-            n.label.clone()
-        });
-        viewer.add_root(root);
-        self.outline = Some(viewer);
+        // Size to the desktop (already inset for menu/status), left half.
+        let db = self.app.desktop.get_bounds();
+        let dw = db.width();
+        let dh = db.height();
+        let win_w = (dw / 2).max(20);
+        let win_h = dh.max(5);
+        let mut win = Window::new(Rect::new(0, 0, win_w, win_h), "DIT");
+        // Interior child bounds are relative to the inset interior (spike §10.9).
+        let inner_bounds = Rect::new(0, 0, win_w - 2, win_h - 2);
+        win.add(Box::new(DitOutline::new(
+            inner_bounds,
+            root,
+            self.selection.clone(),
+        )));
+        win.set_initial_focus();
+        self.app.desktop.add(Box::new(win));
     }
 
-    /// The DN and `loaded` flag of the currently selected outline node, via the
-    /// outline's typed `selected_node()`. `None` when no outline / no selection.
+    /// The DN and `loaded` flag of the currently selected tree node, read from the
+    /// shared [`Selection`] handle the windowed [`DitOutline`] publishes. `None`
+    /// when no node is selected. No view reference, no downcast (spike §10.4).
     fn selected(&self) -> Option<(String, bool)> {
-        let node = self.outline.as_ref()?.selected_node()?;
-        let n = node.borrow();
-        Some((n.data.dn.clone(), n.data.loaded))
+        self.selection.borrow().clone()
     }
 
-    /// Run the manual event loop (spike §1/§9). Each iteration: `idle()` →
+    /// Run the manual event loop (spike §1/§9/§10). Each iteration: `idle()` →
     /// `on_event(Idle)` (where the read flow drains the worker channel) →
-    /// `draw()` (desktop + the outline) → flush → `poll_event(50ms)`. `CM_QUIT`
-    /// (menu Quit / Alt-X) ends the loop.
+    /// `draw()` (desktop renders the menu, the DIT window+frame, and the status
+    /// line) → flush → `poll_event(50ms)` → `app.handle_event` (Turbo Vision
+    /// routes mouse/keyboard to the focused window's outline, and menu/status
+    /// hotkeys). `CM_QUIT` (menu Quit / Alt-X) ends the loop.
     ///
     /// A single `on_event` callback is used (not separate idle/action callbacks)
     /// so the caller can own `&mut` browser / read-flow state in one closure
     /// without a double-mutable-borrow conflict. The callback receives
     /// `&mut Application` and a [`LoopEvent`]:
     /// * [`LoopEvent::Idle`] every tick;
-    /// * [`LoopEvent::Action`] when a non-quit command (menu New <profile> /
+    /// * [`LoopEvent::Action`] when a non-quit menu command (New <profile> /
     ///   Delete → [`crate::app::menu_action`], resolved against the current
-    ///   selection) fires, or when Enter activates the focused outline node
-    ///   ([`UiAction::Activate`]).
+    ///   selection) fires, or when the tree's [`CM_DIT_ACTIVATE`] command fires
+    ///   (the user clicked a node) — surfaced as [`UiAction::Activate`] built from
+    ///   the shared selection.
     ///
-    /// Keyboard events are forwarded to the outline first (navigation /
-    /// expand-collapse), then to the application (menu hotkeys, Alt-X, F10). The
+    /// All event routing to the tree is Turbo Vision's job now (the window is in
+    /// the desktop hierarchy); the loop only translates the resulting app commands
+    /// and the published selection into backend-agnostic [`UiAction`]s. The
     /// callback never sees a `turbo_vision` type, keeping callers backend-free.
     /// Not tty-testable.
     pub fn run_loop(
@@ -168,56 +328,75 @@ impl Shell {
             self.app.idle();
             on_event(&mut self.app, LoopEvent::Idle);
             self.app.draw();
-            // Draw the outline on top of the desktop (disjoint field borrows).
-            if let Some(outline) = self.outline.as_mut() {
-                outline.draw(&mut self.app.terminal);
-            }
             let _ = self.app.terminal.flush();
             if let Ok(Some(mut ev)) = self.app.terminal.poll_event(Duration::from_millis(50)) {
-                if ev.what == EventType::Command {
-                    if ev.command == CM_QUIT {
-                        self.app.running = false;
-                    } else {
-                        // Resolve the menu command against the current selection.
-                        let selected = self.selected();
-                        let action = menu_action(
-                            ev.command,
-                            profile_count,
-                            selected.as_ref().map(|(dn, _)| dn.as_str()),
-                        );
-                        self.app.handle_event(&mut ev);
-                        if action != UiAction::None {
-                            on_event(&mut self.app, LoopEvent::Action(action));
-                        }
-                    }
-                } else if ev.what == EventType::Keyboard {
-                    // Remember Enter before the outline clears the event, then let
-                    // the outline navigate / expand-collapse. After it processes
-                    // the key the selection reflects any cursor move, so read it
-                    // then to build the Activate action.
-                    let is_enter = ev.key_code == KB_ENTER;
-                    if let Some(outline) = self.outline.as_mut() {
-                        outline.handle_event(&mut ev);
-                    }
-                    // Forward anything the outline left unhandled (menu hotkeys,
-                    // Alt-X, F10) to the application.
-                    self.app.handle_event(&mut ev);
-                    if ev.what == EventType::Command && ev.command == CM_QUIT {
-                        self.app.running = false;
-                    } else if is_enter {
-                        if let Some((dn, loaded)) = self.selected() {
-                            on_event(
-                                &mut self.app,
-                                LoopEvent::Action(UiAction::Activate { dn, loaded }),
-                            );
-                        }
-                    }
+                // Resolve a menu command against the current selection BEFORE the
+                // app consumes the event (menu New <profile> / Delete).
+                let menu_cmd = if ev.what == EventType::Command {
+                    let selected = self.selected();
+                    Some(menu_action(
+                        ev.command,
+                        profile_count,
+                        selected.as_ref().map(|(dn, _)| dn.as_str()),
+                    ))
                 } else {
-                    self.app.handle_event(&mut ev);
+                    None
+                };
+
+                if ev.what == EventType::Command && ev.command == CM_QUIT {
+                    self.app.running = false;
+                    continue;
+                }
+
+                // Let Turbo Vision route the event: menu hotkeys, Alt-X, F10, and
+                // (crucially) mouse/keyboard to the focused DIT window's outline.
+                self.app.handle_event(&mut ev);
+
+                if !self.app.running {
+                    // Alt-X is handled inside app.handle_event and sets running=false.
+                    continue;
+                }
+
+                // A tree click surfaces as CM_DIT_ACTIVATE (the wrapper emitted it;
+                // the app left the unknown command intact, spike §10.1). Build the
+                // Activate action from the freshly published selection.
+                if ev.what == EventType::Command && ev.command == CM_DIT_ACTIVATE {
+                    if let Some((dn, loaded)) = self.selected() {
+                        on_event(
+                            &mut self.app,
+                            LoopEvent::Action(UiAction::Activate { dn, loaded }),
+                        );
+                    }
+                    continue;
+                }
+
+                // A resolved non-quit menu command (New / Delete).
+                if let Some(action) = menu_cmd {
+                    if action != UiAction::None {
+                        on_event(&mut self.app, LoopEvent::Action(action));
+                    }
                 }
             }
         }
     }
+
+    /// Broadcast [`CM_DIT_REFRESH`] so the windowed [`DitOutline`] rebuilds its
+    /// flattened display from the shared `Rc` tree (showing children attached
+    /// during idle). Routed through `app.handle_event`, which dispatches the
+    /// broadcast to the desktop and on to every window child — no handle to the
+    /// inserted view and no downcast needed (spike §10.4). Not tty-testable.
+    fn refresh(app: &mut Application) {
+        let mut ev = Event::broadcast(CM_DIT_REFRESH);
+        app.handle_event(&mut ev);
+    }
+}
+
+/// Trigger a DIT tree refresh after children have been attached to the shared
+/// node tree during idle (lazy expand, re-read after a write). Keeps `main.rs`
+/// turbo-vision-free: the idle closure calls this, the facade broadcasts
+/// [`CM_DIT_REFRESH`] to the windowed outline. Not tty-testable.
+pub fn refresh_tree(app: &mut Application) {
+    Shell::refresh(app);
 }
 
 // ---------------------------------------------------------------------------
@@ -256,11 +435,16 @@ pub fn build_outline(root: BrowserNodeRef) -> OutlineViewer<BrowserNode> {
 }
 
 /// Attach freshly fetched child payloads under `parent` (spike §6:
-/// `Node::add_child(Rc<RefCell<Node<T>>>)`). Not tty-testable.
+/// `Node::add_child(Rc<RefCell<Node<T>>>)`). The parent is marked expanded so the
+/// new children are visible after the next `set_roots`/`rebuild_display` (the
+/// refresh broadcast); without this the freshly loaded subtree would stay folded.
+/// Not tty-testable.
 pub fn attach_children(parent: &BrowserNodeRef, kids: Vec<BrowserNode>) {
+    let mut p = parent.borrow_mut();
     for child in kids {
-        parent.borrow_mut().add_child(new_node(child));
+        p.add_child(new_node(child));
     }
+    p.expanded = true;
 }
 
 /// Find the node with the given DN by depth-first walk of the shared Rc tree
@@ -637,7 +821,7 @@ mod tests {
     }
 
     #[test]
-    fn attach_children_adds_payloads() {
+    fn attach_children_adds_payloads_and_expands() {
         let parent = new_node(BrowserNode {
             dn: "dc=example,dc=org".to_string(),
             label: "root".to_string(),
@@ -654,6 +838,8 @@ mod tests {
             }],
         );
         assert_eq!(parent.borrow().children.len(), 1);
+        // Newly loaded subtree is expanded so the refresh shows it.
+        assert!(parent.borrow().expanded);
         assert_eq!(parent.dn(), "dc=example,dc=org");
     }
 }

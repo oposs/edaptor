@@ -127,9 +127,10 @@ fn run_tui(config: Config, password: String) -> Result<()> {
     browser.request_children(&worker, &root)?;
 
     let mut shell = Shell::new(&menu_defs)?;
-    // Mount the DIT outline so the tree is interactive (closes the M3 gap where
-    // the outline was built but never shown). The outline shares the node Rc tree
-    // with `root`, so we keep `root` to resolve nodes by DN on expansion.
+    // Mount the DIT outline as a real Turbo Vision Window on the desktop, so the
+    // tree has a frame and gets mouse + keyboard routing (M4.1). The outline
+    // shares the node Rc tree with `root`, so we keep `root` to resolve nodes by
+    // DN on expansion and to drive the refresh broadcast after lazy load.
     shell.mount_outline(root.clone());
 
     // After a MODRDN whose changeset also has attribute mods, the follow-up
@@ -143,9 +144,12 @@ fn run_tui(config: Config, password: String) -> Result<()> {
         |app, event| match event {
             LoopEvent::Idle => {
                 while let Some(resp) = worker.poll() {
-                    // Browser child-expansion responses attach to their node.
+                    // Browser child-expansion responses attach to their node, then
+                    // refresh the windowed tree so the new children render (lazy
+                    // expand; the broadcast triggers OutlineViewer::rebuild_display).
                     if let Some((node, kids)) = browser.on_response(&resp) {
                         facade::attach_children(&node, kids);
+                        facade::refresh_tree(app);
                         continue;
                     }
                     // Write results (spec §10, no silent success).
