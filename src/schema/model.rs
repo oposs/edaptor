@@ -7,6 +7,7 @@ use chumsky::Parser;
 use ldap_types::schema::{attribute_type_parser, object_class_parser, AttributeType, ObjectClass};
 
 use crate::ldap::worker::RawSubschema;
+use crate::schema::syntax::{classify_syntax, FieldKind};
 
 pub struct SchemaModel {
     object_classes: Vec<ObjectClass>,
@@ -147,6 +148,26 @@ impl SchemaModel {
             self.collect_class(&sup, must, may, visited);
         }
     }
+
+    /// The FieldKind of an attribute, following the SUP chain to find the first
+    /// declared SYNTAX. Defaults to Text when no syntax is found.
+    pub fn field_kind(&self, attr_name: &str) -> FieldKind {
+        let mut current = self.attribute_type(attr_name);
+        for _ in 0..64 {
+            // bounded against malformed SUP cycles
+            let Some(at) = current else {
+                break;
+            };
+            if let Some(syntax) = &at.syntax {
+                return classify_syntax(&syntax.oid);
+            }
+            current = at
+                .sup
+                .as_ref()
+                .and_then(|s| self.attribute_type(&s.to_string()));
+        }
+        FieldKind::Text
+    }
 }
 
 #[cfg(test)]
@@ -232,5 +253,33 @@ mod tests {
             m.effective_attributes(&["doesNotExist"]),
             ResolvedAttributes::default()
         );
+    }
+
+    fn syntax_raw() -> RawSubschema {
+        RawSubschema {
+            object_classes: vec![],
+            attribute_types: vec![
+                // 'name' carries the DirectoryString syntax → Text.
+                "( 2.5.4.41 NAME 'name' SYNTAX 1.3.6.1.4.1.1466.115.121.1.15{32768} )".to_string(),
+                // 'sn' has NO syntax of its own; it must inherit from SUP name → Text.
+                "( 2.5.4.4 NAME ( 'sn' 'surname' ) SUP name )".to_string(),
+                // a boolean attribute, single-valued.
+                "( 2.5.4.100 NAME 'flag' SYNTAX 1.3.6.1.4.1.1466.115.121.1.7 SINGLE-VALUE )"
+                    .to_string(),
+                // a DN-valued attribute.
+                "( 2.5.4.49 NAME 'member' SYNTAX 1.3.6.1.4.1.1466.115.121.1.12 )".to_string(),
+            ],
+            ldap_syntaxes: vec![],
+        }
+    }
+
+    #[test]
+    fn field_kind_follows_syntax_and_sup_chain() {
+        let m = SchemaModel::from_raw(&syntax_raw());
+        assert_eq!(m.field_kind("name"), FieldKind::Text);
+        assert_eq!(m.field_kind("sn"), FieldKind::Text); // inherited from name
+        assert_eq!(m.field_kind("flag"), FieldKind::Boolean);
+        assert_eq!(m.field_kind("member"), FieldKind::DistinguishedName);
+        assert_eq!(m.field_kind("unknownAttr"), FieldKind::Text); // default
     }
 }
