@@ -181,7 +181,6 @@ dependencies = [
  "rpassword",
  "serde",
  "tempfile",
- "thiserror",
  "toml",
 ]
 

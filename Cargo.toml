@@ -9,7 +9,6 @@ clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 toml = "1"
 anyhow = "1"
-thiserror = "2"
 ldap3 = "0.12"            # default features: sync + tls (native-tls)
 native-tls = "0.2"       # build a custom TlsConnector for a configured CA
 rpassword = "7"          # read the bind password without echo
