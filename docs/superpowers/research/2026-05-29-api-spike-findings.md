@@ -88,6 +88,42 @@ behind `#[cfg(feature = "gssapi")]`).
 **Decision (M2):** depend on `ldap-types` (chumsky-only features); golden-file
 test against the live `oposs.openldap` schema.
 
+### 3a. ldap-types — verified by compilation (2026-05-29, for M2)  *(confidence: high)*
+
+A throwaway crate was built against `ldap-types` 0.7.2 to confirm the exact API:
+
+- **Three direct deps required** (the `Parser` trait and `ObjectIdentifier` type
+  are not usably re-exported, and versions must match ldap-types' locked tree):
+  ```toml
+  ldap-types = { version = "0.7", default-features = false, features = ["chumsky"] }
+  chumsky = "0.12"   # locked tree has 0.12.0 — needed for the Parser trait
+  oid = "0.3"        # locked tree has 0.3.0 — ObjectIdentifier type + try_from
+  ```
+  `default-features = false, features = ["chumsky"]` pulls in NEITHER ldap3 nor
+  serde nor diff (confirmed) — so there is no ldap3 version conflict with our 0.12.
+- **Parsing:** `use chumsky::Parser;` then
+  `object_class_parser().parse(s).into_result()` (and `attribute_type_parser()`).
+  chumsky's `.parse()` returns a `ParseResult`, so `.into_result()` is required to
+  get a `Result`.
+- **Name extraction:** `KeyString` and `KeyStringOrOID` both implement `Display`,
+  so `.to_string()` yields the plain name. (`KeyString` does NOT `Deref` to `str`.)
+- **`ObjectClass` fields:** `oid`, `name: Vec<KeyString>`, `sup: Vec<KeyStringOrOID>`,
+  `desc: Option<String>`, `object_class_type: ObjectClassType` (variants
+  `Structural` / `Abstract` / `Auxiliary`), `must: Vec<KeyStringOrOID>`,
+  `may: Vec<KeyStringOrOID>`, `obsolete: bool`.
+- **`AttributeType` fields:** `oid`, `name: Vec<KeyString>`,
+  `sup: Option<KeyStringOrOID>`, `desc`, `syntax: Option<OIDWithLength>`
+  (where `OIDWithLength { oid: oid::ObjectIdentifier, length: Option<u32> }`),
+  `single_value: bool`, `equality: Option<KeyString>`, `substr`, etc.
+- **Syntax classification:** `oid::ObjectIdentifier` has **no** `Display`/`ToString`.
+  Compare against known syntaxes via `PartialEq`:
+  `syntax.oid == ObjectIdentifier::try_from("1.3.6.1.4.1.1466.115.121.1.7").unwrap()`
+  (verified `== true` for the Boolean syntax). Define known syntax OIDs as `&str`
+  constants and parse them once.
+- **Robustness note:** parse each description string individually and collect
+  failures rather than aborting — OpenLDAP may emit definitions with quirks.
+  Inheritance (SUP) is NOT resolved by the crate; edaptor walks SUP chains itself.
+
 ## 4. turbo-vision 1.2 — widgets & the dual-pane editor  *(confidence: medium-high)*
 
 - **Verdict:** a single modal `Dialog` can hold two side-by-side `ListBox`es,
