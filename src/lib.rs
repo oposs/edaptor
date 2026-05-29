@@ -6,6 +6,7 @@ pub mod config;
 pub mod ldap;
 pub mod schema;
 pub mod ui;
+pub mod workflows;
 
 use anyhow::{anyhow, Result};
 
