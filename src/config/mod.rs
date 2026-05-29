@@ -11,6 +11,25 @@ use std::path::{Path, PathBuf};
 pub struct Config {
     pub server: ServerConfig,
     pub auth: AuthConfig,
+    /// Entry profiles drive the menu and read-form ordering. A minimal slice is
+    /// pulled forward into M3 (the rich profile metadata stays in M4). `[[profile]]`
+    /// TOML blocks parse here; absent profiles default to empty.
+    #[serde(default, rename = "profile")]
+    pub profiles: Vec<EntryProfile>,
+}
+
+/// A minimal entry profile (M3 slice). Richer metadata (password/membership/
+/// Samba/labels/search_attributes) arrives in M4.
+#[derive(Debug, Deserialize, Default, Clone)]
+pub struct EntryProfile {
+    pub name: String,
+    pub object_class: String,
+    #[serde(default)]
+    pub rdn_attr: String,
+    #[serde(default)]
+    pub search_base: String,
+    #[serde(default)]
+    pub show: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -127,6 +146,49 @@ mod tests {
         assert!(cfg.server.tls.verify);
         assert!(!cfg.server.start_tls); // default false
         assert_eq!(cfg.auth.method, AuthMethod::Simple); // default
+    }
+
+    #[test]
+    fn parses_profiles() {
+        let toml = r#"
+            [server]
+            uri = "ldap://ldap.example.com:389"
+            base_dn = "dc=example,dc=com"
+            [auth]
+            bind_dn = "cn=admin,dc=example,dc=com"
+
+            [[profile]]
+            name = "Users"
+            object_class = "inetOrgPerson"
+            rdn_attr = "uid"
+            search_base = "ou=people,dc=example,dc=com"
+            show = ["uid", "cn", "mail"]
+
+            [[profile]]
+            name = "Groups"
+            object_class = "groupOfNames"
+        "#;
+        let cfg: Config = toml::from_str(toml).expect("should parse");
+        assert_eq!(cfg.profiles.len(), 2);
+        assert_eq!(cfg.profiles[0].name, "Users");
+        assert_eq!(cfg.profiles[0].object_class, "inetOrgPerson");
+        assert_eq!(cfg.profiles[0].rdn_attr, "uid");
+        assert_eq!(cfg.profiles[0].show, vec!["uid", "cn", "mail"]);
+        assert_eq!(cfg.profiles[1].name, "Groups");
+        assert_eq!(cfg.profiles[1].object_class, "groupOfNames");
+    }
+
+    #[test]
+    fn config_without_profiles_still_parses() {
+        let toml = r#"
+            [server]
+            uri = "ldap://ldap.example.com:389"
+            base_dn = "dc=example,dc=com"
+            [auth]
+            bind_dn = "cn=admin,dc=example,dc=com"
+        "#;
+        let cfg: Config = toml::from_str(toml).expect("should parse");
+        assert!(cfg.profiles.is_empty());
     }
 
     #[test]
