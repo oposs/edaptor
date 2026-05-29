@@ -1,4 +1,4 @@
-//! edaptor CLI. With no subcommand it launches the M3 read-only TUI shell; the
+//! edaptor CLI. With no subcommand it launches the M3 read-only TUI; the
 //! `check` / `schema` subcommands keep the M1/M2 headless pipelines.
 
 use std::path::PathBuf;
@@ -8,7 +8,11 @@ use clap::{Parser, Subcommand};
 
 use edaptor::app::build_menu_defs;
 use edaptor::config::Config;
-use edaptor::ui::facade::Shell;
+use edaptor::ldap::worker::{Request, Response, WorkerHandle};
+use edaptor::schema::SchemaModel;
+use edaptor::ui::facade::{self, Shell};
+use edaptor::workflows::browser::{BrowserNode, BrowserState};
+use edaptor::workflows::read_flow::{ReadFlow, ReadOutcome};
 use edaptor::SchemaReport;
 
 #[derive(Parser)]
@@ -53,15 +57,7 @@ fn main() -> Result<()> {
         .context("resolving bind password")?;
 
     match cli.command {
-        None => {
-            // No subcommand: launch the M3 read-only TUI shell. The menu is
-            // derived from the configured entry profiles; the idle hook is a
-            // no-op for now (Task 6 wires the worker/browser/read flow here).
-            let _ = &password;
-            let defs = build_menu_defs(&config.profiles);
-            let mut shell = Shell::new(&defs)?;
-            shell.run_loop(|_app| {});
-        }
+        None => run_tui(config, password)?,
         Some(Command::Check) => {
             let summary = edaptor::run_check(config, password)?;
             println!("Connected to {}", summary.uri);
@@ -78,6 +74,62 @@ fn main() -> Result<()> {
             print_schema(&report);
         }
     }
+    Ok(())
+}
+
+/// Launch the read-only TUI shell: spawn the worker, fetch the schema
+/// synchronously, build the profile-derived menu and the DIT browser rooted at
+/// the base DN, then run the manual loop. The idle hook drains the worker's
+/// non-blocking response channel and routes each response to the browser (child
+/// expansion) or the read flow (entry form), surfacing errors via a message box.
+///
+/// All network I/O happens on the worker thread; the loop never blocks on it.
+fn run_tui(config: Config, password: String) -> Result<()> {
+    let base_dn = config.server.base_dn.clone();
+    let profiles = config.profiles.clone();
+    let menu_defs = build_menu_defs(&profiles);
+
+    // Spawn the worker and fetch the schema up front (synchronous startup path).
+    let worker = WorkerHandle::spawn(config, password)?;
+    let raw = match worker.request(Request::FetchSubschema)? {
+        Response::Subschema(raw) => raw,
+        Response::Error(e) => return Err(anyhow::anyhow!(e)),
+        _ => return Err(anyhow::anyhow!("unexpected response to FetchSubschema")),
+    };
+    let schema = SchemaModel::from_raw(&raw);
+
+    let mut browser: BrowserState<facade::BrowserNodeRef> = BrowserState::new(base_dn.clone());
+    let mut read_flow = ReadFlow::new(schema);
+
+    // Root the browser at the base DN and request its children once.
+    let root = facade::new_node(BrowserNode {
+        dn: base_dn.clone(),
+        label: base_dn,
+        loaded: false,
+        object_classes: Vec::new(),
+    });
+    browser.request_children(&worker, &root)?;
+    // The outline view is owned by the shell's desktop in a fuller wiring; for
+    // M3 the browser drives data, and the read form is the visible deliverable.
+    let _outline = facade::build_outline(root);
+
+    let mut shell = Shell::new(&menu_defs)?;
+    shell.run_loop(|app| {
+        // Drain every pending worker response this idle tick (non-blocking).
+        while let Some(resp) = worker.poll() {
+            // Browser child-expansion responses attach to their node.
+            if let Some((node, kids)) = browser.on_response(&resp) {
+                facade::attach_children(&node, kids);
+                continue;
+            }
+            // Otherwise it may be a read-flow result.
+            match read_flow.on_response(&resp) {
+                ReadOutcome::Form(model) => facade::show_entry_dialog(app, &model),
+                ReadOutcome::Error(msg) => facade::confirm_error(app, &msg),
+                ReadOutcome::Ignored => {}
+            }
+        }
+    });
     Ok(())
 }
 
