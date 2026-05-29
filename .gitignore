@@ -1,0 +1,9 @@
+# Rust
+/target
+**/*.rs.bk
+*.pdb
+# Cargo.lock IS committed — edaptor is a binary application, not a library.
+
+# editor / OS
+*.swp
+.DS_Store
