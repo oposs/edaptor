@@ -113,9 +113,10 @@ impl SchemaModel {
         for &name in object_classes {
             self.collect_class(name, &mut must, &mut may, &mut visited);
         }
-        for m in &must {
-            may.remove(m);
-        }
+        // An attribute required by any class is MUST; drop it from MAY. Compare
+        // case-insensitively so an undefined attribute referenced with differing
+        // case across classes is still deduplicated (display case is preserved).
+        may.retain(|m| !must.iter().any(|r| r.eq_ignore_ascii_case(m)));
         ResolvedAttributes { must, may }
     }
 
@@ -281,5 +282,31 @@ mod tests {
         assert_eq!(m.field_kind("flag"), FieldKind::Boolean);
         assert_eq!(m.field_kind("member"), FieldKind::DistinguishedName);
         assert_eq!(m.field_kind("unknownAttr"), FieldKind::Text); // default
+    }
+
+    #[test]
+    fn undefined_attr_with_mixed_case_does_not_appear_in_both_sets() {
+        // 'Foo'/'foo' are referenced but never defined as attribute types.
+        // Canonicalization must still dedup them so MUST wins over MAY.
+        let raw = RawSubschema {
+            object_classes: vec![
+                "( 1.1.1 NAME 'a' STRUCTURAL MUST Foo )".to_string(),
+                "( 1.1.2 NAME 'b' SUP a STRUCTURAL MAY foo )".to_string(),
+            ],
+            attribute_types: vec![],
+            ldap_syntaxes: vec![],
+        };
+        let m = SchemaModel::from_raw(&raw);
+        let r = m.effective_attributes(&["b"]);
+        assert!(
+            r.must.iter().any(|a| a.eq_ignore_ascii_case("foo")),
+            "must={:?}",
+            r.must
+        );
+        assert!(
+            !r.may.iter().any(|a| a.eq_ignore_ascii_case("foo")),
+            "undefined attr in both sets; may={:?}",
+            r.may
+        );
     }
 }
