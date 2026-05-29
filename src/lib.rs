@@ -28,7 +28,21 @@ fn fetch_raw(config: Config, password: String) -> Result<RawSubschema> {
     match handle.request(Request::FetchSubschema)? {
         Response::Subschema(raw) => Ok(raw),
         Response::Error(e) => Err(anyhow!(e)),
-        Response::Done => Err(anyhow!("unexpected Done response to FetchSubschema")),
+        other => Err(anyhow!(
+            "unexpected response to FetchSubschema: {}",
+            describe_response(&other)
+        )),
+    }
+}
+
+/// A short label for an unexpected [`Response`] variant, for diagnostics.
+fn describe_response(resp: &Response) -> &'static str {
+    match resp {
+        Response::Subschema(_) => "Subschema",
+        Response::Entries { .. } => "Entries",
+        Response::SearchError { .. } => "SearchError",
+        Response::Done => "Done",
+        Response::Error(_) => "Error",
     }
 }
 
