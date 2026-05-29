@@ -1,7 +1,10 @@
 //! Turn a ServerConfig into ldap3 LdapConnSettings (native-tls backend).
 //!
-//! M1 wires the configured CA and the verify flag. Client-certificate identity
-//! (for SASL EXTERNAL) is added in the auth milestone (M6).
+//! M1 wires the configured CA, the verify flag, and the connect timeout.
+//! Client-certificate identity (for SASL EXTERNAL) is added in the auth
+//! milestone (M6); per-operation timeouts are tracked for a later milestone.
+
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use ldap3::LdapConnSettings;
@@ -10,7 +13,10 @@ use native_tls::{Certificate, TlsConnector};
 use crate::config::ServerConfig;
 
 pub fn build_settings(server: &ServerConfig) -> Result<LdapConnSettings> {
-    let mut settings = LdapConnSettings::new();
+    // Bound the TCP connect so an unreachable/black-hole server cannot hang the
+    // worker thread indefinitely. (Per-operation timeouts come in a later milestone.)
+    let mut settings =
+        LdapConnSettings::new().set_conn_timeout(Duration::from_secs(server.timeout_secs));
 
     // StartTLS upgrades an ldap:// connection (do NOT combine with ldaps://).
     if server.start_tls {
