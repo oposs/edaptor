@@ -1,12 +1,14 @@
-//! edaptor CLI. M1/M2: connectivity check and schema introspection.
-//! (The TUI replaces these in M3.)
+//! edaptor CLI. With no subcommand it launches the M3 read-only TUI shell; the
+//! `check` / `schema` subcommands keep the M1/M2 headless pipelines.
 
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 
+use edaptor::app::build_menu_defs;
 use edaptor::config::Config;
+use edaptor::ui::facade::Shell;
 use edaptor::SchemaReport;
 
 #[derive(Parser)]
@@ -23,7 +25,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Connect, bind, and print a schema summary (the default action).
+    /// Connect, bind, and print a schema summary.
     Check,
     /// Resolve and print the effective attributes of an object class.
     Schema {
@@ -50,8 +52,17 @@ fn main() -> Result<()> {
         .resolve()
         .context("resolving bind password")?;
 
-    match cli.command.unwrap_or(Command::Check) {
-        Command::Check => {
+    match cli.command {
+        None => {
+            // No subcommand: launch the M3 read-only TUI shell. The menu is
+            // derived from the configured entry profiles; the idle hook is a
+            // no-op for now (Task 6 wires the worker/browser/read flow here).
+            let _ = &password;
+            let defs = build_menu_defs(&config.profiles);
+            let mut shell = Shell::new(&defs)?;
+            shell.run_loop(|_app| {});
+        }
+        Some(Command::Check) => {
             let summary = edaptor::run_check(config, password)?;
             println!("Connected to {}", summary.uri);
             if let Some(dn) = &summary.bind_dn {
@@ -62,7 +73,7 @@ fn main() -> Result<()> {
                 summary.object_class_count, summary.attribute_type_count, summary.ldap_syntax_count
             );
         }
-        Command::Schema { object_class } => {
+        Some(Command::Schema { object_class }) => {
             let report: SchemaReport = edaptor::run_schema(config, password, &object_class)?;
             print_schema(&report);
         }
