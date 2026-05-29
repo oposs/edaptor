@@ -1,20 +1,35 @@
-//! edaptor CLI. M1: connect, bind, print a schema summary, then exit.
-//! (The TUI replaces this default action in M3.)
+//! edaptor CLI. M1/M2: connectivity check and schema introspection.
+//! (The TUI replaces these in M3.)
 
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
-use clap::Parser;
+use clap::{Parser, Subcommand};
 
 use edaptor::config::Config;
+use edaptor::SchemaReport;
 
 #[derive(Parser)]
 #[command(name = "edaptor", about = "TUI for editing OpenLDAP directories")]
 struct Cli {
     /// Path to the configuration file
     /// (default: $XDG_CONFIG_HOME/edaptor/config.toml or ~/.config/edaptor/config.toml).
-    #[arg(long, value_name = "PATH")]
+    #[arg(long, global = true, value_name = "PATH")]
     config: Option<PathBuf>,
+
+    #[command(subcommand)]
+    command: Option<Command>,
+}
+
+#[derive(Subcommand)]
+enum Command {
+    /// Connect, bind, and print a schema summary (the default action).
+    Check,
+    /// Resolve and print the effective attributes of an object class.
+    Schema {
+        /// Object class name, e.g. inetOrgPerson
+        object_class: String,
+    },
 }
 
 fn default_config_path() -> PathBuf {
@@ -27,8 +42,7 @@ fn default_config_path() -> PathBuf {
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
-    let config_path = cli.config.unwrap_or_else(default_config_path);
-
+    let config_path = cli.config.clone().unwrap_or_else(default_config_path);
     let config = Config::load(&config_path)?;
     let password = config
         .auth
@@ -36,15 +50,44 @@ fn main() -> Result<()> {
         .resolve()
         .context("resolving bind password")?;
 
-    let summary = edaptor::run_check(config, password)?;
-
-    println!("Connected to {}", summary.uri);
-    if let Some(dn) = &summary.bind_dn {
-        println!("Bound as {dn}");
+    match cli.command.unwrap_or(Command::Check) {
+        Command::Check => {
+            let summary = edaptor::run_check(config, password)?;
+            println!("Connected to {}", summary.uri);
+            if let Some(dn) = &summary.bind_dn {
+                println!("Bound as {dn}");
+            }
+            println!(
+                "Subschema: {} objectClasses, {} attributeTypes, {} ldapSyntaxes",
+                summary.object_class_count, summary.attribute_type_count, summary.ldap_syntax_count
+            );
+        }
+        Command::Schema { object_class } => {
+            let report: SchemaReport = edaptor::run_schema(config, password, &object_class)?;
+            print_schema(&report);
+        }
     }
-    println!(
-        "Subschema: {} objectClasses, {} attributeTypes, {} ldapSyntaxes",
-        summary.object_class_count, summary.attribute_type_count, summary.ldap_syntax_count
-    );
     Ok(())
+}
+
+fn print_schema(report: &SchemaReport) {
+    println!(
+        "Object class '{}' — {} effective attributes ({} schema parse warnings)",
+        report.object_class,
+        report.attributes.len(),
+        report.parse_warnings
+    );
+    for a in &report.attributes {
+        println!(
+            "  {:<28} {:<4} {:?}{}",
+            a.name,
+            if a.required { "MUST" } else { "MAY" },
+            a.kind,
+            if a.single_value {
+                " (single-valued)"
+            } else {
+                ""
+            }
+        );
+    }
 }
