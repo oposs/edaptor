@@ -1,0 +1,5 @@
+dn: cn=Alice,ou=people,dc=example,dc=org
+changetype: modify
+replace: sn
+sn: Brown
+-

@@ -1,0 +1,10 @@
+dn: uid=alice,ou=people,dc=example,dc=org
+changetype: modify
+add: mail
+mail: alice2@example.org
+-
+delete: description
+-
+replace: sn
+sn: Brown
+-

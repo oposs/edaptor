@@ -1,0 +1,6 @@
+dn: cn=Alice,ou=people,dc=example,dc=org
+changetype: add
+cn: Alice
+objectClass: top
+objectClass: inetOrgPerson
+sn: Adams

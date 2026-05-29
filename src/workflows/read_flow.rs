@@ -19,8 +19,14 @@ use crate::ui::form::{build_form_model, FormModel};
 
 /// Outcome of feeding a polled [`Response`] to the read flow.
 pub enum ReadOutcome {
-    /// A built form to display.
-    Form(FormModel),
+    /// A built form to display, plus the entry's objectClass values (needed by
+    /// the write path's client-side validation, which `FormModel` does not carry).
+    Form {
+        /// The schema-driven form model.
+        model: FormModel,
+        /// The entry's objectClass values.
+        object_classes: Vec<String>,
+    },
     /// A user-facing error string to surface (e.g. via `facade::confirm_error`).
     Error(String),
     /// The response was not for this flow (unknown id / unrelated variant).
@@ -82,7 +88,10 @@ impl ReadFlow {
                 let Some(entry) = entries.first() else {
                     return ReadOutcome::Error("entry not found".to_string());
                 };
-                ReadOutcome::Form(self.form_for(entry, &show))
+                ReadOutcome::Form {
+                    model: self.form_for(entry, &show),
+                    object_classes: object_classes_of(entry),
+                }
             }
             Response::SearchError { id, msg } => {
                 if self.pending.remove(id).is_some() {
@@ -93,6 +102,12 @@ impl ReadFlow {
             }
             _ => ReadOutcome::Ignored,
         }
+    }
+
+    /// The server schema this flow was built with — needed by the write path's
+    /// client-side validation (`form::validate::validate`).
+    pub fn schema(&self) -> &SchemaModel {
+        &self.schema
     }
 
     /// Build the form for an already-fetched entry (objectClasses come from the
@@ -172,10 +187,14 @@ mod tests {
             entries: vec![entry()],
         };
         match flow.on_response(&resp) {
-            ReadOutcome::Form(model) => {
+            ReadOutcome::Form {
+                model,
+                object_classes,
+            } => {
                 assert_eq!(model.title, "cn=Alice,dc=example,dc=org");
                 assert_eq!(model.fields[0].label, "cn"); // profile_show first
                 assert!(model.fields.iter().any(|f| f.label == "sn" && f.is_must));
+                assert!(object_classes.iter().any(|o| o == "person"));
             }
             _ => panic!("expected a form"),
         }
@@ -192,13 +211,13 @@ mod tests {
             id: 11,
             entries: vec![entry()],
         });
-        assert!(matches!(r11, ReadOutcome::Form(_)));
+        assert!(matches!(r11, ReadOutcome::Form { .. }));
         assert_eq!(flow.pending.len(), 1);
         let r10 = flow.on_response(&Response::Entries {
             id: 10,
             entries: vec![entry()],
         });
-        assert!(matches!(r10, ReadOutcome::Form(_)));
+        assert!(matches!(r10, ReadOutcome::Form { .. }));
         assert!(flow.pending.is_empty());
     }
 

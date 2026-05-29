@@ -101,6 +101,37 @@ pub fn entries_to_nodes(entries: &[LdapEntry]) -> Vec<BrowserNode> {
         .collect()
 }
 
+/// What the UI should do when the user activates (Enter) a browser node.
+///
+/// The classifier is intentionally gesture/state driven rather than trying to
+/// distinguish "container" from "leaf" from `objectClass` (LDAP gives no cheap
+/// has-children signal): an as-yet-unloaded node is expanded one level; once a
+/// node's children have been fetched, activating it reads the entry into the
+/// form. `None` is reserved for nodes that should do nothing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SelectAction {
+    /// Expand this DN's children (one-level search).
+    Expand(String),
+    /// Read this DN into the entry form (base search).
+    Read(String),
+    /// Do nothing.
+    None,
+}
+
+/// Decide what activating `node` should do, given whether its children have
+/// already been loaded. Pure: the caller (facade) supplies the node's DN and
+/// loaded flag; this never touches turbo-vision. An unloaded node expands; a
+/// loaded node reads.
+pub fn on_select(dn: &str, loaded: bool) -> SelectAction {
+    if dn.is_empty() {
+        SelectAction::None
+    } else if loaded {
+        SelectAction::Read(dn.to_string())
+    } else {
+        SelectAction::Expand(dn.to_string())
+    }
+}
+
 /// Drives lazy expansion: assigns correlation ids, tracks in-flight requests,
 /// and resolves polled responses back to the awaiting tree-node handle.
 ///
@@ -248,6 +279,33 @@ mod tests {
         fn mark_loaded(&self) {
             self.0.borrow_mut().loaded = true;
         }
+    }
+
+    #[test]
+    fn selecting_container_requests_children_once() {
+        // An unloaded node expands; once loaded, re-activating it reads instead.
+        assert_eq!(
+            on_select("ou=people,dc=example,dc=org", false),
+            SelectAction::Expand("ou=people,dc=example,dc=org".to_string())
+        );
+        assert_eq!(
+            on_select("ou=people,dc=example,dc=org", true),
+            SelectAction::Read("ou=people,dc=example,dc=org".to_string())
+        );
+    }
+
+    #[test]
+    fn selecting_entry_requests_base_read() {
+        // A loaded leaf (children fetched, none returned) reads into the form.
+        assert_eq!(
+            on_select("cn=alice,dc=example,dc=org", true),
+            SelectAction::Read("cn=alice,dc=example,dc=org".to_string())
+        );
+    }
+
+    #[test]
+    fn selecting_empty_dn_is_none() {
+        assert_eq!(on_select("", false), SelectAction::None);
     }
 
     #[test]

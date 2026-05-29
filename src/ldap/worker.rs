@@ -20,9 +20,13 @@ use std::collections::BTreeMap;
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::thread::{self, JoinHandle};
 
-use ldap3::{LdapConn, Scope, SearchEntry};
+use std::collections::HashSet;
+
+use ldap3::{LdapConn, Mod, Scope, SearchEntry};
 
 use crate::config::{AuthMethod, Config};
+use crate::form::changeset::ModOp;
+use crate::ldap::result::result_code_message;
 use crate::ldap::tls::build_settings;
 
 /// Search scope for a [`Request::Search`]. Mapped to `ldap3::Scope` only inside
@@ -66,6 +70,44 @@ pub enum Request {
         /// Attributes to request (`"*"` for all user attributes).
         attrs: Vec<String>,
     },
+    /// Modify an entry's attributes. `id` is echoed in the reply (D4).
+    Modify {
+        /// Correlation id.
+        id: u64,
+        /// Target DN.
+        dn: String,
+        /// The attribute modifications (pure domain type from `form::changeset`).
+        changes: Vec<ModOp>,
+    },
+    /// Add a new entry. `id` is echoed in the reply.
+    Add {
+        /// Correlation id.
+        id: u64,
+        /// New entry's DN.
+        dn: String,
+        /// Attribute values for the new entry.
+        attrs: BTreeMap<String, Vec<String>>,
+    },
+    /// Rename an entry (MODRDN). `id` is echoed in the reply.
+    ModRdn {
+        /// Correlation id.
+        id: u64,
+        /// Current DN.
+        dn: String,
+        /// The new RDN, e.g. `cn=Bob`.
+        new_rdn: String,
+        /// Whether to delete the old RDN attribute value.
+        delete_old: bool,
+        /// Optional new superior (parent) DN. `None` in M4.
+        new_superior: Option<String>,
+    },
+    /// Delete an entry. `id` is echoed in the reply.
+    Delete {
+        /// Correlation id.
+        id: u64,
+        /// DN to delete.
+        dn: String,
+    },
     /// Unbind and stop the worker thread.
     Shutdown,
 }
@@ -88,6 +130,21 @@ pub enum Response {
     /// A failed [`Request::Search`]; `id` echoes the request (D4).
     SearchError {
         id: u64,
+        msg: String,
+    },
+    /// A successful write (Modify/Add/ModRdn/Delete); `id` echoes the request.
+    WriteOk {
+        /// Correlation id.
+        id: u64,
+        /// The affected DN (post-rename DN for ModRdn is computed by the caller).
+        dn: String,
+    },
+    /// A failed write; `id` echoes the request. `msg` is already human-mapped
+    /// from the LDAP result code by [`result_code_message`].
+    WriteError {
+        /// Correlation id.
+        id: u64,
+        /// Human-readable error message.
         msg: String,
     },
     Done,
@@ -265,6 +322,31 @@ fn worker_loop(conn: &mut LdapConn, config: &Config, rx: Receiver<Job>) {
                 };
                 let _ = reply.send(resp);
             }
+            Request::Modify { id, dn, changes } => {
+                let _ = reply.send(run_modify(conn, id, &dn, &changes));
+            }
+            Request::Add { id, dn, attrs } => {
+                let _ = reply.send(run_add(conn, id, &dn, &attrs));
+            }
+            Request::ModRdn {
+                id,
+                dn,
+                new_rdn,
+                delete_old,
+                new_superior,
+            } => {
+                let _ = reply.send(run_modrdn(
+                    conn,
+                    id,
+                    &dn,
+                    &new_rdn,
+                    delete_old,
+                    new_superior.as_deref(),
+                ));
+            }
+            Request::Delete { id, dn } => {
+                let _ = reply.send(run_delete(conn, id, &dn));
+            }
             Request::Shutdown => {
                 let _ = conn.unbind();
                 let _ = reply.send(Response::Done);
@@ -272,6 +354,73 @@ fn worker_loop(conn: &mut LdapConn, config: &Config, rx: Receiver<Job>) {
             }
         }
     }
+}
+
+/// Convert a domain [`ModOp`] into an ldap3 [`Mod`] (worker-private so `ldap3`
+/// does not leak past the worker). Values become a `HashSet` (ldap3's shape).
+fn mod_op_to_ldap3(op: &ModOp) -> Mod<String> {
+    match op {
+        ModOp::Add { attr, values } => Mod::Add(attr.clone(), values.iter().cloned().collect()),
+        ModOp::Delete { attr, values } => {
+            Mod::Delete(attr.clone(), values.iter().cloned().collect())
+        }
+        ModOp::Replace { attr, values } => {
+            Mod::Replace(attr.clone(), values.iter().cloned().collect())
+        }
+    }
+}
+
+/// Turn an ldap3 write call's `Result<LdapResult>` into a [`Response`]: a zero
+/// result code is `WriteOk`; a non-zero code or transport error is `WriteError`
+/// with the human-mapped message (spec §10).
+fn write_response(id: u64, dn: &str, res: ldap3::result::Result<ldap3::LdapResult>) -> Response {
+    match res {
+        Ok(r) if r.rc == 0 => Response::WriteOk {
+            id,
+            dn: dn.to_string(),
+        },
+        Ok(r) => Response::WriteError {
+            id,
+            msg: result_code_message(r.rc, &r.text),
+        },
+        Err(e) => Response::WriteError {
+            id,
+            msg: format!("{e}"),
+        },
+    }
+}
+
+fn run_modify(conn: &mut LdapConn, id: u64, dn: &str, changes: &[ModOp]) -> Response {
+    let mods: Vec<Mod<String>> = changes.iter().map(mod_op_to_ldap3).collect();
+    write_response(id, dn, conn.modify(dn, mods))
+}
+
+fn run_add(
+    conn: &mut LdapConn,
+    id: u64,
+    dn: &str,
+    attrs: &BTreeMap<String, Vec<String>>,
+) -> Response {
+    let entry: Vec<(String, HashSet<String>)> = attrs
+        .iter()
+        .map(|(k, vs)| (k.clone(), vs.iter().cloned().collect::<HashSet<String>>()))
+        .collect();
+    write_response(id, dn, conn.add(dn, entry))
+}
+
+fn run_modrdn(
+    conn: &mut LdapConn,
+    id: u64,
+    dn: &str,
+    new_rdn: &str,
+    delete_old: bool,
+    new_superior: Option<&str>,
+) -> Response {
+    write_response(id, dn, conn.modifydn(dn, new_rdn, delete_old, new_superior))
+}
+
+fn run_delete(conn: &mut LdapConn, id: u64, dn: &str) -> Response {
+    write_response(id, dn, conn.delete(dn))
 }
 
 fn run_search(
@@ -409,5 +558,73 @@ mod tests {
             _ => panic!("expected Entries with id 7"),
         }
         assert!(handle.poll().is_none(), "second poll should be empty");
+    }
+
+    #[test]
+    fn submit_then_poll_write_ok_roundtrip() {
+        // Same pattern as the search roundtrip, but for a write reply.
+        let (resp_tx, resp_rx) = mpsc::channel::<Response>();
+        let (tx, _rx) = mpsc::channel::<Job>();
+        let handle = WorkerHandle {
+            tx,
+            resp_tx: resp_tx.clone(),
+            resp_rx,
+            join: None,
+        };
+        resp_tx
+            .send(Response::WriteOk {
+                id: 9,
+                dn: "cn=x,dc=example,dc=org".to_string(),
+            })
+            .unwrap();
+        match handle.poll() {
+            Some(Response::WriteOk { id, dn }) => {
+                assert_eq!(id, 9);
+                assert_eq!(dn, "cn=x,dc=example,dc=org");
+            }
+            _ => panic!("expected WriteOk with id 9"),
+        }
+        assert!(handle.poll().is_none());
+    }
+
+    #[test]
+    fn write_response_maps_codes() {
+        // rc 0 -> WriteOk; non-zero -> WriteError with the human message.
+        let ok = write_response(1, "cn=a,dc=x", Ok(make_result(0, "")));
+        assert!(matches!(ok, Response::WriteOk { id: 1, .. }));
+
+        let err = write_response(2, "cn=a,dc=x", Ok(make_result(32, "no such object")));
+        match err {
+            Response::WriteError { id, msg } => {
+                assert_eq!(id, 2);
+                assert!(msg.starts_with("No such object"), "msg={msg}");
+            }
+            _ => panic!("expected WriteError"),
+        }
+    }
+
+    fn make_result(rc: u32, text: &str) -> ldap3::LdapResult {
+        ldap3::LdapResult {
+            rc,
+            matched: String::new(),
+            text: text.to_string(),
+            refs: Vec::new(),
+            ctrls: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn mod_op_converts_to_ldap3() {
+        let m = mod_op_to_ldap3(&ModOp::Replace {
+            attr: "sn".to_string(),
+            values: vec!["Brown".to_string()],
+        });
+        match m {
+            Mod::Replace(attr, vals) => {
+                assert_eq!(attr, "sn");
+                assert!(vals.contains("Brown"));
+            }
+            _ => panic!("expected Replace"),
+        }
     }
 }

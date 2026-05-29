@@ -1,0 +1,8 @@
+dn: cn=Test,dc=example,dc=org
+changetype: modify
+replace: description
+description:: IGxlYWRpbmcgc3BhY2U=
+-
+replace: cn
+cn:: bmHDr3Zl
+-

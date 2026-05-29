@@ -1,0 +1,4 @@
+dn: cn=Alice,ou=people,dc=example,dc=org
+changetype: modrdn
+newrdn: cn=Bob
+deleteoldrdn: 1

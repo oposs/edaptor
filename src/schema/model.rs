@@ -169,6 +169,28 @@ impl SchemaModel {
         }
         FieldKind::Text
     }
+
+    /// Whether an attribute is single-valued, following the SUP chain the same
+    /// way [`field_kind`](Self::field_kind) does: the first attribute type in the
+    /// chain that is declared `SINGLE-VALUE` makes it single-valued. Unknown
+    /// attributes default to multi-valued (`false`).
+    pub fn is_single_value(&self, attr_name: &str) -> bool {
+        let mut current = self.attribute_type(attr_name);
+        for _ in 0..64 {
+            // bounded against malformed SUP cycles
+            let Some(at) = current else {
+                break;
+            };
+            if at.single_value {
+                return true;
+            }
+            current = at
+                .sup
+                .as_ref()
+                .and_then(|s| self.attribute_type(&s.to_string()));
+        }
+        false
+    }
 }
 
 #[cfg(test)]
@@ -282,6 +304,22 @@ mod tests {
         assert_eq!(m.field_kind("flag"), FieldKind::Boolean);
         assert_eq!(m.field_kind("member"), FieldKind::DistinguishedName);
         assert_eq!(m.field_kind("unknownAttr"), FieldKind::Text); // default
+    }
+
+    #[test]
+    fn single_value_attr_is_flagged() {
+        let m = SchemaModel::from_raw(&syntax_raw());
+        // 'flag' is declared SINGLE-VALUE.
+        assert!(m.is_single_value("flag"));
+        assert!(m.is_single_value("FLAG")); // case-insensitive name lookup
+    }
+
+    #[test]
+    fn multi_value_attr_is_not() {
+        let m = SchemaModel::from_raw(&syntax_raw());
+        assert!(!m.is_single_value("name"));
+        assert!(!m.is_single_value("member"));
+        assert!(!m.is_single_value("unknownAttr")); // default for unknown
     }
 
     #[test]

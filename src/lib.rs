@@ -3,6 +3,7 @@
 
 pub mod app;
 pub mod config;
+pub mod form;
 pub mod ldap;
 pub mod schema;
 pub mod ui;
@@ -42,6 +43,8 @@ fn describe_response(resp: &Response) -> &'static str {
         Response::Subschema(_) => "Subschema",
         Response::Entries { .. } => "Entries",
         Response::SearchError { .. } => "SearchError",
+        Response::WriteOk { .. } => "WriteOk",
+        Response::WriteError { .. } => "WriteError",
         Response::Done => "Done",
         Response::Error(_) => "Error",
     }
