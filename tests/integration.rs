@@ -22,6 +22,7 @@ fn test_config(uri: String) -> (Config, String) {
             password_source: PasswordSource::Env("EDAPTOR_TEST_ADMIN_PW".to_string()),
         },
         profiles: Vec::new(),
+        samba: Default::default(),
     };
     let password =
         std::env::var("EDAPTOR_TEST_ADMIN_PW").unwrap_or_else(|_| "adminpassword".to_string());

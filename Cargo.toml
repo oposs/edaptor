@@ -10,6 +10,7 @@ serde = { version = "1", features = ["derive"] }
 toml = "1"
 anyhow = "1"
 ldap3 = "0.12"            # default features: sync + tls (native-tls)
+md4 = "0.11"             # NT hash (sambaNTPassword = MD4(UTF-16LE(password)))
 native-tls = "0.2"       # build a custom TlsConnector for a configured CA
 rpassword = "7"          # read the bind password without echo
 ldap-types = { version = "0.7", default-features = false, features = ["chumsky"] }

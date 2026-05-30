@@ -16,6 +16,34 @@ pub struct Config {
     /// TOML blocks parse here; absent profiles default to empty.
     #[serde(default, rename = "profile")]
     pub profiles: Vec<EntryProfile>,
+    /// Samba lifecycle fallback settings. Used only when no `sambaDomain` entry
+    /// is discovered in the directory (spec §9). Absent `[samba]` table is fine.
+    #[serde(default)]
+    pub samba: SambaConfig,
+}
+
+/// Fallback Samba domain settings (spec §9). The live `sambaDomain` entry takes
+/// precedence; these values are used only when that entry is absent.
+#[derive(Debug, Deserialize)]
+pub struct SambaConfig {
+    #[serde(default)]
+    pub domain_sid: Option<String>,
+    #[serde(default = "default_rid_base")]
+    pub algorithmic_rid_base: u32,
+}
+
+fn default_rid_base() -> u32 {
+    1000
+}
+
+// Manual Default so an absent [samba] table yields algorithmic_rid_base = 1000.
+impl Default for SambaConfig {
+    fn default() -> Self {
+        SambaConfig {
+            domain_sid: None,
+            algorithmic_rid_base: default_rid_base(),
+        }
+    }
 }
 
 /// A minimal entry profile (M3 slice). Richer metadata (password/membership/
@@ -189,6 +217,38 @@ mod tests {
         "#;
         let cfg: Config = toml::from_str(toml).expect("should parse");
         assert!(cfg.profiles.is_empty());
+    }
+
+    #[test]
+    fn config_without_samba_table_defaults_rid_base_1000() {
+        let toml = r#"
+            [server]
+            uri = "ldap://ldap.example.com:389"
+            base_dn = "dc=example,dc=com"
+            [auth]
+            bind_dn = "cn=admin,dc=example,dc=com"
+        "#;
+        let cfg: Config = toml::from_str(toml).expect("should parse");
+        assert_eq!(cfg.samba.algorithmic_rid_base, 1000);
+        assert!(cfg.samba.domain_sid.is_none());
+    }
+
+    #[test]
+    fn config_with_samba_table_parses() {
+        let toml = r#"
+            [server]
+            uri = "ldap://ldap.example.com:389"
+            base_dn = "dc=example,dc=com"
+            [auth]
+            bind_dn = "cn=admin,dc=example,dc=com"
+
+            [samba]
+            domain_sid = "S-1-5-21-1-2-3"
+            algorithmic_rid_base = 2000
+        "#;
+        let cfg: Config = toml::from_str(toml).expect("should parse");
+        assert_eq!(cfg.samba.domain_sid.as_deref(), Some("S-1-5-21-1-2-3"));
+        assert_eq!(cfg.samba.algorithmic_rid_base, 2000);
     }
 
     #[test]

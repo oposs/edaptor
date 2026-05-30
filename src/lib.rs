@@ -5,6 +5,7 @@ pub mod app;
 pub mod config;
 pub mod form;
 pub mod ldap;
+pub mod samba;
 pub mod schema;
 pub mod ui;
 pub mod workflows;
