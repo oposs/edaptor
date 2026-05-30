@@ -43,6 +43,13 @@ enum Command {
         /// Object class name, e.g. inetOrgPerson
         object_class: String,
     },
+    /// Set a synced Unix + Samba password on an entry (TLS-only). Prompts for the
+    /// new password twice; updates `userPassword` and, for a `sambaSamAccount`,
+    /// `sambaNTPassword` + `sambaPwdLastSet` in one atomic MODIFY.
+    Passwd {
+        /// Target entry DN, e.g. uid=alice,ou=people,dc=example,dc=org
+        dn: String,
+    },
 }
 
 fn default_config_path() -> PathBuf {
@@ -80,8 +87,25 @@ fn main() -> Result<()> {
             let report: SchemaReport = edaptor::run_schema(config, password, &object_class)?;
             print_schema(&report);
         }
+        Some(Command::Passwd { dn }) => {
+            let new_password = prompt_new_password()?;
+            let confirmation = edaptor::run_passwd(config, password, &dn, &new_password)?;
+            println!("{confirmation}");
+        }
     }
     Ok(())
+}
+
+/// Prompt for the new password twice (no echo) and confirm the two entries match.
+/// Errors if they differ, so a typo never silently sets a wrong password.
+fn prompt_new_password() -> Result<String> {
+    let first = rpassword::prompt_password("New password: ").context("reading new password")?;
+    let second = rpassword::prompt_password("Retype new password: ")
+        .context("reading password confirmation")?;
+    if first != second {
+        return Err(anyhow::anyhow!("the two passwords do not match"));
+    }
+    Ok(first)
 }
 
 /// Launch the TUI: spawn the worker, fetch the schema synchronously, build the
