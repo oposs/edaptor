@@ -38,7 +38,7 @@
    - `group_sid("S-1-5-21-1-2-3", 1000, 1000) == "S-1-5-21-1-2-3-3001"` (RID 3001, odd)
    - `user_rid(0, 1000) == 1000`; `group_rid(0, 1000) == 1001`.
 
-4. **`sambaAcctFlags` is exactly 13 chars: `[` + 11 interior + `]`.** Enabled normal user = `"[U          ]"` (`U` then **10 spaces**). **Assert both the exact literal AND `flags.len() == 13`** — the space count is the bug magnet. Provide `samba_acct_flags(disabled: bool) -> String`: enabled → `[U          ]`, disabled → `[UD         ]` (`U`,`D` then 9 spaces, still len 13). Build the string by left-justifying the flag letters in an 11-wide field then wrapping in brackets, so the width is structural, not a hand-counted literal.
+4. **`sambaAcctFlags` is exactly 13 chars: `[` + 11 interior + `]`.** Enabled normal user = `"[U          ]"` (`U` then **10 spaces**). **Assert both the exact literal AND `flags.len() == 13`** — the space count is the bug magnet. Provide `samba_acct_flags(disabled: bool) -> String`: enabled → `[U          ]`, disabled → `[DU         ]`. **Letter order matters:** Samba's `pdb_encode_acct_ctrl` emits flags in the fixed order `N D H T U M W S L X I`, so `D` (ACB_DISABLED) comes **before** `U` (ACB_NORMAL) — a disabled normal account is `[DU         ]`, not `[UD]`. Build the interior by iterating the flags in canonical order and left-justifying in an 11-wide field, so width is structural and ordering is correct by construction.
 
 5. **`sambaDomain` discovery (spec §9).** Search `(objectClass=sambaDomain)` under base; read `sambaSID` (the **domain** SID, e.g. `S-1-5-21-...`) and `sambaAlgorithmicRidBase` (string→u32, default 1000 if absent). Parse function takes an already-fetched `&LdapEntry`-like map (`&BTreeMap<String,Vec<String>>`) → `SambaDomainInfo { domain_sid, algorithmic_rid_base }`, so it is unit-testable without a server. Config `[samba]` is a **fallback only**: if no `sambaDomain` entry exists, use `config.samba.domain_sid` / `config.samba.algorithmic_rid_base`.
 
@@ -81,6 +81,9 @@
 - `cargo test` green, `cargo clippy --all-targets -- -D warnings` clean, `cargo fmt --check` clean.
 - Facade boundary intact: `grep -rl 'use turbo_vision\|turbo_vision::' src/` lists **only** `src/ui/facade.rs` (M5 adds no TV usage).
 - No `ldap3` type leaks past `src/ldap/`.
+
+## Known coverage gap (recorded honestly)
+- **`run_passwd` is not exercised end-to-end against a server.** The live test drives `build_password_mods` + the worker directly because the plain (non-TLS) test container would trip the TLS gate inside `run_passwd`. So the gate, sambaSamAccount detection, MODIFY, re-read, and confirmation-string are each unit-tested, and the *equivalent mods* are proven live, but the composed CLI path never runs against a real directory. Closing this needs a TLS-capable test container (deferred with the Samba-schema container work below).
 
 ## Deferred to M6 (record, do not build in M5)
 - Interactive masked password dialog in the TUI (needs a custom masked `InputLine` — its own TV spike).
