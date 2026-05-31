@@ -19,12 +19,13 @@ use std::time::Duration;
 
 use turbo_vision::app::Application;
 use turbo_vision::core::command::{CommandId, CM_CANCEL, CM_OK, CM_QUIT, CM_YES};
+use turbo_vision::core::draw::DrawBuffer;
 use turbo_vision::core::event::{Event, EventType, KB_ALT_X, KB_F10};
 use turbo_vision::core::geometry::Rect;
 use turbo_vision::core::menu_data::MenuBuilder;
 use turbo_vision::core::palette::Palette;
 use turbo_vision::core::palette_chain::PaletteChainNode;
-use turbo_vision::core::state::StateFlags;
+use turbo_vision::core::state::{StateFlags, SF_DRAGGING, SF_FOCUSED};
 use turbo_vision::helpers::msgbox::{
     message_box, MF_CONFIRMATION, MF_ERROR, MF_INFORMATION, MF_NO_BUTTON, MF_OK_BUTTON,
     MF_YES_BUTTON,
@@ -32,11 +33,13 @@ use turbo_vision::helpers::msgbox::{
 use turbo_vision::terminal::Terminal;
 use turbo_vision::views::button::Button;
 use turbo_vision::views::dialog::Dialog;
+use turbo_vision::views::group::Group;
 use turbo_vision::views::input_line::InputLine;
 use turbo_vision::views::menu_bar::{MenuBar, SubMenu};
 use turbo_vision::views::outline::{Node, OutlineViewer};
 use turbo_vision::views::static_text::StaticText;
 use turbo_vision::views::status_line::{StatusItem, StatusLine};
+use turbo_vision::views::view::write_line_to_terminal;
 use turbo_vision::views::window::Window;
 use turbo_vision::views::View;
 
@@ -77,6 +80,32 @@ pub fn tv_available() -> bool {
 /// `turbo_vision`. The `cm_quit_matches_app` test pins the two together.
 pub fn tv_cm_quit() -> u16 {
     CM_QUIT
+}
+
+/// Minimum width any pane may shrink to.
+const MIN_PANE_W: i16 = 8;
+/// Columns a divider occupies.
+const DIVIDER_W: i16 = 1;
+
+/// Clamp two divider x-positions so every pane keeps `MIN_PANE_W` and the dividers
+/// stay ordered, within the absolute interior `[left, right)`.
+fn clamp_dividers(left: i16, right: i16, mut d0: i16, mut d1: i16) -> (i16, i16) {
+    d0 = d0
+        .max(left + MIN_PANE_W)
+        .min(right - 2 * MIN_PANE_W - DIVIDER_W);
+    d1 = d1.max(d0 + DIVIDER_W + MIN_PANE_W).min(right - MIN_PANE_W);
+    (d0, d1)
+}
+
+/// The three absolute pane rects for a SplitContainer of bounds `b` with dividers
+/// at `d0`/`d1` (already clamped).
+fn pane_rects(b: Rect, d0: i16, d1: i16) -> [Rect; 3] {
+    let (top, bottom) = (b.a.y, b.b.y);
+    [
+        Rect::new(b.a.x, top, d0, bottom),
+        Rect::new(d0 + DIVIDER_W, top, d1, bottom),
+        Rect::new(d1 + DIVIDER_W, top, b.b.x, bottom),
+    ]
 }
 
 /// Build the menu bar from backend-agnostic [`MenuDef`]s (spike §1/§7).
@@ -225,6 +254,174 @@ impl View for DitOutline {
 
     fn get_palette(&self) -> Option<Palette> {
         self.inner.get_palette()
+    }
+}
+
+/// A frameless three-column container with two mouse-draggable vertical dividers.
+/// Wraps a [`Group`] that owns the three pane child views (so Tab focus cycling and
+/// child event routing come for free); the SplitContainer adds only divider drawing
+/// and drag (TV has no splitter widget). Mounted directly on `app.desktop`.
+pub struct SplitContainer {
+    inner: Group,
+    bounds: Rect,
+    divider_x: [i16; 2],
+    dragging: Option<usize>,
+    state: StateFlags,
+    palette_chain: Option<PaletteChainNode>,
+}
+
+impl SplitContainer {
+    /// Build from three already-constructed pane views (left→right). Incoming pane
+    /// bounds are ignored; `layout` assigns columns.
+    pub fn new(
+        bounds: Rect,
+        left: Box<dyn View>,
+        middle: Box<dyn View>,
+        right: Box<dyn View>,
+    ) -> Self {
+        let w = bounds.b.x - bounds.a.x;
+        let (d0, d1) = clamp_dividers(
+            bounds.a.x,
+            bounds.b.x,
+            bounds.a.x + w / 3,
+            bounds.a.x + (2 * w) / 3,
+        );
+        let mut inner = Group::new(bounds);
+        inner.add(left);
+        inner.add(middle);
+        inner.add(right);
+        let mut me = SplitContainer {
+            inner,
+            bounds,
+            divider_x: [d0, d1],
+            dragging: None,
+            state: 0,
+            palette_chain: None,
+        };
+        me.layout();
+        me.inner.set_initial_focus();
+        me
+    }
+
+    fn layout(&mut self) {
+        let rects = pane_rects(self.bounds, self.divider_x[0], self.divider_x[1]);
+        for (i, r) in rects.iter().enumerate() {
+            self.inner.child_at_mut(i).set_bounds(*r);
+        }
+    }
+
+    fn divider_at(&self, x: i16, y: i16) -> Option<usize> {
+        if y < self.bounds.a.y || y >= self.bounds.b.y {
+            return None;
+        }
+        self.divider_x.iter().position(|&dx| x == dx)
+    }
+}
+
+impl View for SplitContainer {
+    fn bounds(&self) -> Rect {
+        self.bounds
+    }
+
+    fn set_bounds(&mut self, new: Rect) {
+        let old_w = (self.bounds.b.x - self.bounds.a.x).max(1);
+        let new_w = (new.b.x - new.a.x).max(1);
+        for d in &mut self.divider_x {
+            let frac = (*d - self.bounds.a.x) as f32 / old_w as f32;
+            *d = new.a.x + (frac * new_w as f32).round() as i16;
+        }
+        self.bounds = new;
+        self.inner.set_bounds(new);
+        let (d0, d1) = clamp_dividers(new.a.x, new.b.x, self.divider_x[0], self.divider_x[1]);
+        self.divider_x = [d0, d1];
+        self.layout();
+    }
+
+    fn draw(&mut self, terminal: &mut Terminal) {
+        self.inner.set_palette_chain(self.palette_chain.clone());
+        self.inner.draw(terminal);
+        let attr = self.map_color(1);
+        for &x in &self.divider_x {
+            for y in self.bounds.a.y..self.bounds.b.y {
+                let mut buf = DrawBuffer::new(DIVIDER_W as usize);
+                buf.move_char(0, '│', attr, DIVIDER_W as usize);
+                write_line_to_terminal(terminal, x, y, &buf);
+            }
+        }
+    }
+
+    fn handle_event(&mut self, event: &mut Event) {
+        match event.what {
+            EventType::MouseDown => {
+                if let Some(i) = self.divider_at(event.mouse.pos.x, event.mouse.pos.y) {
+                    self.dragging = Some(i);
+                    self.state |= SF_DRAGGING;
+                    event.clear();
+                    return;
+                }
+            }
+            EventType::MouseMove => {
+                if let Some(i) = self.dragging {
+                    let x = event.mouse.pos.x;
+                    self.divider_x[i] = x;
+                    let (d0, d1) = clamp_dividers(
+                        self.bounds.a.x,
+                        self.bounds.b.x,
+                        self.divider_x[0],
+                        self.divider_x[1],
+                    );
+                    self.divider_x = [d0, d1];
+                    self.layout();
+                    event.clear();
+                    return;
+                }
+            }
+            EventType::MouseUp if self.dragging.is_some() => {
+                self.dragging = None;
+                self.state &= !SF_DRAGGING;
+                event.clear();
+                return;
+            }
+            _ => {}
+        }
+        self.inner.handle_event(event);
+    }
+
+    fn can_focus(&self) -> bool {
+        true
+    }
+
+    fn state(&self) -> StateFlags {
+        self.state
+    }
+
+    fn set_state(&mut self, state: StateFlags) {
+        self.state = state;
+    }
+
+    fn set_focus(&mut self, focused: bool) {
+        self.set_state_flag(SF_FOCUSED, focused);
+        if focused {
+            self.inner.set_initial_focus();
+        }
+    }
+
+    fn update_cursor(&self, terminal: &mut Terminal) {
+        if let Some(child) = self.inner.focused_child() {
+            child.update_cursor(terminal);
+        }
+    }
+
+    fn set_palette_chain(&mut self, node: Option<PaletteChainNode>) {
+        self.palette_chain = node;
+    }
+
+    fn get_palette_chain(&self) -> Option<&PaletteChainNode> {
+        self.palette_chain.as_ref()
+    }
+
+    fn get_palette(&self) -> Option<Palette> {
+        None
     }
 }
 
@@ -772,6 +969,18 @@ mod tests {
     #[test]
     fn facade_boundary_compiles() {
         assert!(tv_available());
+    }
+
+    #[test]
+    fn dividers_clamp_and_panes_tile() {
+        let (d0, d1) = clamp_dividers(0, 60, -100, 1000);
+        assert!(d0 >= 8 && d1 > d0 && d1 <= 52);
+        let panes = pane_rects(Rect::new(0, 0, 60, 10), d0, d1);
+        assert_eq!(panes[0].a.x, 0);
+        assert_eq!(panes[1].a.x, d0 + 1);
+        assert_eq!(panes[2].b.x, 60);
+        assert!(panes[0].b.x <= panes[1].a.x);
+        assert!(panes[1].b.x <= panes[2].a.x);
     }
 
     #[test]
