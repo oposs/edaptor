@@ -131,6 +131,8 @@ fn variant_name(resp: &Response) -> &'static str {
         Response::Subschema(_) => "Subschema",
         Response::Entries { .. } => "Entries",
         Response::SearchError { .. } => "SearchError",
+        Response::StructureEntries { .. } => "StructureEntries",
+        Response::StructureError { .. } => "StructureError",
         Response::WriteOk { .. } => "WriteOk",
         Response::WriteError { .. } => "WriteError",
         Response::Done => "Done",

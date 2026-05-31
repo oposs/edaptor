@@ -22,6 +22,7 @@ use std::thread::{self, JoinHandle};
 
 use std::collections::HashSet;
 
+use ldap3::adapters::{Adapter, EntriesOnly, PagedResults};
 use ldap3::{LdapConn, Mod, Scope, SearchEntry};
 
 use crate::config::{AuthMethod, Config};
@@ -45,6 +46,20 @@ pub enum SearchScope {
 /// verbatim; binary attributes are reduced to a byte count (sum of value
 /// lengths) so the read-only form can render `<N bytes>` without copying blobs.
 /// `BTreeMap` gives deterministic ordering for tests and display.
+/// One entry from the eager structure scan: DN + display label inputs + objectClass.
+/// Deliberately minimal (no full attributes) so a 100k-entry directory stays cheap.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StructureNodeRaw {
+    /// Distinguished name (the structural key).
+    pub dn: String,
+    /// `cn` first value, if present (label preference 1).
+    pub cn: Option<String>,
+    /// `description` first value, if present (label preference 2).
+    pub description: Option<String>,
+    /// objectClass values (kept for future domain classification).
+    pub object_classes: Vec<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LdapEntry {
     /// The entry's distinguished name.
@@ -71,6 +86,16 @@ pub enum Request {
         filter: String,
         /// Attributes to request (`"*"` for all user attributes).
         attrs: Vec<String>,
+    },
+    /// Eagerly load the entire subtree structure under `base` (paged). `id` is
+    /// echoed in the reply for correlation.
+    LoadStructure {
+        /// Correlation id.
+        id: u64,
+        /// Base DN to scan (the whole subtree below + including it).
+        base: String,
+        /// Paged-results page size (e.g. 500).
+        page_size: i32,
     },
     /// Modify an entry's attributes. `id` is echoed in the reply (D4).
     Modify {
@@ -122,6 +147,7 @@ pub struct RawSubschema {
     pub ldap_syntaxes: Vec<String>,
 }
 
+#[derive(Debug, Clone)]
 pub enum Response {
     Subschema(RawSubschema),
     /// Result of a [`Request::Search`]; `id` echoes the request (D4).
@@ -133,6 +159,24 @@ pub enum Response {
     SearchError {
         id: u64,
         msg: String,
+    },
+    /// Result of a [`Request::LoadStructure`] eager scan; `id` echoes the request.
+    StructureEntries {
+        /// Correlation id.
+        id: u64,
+        /// Every entry under the base (paged), minimal payload.
+        nodes: Vec<StructureNodeRaw>,
+    },
+    /// A failed [`Request::LoadStructure`]; `id` echoes the request. `truncated`
+    /// is true when the server refused to page (rc 3/4/11) so the UI can fall back
+    /// to lazy one-level browsing.
+    StructureError {
+        /// Correlation id.
+        id: u64,
+        /// Human-readable error message.
+        msg: String,
+        /// True if the failure was a size/time/admin limit (fallback signal).
+        truncated: bool,
     },
     /// A successful write (Modify/Add/ModRdn/Delete); `id` echoes the request.
     WriteOk {
@@ -325,6 +369,17 @@ fn worker_loop(conn: &mut LdapConn, config: &Config, rx: Receiver<Job>) {
                 };
                 let _ = reply.send(resp);
             }
+            Request::LoadStructure {
+                id,
+                base,
+                page_size,
+            } => {
+                let resp = match run_load_structure(conn, &base, page_size) {
+                    Ok(nodes) => Response::StructureEntries { id, nodes },
+                    Err((msg, truncated)) => Response::StructureError { id, msg, truncated },
+                };
+                let _ = reply.send(resp);
+            }
             Request::Modify { id, dn, changes } => {
                 let _ = reply.send(run_modify(conn, id, &dn, &changes));
             }
@@ -426,6 +481,73 @@ fn run_delete(conn: &mut LdapConn, id: u64, dn: &str) -> Response {
     write_response(id, dn, conn.delete(dn))
 }
 
+/// True for the LDAP result codes that mean "the server capped the result set"
+/// (time/size/admin limit). Used to decide whether to fall back to lazy browsing.
+fn is_limit_rc(rc: u32) -> bool {
+    matches!(rc, 3 | 4 | 11)
+}
+
+/// Page through the entire subtree under `base` (RFC 2696) and return minimal
+/// per-entry structure data. Bypasses the server's per-request size limit. On a
+/// time/size/admin limit it returns the entries gathered so far paired with a
+/// `truncated` flag so the caller can fall back to lazy browsing.
+fn run_load_structure(
+    conn: &mut LdapConn,
+    base: &str,
+    page_size: i32,
+) -> std::result::Result<Vec<StructureNodeRaw>, (String, bool)> {
+    let adapters: Vec<Box<dyn Adapter<_, _>>> = vec![
+        Box::new(EntriesOnly::new()),
+        Box::new(PagedResults::new(page_size)),
+    ];
+    let attrs = vec![
+        "cn".to_string(),
+        "description".to_string(),
+        "objectClass".to_string(),
+    ];
+    let mut stream = conn
+        .streaming_search_with(adapters, base, Scope::Subtree, "(objectClass=*)", attrs)
+        .map_err(|e| (format!("{e}"), false))?;
+
+    let mut out = Vec::new();
+    loop {
+        match stream.next() {
+            Ok(Some(re)) => {
+                let se = SearchEntry::construct(re);
+                out.push(structure_node_from(se));
+            }
+            Ok(None) => break,
+            Err(e) => return Err((format!("{e}"), false)),
+        }
+    }
+
+    match stream.result().success() {
+        Ok(_) => Ok(out),
+        Err(ldap3::LdapError::LdapResult { result }) if is_limit_rc(result.rc) => {
+            Err((result_code_message(result.rc, &result.text), true))
+        }
+        Err(e) => Err((format!("{e}"), false)),
+    }
+}
+
+/// First value of a (case-sensitive ldap3 key) attribute from a SearchEntry.
+fn first_attr(se: &SearchEntry, attr: &str) -> Option<String> {
+    se.attrs.get(attr).and_then(|v| v.first().cloned())
+}
+
+/// Flatten a SearchEntry into the minimal structure payload.
+fn structure_node_from(se: SearchEntry) -> StructureNodeRaw {
+    let cn = first_attr(&se, "cn");
+    let description = first_attr(&se, "description");
+    let object_classes = se.attrs.get("objectClass").cloned().unwrap_or_default();
+    StructureNodeRaw {
+        dn: se.dn,
+        cn,
+        description,
+        object_classes,
+    }
+}
+
 fn run_search(
     conn: &mut LdapConn,
     base: &str,
@@ -499,6 +621,15 @@ fn fetch_subschema(conn: &mut LdapConn, base_dn: &str) -> Result<RawSubschema> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn limit_rc_triggers_truncation_fallback() {
+        assert!(is_limit_rc(3)); // timeLimitExceeded
+        assert!(is_limit_rc(4)); // sizeLimitExceeded
+        assert!(is_limit_rc(11)); // adminLimitExceeded
+        assert!(!is_limit_rc(0));
+        assert!(!is_limit_rc(32)); // noSuchObject
+    }
 
     #[test]
     fn scope_maps_to_ldap3() {
