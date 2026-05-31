@@ -101,11 +101,20 @@ code is the divider bar (draw + drag) — TV has no splitter widget.
 | Pane 1 tree        | `views::outline::{OutlineViewer, Node}` (= TOutline)   |
 | Pane 2 list        | `views::listbox::ListBox` (or `sorted_listbox::SortedListBox`) |
 | Pane 2 search box  | `views::input_line::InputLine`                         |
-| Pane 3 scrolling   | `views::scroller::Scroller` + `views::scrollbar::ScrollBar` |
+| Pane 3 scrolling   | inner `views::group::Group` of rows + a manual `delta` + `views::scrollbar::ScrollBar` |
 | Pane 3 fields      | `views::input_line::InputLine`, `static_text::StaticText`, `button::Button` |
 
-`Group` provides Tab focus cycling between panes for free; `Scroller` provides
-`delta`/`limit`/`scroll_to`/`set_limit` + scrollbar plumbing.
+`Group` provides Tab focus cycling between panes for free.
+
+**Correction (verified against turbo-vision 1.2.0 source, 2026-06-01):**
+`Scroller` is **not** usable to host the form. It holds *no children* (just
+`bounds/delta/limit/scrollbars`) and nothing in the crate embeds views in it —
+`editor`/`memo`/`text_viewer` each keep their own `delta` and drive a `ScrollBar`
+directly. So pane 3 scrolls by owning an inner `Group` of row views plus a manual
+vertical `delta` and a `ScrollBar`; on a scroll change the Group is translated by
+moving its origin (keeping width/height constant — `Group::set_bounds` adds the
+size delta to children, so a pure translation must keep `dw==dh==0`). See the API
+verification report `docs/superpowers/research/2026-06-01-tv-api-verification-3pane.md`.
 
 ## 5. Component design
 
@@ -175,9 +184,9 @@ Selecting a branch sets the "current branch" that drives pane 2. Reuses the
 
 - On selecting a pane-2 entry, issue an on-demand **base read** for its full attributes
   (existing `ReadFlow` / `FormModel` path), then render the form into the pane.
-- Layout: one row per field (label + value editor), inside a `Scroller` so a tall entry
-  scrolls (PgUp/PgDn, wheel, scrollbar). A persistent **Save / Cancel** bar at the
-  bottom.
+- Layout: one row per field (label + value editor), held in an inner `Group` that
+  scrolls via a manual vertical `delta` + `ScrollBar` (PgUp/PgDn, wheel) — *not*
+  `Scroller` (see §4.1 correction). A persistent **Save / Cancel** bar at the bottom.
 - Editors reuse the existing rules: `InputLine` per editable field (multi-values joined
   by newline — unchanged for this redesign), `StaticText` for read-only kinds
   (`memberOf`, binary notes, disabled checkboxes).
@@ -271,17 +280,24 @@ read_only = false          # NEW: global read-only mode (also implied by anonymo
 
 ## 9. Risks & open items (to resolve during the implementation spike)
 
-1. **Pane-3 scrolling pattern.** `Scroller` is documented as a base for text
-   viewers/editors; it manages offset/limit but may not auto-host arbitrary child
-   `InputLine`s. We may need to reposition field editors by the scroll delta ourselves.
-   A spike (mirroring the M4.1 TV spike) confirms the exact pattern before planning
-   locks the approach. *This is the main implementation risk.*
-2. **ldap3 0.12 paged-results API.** Confirm the exact adapter/iterator for RFC 2696
-   and how to thread the cookie on the worker's sync `LdapConn`.
-3. **Divider drag focus capture.** Confirm `SF_RESIZING` (or the crate's equivalent)
-   keeps mouse capture during a drag, as the skeleton assumes.
-4. **Eager load progress UX.** Show progress during the initial scan; decide
-   sync-at-startup vs background-with-spinner.
+1. **Pane-3 scrolling pattern — RESOLVED by spike.** `Scroller` holds no children
+   and is unused in the crate; pane 3 uses an inner `Group` of rows + manual
+   `delta`/`ScrollBar`, translating the Group origin on scroll (keep `dw==dh==0`).
+   Verified in `docs/superpowers/research/2026-06-01-tv-api-verification-3pane.md`.
+2. **ldap3 0.12 paged-results API — RESOLVED by spike.** Use
+   `conn.streaming_search_with(vec![Box::new(EntriesOnly::new()),
+   Box::new(PagedResults::new(page_size))], base, Scope::Subtree, filter, attrs)`,
+   drain `next()` to `None`, then `result().success()?`. No Cargo change (adapters
+   are default). Fallback on `rc ∈ {3,4,11}`. Verified in
+   `docs/superpowers/research/2026-06-01-ldap3-0.12-paged-subtree.md`.
+3. **Divider drag focus capture — RESOLVED by spike.** `SF_DRAGGING`/`SF_RESIZING`
+   exist; `Group::handle_event` keeps feeding MouseMove/Up to the focused child while
+   that flag is set. The SplitContainer sets `SF_DRAGGING` on its *own* `state()`
+   during a divider drag (it is the focused child of the desktop), mirroring how
+   `Window` rides `Frame`'s flag. Verified, same report §D.
+4. **Eager load progress UX (open).** Show progress during the initial scan; decide
+   sync-at-startup vs background-with-spinner. Plan defaults to a synchronous load at
+   startup with a status message, matching the existing `FetchSubschema` startup step.
 
 ## 10. Reuse map (what stays unchanged)
 
