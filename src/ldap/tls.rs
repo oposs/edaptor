@@ -55,6 +55,7 @@ mod tests {
             uri: "ldaps://ldap.example.com:636".to_string(),
             base_dn: "dc=example,dc=com".to_string(),
             start_tls,
+            read_only: false,
             timeout_secs: 10,
             tls,
         }

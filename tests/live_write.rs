@@ -22,6 +22,7 @@ fn test_config(uri: String) -> (Config, String) {
             uri,
             base_dn: "dc=example,dc=org".to_string(),
             start_tls: false,
+            read_only: false,
             timeout_secs: 10,
             tls: TlsConfig::default(),
         },

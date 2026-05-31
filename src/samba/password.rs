@@ -59,6 +59,7 @@ mod tests {
             uri: uri.into(),
             base_dn: "dc=example,dc=com".into(),
             start_tls,
+            read_only: false,
             timeout_secs: 10,
             tls: TlsConfig::default(),
         }

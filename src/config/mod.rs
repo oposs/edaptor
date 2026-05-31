@@ -66,6 +66,10 @@ pub struct ServerConfig {
     pub base_dn: String,
     #[serde(default)]
     pub start_tls: bool,
+    /// Global read-only mode. When true (or when the bind is anonymous), the TUI
+    /// hides Save/Cancel and create/delete actions (spec §5.8).
+    #[serde(default)]
+    pub read_only: bool,
     #[serde(default = "default_timeout")]
     pub timeout_secs: u64,
     #[serde(default)]
@@ -123,6 +127,17 @@ pub enum AuthMethod {
     Gssapi,
 }
 
+impl AuthConfig {
+    /// True when no bind DN is configured (anonymous bind).
+    pub fn is_anonymous(&self) -> bool {
+        self.bind_dn
+            .as_deref()
+            .map(str::trim)
+            .unwrap_or("")
+            .is_empty()
+    }
+}
+
 impl Config {
     pub fn load(path: &Path) -> Result<Config> {
         let text = std::fs::read_to_string(path)
@@ -130,6 +145,11 @@ impl Config {
         let config: Config =
             toml::from_str(&text).with_context(|| format!("parsing config {}", path.display()))?;
         Ok(config)
+    }
+
+    /// Global read-only: the explicit flag OR an anonymous bind (spec §5.8).
+    pub fn is_read_only(&self) -> bool {
+        self.server.read_only || self.auth.is_anonymous()
     }
 }
 
@@ -260,5 +280,45 @@ mod tests {
             bind_dn = "cn=admin,dc=example,dc=com"
         "#;
         assert!(toml::from_str::<Config>(toml).is_err());
+    }
+
+    #[test]
+    fn read_only_flag_forces_read_only() {
+        let toml = r#"
+            [server]
+            uri = "ldap://x"
+            base_dn = "dc=x"
+            read_only = true
+            [auth]
+            bind_dn = "cn=admin,dc=x"
+        "#;
+        let cfg: Config = toml::from_str(toml).unwrap();
+        assert!(cfg.is_read_only());
+    }
+
+    #[test]
+    fn anonymous_bind_is_read_only() {
+        let toml = r#"
+            [server]
+            uri = "ldap://x"
+            base_dn = "dc=x"
+            [auth]
+        "#;
+        let cfg: Config = toml::from_str(toml).unwrap();
+        assert!(cfg.auth.is_anonymous());
+        assert!(cfg.is_read_only());
+    }
+
+    #[test]
+    fn bound_writable_is_not_read_only() {
+        let toml = r#"
+            [server]
+            uri = "ldap://x"
+            base_dn = "dc=x"
+            [auth]
+            bind_dn = "cn=admin,dc=x"
+        "#;
+        let cfg: Config = toml::from_str(toml).unwrap();
+        assert!(!cfg.is_read_only());
     }
 }
