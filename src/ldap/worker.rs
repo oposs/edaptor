@@ -37,6 +37,8 @@ pub enum SearchScope {
     Base,
     /// The immediate children of the base (one-level browse).
     OneLevel,
+    /// The entire subtree under the base (used for the eager structure scan).
+    Subtree,
 }
 
 /// A flattened LDAP entry for the UI. String attribute values are carried
@@ -276,6 +278,7 @@ fn scope_to_ldap3(scope: SearchScope) -> Scope {
     match scope {
         SearchScope::Base => Scope::Base,
         SearchScope::OneLevel => Scope::OneLevel,
+        SearchScope::Subtree => Scope::Subtree,
     }
 }
 
@@ -503,6 +506,10 @@ mod tests {
         assert!(matches!(
             scope_to_ldap3(SearchScope::OneLevel),
             Scope::OneLevel
+        ));
+        assert!(matches!(
+            scope_to_ldap3(SearchScope::Subtree),
+            Scope::Subtree
         ));
     }
 
