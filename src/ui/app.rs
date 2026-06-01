@@ -524,7 +524,7 @@ fn dispatch_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
     }
     // Save / Cancel / Create / Delete (writable mode only). Read-only mode
     // suppresses every write affordance (P4-T4). These keys are surfaced in the
-    // per-pane footers (view::pane_footer); F7 creates under the first profile.
+    // status-line hints (view::pane_hints); F7 creates under the first profile.
     if !app.read_only {
         match key.code {
             KeyCode::F(2) => return Some(UiAction::FormSave),

@@ -2,8 +2,9 @@
 //!
 //! Panes use the terminal's default colours (a light/white background); the
 //! ACTIVE pane is marked by a bold **double** border, inactive panes by a dim
-//! single border — no background inversion. Each active pane shows its own
-//! hotkeys in its bottom border (the per-pane footer). Values are rendered
+//! single border — no background inversion. The focused pane's hotkeys live in
+//! the full-width status line (the narrow panes clip them in a border). Values
+//! are rendered
 //! through `Paragraph`, which grapheme-clips correctly — there is NO byte-slicing
 //! of values anywhere here, which is the whole reason for leaving turbo-vision
 //! (its `InputLine` byte-sliced UTF-8 and panicked on an umlaut at the cut).
@@ -31,11 +32,16 @@ const LABEL_WIDTH: u16 = 18;
 
 /// The bottom status-line text for `app` (pure, no ratatui types — unit-tested).
 ///
-/// Shows STATE, not key hints (the keys live in the per-pane footers now):
+/// Shows STATE plus the focused pane's hotkeys, ordered so the fixed-width
+/// affordances survive a no-wrap clip and the variable-length DN clips last:
 /// - a `[read-only]` tag in read-only mode;
 /// - the transient `app.status` (e.g. "Saved." / "Created.") when present;
-/// - the current DN with a trailing ` *` dirty marker when a form is loaded;
-/// - always a trailing `Alt+X Quit` so the global quit is discoverable anywhere.
+/// - the focused pane's key hints (they live here, not in the pane borders,
+///   because the narrow panes clip them — see [`pane_hints`]);
+/// - `Alt+X Quit` so the global quit is discoverable anywhere;
+/// - LAST, the current DN with a trailing ` *` dirty marker when a form is
+///   loaded — placed last because a deep DN would otherwise push the hints and
+///   quit off the right edge; the DN is also shown in the form pane title.
 pub fn status_line(app: &App) -> String {
     let mut parts: Vec<String> = Vec::new();
     if app.read_only {
@@ -44,23 +50,26 @@ pub fn status_line(app: &App) -> String {
     if !app.status.is_empty() {
         parts.push(app.status.clone());
     }
+    parts.push(pane_hints(app.focus, app.read_only).to_string());
+    parts.push("Alt+X Quit".to_string());
     if let Some(form) = app.form.as_ref() {
         let dirty = if form.is_dirty() { " *" } else { "" };
         parts.push(format!("{}{dirty}", form.dn));
     }
-    parts.push("Alt+X Quit".to_string());
     parts.join("   ·   ")
 }
 
-/// The active pane's footer (its hotkeys), shown in the bottom border. Read-only
-/// mode drops the write keys. Pure.
-fn pane_footer(pane: Pane, read_only: bool) -> &'static str {
+/// The focused pane's hotkey hints, shown in the (full-width) status line.
+/// Read-only mode drops the write keys. Pure. The narrow Tree/Leaf panes can't
+/// hold these in their bottom border without clipping mid-word, so the hints
+/// live in the status line and follow focus.
+fn pane_hints(pane: Pane, read_only: bool) -> &'static str {
     match (pane, read_only) {
-        (Pane::Tree, _) => " ↑↓ Move · ←→ Fold · F5 Refresh · ⇥ Pane ",
-        (Pane::Leaf, false) => " ↑↓ Select · Type / Search · F7 New · F8 Del · ⇥ Pane ",
-        (Pane::Leaf, true) => " ↑↓ Select · Type / Search · ⇥ Pane ",
-        (Pane::Form, false) => " ↑↓ Field · Enter Edit-list · F2 Save · F3 Cancel · ⇥ Pane ",
-        (Pane::Form, true) => " ↑↓ Field · ⇥ Pane ",
+        (Pane::Tree, _) => "↑↓ Move · ←→ Fold · F5 Refresh",
+        (Pane::Leaf, false) => "↑↓ Select · Type to search · F7 New · F8 Del",
+        (Pane::Leaf, true) => "↑↓ Select · Type to search",
+        (Pane::Form, false) => "↑↓ Field · ↵ Edit · F2 Save · F3 Cancel",
+        (Pane::Form, true) => "↑↓ Field",
     }
 }
 
@@ -94,16 +103,13 @@ fn render_status_line(f: &mut Frame, app: &App, area: Rect) {
 }
 
 /// A bordered pane block on the terminal's default background. The focused pane
-/// gets a bold **double** border (and shows its `footer` hotkeys in the bottom
-/// border); inactive panes get a dim single border and no footer.
-pub fn pane_block(title: &str, focused: bool, footer: &str) -> Block<'static> {
-    let mut b = Block::default()
+/// gets a bold **double** border; inactive panes get a dim single border. Key
+/// hints live in the status line (see [`pane_hints`]), not the bottom border.
+pub fn pane_block(title: &str, focused: bool) -> Block<'static> {
+    let b = Block::default()
         .borders(Borders::ALL)
         .title(format!(" {title} "));
     if focused {
-        if !footer.is_empty() {
-            b = b.title_bottom(footer.to_string());
-        }
         b.border_type(BorderType::Double).border_style(
             Style::default()
                 .fg(Color::Cyan)
@@ -121,11 +127,7 @@ fn render_tree(f: &mut Frame, app: &mut App, area: Rect) {
     let focused = app.focus == Pane::Tree;
     let tree = Tree::new(&app.tree_items)
         .expect("tree item ids are unique DNs")
-        .block(pane_block(
-            "DIT",
-            focused,
-            pane_footer(Pane::Tree, app.read_only),
-        ))
+        .block(pane_block("DIT", focused))
         .highlight_style(Style::default().bg(Color::Blue).fg(Color::White));
     f.render_stateful_widget(tree, area, &mut app.tree_state);
 }
@@ -134,7 +136,7 @@ fn render_tree(f: &mut Frame, app: &mut App, area: Rect) {
 /// highlighted; the list scrolls so the selection stays visible.
 fn render_leaf(f: &mut Frame, app: &mut App, area: Rect) {
     let focused = app.focus == Pane::Leaf;
-    let block = pane_block("Entries", focused, pane_footer(Pane::Leaf, app.read_only));
+    let block = pane_block("Entries", focused);
     let inner = block.inner(area);
     f.render_widget(block, area);
     if inner.height == 0 {
@@ -189,7 +191,7 @@ fn render_form(f: &mut Frame, app: &mut App, area: Rect) {
         Some(form) => format!("Entry — {}", form.dn),
         None => "Entry".to_string(),
     };
-    let block = pane_block(&title, focused, pane_footer(Pane::Form, app.read_only));
+    let block = pane_block(&title, focused);
     let inner = block.inner(area);
     f.render_widget(block, area);
     if inner.height == 0 {
@@ -745,12 +747,23 @@ mod tests {
     }
 
     #[test]
-    fn status_line_shows_quit_and_omits_key_hints() {
-        // Key hints live in the per-pane footers now; the status line shows state.
+    fn status_line_shows_quit_and_focused_pane_hints() {
+        // Key hints live in the status line and follow focus. The helper focuses
+        // the Tree pane, so its hints (F5 Refresh) show — not the Form's.
         let s = status_line(&status_app(false, ""));
         assert!(s.contains("Alt+X Quit"));
+        assert!(s.contains("F5 Refresh"));
         assert!(!s.contains("F2 Save"));
         assert!(!s.contains("[read-only]"));
+    }
+
+    #[test]
+    fn status_line_hints_follow_focus() {
+        let mut app = with_cn_form(status_app(false, ""), "cn=Alice,dc=example,dc=org", false);
+        app.focus = Pane::Form;
+        let s = status_line(&app);
+        assert!(s.contains("F2 Save"));
+        assert!(!s.contains("F5 Refresh"));
     }
 
     #[test]
@@ -784,16 +797,16 @@ mod tests {
     }
 
     #[test]
-    fn pane_footer_drops_write_keys_in_read_only() {
-        use super::pane_footer;
+    fn pane_hints_drop_write_keys_in_read_only() {
+        use super::pane_hints;
         // The Entries pane surfaces create/delete; read-only hides them.
-        assert!(pane_footer(Pane::Leaf, false).contains("F7 New"));
-        assert!(pane_footer(Pane::Leaf, false).contains("F8 Del"));
-        assert!(!pane_footer(Pane::Leaf, true).contains("F7 New"));
+        assert!(pane_hints(Pane::Leaf, false).contains("F7 New"));
+        assert!(pane_hints(Pane::Leaf, false).contains("F8 Del"));
+        assert!(!pane_hints(Pane::Leaf, true).contains("F7 New"));
         // The Form pane surfaces Save/Cancel; read-only hides them.
-        assert!(pane_footer(Pane::Form, false).contains("F2 Save"));
-        assert!(!pane_footer(Pane::Form, true).contains("F2 Save"));
+        assert!(pane_hints(Pane::Form, false).contains("F2 Save"));
+        assert!(!pane_hints(Pane::Form, true).contains("F2 Save"));
         // Refresh is allowed in read-only.
-        assert!(pane_footer(Pane::Tree, true).contains("F5 Refresh"));
+        assert!(pane_hints(Pane::Tree, true).contains("F5 Refresh"));
     }
 }
