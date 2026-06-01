@@ -30,7 +30,7 @@ fn menu_defs_smoke() {
     ];
     let defs = build_menu_defs(&profiles);
     let labels: Vec<&str> = defs.iter().map(|d| d.label.as_str()).collect();
-    assert_eq!(labels, vec!["Users", "Groups", "Browser", "Delete", "Quit"]);
+    assert_eq!(labels, vec!["Users", "Groups", "Delete", "Refresh", "Quit"]);
     assert_eq!(defs.last().unwrap().command, CM_QUIT);
 }
 

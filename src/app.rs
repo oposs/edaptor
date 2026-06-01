@@ -13,11 +13,16 @@ use crate::config::EntryProfile;
 pub const CM_QUIT: u16 = 24;
 
 /// App-local command id for the generic DIT browser menu entry. Chosen above
-/// Turbo Vision's standard `CM_*` ids.
+/// Turbo Vision's standard `CM_*` ids. Retained for compatibility; the three-pane
+/// shell no longer surfaces a "Browser" entry (the tree is always on).
 pub const CM_BROWSER: u16 = 1000;
 
 /// App-local command id for the generic "Delete entry" menu action (M4).
 pub const CM_DELETE: u16 = 1001;
+
+/// App-local command id for the "Refresh" menu action (M6): re-run the eager
+/// structure scan and rebuild the three panes.
+pub const CM_REFRESH: u16 = 1002;
 
 /// App-local command id base for per-profile menu entries. Profile *i* gets
 /// `CM_PROFILE_BASE + i`.
@@ -36,6 +41,12 @@ pub enum UiAction {
     NewEntry(usize),
     /// User chose "Delete" for the currently selected entry DN.
     DeleteEntry(String),
+    /// The form pane's Save button fired (three-pane editor).
+    FormSave,
+    /// The form pane's Cancel button fired (three-pane editor).
+    FormCancel,
+    /// User chose "Refresh": re-run the eager structure scan.
+    Refresh,
     /// Nothing actionable.
     None,
 }
@@ -63,6 +74,9 @@ pub fn menu_action(command: u16, profile_count: usize, selected_dn: Option<&str>
             Some(dn) if !dn.is_empty() => UiAction::DeleteEntry(dn.to_string()),
             _ => UiAction::None,
         };
+    }
+    if command == CM_REFRESH {
+        return UiAction::Refresh;
     }
     if command >= CM_PROFILE_BASE {
         let i = (command - CM_PROFILE_BASE) as usize;
@@ -96,12 +110,12 @@ pub fn build_menu_defs(profiles: &[EntryProfile]) -> Vec<MenuDef> {
         })
         .collect();
     defs.push(MenuDef {
-        label: "Browser".to_string(),
-        command: CM_BROWSER,
-    });
-    defs.push(MenuDef {
         label: "Delete".to_string(),
         command: CM_DELETE,
+    });
+    defs.push(MenuDef {
+        label: "Refresh".to_string(),
+        command: CM_REFRESH,
     });
     defs.push(MenuDef {
         label: "Quit".to_string(),
@@ -130,18 +144,19 @@ mod tests {
         ];
         let defs = build_menu_defs(&profiles);
         let labels: Vec<&str> = defs.iter().map(|d| d.label.as_str()).collect();
-        assert_eq!(labels, vec!["Users", "Groups", "Browser", "Delete", "Quit"]);
+        assert_eq!(labels, vec!["Users", "Groups", "Delete", "Refresh", "Quit"]);
         assert_eq!(defs.last().unwrap().command, CM_QUIT);
         assert_eq!(defs[0].command, CM_PROFILE_BASE);
         assert_eq!(defs[1].command, CM_PROFILE_BASE + 1);
-        assert_eq!(defs[2].command, CM_BROWSER);
+        assert_eq!(defs[2].command, CM_DELETE);
+        assert_eq!(defs[3].command, CM_REFRESH);
     }
 
     #[test]
-    fn menu_defs_with_no_profiles_still_has_browser_and_quit() {
+    fn menu_defs_with_no_profiles_still_has_delete_refresh_and_quit() {
         let defs = build_menu_defs(&[]);
         let labels: Vec<&str> = defs.iter().map(|d| d.label.as_str()).collect();
-        assert_eq!(labels, vec!["Browser", "Delete", "Quit"]);
+        assert_eq!(labels, vec!["Delete", "Refresh", "Quit"]);
     }
 
     #[test]
@@ -161,6 +176,8 @@ mod tests {
         );
         // Delete without a selection -> None.
         assert_eq!(menu_action(CM_DELETE, 2, None), UiAction::None);
+        // Refresh -> Refresh (no selection needed).
+        assert_eq!(menu_action(CM_REFRESH, 2, None), UiAction::Refresh);
         // Browser is handled elsewhere -> None here.
         assert_eq!(menu_action(CM_BROWSER, 2, None), UiAction::None);
     }

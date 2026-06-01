@@ -842,7 +842,7 @@ impl LeafListPane {
             CM_LEAF_SELECT,
         )));
         inner.set_initial_focus();
-        let me = LeafListPane {
+        let mut me = LeafListPane {
             bounds,
             inner,
             handles,
@@ -850,7 +850,9 @@ impl LeafListPane {
             state: 0,
             palette_chain: None,
         };
-        me.publish_selection();
+        // Seed the list from any rows the loop pre-populated before mounting, so
+        // pane 2 is non-empty on the first frame (no refresh broadcast needed yet).
+        me.rebuild_rows();
         me
     }
 
@@ -1099,6 +1101,19 @@ impl Shell {
 
                 if !self.app.running {
                     // Alt-X is handled inside app.handle_event and sets running=false.
+                    continue;
+                }
+
+                // The FormPane's Save/Cancel buttons rewrite the in-flight event to
+                // their command (button.rs sets `*event = Event::command(..)`); it
+                // bubbles intact through both Group layers (verified against the
+                // crate source). Surface them as backend-agnostic actions.
+                if ev.what == EventType::Command && ev.command == CM_FORM_SAVE {
+                    on_event(&mut self.app, LoopEvent::Action(UiAction::FormSave));
+                    continue;
+                }
+                if ev.what == EventType::Command && ev.command == CM_FORM_CANCEL {
+                    on_event(&mut self.app, LoopEvent::Action(UiAction::FormCancel));
                     continue;
                 }
 
