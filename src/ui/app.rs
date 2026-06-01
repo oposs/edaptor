@@ -833,6 +833,7 @@ fn service_picker_search(app: &mut App, worker: &WorkerHandle) {
         if let Some(Overlay::ValueEditor(ve)) = app.overlay.as_mut() {
             if let Some(p) = ve.picker.as_mut() {
                 p.set_results(Vec::new());
+                p.truncated = false;
             }
         }
         app.picker_search_id = None;
