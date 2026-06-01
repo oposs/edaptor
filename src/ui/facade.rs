@@ -144,13 +144,14 @@ fn fill_pane_background(terminal: &mut Terminal, bounds: Rect, attr: Attr) {
     }
 }
 
-/// The gray-dialog palette every leaf/form pane provides, so the stock
-/// `StaticText` / `InputLine` / `ListBox` / `Button` widgets it hosts resolve their
-/// colors exactly as they would inside a real `Dialog` (which is the environment
-/// they were designed for). Without it they map against the desktop palette and
-/// render invisibly.
-fn dialog_palette() -> Palette {
-    Palette::from_slice(palettes::CP_GRAY_DIALOG)
+/// The light GRAY-WINDOW palette the leaf/form panes provide. It remaps the stock
+/// widgets' colors into the light gray-window app slots (indices 24-31 / 86-96) —
+/// the same light region the tree's `OutlineViewer` (via `CP_LISTBOX`) lands in —
+/// instead of the dark gray-DIALOG slots (32-63) or the blue/cyan-window slots a
+/// fully transparent pane would map to. Result: panes 2/3 render light gray like
+/// the tree, and focused widgets highlight rather than going dark-on-dark.
+fn gray_window_palette() -> Palette {
+    Palette::from_slice(palettes::CP_GRAY_WINDOW)
 }
 
 /// Clamp a desired vertical scroll `delta` to `[0, max(0, content_h - viewport_h)]`.
@@ -768,8 +769,14 @@ impl View for FormPane {
     }
 
     fn draw(&mut self, terminal: &mut Terminal) {
+        // The form has gaps (label/value gutter, the area below the last field)
+        // that would otherwise show the desktop pattern, so fill a solid backdrop.
+        // `map_color(1)` resolves through the gray-window palette to its light-gray
+        // normal background — matching the tree pane.
         fill_pane_background(terminal, self.bounds, self.map_color(1));
-        // Propagate a chain node carrying this pane's dialog palette to the rows.
+        // Carry the pane's gray-window palette into the chain so the hosted widgets
+        // map into the light gray-window app slots (like the tree's OutlineViewer),
+        // not the dark dialog slots or the blue/cyan window slots.
         let chain = PaletteChainNode::new(self.get_palette(), self.palette_chain.clone());
         self.inner.set_palette_chain(Some(chain));
         self.inner.draw(terminal);
@@ -861,7 +868,9 @@ impl View for FormPane {
     }
 
     fn get_palette(&self) -> Option<Palette> {
-        Some(dialog_palette())
+        // Light gray-window palette so hosted widgets map to the light gray-window
+        // app slots like the tree, not the dark gray-dialog slots.
+        Some(gray_window_palette())
     }
 }
 
@@ -990,7 +999,15 @@ impl View for LeafListPane {
         self.inner.set_bounds(b);
     }
     fn draw(&mut self, terminal: &mut Terminal) {
+        // Fill a light backdrop for the gaps the Search label/InputLine and a short
+        // ListBox leave. `map_color(1)` resolves through the gray-window palette to
+        // light gray — matching the tree.
         fill_pane_background(terminal, self.bounds, self.map_color(1));
+        // Carry the gray-window palette into the chain: it remaps the in-range
+        // StaticText/InputLine indices into the light gray-window slots (so the
+        // Search label/box render light), while the ListBox's own indices fall
+        // outside the gray-window palette and pass through unchanged — so the list
+        // keeps the exact light look the tree's OutlineViewer has.
         let chain = PaletteChainNode::new(self.get_palette(), self.palette_chain.clone());
         self.inner.set_palette_chain(Some(chain));
         self.inner.draw(terminal);
@@ -1036,7 +1053,10 @@ impl View for LeafListPane {
         self.palette_chain.as_ref()
     }
     fn get_palette(&self) -> Option<Palette> {
-        Some(dialog_palette())
+        // Light gray-window palette: it lightens the in-range StaticText/InputLine
+        // colors while leaving the ListBox (out-of-range indices) to map through to
+        // the same light gray-window slots the tree's OutlineViewer uses.
+        Some(gray_window_palette())
     }
 }
 
