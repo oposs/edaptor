@@ -180,10 +180,21 @@ fn event_loop(
 fn handle_worker_response(app: &mut App, resp: &Response, read_flow: &mut ReadFlow) {
     match read_flow.on_response(resp) {
         ReadOutcome::Form { model, .. } => {
-            app.form = Some(build_edit_form(&model, read_flow.schema(), app.read_only));
-            app.form_focus = 0;
-            app.form_scroll = 0;
-            app.status.clear();
+            // Rapid leaf navigation submits overlapping base-reads; the worker is
+            // FIFO, so an older read can resolve first. Install only the response
+            // whose DN matches the entry the user is currently on — otherwise a
+            // stale entry would flash now (and, from P2, clobber edit state).
+            let current = app
+                .last_seen_leaf
+                .as_deref()
+                .map(|dn| dn.eq_ignore_ascii_case(&model.title))
+                .unwrap_or(false);
+            if current {
+                app.form = Some(build_edit_form(&model, read_flow.schema(), app.read_only));
+                app.form_focus = 0;
+                app.form_scroll = 0;
+                app.status.clear();
+            }
         }
         ReadOutcome::Error(msg) => app.status = msg,
         ReadOutcome::Ignored => {}
@@ -246,13 +257,10 @@ fn dispatch_key(app: &mut App, key: KeyEvent) {
             match key.code {
                 KeyCode::Up => app.form_focus = app.form_focus.saturating_sub(1),
                 KeyCode::Down => app.form_focus = next_index(app.form_focus, n),
-                KeyCode::PageUp => {
-                    app.form_focus = app.form_focus.saturating_sub(10);
-                    app.form_scroll = app.form_scroll.saturating_sub(10);
-                }
-                KeyCode::PageDown => {
-                    app.form_focus = (app.form_focus + 10).min(n.saturating_sub(1));
-                }
+                // Scroll follows focus: clamp_scroll (in render_form) is the sole
+                // authority for form_scroll, so paging only moves the focus.
+                KeyCode::PageUp => app.form_focus = app.form_focus.saturating_sub(10),
+                KeyCode::PageDown => app.form_focus = (app.form_focus + 10).min(n.saturating_sub(1)),
                 // Editing the focused field arrives in P2.
                 _ => {}
             }
