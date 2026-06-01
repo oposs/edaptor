@@ -23,7 +23,7 @@ use std::thread::{self, JoinHandle};
 use std::collections::HashSet;
 
 use ldap3::adapters::{Adapter, EntriesOnly, PagedResults};
-use ldap3::{LdapConn, Mod, Scope, SearchEntry, SearchOptions};
+use ldap3::{LdapConn, Mod, Scope, SearchEntry, SearchOptions, SearchResult};
 
 use crate::config::{AuthMethod, Config};
 use crate::form::changeset::ModOp;
@@ -563,11 +563,16 @@ fn run_search(
         // `with_search_options` applies to the next search on this conn.
         conn.with_search_options(SearchOptions::new().sizelimit(n));
     }
-    let (entries, _res) = conn
-        .search(base, scope_to_ldap3(scope), filter, attrs)?
-        .success()
-        .with_context(|| format!("searching {base}"))?;
-    Ok(entries
+    // Destructure the SearchResult directly so we can inspect the result code:
+    // rc==0 → clean success; is_limit_rc(rc) → server capped the set but the
+    // partial entries are still valid (spec §7 requires showing them); any other
+    // non-zero rc is a real error.
+    let SearchResult(raw_entries, res) = conn.search(base, scope_to_ldap3(scope), filter, attrs)?;
+    if res.rc != 0 && !is_limit_rc(res.rc) {
+        return Err(anyhow!(result_code_message(res.rc, &res.text)))
+            .with_context(|| format!("searching {base}"));
+    }
+    Ok(raw_entries
         .into_iter()
         .map(SearchEntry::construct)
         .map(to_ldap_entry)

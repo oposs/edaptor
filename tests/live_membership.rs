@@ -508,3 +508,106 @@ fn removing_last_member_is_rejected_by_server() {
     cleanup(&worker, 40, LAST_GROUP_DN);
     cleanup(&worker, 41, LAST_USER_A_DN);
 }
+
+/// Seed 21 matching users under ou=users, then submit a size-capped search with
+/// `size_limit: Some(20)`. Before the fix, OpenLDAP's rc=4 (sizeLimitExceeded)
+/// caused `run_search` to error and emit `Response::SearchError`; after the fix
+/// it returns `Response::Entries` with exactly 20 entries (the partial set).
+///
+/// This test directly validates Fix 1 described in the bug report.
+#[test]
+fn size_capped_search_returns_partial_entries_not_error() {
+    let uri = match std::env::var("EDAPTOR_TEST_LDAP_URI") {
+        Ok(uri) => uri,
+        Err(_) => {
+            eprintln!(
+                "SKIP size_capped_search_returns_partial_entries_not_error: set EDAPTOR_TEST_LDAP_URI to run"
+            );
+            return;
+        }
+    };
+
+    let (config, password) = test_config(uri);
+    let worker = WorkerHandle::spawn(config, password).expect("spawn worker");
+
+    // DN constants for the 21 cap-test users.
+    const CAP_USER_BASE: &str = "ou=users,dc=example,dc=org";
+    const CAP_USER_COUNT: u32 = 21;
+    let cap_dn = |n: u32| format!("uid=lm-cap-user{n:02},{CAP_USER_BASE}");
+
+    // Idempotent cleanup from any prior aborted run.
+    for n in 0..CAP_USER_COUNT {
+        cleanup(&worker, 200 + n as u64, &cap_dn(n));
+    }
+
+    // Seed 21 users whose uid matches the search term "lm-cap-user".
+    for n in 0..CAP_USER_COUNT {
+        let mut attrs = BTreeMap::new();
+        attrs.insert(
+            "objectClass".to_string(),
+            vec!["top".to_string(), "inetOrgPerson".to_string()],
+        );
+        attrs.insert("uid".to_string(), vec![format!("lm-cap-user{n:02}")]);
+        attrs.insert("cn".to_string(), vec![format!("LM Cap User {n:02}")]);
+        attrs.insert("sn".to_string(), vec!["Cap".to_string()]);
+        let id = 300 + n as u64;
+        worker
+            .submit(Request::Add {
+                id,
+                dn: cap_dn(n),
+                attrs,
+            })
+            .expect("submit add cap user");
+        match poll_for_id(&worker, id, Duration::from_secs(10)) {
+            Some(Response::WriteOk { .. }) => {}
+            other => {
+                // Cleanup whatever was created, then fail.
+                for m in 0..=n {
+                    cleanup(&worker, 400 + m as u64, &cap_dn(m));
+                }
+                panic!("ADD cap user {n} failed: {}", describe(&other));
+            }
+        }
+    }
+
+    // Submit a subtree search capped at 20 matching all 21 seeded users.
+    // The filter targets the unique uid prefix so only our entries match.
+    let search_id = 500u64;
+    worker
+        .submit(Request::Search {
+            id: search_id,
+            base: CAP_USER_BASE.to_string(),
+            scope: SearchScope::Subtree,
+            filter: "(uid=lm-cap-user*)".to_string(),
+            attrs: vec!["uid".to_string()],
+            size_limit: Some(20),
+        })
+        .expect("submit capped search");
+
+    let resp = poll_for_id(&worker, search_id, Duration::from_secs(15));
+
+    // Teardown before asserting so the LDAP server stays clean on failure.
+    for n in 0..CAP_USER_COUNT {
+        cleanup(&worker, 600 + n as u64, &cap_dn(n));
+    }
+
+    // After Fix 1: server returns rc=4 (sizeLimitExceeded) + 20 partial entries.
+    // run_search must return those 20 entries instead of converting rc=4 to Err.
+    match resp {
+        Some(Response::Entries { ref entries, .. }) => {
+            assert_eq!(
+                entries.len(),
+                20,
+                "expected exactly 20 capped entries, got {}",
+                entries.len()
+            );
+        }
+        Some(Response::SearchError { ref msg, .. }) => {
+            panic!(
+                "Fix 1 regression: got SearchError instead of partial Entries. \
+                 run_search is still converting rc=4 to an error. msg={msg}"
+            );
+        }
+        other => panic!("unexpected response: {}", describe(&other)),
+    }
+}
