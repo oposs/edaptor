@@ -1,21 +1,15 @@
 //! Application-level domain logic: menu assembly from config profiles.
 //!
 //! This module is tty-free. It produces backend-agnostic [`MenuDef`]s that the
-//! facade ([`crate::ui::facade`]) turns into real Turbo Vision menu widgets.
-//! Only [`build_menu_defs`] is unit-tested; the facade wrappers it feeds need a
-//! terminal and are not.
+//! ratatui UI ([`crate::ui::view::menu_bar`]) renders as the top menu bar, and a
+//! [`UiAction`] vocabulary the event loop ([`crate::ui::app`]) services. Pure and
+//! unit-tested; no terminal needed.
 
 use crate::config::EntryProfile;
 
-/// The Turbo Vision quit command id (real value 24, verified in the crate
-/// source). Mirrored here as a plain constant so this module needs no Turbo
-/// Vision import; the facade's `cm_quit_matches_app` test asserts the two agree.
+/// The quit command id. A plain constant in the menu vocabulary; the ratatui UI
+/// renders it as the `[Alt+X] Quit` menu entry and quits on Alt+X / Ctrl+C.
 pub const CM_QUIT: u16 = 24;
-
-/// App-local command id for the generic DIT browser menu entry. Chosen above
-/// Turbo Vision's standard `CM_*` ids. Retained for compatibility; the three-pane
-/// shell no longer surfaces a "Browser" entry (the tree is always on).
-pub const CM_BROWSER: u16 = 1000;
 
 /// App-local command id for the generic "Delete entry" menu action (M4).
 pub const CM_DELETE: u16 = 1001;
@@ -28,15 +22,11 @@ pub const CM_REFRESH: u16 = 1002;
 /// `CM_PROFILE_BASE + i`.
 pub const CM_PROFILE_BASE: u16 = 1100;
 
-/// A backend-agnostic UI intent surfaced by the facade's event handling and
-/// consumed by the main loop. Keeping it turbo-vision-free is what lets
-/// `main.rs` react to outline activation and menu commands without importing
-/// `turbo_vision` (the facade translates raw TV events into these).
+/// A backend-agnostic UI intent produced by the event loop's key dispatch and
+/// the menu (via [`menu_action`]) and serviced by [`crate::ui::app::handle_action`].
+/// Keeping it framework-free is what lets the menu/key layer stay testable.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UiAction {
-    /// User activated (Enter) the node with this DN; the `loaded` flag decides
-    /// expand-vs-read in [`crate::workflows::browser::on_select`].
-    Activate { dn: String, loaded: bool },
     /// User chose "New <profile #i>" from the menu (profile index).
     NewEntry(usize),
     /// User chose "Delete" for the currently selected entry DN.
@@ -51,23 +41,13 @@ pub enum UiAction {
     None,
 }
 
-/// What the manual event loop hands the single `on_event` callback each turn:
-/// either an idle tick (drain the worker channel) or a resolved [`UiAction`].
-/// One callback (rather than two) so the caller can own `&mut` state without a
-/// double-mutable-borrow conflict between idle and action handling.
-pub enum LoopEvent {
-    /// An idle tick: drain the worker's response channel.
-    Idle,
-    /// A resolved user action (outline activation / menu command).
-    Action(UiAction),
-}
-
-/// Map a menu command id (as emitted by the facade) to a [`UiAction`], given the
-/// number of configured profiles and the currently selected node DN. Pure and
-/// turbo-vision-free so it can be unit-tested and called from the facade.
+/// Map a menu command id (from the menu bar / Alt+digit keys) to a [`UiAction`],
+/// given the number of configured profiles and the currently selected node DN.
+/// Pure and framework-free so it can be unit-tested and called from the UI.
 ///
-/// `CM_DELETE` → `DeleteEntry(selected)`; `CM_PROFILE_BASE + i` → `NewEntry(i)`;
-/// anything else (including `CM_BROWSER`/`CM_QUIT`, handled elsewhere) → `None`.
+/// `CM_DELETE` → `DeleteEntry(selected)`; `CM_REFRESH` → `Refresh`;
+/// `CM_PROFILE_BASE + i` → `NewEntry(i)`; anything else (including `CM_QUIT`,
+/// handled elsewhere) → `None`.
 pub fn menu_action(command: u16, profile_count: usize, selected_dn: Option<&str>) -> UiAction {
     if command == CM_DELETE {
         return match selected_dn {
@@ -178,7 +158,7 @@ mod tests {
         assert_eq!(menu_action(CM_DELETE, 2, None), UiAction::None);
         // Refresh -> Refresh (no selection needed).
         assert_eq!(menu_action(CM_REFRESH, 2, None), UiAction::Refresh);
-        // Browser is handled elsewhere -> None here.
-        assert_eq!(menu_action(CM_BROWSER, 2, None), UiAction::None);
+        // An unknown command id -> None.
+        assert_eq!(menu_action(CM_QUIT, 2, None), UiAction::None);
     }
 }

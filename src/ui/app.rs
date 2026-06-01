@@ -779,7 +779,7 @@ fn handle_action(
             }
         }
         UiAction::Refresh => refresh_structure(app, worker, structure, base_dn),
-        UiAction::Activate { .. } | UiAction::None => {}
+        UiAction::None => {}
     }
 }
 

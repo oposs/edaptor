@@ -1,9 +1,8 @@
 //! Headless smoke tests for the M3 read flow (no tty, no network).
 //!
-//! These exercise the pure logic below the facade: menu assembly, the
-//! schema-driven form model, and id-correlated response handling. The tty-bound
-//! pieces (`Shell`, `build_outline`, `build_entry_dialog`, `confirm_error`,
-//! `show_entry_dialog`) require a terminal and are NOT covered here.
+//! These exercise the pure logic below the UI: menu assembly, the schema-driven
+//! form model, and id-correlated response handling. The tty-bound rendering and
+//! event loop (`crate::ui`) require a terminal and are NOT covered here.
 
 use std::collections::BTreeMap;
 
@@ -91,8 +90,7 @@ fn form_model_smoke() {
 #[test]
 fn correlation_smoke() {
     // The shared id-keyed correlation: a matching id produces a form, a foreign
-    // id is ignored. (The browser's two-interleaved-ids property is covered in
-    // its own unit test; here we exercise the read flow's mechanism.)
+    // id is ignored — here we exercise the read flow's correlation mechanism.
     let raw = RawSubschema {
         object_classes: vec![
             "( 2.5.6.0 NAME 'top' ABSTRACT MUST objectClass )".to_string(),

@@ -1,11 +1,10 @@
-//! Read-flow workflows: the DIT browser controller, the read flow, and their
-//! pure helpers.
+//! Read-flow workflows: the eager structure model, the read flow, the create
+//! helpers, and their pure helpers.
 //!
-//! Everything here is tty-free domain logic. Turning [`browser::BrowserNode`]s
-//! into real Turbo Vision outline widgets, and [`crate::ui::form::FormModel`]s
-//! into dialogs, happens in [`crate::ui::facade`].
+//! Everything here is tty-free domain logic. Rendering the [`structure::Structure`]
+//! and the [`crate::ui::form::FormModel`]s happens in the ratatui UI
+//! ([`crate::ui::view`]).
 
-pub mod browser;
 pub mod create;
 pub mod read_flow;
 pub mod structure;

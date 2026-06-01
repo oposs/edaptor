@@ -1,12 +1,10 @@
-//! The M3 read flow: turn a selected entry DN into a read-only [`FormModel`].
+//! The read flow: turn a selected entry DN into a [`FormModel`].
 //!
-//! This is the tty-free spine of the milestone. When the user opens a browser
-//! node, [`ReadFlow::request_entry`] submits a base-scope search for that DN
-//! (all user attributes). The manual loop's idle hook polls the worker and
-//! feeds responses to [`ReadFlow::on_response`], which correlates by id (D4),
-//! builds the schema-driven [`FormModel`], and hands it back for the facade to
-//! display. The facade dialog itself is the only tty-bound piece and lives in
-//! [`crate::ui::facade::build_entry_dialog`].
+//! This is the tty-free spine. When the user selects an entry,
+//! [`ReadFlow::request_entry`] submits a base-scope search for that DN (all user
+//! attributes). The event loop drains the worker and feeds responses to
+//! [`ReadFlow::on_response`], which correlates by id (D4) and builds the
+//! schema-driven [`FormModel`]; the ratatui UI ([`crate::ui::view`]) renders it.
 
 use std::collections::HashMap;
 
@@ -27,7 +25,7 @@ pub enum ReadOutcome {
         /// The entry's objectClass values.
         object_classes: Vec<String>,
     },
-    /// A user-facing error string to surface (e.g. via `facade::confirm_error`).
+    /// A user-facing error string to surface (e.g. via an `Overlay::Error`).
     Error(String),
     /// The response was not for this flow (unknown id / unrelated variant).
     Ignored,

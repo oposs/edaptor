@@ -7,7 +7,7 @@
 //!    `FetchSubschema` fetch.
 //!  * Non-blocking: [`WorkerHandle::submit`] fires a `Search` job whose reply
 //!    sender is a clone of a long-lived response channel; [`WorkerHandle::poll`]
-//!    drains that channel without blocking. Used by the browser/read flow so the
+//!    drains that channel without blocking. Used by the read flow so the
 //!    UI thread never blocks on the network.
 //!
 //! Routing is kept uniform by reusing the existing `Job = (Request, Sender<Response>)`

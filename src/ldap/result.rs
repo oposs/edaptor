@@ -1,7 +1,7 @@
 //! Mapping LDAP result codes (RFC 4511 §A.1) to human-readable messages
 //! (spec §10: "LDAP result codes map to human messages"). Pure, unit-tested; no
 //! network. The worker calls [`result_code_message`] before a write result
-//! crosses back to the UI, so non-facade code never sees a raw numeric code.
+//! crosses back to the UI, so the UI never sees a raw numeric code.
 
 /// Map an LDAP result code + server diagnostic text to a human message.
 ///

@@ -103,7 +103,7 @@ pub fn empty_form_for_profile(schema: &SchemaModel, profile: &EntryProfile) -> F
                 is_must: is_must(&attr),
                 kind,
                 values: Vec::new(),
-                widget: WidgetSpec::ReadOnlyText, // editability is decided by the facade
+                widget: WidgetSpec::ReadOnlyText, // editability is decided by build_edit_form
                 label: attr,
             }
         })

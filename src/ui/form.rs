@@ -1,15 +1,15 @@
 //! Schema-driven READ-ONLY entry form model (tty-free, unit-tested).
 //!
-//! This is the heart of the M3 read flow: given the server [`SchemaModel`], an
+//! This is the heart of the read flow: given the server [`SchemaModel`], an
 //! entry's objectClasses, the fetched [`LdapEntry`], and the active profile's
 //! `show` ordering, it produces a [`FormModel`] — an ordered list of
-//! [`FormField`]s, each tagged with the read-only widget the facade should
-//! render. No editing, no write-back (READ-ONLY milestone).
+//! [`FormField`]s, each tagged with a read-only widget hint. It is the source the
+//! editable [`crate::ui::edit_form::EditForm`] is built from; the UI renders it.
 
 use crate::ldap::worker::LdapEntry;
 use crate::schema::{FieldKind, SchemaModel};
 
-/// The read-only widget the facade renders for a field, chosen by [`FieldKind`].
+/// The read-only widget the UI renders for a field, chosen by [`FieldKind`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WidgetSpec {
     /// Free text shown read-only.
@@ -29,7 +29,7 @@ pub enum WidgetSpec {
 /// One field of the read-only form.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FormField {
-    /// The attribute name (the facade appends a `" *"` marker when `is_must`).
+    /// The attribute name (the UI appends a `" *"` marker when `is_must`).
     pub label: String,
     /// The classified syntax of the attribute.
     pub kind: FieldKind,
@@ -37,7 +37,7 @@ pub struct FormField {
     pub is_must: bool,
     /// The entry's string values for this attribute (empty for binary/absent).
     pub values: Vec<String>,
-    /// The widget the facade should render.
+    /// The widget the UI should render.
     pub widget: WidgetSpec,
 }
 
