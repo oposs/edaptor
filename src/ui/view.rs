@@ -402,7 +402,11 @@ fn render_value_editor(f: &mut Frame, ve: &ValueEditor, area: Rect) {
         let block = Block::default()
             .borders(Borders::ALL)
             .title(format!(" {} ", ve.label))
-            .title_bottom(" Space toggle · F2 save · Esc cancel · type to search (cap 20) ")
+            .title_bottom(if picker.truncated {
+                " Space toggle · F2 save · Esc cancel · type to search · more match — narrow search "
+            } else {
+                " Space toggle · F2 save · Esc cancel · type to search "
+            })
             .style(Style::default().bg(bg).fg(Color::White))
             .border_style(
                 Style::default()

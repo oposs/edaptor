@@ -60,12 +60,21 @@ pub struct VisibleRow {
     pub selected: bool,
 }
 
+/// Server-side size cap used for picker candidate searches. Shared between
+/// `service_picker_search` (where it is passed as `size_limit`) and the
+/// `handle_worker_response` intercept (where hitting this count means there may
+/// be more matching entries the server did not return).
+pub const PICKER_SEARCH_CAP: i32 = 20;
+
 /// Picker state: the current selection (always shown) and the latest results.
 #[derive(Debug, Clone, Default)]
 pub struct PickerState {
     pub selected: Vec<Candidate>,
     pub results: Vec<Candidate>,
     pub cursor: usize,
+    /// True when the last search returned exactly `PICKER_SEARCH_CAP` entries —
+    /// a heuristic signal that the server may have more matching entries.
+    pub truncated: bool,
 }
 
 fn same_dn(a: &str, b: &str) -> bool {
@@ -78,6 +87,7 @@ impl PickerState {
             selected,
             results: Vec::new(),
             cursor: 0,
+            truncated: false,
         }
     }
 
@@ -241,6 +251,20 @@ mod tests {
         assert_eq!(
             candidate_label("uid=bob,ou=people", &BTreeMap::new()),
             "uid=bob,ou=people"
+        );
+    }
+
+    #[test]
+    fn truncated_defaults_false_and_is_settable() {
+        let mut p = PickerState::new(vec![c("A")]);
+        assert!(!p.truncated, "truncated should default to false");
+        p.truncated = true;
+        assert!(p.truncated, "truncated should be settable");
+        // Default trait also produces false.
+        let p2 = PickerState::default();
+        assert!(
+            !p2.truncated,
+            "Default impl should also set truncated=false"
         );
     }
 }

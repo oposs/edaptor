@@ -29,6 +29,7 @@ use crate::ldap::worker::{Request, Response, SearchScope, StructureNodeRaw, Work
 use crate::schema::SchemaModel;
 use crate::ui::edit_form::{build_edit_form, value_set_eq, EditForm, ValueEditor};
 use crate::ui::form_state::{guard_decision, GuardChoice, GuardOutcome};
+use crate::ui::picker::PICKER_SEARCH_CAP;
 use crate::ui::view;
 use crate::workflows::create::{build_add_entry, empty_form_for_profile};
 use crate::workflows::read_flow::{ReadFlow, ReadOutcome};
@@ -406,6 +407,9 @@ fn handle_worker_response(
                         })
                         .collect();
                     p.set_results(results);
+                    // Heuristic: if the result count hit the cap, the server may
+                    // have more matching entries — signal the view to show a hint.
+                    p.truncated = entries.len() as i32 >= PICKER_SEARCH_CAP;
                 }
             }
         }
@@ -844,7 +848,7 @@ fn service_picker_search(app: &mut App, worker: &WorkerHandle) {
         scope: SearchScope::Subtree,
         filter,
         attrs: vec!["cn".to_string()],
-        size_limit: Some(20),
+        size_limit: Some(PICKER_SEARCH_CAP),
     });
 }
 
