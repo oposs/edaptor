@@ -3,7 +3,7 @@
 
 use std::collections::BTreeMap;
 
-/// RFC 4515 filter-value escaping for the four special bytes.
+/// RFC 4515 filter-value escaping for the five special bytes.
 pub fn escape_filter(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for ch in s.chars() {
@@ -24,6 +24,9 @@ pub fn escape_filter(s: &str) -> String {
 pub fn build_member_filter(object_class: &str, search_attrs: &[String], term: &str) -> String {
     let oc = format!("(objectClass={})", object_class);
     if term.is_empty() {
+        return oc;
+    }
+    if search_attrs.is_empty() {
         return oc;
     }
     let esc = escape_filter(term);
@@ -195,6 +198,18 @@ mod tests {
     }
 
     #[test]
+    fn move_cursor_advances_and_stops_at_last() {
+        let mut p = PickerState::new(vec![c("A")]);
+        p.set_results(vec![c("B"), c("C")]);
+        p.move_cursor(1);
+        assert_eq!(p.cursor, 1);
+        p.move_cursor(1);
+        assert_eq!(p.cursor, 2);
+        p.move_cursor(1);
+        assert_eq!(p.cursor, 2);
+    }
+
+    #[test]
     fn escapes_filter_specials() {
         assert_eq!(escape_filter("a*b(c)\\d"), r"a\2ab\28c\29\5cd");
     }
@@ -209,6 +224,12 @@ mod tests {
     fn empty_term_filters_objectclass_only() {
         let f = build_member_filter("groupOfNames", &["cn".into()], "");
         assert_eq!(f, "(objectClass=groupOfNames)");
+    }
+
+    #[test]
+    fn empty_search_attrs_with_term_returns_oc_only() {
+        let f = build_member_filter("inetOrgPerson", &[], "ann");
+        assert_eq!(f, "(objectClass=inetOrgPerson)");
     }
 
     #[test]
