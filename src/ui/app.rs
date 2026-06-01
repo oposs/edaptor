@@ -259,15 +259,13 @@ fn handle_worker_response(
                     dn: new_dn.clone(),
                     changes: mods,
                 });
-                app.last_seen_leaf = Some(new_dn.clone());
+                rebind_selection(app, &new_dn);
                 let _ = read_flow.request_entry(worker, &new_dn, None);
                 return;
             }
             if let Some(PostWrite::Save { reread_dn }) = post.remove(id) {
                 app.status = "Saved.".to_string();
-                // Update the awaited DN so the re-read's form passes the DN gate
-                // (covers a rename, where reread_dn is the new DN).
-                app.last_seen_leaf = Some(reread_dn.clone());
+                rebind_selection(app, &reread_dn);
                 let _ = read_flow.request_entry(worker, &reread_dn, None);
             } else {
                 app.status = "Saved.".to_string();
@@ -434,8 +432,19 @@ fn revert_form(app: &mut App) {
             field.editor = TextState::new().with_value(base.first().cloned().unwrap_or_default());
             field.values = base;
         }
+        app.status = "Reverted.".to_string();
     }
-    app.status = "Reverted.".to_string();
+}
+
+/// After a save re-reads `dn` (possibly a rename's new DN), point both the
+/// awaited DN and the current leaf row at it, so the post-save base-read passes
+/// the DN gate and `reconcile` does not fire a competing read of the old DN.
+/// (The tree / leaf-label structure reflow is P4.)
+fn rebind_selection(app: &mut App, dn: &str) {
+    app.last_seen_leaf = Some(dn.to_string());
+    if let Some(row) = app.rows.get_mut(app.leaf_sel) {
+        row.1 = dn.to_string();
+    }
 }
 
 /// Handle a key while an overlay is open. Returns the action to run when the

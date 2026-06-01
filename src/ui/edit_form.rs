@@ -111,9 +111,11 @@ impl EditForm {
     }
 }
 
-/// Order-insensitive value-set equality, matching `changeset::diff`'s
-/// `value_set_eq`: same length and every element of each side appears in the
-/// other (symmetric check).
+/// Order-insensitive value-set equality: same length and every element of each
+/// side appears in the other (symmetric check). This is the dirty-check sibling
+/// of `changeset::diff`'s value comparison; note the changeset version is
+/// currently only a one-directional subset check (a latent asymmetry masked by
+/// LDAP per-attribute value uniqueness — to be made symmetric in P5).
 fn value_set_eq(a: &[String], b: &[String]) -> bool {
     a.len() == b.len()
         && a.iter().all(|v| b.iter().any(|w| w == v))
