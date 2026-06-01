@@ -20,6 +20,28 @@ pub struct EditEntry {
     pub attrs: BTreeMap<String, Vec<String>>,
 }
 
+/// Whether `attr` is an OpenLDAP **X-ORDERED** attribute, where the `{n}` value
+/// prefix makes order significant (so a reorder is a real change and the
+/// set-wise diff is wrong for it). The schema parser does not expose an
+/// X-ORDERED flag, so this is a conservative hardcoded known-attr list (these
+/// live under `cn=config` and essentially never appear in a user/group
+/// directory). Extend the list if a config-editing profile is ever added; a
+/// future schema-parser enhancement could replace it with a real flag.
+///
+/// Domain-owned (consumed by [`diff`] in P5 and by the UI's `ordered` field
+/// flag) so the layering stays `ui -> form`, never the reverse.
+pub fn is_x_ordered(attr: &str) -> bool {
+    const ORDERED: &[&str] = &[
+        "olcAccess",
+        "olcDbIndex",
+        "olcSuffix",
+        "olcRootDN",
+        "olcLimits",
+        "olcSyncrepl",
+    ];
+    ORDERED.iter().any(|a| a.eq_ignore_ascii_case(attr))
+}
+
 /// A single LDAP MODIFY operation on one attribute.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ModOp {

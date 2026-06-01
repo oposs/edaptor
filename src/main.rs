@@ -15,7 +15,7 @@ use edaptor::ldap::ldif::render_changeset;
 use edaptor::ldap::worker::{Request, WorkerHandle};
 use edaptor::schema::SchemaModel;
 use edaptor::ui::form::FormModel;
-use edaptor::workflows::structure::{Structure, StructureInput};
+use edaptor::workflows::structure::StructureInput;
 use edaptor::SchemaReport;
 
 #[derive(Parser)]
@@ -104,17 +104,12 @@ fn prompt_new_password() -> Result<String> {
     Ok(first)
 }
 
-/// Launch the three-pane ratatui TUI.
-///
-/// P0: an empty three-pane shell — it initialises the terminal, draws the
-/// panes, cycles focus on F6/Tab, and quits on `q` / `Alt+X` / `Ctrl+C`. The
-/// worker spawn, eager structure scan, read-flow, save/create/delete
-/// orchestration and overlays are wired into [`edaptor::ui::app::App`] in the
-/// following phases; the app-free helpers below (`prepare_save`,
-/// `submit_prepared`, `compute_rows`, …) port verbatim and are reused then.
-fn run_tui(_config: Config, _password: String) -> Result<()> {
-    edaptor::ui::app::run()?;
-    Ok(())
+/// Launch the three-pane ratatui TUI. The event loop, state and rendering live
+/// in [`edaptor::ui::app`]; this just hands off the connection details. The
+/// app-free helpers below (`prepare_save`, `submit_prepared`, …) are the
+/// write-path orchestration reused by the save/create/delete flows in P2+.
+fn run_tui(config: Config, password: String) -> Result<()> {
+    edaptor::ui::app::run(config, password)
 }
 
 /// What the run-loop should do when a write's `WriteOk` arrives, looked up by the
@@ -160,19 +155,6 @@ enum PrepareSave {
         /// LDIF preview text for the confirmation dialog.
         ldif: String,
     },
-}
-
-/// The pane-2 rows for `branch` filtered by `search`: a `‹self›` row for the branch
-/// entry itself, then its leaf children (label, DN). Pure / app-free.
-fn compute_rows(structure: &Structure, branch: &str, search: &str) -> Vec<(String, String)> {
-    let mut rows = Vec::new();
-    if let Some(node) = structure.get(branch) {
-        rows.push((format!("‹self› {}", node.label), branch.to_string()));
-    }
-    for leaf in structure.filter_leaves(branch, search) {
-        rows.push((leaf.label.clone(), leaf.dn.clone()));
-    }
-    rows
 }
 
 /// Validate + diff the edited entry against its model baseline and, if there is a
@@ -291,19 +273,6 @@ fn structure_input_from_attrs(
         description: first("description"),
         object_classes,
     }
-}
-
-/// Map the worker's raw structure rows into the pure model's input rows. App-free.
-fn structure_inputs(nodes: Vec<edaptor::ldap::worker::StructureNodeRaw>) -> Vec<StructureInput> {
-    nodes
-        .into_iter()
-        .map(|n| StructureInput {
-            dn: n.dn,
-            cn: n.cn,
-            description: n.description,
-            object_classes: n.object_classes,
-        })
-        .collect()
 }
 
 /// The parent DN (everything after the first comma), or `None` if `dn` has no
