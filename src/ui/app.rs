@@ -19,7 +19,7 @@ use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifier
 use tui_prompts::{State, TextState};
 use tui_tree_widget::{TreeItem, TreeState};
 
-use crate::app::UiAction;
+use crate::app::{build_menu_defs, menu_action, MenuDef, UiAction, CM_PROFILE_BASE};
 use crate::config::{Config, EntryProfile};
 use crate::form::changeset::{diff, EditEntry, ModOp};
 use crate::form::validate::{plan_save, validate, SavePlan, ValidationError};
@@ -189,6 +189,22 @@ pub struct App {
     pub overlay: Option<Overlay>,
     /// Transient status / error text.
     pub status: String,
+    /// The menu entries (profile creates + Delete/Refresh/Quit), built once in
+    /// [`run`] from the config profiles. Drives the top menu bar (rendered in
+    /// [`view::ui`]) and the Alt+digit create keys (mapped via [`menu_action`]).
+    pub menu_defs: Vec<MenuDef>,
+}
+
+impl App {
+    /// The number of configured create-profiles, derived from `menu_defs` (every
+    /// entry whose command is at or above [`CM_PROFILE_BASE`]). Used to bound the
+    /// Alt+digit create keys via [`menu_action`].
+    pub fn profile_count(&self) -> usize {
+        self.menu_defs
+            .iter()
+            .filter(|d| d.command >= CM_PROFILE_BASE)
+            .count()
+    }
 }
 
 /// Spawn the worker, fetch the schema + eager structure, then run the TUI.
@@ -251,6 +267,7 @@ pub fn run(config: Config, password: String) -> Result<()> {
         form_scroll: 0,
         overlay: None,
         status: String::new(),
+        menu_defs: build_menu_defs(&profiles),
     };
 
     let mut terminal = ratatui::init();
@@ -440,7 +457,18 @@ fn handle_worker_response(
                     app.status.clear();
                 }
             }
-            ReadOutcome::Error(msg) => app.status = msg,
+            // Promote a read failure to an Error overlay so it is visible (P5-T2);
+            // previously it only landed in the easily-missed status line. Gate on
+            // `overlay.is_none()` — same as the Form arm above — so a late base-read
+            // that errors cannot clobber an in-progress create / value-editor
+            // overlay; in that case fall back to the status line.
+            ReadOutcome::Error(msg) => {
+                if app.overlay.is_none() {
+                    app.overlay = Some(Overlay::Error { text: msg });
+                } else {
+                    app.status = msg;
+                }
+            }
             ReadOutcome::Ignored => {}
         },
     }
@@ -471,12 +499,40 @@ fn dispatch_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
     // Save / Cancel / Create / Delete (writable mode only). Read-only mode
     // suppresses every write affordance (P4-T4). A menu bar surfaces the same
     // actions for discoverability + multi-profile create in P5-T2.
+    //
+    // P5-T2 menu key scheme (every menu entry reachable, all via `menu_action`):
+    //   Alt+1 .. Alt+9 → create for profile (n-1): menu_action(CM_PROFILE_BASE+n-1).
+    //                    Alt-digit is used (not bare digits) so it never collides
+    //                    with the search box or inline form editing. Out-of-range
+    //                    digits map to UiAction::None (inert).
+    //   F7             → create for the first profile (legacy convenience).
+    //   F8 / [Del]     → delete the form's entry: menu_action(CM_DELETE, …).
+    //   F5             → Refresh (wired above; allowed in read-only too).
+    //   Alt+X          → Quit (wired above).
+    // All create/delete keys live inside this read-only gate, so read-only mode
+    // makes the menu's create/delete entries inert.
     if !app.read_only {
+        // Alt+digit → create for the matching profile, routed through menu_action
+        // (the single mapping authority; gives the out-of-range → None guard).
+        if alt {
+            if let KeyCode::Char(c @ '1'..='9') = key.code {
+                let n = c.to_digit(10).unwrap() as u16; // 1..=9
+                let selected_dn = app.form.as_ref().map(|f| f.dn.as_str());
+                return match menu_action(
+                    CM_PROFILE_BASE + (n - 1),
+                    app.profile_count(),
+                    selected_dn,
+                ) {
+                    UiAction::None => None,
+                    action => Some(action),
+                };
+            }
+        }
         match key.code {
             KeyCode::F(2) => return Some(UiAction::FormSave),
             KeyCode::F(3) => return Some(UiAction::FormCancel),
-            // F7 creates an entry for the first profile; the (P5-T2) menu bar
-            // reaches the other profiles via `menu_action`.
+            // F7 creates an entry for the first profile; the menu bar / Alt+digit
+            // reach the other profiles via `menu_action`.
             KeyCode::F(7) => return Some(UiAction::NewEntry(0)),
             // F8 deletes the entry currently shown in the form pane (spec §12).
             KeyCode::F(8) => {
@@ -1381,6 +1437,7 @@ mod tests {
             form_scroll: 0,
             overlay: Some(Overlay::ValueEditor(ve)),
             status: String::new(),
+            menu_defs: vec![],
         }
     }
 
@@ -1422,7 +1479,10 @@ mod tests {
     }
 
     /// A bare App (no form) with the given read-only flag, for dispatch tests.
+    /// Seeded with two create-profiles ("Users", "Groups") so the Alt+digit menu
+    /// mapping tests can exercise both the in-range and out-of-range branches.
     fn bare_app(read_only: bool) -> App {
+        use crate::app::{CM_PROFILE_BASE, CM_QUIT};
         App {
             focus: Pane::Tree,
             should_quit: false,
@@ -1440,6 +1500,20 @@ mod tests {
             form_scroll: 0,
             overlay: None,
             status: String::new(),
+            menu_defs: vec![
+                MenuDef {
+                    label: "Users".to_string(),
+                    command: CM_PROFILE_BASE,
+                },
+                MenuDef {
+                    label: "Groups".to_string(),
+                    command: CM_PROFILE_BASE + 1,
+                },
+                MenuDef {
+                    label: "Quit".to_string(),
+                    command: CM_QUIT,
+                },
+            ],
         }
     }
 
@@ -1507,6 +1581,28 @@ mod tests {
         // Read-only suppresses delete.
         let mut ro = with_form(bare_app(true), "cn=Alice,dc=example,dc=org");
         assert_eq!(dispatch_key(&mut ro, fkey(8)), None);
+    }
+
+    #[test]
+    fn alt_digit_creates_matching_profile_via_menu_action() {
+        let alt_digit = |c| KeyEvent::new(KeyCode::Char(c), KeyModifiers::ALT);
+        // bare_app seeds two profiles (Users, Groups).
+        // Alt+1 → create profile 0; Alt+2 → create profile 1.
+        assert_eq!(
+            dispatch_key(&mut bare_app(false), alt_digit('1')),
+            Some(UiAction::NewEntry(0))
+        );
+        assert_eq!(
+            dispatch_key(&mut bare_app(false), alt_digit('2')),
+            Some(UiAction::NewEntry(1))
+        );
+        // Out-of-range digit (only two profiles) → menu_action returns None → no
+        // action (the key is inert, not a spurious create).
+        assert_eq!(dispatch_key(&mut bare_app(false), alt_digit('3')), None);
+        assert_eq!(dispatch_key(&mut bare_app(false), alt_digit('9')), None);
+        // Read-only mode suppresses the Alt+digit create keys entirely.
+        assert_eq!(dispatch_key(&mut bare_app(true), alt_digit('1')), None);
+        assert_eq!(dispatch_key(&mut bare_app(true), alt_digit('2')), None);
     }
 
     #[test]

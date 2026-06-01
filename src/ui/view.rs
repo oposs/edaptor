@@ -28,15 +28,112 @@ const COLUMNS: [Constraint; 3] = [
 /// Width of the label column in the form pane.
 const LABEL_WIDTH: u16 = 18;
 
-/// Render the whole frame from `app`.
+/// The bottom status-line text for `app` (pure, no ratatui types — unit-tested).
+///
+/// Layout (plan §3.5 / the old `build_status_line` logic):
+/// - Always start with the key hints: `Alt+X Quit`, plus `F2 Save  F3 Cancel`
+///   when NOT read-only (read-only mode suppresses every write affordance).
+/// - In read-only mode, prepend a `[read-only]` tag so the state is visible.
+/// - When a form is loaded, append the current DN, with a trailing ` *` dirty
+///   marker when the form has unsaved edits.
+/// - A non-empty transient `app.status` (e.g. "Saved." / "Created.") takes the
+///   place of the key hints (it is the more useful thing to surface), but the DN
+///   and dirty marker are still appended.
+pub fn status_line(app: &App) -> String {
+    let mut head = if app.status.is_empty() {
+        let mut hints = String::from("Alt+X Quit");
+        if !app.read_only {
+            hints.push_str("  F2 Save  F3 Cancel");
+        }
+        hints
+    } else {
+        app.status.clone()
+    };
+    if app.read_only {
+        head = format!("[read-only]  {head}");
+    }
+    if let Some(form) = app.form.as_ref() {
+        head.push_str("  │  ");
+        head.push_str(&form.dn);
+        if form.is_dirty() {
+            head.push_str(" *");
+        }
+    }
+    head
+}
+
+/// The top menu-bar text for `app`: each menu entry's label with its trigger key
+/// shown, derived from `app.menu_defs`. Profile-create entries get `[Alt+N]`,
+/// Delete gets `[F8]`, Refresh gets `[F5]`, Quit gets `[Alt+X]` — matching the
+/// keys actually wired in `dispatch_key`. Pure (no ratatui types).
+pub fn menu_bar(app: &App) -> String {
+    use crate::app::{CM_DELETE, CM_PROFILE_BASE, CM_QUIT, CM_REFRESH};
+    let mut parts: Vec<String> = Vec::new();
+    let mut profile_n = 0u16;
+    for def in &app.menu_defs {
+        let key = if def.command == CM_DELETE {
+            "F8".to_string()
+        } else if def.command == CM_REFRESH {
+            "F5".to_string()
+        } else if def.command == CM_QUIT {
+            "Alt+X".to_string()
+        } else if def.command >= CM_PROFILE_BASE {
+            profile_n += 1;
+            format!("Alt+{profile_n}")
+        } else {
+            continue;
+        };
+        parts.push(format!("[{key}] {}", def.label));
+    }
+    parts.join("  ")
+}
+
+/// Render the whole frame from `app`: a 1-row menu bar on top, the 3-column pane
+/// area in the middle, and a 1-row status line at the bottom. Overlays still
+/// render over the WHOLE frame (`render_overlay` uses `f.area()`).
 pub fn ui(f: &mut Frame, app: &mut App) {
-    let cols = Layout::horizontal(COLUMNS).split(f.area());
+    let chunks = Layout::vertical([
+        Constraint::Length(1), // menu bar
+        Constraint::Min(0),    // pane area
+        Constraint::Length(1), // status line
+    ])
+    .split(f.area());
+
+    render_menu_bar(f, app, chunks[0]);
+
+    let cols = Layout::horizontal(COLUMNS).split(chunks[1]);
     render_tree(f, app, cols[0]);
     render_leaf(f, app, cols[1]);
     render_form(f, app, cols[2]);
+
+    render_status_line(f, app, chunks[2]);
+
     if app.overlay.is_some() {
         render_overlay(f, app);
     }
+}
+
+/// Render the top menu bar (the profile/Delete/Refresh/Quit labels with their
+/// trigger keys) onto `area`.
+fn render_menu_bar(f: &mut Frame, app: &App, area: Rect) {
+    f.render_widget(
+        Paragraph::new(menu_bar(app)).style(
+            Style::default()
+                .bg(Color::Blue)
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
+        ),
+        area,
+    );
+}
+
+/// Render the bottom status line (key hints / transient status + DN + dirty
+/// marker) onto `area`.
+fn render_status_line(f: &mut Frame, app: &App, area: Rect) {
+    f.render_widget(
+        Paragraph::new(status_line(app)).style(Style::default().bg(Color::Blue).fg(Color::White)),
+        area,
+    );
 }
 
 /// A bordered pane block. The focused pane gets a solid light background and a
@@ -449,7 +546,9 @@ pub fn clamp_scroll(focus: usize, scroll: usize, viewport: usize, n: usize) -> u
 
 #[cfg(test)]
 mod tests {
-    use super::{centered, clamp_scroll, field_display_value, render_form};
+    use super::{centered, clamp_scroll, field_display_value, menu_bar, render_form, status_line};
+    use crate::app::{build_menu_defs, MenuDef, CM_PROFILE_BASE};
+    use crate::config::EntryProfile;
     use crate::schema::FieldKind;
     use crate::ui::app::{App, Pane};
     use crate::ui::edit_form::{EditField, EditForm};
@@ -534,6 +633,7 @@ mod tests {
             form_scroll: 0,
             overlay: None,
             status: String::new(),
+            menu_defs: vec![],
         }
     }
 
@@ -643,5 +743,160 @@ mod tests {
     fn handles_empty_and_zero_viewport() {
         assert_eq!(clamp_scroll(0, 0, 0, 20), 0);
         assert_eq!(clamp_scroll(0, 5, 10, 0), 0);
+    }
+
+    /// A bare App with no form, the given read-only flag, and an optional
+    /// transient status, for status-line tests.
+    fn status_app(read_only: bool, status: &str) -> App {
+        App {
+            focus: Pane::Tree,
+            should_quit: false,
+            read_only,
+            tree_state: TreeState::default(),
+            tree_items: vec![],
+            current_branch: String::new(),
+            last_search: String::new(),
+            rows: vec![],
+            leaf_sel: 0,
+            search: TextState::new(),
+            last_seen_leaf: None,
+            form: None,
+            form_focus: 0,
+            form_scroll: 0,
+            overlay: None,
+            status: status.to_string(),
+            menu_defs: vec![],
+        }
+    }
+
+    /// Install a one-field `cn` form carrying `dn`; `dirty` controls whether the
+    /// editor value diverges from the baseline (so `is_dirty()` is deterministic).
+    fn with_cn_form(mut app: App, dn: &str, dirty: bool) -> App {
+        use std::collections::BTreeMap;
+        let mut baseline: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        baseline.insert("cn".to_string(), vec!["original".to_string()]);
+        let value = if dirty { "edited" } else { "original" };
+        app.form = Some(EditForm {
+            dn: dn.to_string(),
+            fields: vec![EditField {
+                label: "cn".to_string(),
+                must: true,
+                editable: true,
+                multi: false,
+                secret: false,
+                ordered: false,
+                values: vec![value.to_string()],
+                kind: FieldKind::Text,
+                widget: WidgetSpec::ReadOnlyText,
+                editor: TextState::new().with_value(value.to_string()),
+            }],
+            baseline,
+        });
+        app
+    }
+
+    #[test]
+    fn status_line_writable_shows_save_cancel_hints() {
+        let s = status_line(&status_app(false, ""));
+        assert!(s.contains("Alt+X Quit"));
+        assert!(s.contains("F2 Save"));
+        assert!(s.contains("F3 Cancel"));
+        assert!(!s.contains("[read-only]"));
+    }
+
+    #[test]
+    fn status_line_read_only_tags_and_suppresses_save_cancel() {
+        let s = status_line(&status_app(true, ""));
+        assert!(s.contains("[read-only]"));
+        assert!(s.contains("Alt+X Quit"));
+        assert!(!s.contains("F2 Save"));
+        assert!(!s.contains("F3 Cancel"));
+    }
+
+    #[test]
+    fn status_line_appends_dn_without_dirty_marker() {
+        let app = with_cn_form(status_app(false, ""), "cn=Alice,dc=example,dc=org", false);
+        let s = status_line(&app);
+        assert!(s.contains("cn=Alice,dc=example,dc=org"));
+        assert!(!s.trim_end().ends_with('*'));
+    }
+
+    #[test]
+    fn status_line_appends_dirty_marker_when_form_edited() {
+        let app = with_cn_form(status_app(false, ""), "cn=Alice,dc=example,dc=org", true);
+        let s = status_line(&app);
+        assert!(s.contains("cn=Alice,dc=example,dc=org"));
+        assert!(s.trim_end().ends_with('*'));
+    }
+
+    #[test]
+    fn status_line_surfaces_transient_status_with_dn() {
+        let app = with_cn_form(
+            status_app(false, "Saved."),
+            "cn=Bob,dc=example,dc=org",
+            false,
+        );
+        let s = status_line(&app);
+        assert!(s.contains("Saved."));
+        // The transient status replaces the key hints.
+        assert!(!s.contains("F2 Save"));
+        // …but the DN is still appended.
+        assert!(s.contains("cn=Bob,dc=example,dc=org"));
+    }
+
+    #[test]
+    fn menu_bar_shows_labels_with_trigger_keys() {
+        let profiles = vec![
+            EntryProfile {
+                name: "Users".to_string(),
+                object_class: "inetOrgPerson".to_string(),
+                ..Default::default()
+            },
+            EntryProfile {
+                name: "Groups".to_string(),
+                object_class: "groupOfNames".to_string(),
+                ..Default::default()
+            },
+        ];
+        let mut app = status_app(false, "");
+        app.menu_defs = build_menu_defs(&profiles);
+        let bar = menu_bar(&app);
+        // Profiles get Alt+1 / Alt+2 in config order; Delete/Refresh/Quit keep
+        // their wired keys.
+        assert!(bar.contains("[Alt+1] Users"));
+        assert!(bar.contains("[Alt+2] Groups"));
+        assert!(bar.contains("[F8] Delete"));
+        assert!(bar.contains("[F5] Refresh"));
+        assert!(bar.contains("[Alt+X] Quit"));
+    }
+
+    #[test]
+    fn menu_bar_handles_no_profiles() {
+        let mut app = status_app(false, "");
+        // No profiles: build_menu_defs(&[]) still yields Delete/Refresh/Quit.
+        app.menu_defs = build_menu_defs(&[]);
+        let bar = menu_bar(&app);
+        assert!(!bar.contains("Alt+1"));
+        assert!(bar.contains("[F8] Delete"));
+        assert!(bar.contains("[Alt+X] Quit"));
+    }
+
+    #[test]
+    fn menu_bar_unknown_command_is_skipped() {
+        // A stray command id (not a known CM_*) is silently dropped.
+        let mut app = status_app(false, "");
+        app.menu_defs = vec![
+            MenuDef {
+                label: "Mystery".to_string(),
+                command: 42,
+            },
+            MenuDef {
+                label: "Users".to_string(),
+                command: CM_PROFILE_BASE,
+            },
+        ];
+        let bar = menu_bar(&app);
+        assert!(!bar.contains("Mystery"));
+        assert!(bar.contains("[Alt+1] Users"));
     }
 }
