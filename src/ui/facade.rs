@@ -23,7 +23,7 @@ use turbo_vision::core::draw::DrawBuffer;
 use turbo_vision::core::event::{Event, EventType, KB_ALT_X, KB_F10, KB_F6, KB_PGDN, KB_PGUP};
 use turbo_vision::core::geometry::Rect;
 use turbo_vision::core::menu_data::MenuBuilder;
-use turbo_vision::core::palette::Palette;
+use turbo_vision::core::palette::{palettes, Attr, Palette};
 use turbo_vision::core::palette_chain::PaletteChainNode;
 use turbo_vision::core::state::{StateFlags, SF_DRAGGING, SF_FOCUSED};
 use turbo_vision::helpers::msgbox::{
@@ -109,6 +109,46 @@ fn pane_rects(b: Rect, d0: i16, d1: i16) -> [Rect; 3] {
         Rect::new(d0 + DIVIDER_W, top, d1, bottom),
         Rect::new(d1 + DIVIDER_W, top, b.b.x, bottom),
     ]
+}
+
+/// The initial (one-third / two-thirds) divider x-positions for a container of
+/// `bounds`, clamped. Shared by [`SplitContainer::new`] and [`Shell::mount_split`]
+/// so the panes are *built* at the same column rects the container lays them out
+/// to (otherwise a pane's child widgets, built for placeholder bounds, would be
+/// mangled by the crude `Group::set_bounds` offset+grow).
+fn initial_dividers(bounds: Rect) -> (i16, i16) {
+    let w = bounds.b.x - bounds.a.x;
+    clamp_dividers(
+        bounds.a.x,
+        bounds.b.x,
+        bounds.a.x + w / 3,
+        bounds.a.x + (2 * w) / 3,
+    )
+}
+
+/// Fill `bounds` with spaces in `attr`, giving a frameless pane a solid backdrop
+/// (the stock dialog widgets it hosts are transparent outside their text, so
+/// without this the desktop pattern shows through). Mirrors how a `Dialog`/`Window`
+/// interior is filled.
+fn fill_pane_background(terminal: &mut Terminal, bounds: Rect, attr: Attr) {
+    let w = (bounds.b.x - bounds.a.x).max(0) as usize;
+    if w == 0 {
+        return;
+    }
+    for y in bounds.a.y..bounds.b.y {
+        let mut buf = DrawBuffer::new(w);
+        buf.move_char(0, ' ', attr, w);
+        write_line_to_terminal(terminal, bounds.a.x, y, &buf);
+    }
+}
+
+/// The gray-dialog palette every leaf/form pane provides, so the stock
+/// `StaticText` / `InputLine` / `ListBox` / `Button` widgets it hosts resolve their
+/// colors exactly as they would inside a real `Dialog` (which is the environment
+/// they were designed for). Without it they map against the desktop palette and
+/// render invisibly.
+fn dialog_palette() -> Palette {
+    Palette::from_slice(palettes::CP_GRAY_DIALOG)
 }
 
 /// Clamp a desired vertical scroll `delta` to `[0, max(0, content_h - viewport_h)]`.
@@ -302,13 +342,7 @@ impl SplitContainer {
         middle: Box<dyn View>,
         right: Box<dyn View>,
     ) -> Self {
-        let w = bounds.b.x - bounds.a.x;
-        let (d0, d1) = clamp_dividers(
-            bounds.a.x,
-            bounds.b.x,
-            bounds.a.x + w / 3,
-            bounds.a.x + (2 * w) / 3,
-        );
+        let (d0, d1) = initial_dividers(bounds);
         let mut inner = Group::new(bounds);
         inner.add(left);
         inner.add(middle);
@@ -556,8 +590,10 @@ impl FormPane {
         }
         self.inner = Group::new(self.bounds);
         self.bindings.clear();
+        // Row bounds are RELATIVE to the group origin — `Group::add` offsets them by
+        // `self.bounds.a` to absolute. (Scrolling later translates the whole group.)
         let width = self.bounds.b.x - self.bounds.a.x;
-        let mut y = self.bounds.a.y;
+        let mut y: i16 = 0;
         for field in &model.fields {
             let label = if field.is_must {
                 format!("{} *", field.label)
@@ -565,23 +601,19 @@ impl FormPane {
                 field.label.clone()
             };
             self.inner.add(Box::new(StaticText::new(
-                Rect::new(self.bounds.a.x, y, self.bounds.a.x + 18, y + 1),
+                Rect::new(0, y, 18, y + 1),
                 &label,
             )));
             if !self.read_only && field_is_editable(field) {
                 let seed = field.values.join("\n");
                 let data = Rc::new(RefCell::new(seed));
-                let input = InputLine::new(
-                    Rect::new(self.bounds.a.x + 19, y, self.bounds.a.x + width - 1, y + 1),
-                    1024,
-                    data.clone(),
-                );
+                let input = InputLine::new(Rect::new(19, y, width - 1, y + 1), 1024, data.clone());
                 self.inner.add(Box::new(input));
                 self.bindings.push((field.label.clone(), data));
             } else {
                 let value = field_display(&field.widget, &field.values);
                 self.inner.add(Box::new(StaticText::new(
-                    Rect::new(self.bounds.a.x + 19, y, self.bounds.a.x + width - 1, y + 1),
+                    Rect::new(19, y, width - 1, y + 1),
                     &value,
                 )));
             }
@@ -589,20 +621,20 @@ impl FormPane {
         }
         if !self.read_only {
             self.inner.add(Box::new(Button::new(
-                Rect::new(self.bounds.a.x, y + 1, self.bounds.a.x + 10, y + 2),
+                Rect::new(0, y + 1, 10, y + 2),
                 "~S~ave",
                 CM_FORM_SAVE,
                 true,
             )));
             self.inner.add(Box::new(Button::new(
-                Rect::new(self.bounds.a.x + 12, y + 1, self.bounds.a.x + 22, y + 2),
+                Rect::new(12, y + 1, 22, y + 2),
                 "~C~ancel",
                 CM_FORM_CANCEL,
                 false,
             )));
             y += 2;
         }
-        self.content_h = y - self.bounds.a.y;
+        self.content_h = y;
         self.scroll = 0;
         self.inner.set_initial_focus();
         self.publish();
@@ -708,7 +740,10 @@ impl View for FormPane {
     }
 
     fn draw(&mut self, terminal: &mut Terminal) {
-        self.inner.set_palette_chain(self.palette_chain.clone());
+        fill_pane_background(terminal, self.bounds, self.map_color(1));
+        // Propagate a chain node carrying this pane's dialog palette to the rows.
+        let chain = PaletteChainNode::new(self.get_palette(), self.palette_chain.clone());
+        self.inner.set_palette_chain(Some(chain));
         self.inner.draw(terminal);
     }
 
@@ -785,7 +820,7 @@ impl View for FormPane {
     }
 
     fn get_palette(&self) -> Option<Palette> {
-        None
+        Some(dialog_palette())
     }
 }
 
@@ -838,20 +873,23 @@ impl LeafListPane {
     /// populates it by pushing rows and broadcasting [`CM_LEAF_REFRESH`].
     pub fn new(bounds: Rect, handles: LeafHandles) -> Self {
         let mut inner = Group::new(bounds);
-        inner.add(Box::new(StaticText::new(
-            Rect::new(bounds.a.x, bounds.a.y, bounds.a.x + 8, bounds.a.y + 1),
-            "Search:",
-        )));
+        // Child bounds are RELATIVE to the group origin — `Group::add` offsets them
+        // by `bounds.a` to absolute. Building them absolute here would double-offset.
+        let width = bounds.b.x - bounds.a.x;
+        let height = bounds.b.y - bounds.a.y;
+        inner.add(Box::new(StaticText::new(Rect::new(0, 0, 8, 1), "Search:")));
         inner.add(Box::new(InputLine::new(
-            Rect::new(bounds.a.x + 8, bounds.a.y, bounds.b.x, bounds.a.y + 1),
+            Rect::new(8, 0, width, 1),
             256,
             handles.search.clone(),
         )));
         inner.add(Box::new(ListBox::new(
-            Rect::new(bounds.a.x, bounds.a.y + 1, bounds.b.x, bounds.b.y),
+            Rect::new(0, 1, width, height),
             CM_LEAF_SELECT,
         )));
-        inner.set_initial_focus();
+        // Focus the ListBox (child 2), not the search box, so arrow keys browse
+        // leaves immediately; Tab/click reaches the search box to filter.
+        inner.set_focus_to(2);
         let mut me = LeafListPane {
             bounds,
             inner,
@@ -911,7 +949,9 @@ impl View for LeafListPane {
         self.inner.set_bounds(b);
     }
     fn draw(&mut self, terminal: &mut Terminal) {
-        self.inner.set_palette_chain(self.palette_chain.clone());
+        fill_pane_background(terminal, self.bounds, self.map_color(1));
+        let chain = PaletteChainNode::new(self.get_palette(), self.palette_chain.clone());
+        self.inner.set_palette_chain(Some(chain));
         self.inner.draw(terminal);
     }
     fn handle_event(&mut self, event: &mut Event) {
@@ -939,7 +979,8 @@ impl View for LeafListPane {
     fn set_focus(&mut self, focused: bool) {
         self.set_state_flag(SF_FOCUSED, focused);
         if focused {
-            self.inner.set_initial_focus();
+            // Land on the ListBox so arrows browse leaves immediately.
+            self.inner.set_focus_to(2);
         }
     }
     fn update_cursor(&self, terminal: &mut Terminal) {
@@ -954,7 +995,7 @@ impl View for LeafListPane {
         self.palette_chain.as_ref()
     }
     fn get_palette(&self) -> Option<Palette> {
-        None
+        Some(dialog_palette())
     }
 }
 
@@ -1033,14 +1074,14 @@ impl Shell {
         form: FormHandles,
     ) {
         let db = self.app.desktop.get_bounds();
-        // Incoming pane bounds are placeholders; SplitContainer assigns columns.
-        let tree = Box::new(DitOutline::new(
-            Rect::new(0, 0, 1, 1),
-            tree_root,
-            self.selection.clone(),
-        ));
-        let leaves = Box::new(LeafListPane::new(Rect::new(0, 0, 1, 1), leaf));
-        let form_pane = Box::new(FormPane::new(Rect::new(0, 0, 1, 1), read_only, form));
+        // Build each pane at its real column rect (NOT a placeholder), so its child
+        // widgets are laid out correctly; SplitContainer::new then lays them out to
+        // the same rects (a no-op offset) and only takes over on later resizes.
+        let (d0, d1) = initial_dividers(db);
+        let rects = pane_rects(db, d0, d1);
+        let tree = Box::new(DitOutline::new(rects[0], tree_root, self.selection.clone()));
+        let leaves = Box::new(LeafListPane::new(rects[1], leaf));
+        let form_pane = Box::new(FormPane::new(rects[2], read_only, form));
         let split = SplitContainer::new(db, tree, leaves, form_pane);
         self.app.desktop.add(Box::new(split));
     }
