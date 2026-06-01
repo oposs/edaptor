@@ -394,6 +394,62 @@ fn render_overlay(f: &mut Frame, app: &App) {
 /// marker, the ordered/set hint in the title, and secret rows masked. (Spike
 /// `render_popup`; values rendered via `Paragraph`, never byte-sliced.)
 fn render_value_editor(f: &mut Frame, ve: &ValueEditor, area: Rect) {
+    // Picker mode: searchable candidate list with always-visible selection.
+    if let Some(picker) = &ve.picker {
+        let rect = centered(70, 20, area);
+        f.render_widget(Clear, rect);
+        let bg = Color::Rgb(20, 30, 45);
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .title(format!(" {} ", ve.label))
+            .title_bottom(" Space toggle · F2 save · Esc cancel · type to search (cap 20) ")
+            .style(Style::default().bg(bg).fg(Color::White))
+            .border_style(
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            );
+        let inner = block.inner(rect);
+        f.render_widget(block, rect);
+        if inner.height == 0 {
+            return;
+        }
+        // First row: search box.
+        let search_text = format!("Search: {}", ve.search.value());
+        f.render_widget(
+            Paragraph::new(search_text).style(Style::default().bg(bg).fg(Color::Yellow)),
+            Rect::new(inner.x, inner.y, inner.width, 1),
+        );
+        // Remaining rows: visible candidates.
+        let rows = picker.visible();
+        let list_area_y = inner.y + 1;
+        let list_height = inner.height.saturating_sub(1);
+        for (i, row) in rows.iter().enumerate() {
+            if i as u16 >= list_height {
+                break;
+            }
+            let y = list_area_y + i as u16;
+            let selected_cursor = i == picker.cursor;
+            let check = if row.selected { "[x]" } else { "[ ]" };
+            let line = format!("{check} {}", row.candidate.label);
+            let style = if selected_cursor {
+                Style::default()
+                    .bg(Color::Rgb(60, 80, 100))
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD)
+            } else if row.selected {
+                Style::default().bg(bg).fg(Color::Green)
+            } else {
+                Style::default().bg(bg).fg(Color::Gray)
+            };
+            f.render_widget(
+                Paragraph::new(line).style(style),
+                Rect::new(inner.x, y, inner.width, 1),
+            );
+        }
+        return;
+    }
+
     let avail = area.height.saturating_sub(2).max(7);
     let h = (ve.rows.len() as u16 + 5).clamp(7, avail).min(avail);
     let w = 64.min(area.width.saturating_sub(4)).max(20);
