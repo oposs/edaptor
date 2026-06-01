@@ -1,6 +1,48 @@
 //! Pure state for the value-editor's picker mode: a current selection that is
 //! ALWAYS shown, merged with the latest (size-capped) search results. No ratatui.
 
+use std::collections::BTreeMap;
+
+/// RFC 4515 filter-value escaping for the four special bytes.
+pub fn escape_filter(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for ch in s.chars() {
+        match ch {
+            '*' => out.push_str(r"\2a"),
+            '(' => out.push_str(r"\28"),
+            ')' => out.push_str(r"\29"),
+            '\\' => out.push_str(r"\5c"),
+            '\0' => out.push_str(r"\00"),
+            _ => out.push(ch),
+        }
+    }
+    out
+}
+
+/// Build the candidate search filter. Empty `term` → objectClass only; otherwise
+/// AND the objectClass with an OR of `attr=*term*` over each search attribute.
+pub fn build_member_filter(object_class: &str, search_attrs: &[String], term: &str) -> String {
+    let oc = format!("(objectClass={})", object_class);
+    if term.is_empty() {
+        return oc;
+    }
+    let esc = escape_filter(term);
+    let ors: String = search_attrs
+        .iter()
+        .map(|a| format!("({a}=*{esc}*)"))
+        .collect();
+    format!("(&{oc}(|{ors}))")
+}
+
+/// A candidate's display label: first `cn` value, else the raw DN.
+pub fn candidate_label(dn: &str, attrs: &BTreeMap<String, Vec<String>>) -> String {
+    attrs
+        .iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case("cn"))
+        .and_then(|(_, v)| v.first().cloned())
+        .unwrap_or_else(|| dn.to_string())
+}
+
 /// One candidate entry: the DN that is stored, and the human label that is shown.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Candidate {
@@ -150,5 +192,34 @@ mod tests {
         assert_eq!(p.cursor, 0); // only one visible row
         p.move_cursor(-5);
         assert_eq!(p.cursor, 0);
+    }
+
+    #[test]
+    fn escapes_filter_specials() {
+        assert_eq!(escape_filter("a*b(c)\\d"), r"a\2ab\28c\29\5cd");
+    }
+
+    #[test]
+    fn builds_or_filter_with_objectclass_and_term() {
+        let f = build_member_filter("inetOrgPerson", &["uid".into(), "cn".into()], "ann");
+        assert_eq!(f, "(&(objectClass=inetOrgPerson)(|(uid=*ann*)(cn=*ann*)))");
+    }
+
+    #[test]
+    fn empty_term_filters_objectclass_only() {
+        let f = build_member_filter("groupOfNames", &["cn".into()], "");
+        assert_eq!(f, "(objectClass=groupOfNames)");
+    }
+
+    #[test]
+    fn label_prefers_cn_then_dn() {
+        use std::collections::BTreeMap;
+        let mut attrs = BTreeMap::new();
+        attrs.insert("cn".to_string(), vec!["Ann Smith".to_string()]);
+        assert_eq!(candidate_label("uid=ann,ou=people", &attrs), "Ann Smith");
+        assert_eq!(
+            candidate_label("uid=bob,ou=people", &BTreeMap::new()),
+            "uid=bob,ou=people"
+        );
     }
 }
