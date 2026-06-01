@@ -430,6 +430,10 @@ fn value_editor_key(app: &mut App, key: KeyEvent) {
             let Some(Overlay::ValueEditor(ve)) = app.overlay.as_mut() else {
                 return;
             };
+            // Invariant: sel is always a valid index (or 0 when empty). Every arm
+            // below preserves it, but normalize defensively so the reorder swaps
+            // can never index out of bounds regardless of edit history.
+            ve.sel = ve.sel.min(ve.rows.len().saturating_sub(1));
             match (key.code, alt) {
                 (KeyCode::Up, false) => ve.sel = ve.sel.saturating_sub(1),
                 (KeyCode::Down, false) => ve.sel = (ve.sel + 1).min(ve.rows.len().saturating_sub(1)),
@@ -832,6 +836,77 @@ mod tests {
         assert_eq!(next_pane(Pane::Tree), Pane::Leaf);
         assert_eq!(next_pane(Pane::Leaf), Pane::Form);
         assert_eq!(next_pane(Pane::Form), Pane::Tree);
+    }
+
+    /// A bare App carrying a value-editor overlay of `rows` rows (form left None;
+    /// the popup nav/reorder paths only touch the overlay).
+    fn app_with_value_editor(rows: usize) -> App {
+        use crate::ui::edit_form::ValueEditor;
+        let ve = ValueEditor {
+            field: 0,
+            label: "mail".into(),
+            ordered: false,
+            secret: false,
+            rows: (0..rows)
+                .map(|i| TextState::new().with_value(format!("v{i}")))
+                .collect(),
+            sel: 0,
+        };
+        App {
+            focus: Pane::Form,
+            should_quit: false,
+            read_only: false,
+            tree_state: TreeState::default(),
+            tree_items: vec![],
+            current_branch: String::new(),
+            last_search: String::new(),
+            rows: vec![],
+            leaf_sel: 0,
+            search: TextState::new(),
+            last_seen_leaf: None,
+            form: None,
+            form_focus: 0,
+            form_scroll: 0,
+            overlay: Some(Overlay::ValueEditor(ve)),
+            status: String::new(),
+        }
+    }
+
+    /// Regression (P3 review): deleting every row and then navigating/reordering
+    /// must not panic. The reorder swaps are bounded and `sel` is normalized, so
+    /// `Vec::swap` is never called out of range on an empty popup.
+    #[test]
+    fn value_editor_delete_all_then_navigate_does_not_panic() {
+        let alt = |c| KeyEvent::new(c, KeyModifiers::ALT);
+        let plain = |c| KeyEvent::new(c, KeyModifiers::NONE);
+        let mut app = app_with_value_editor(1);
+        value_editor_key(&mut app, alt(KeyCode::Char('d'))); // delete the only row → empty
+        value_editor_key(&mut app, plain(KeyCode::Down)); // must not advance sel out of range
+        value_editor_key(&mut app, alt(KeyCode::Up)); // reorder on empty → no-op, no panic
+        value_editor_key(&mut app, alt(KeyCode::Down)); // no panic
+        value_editor_key(&mut app, alt(KeyCode::Char('a'))); // add a row back
+        let Some(Overlay::ValueEditor(ve)) = &app.overlay else {
+            panic!("popup should still be open");
+        };
+        assert_eq!(ve.rows.len(), 1);
+        assert!(ve.sel < ve.rows.len());
+    }
+
+    /// Reorder swaps stay in range across a delete-driven shrink, too.
+    #[test]
+    fn value_editor_reorder_after_delete_is_bounded() {
+        let alt = |c| KeyEvent::new(c, KeyModifiers::ALT);
+        let mut app = app_with_value_editor(3);
+        // Move to the last row, delete it, then try to reorder down (past the end).
+        value_editor_key(&mut app, KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        value_editor_key(&mut app, KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        value_editor_key(&mut app, alt(KeyCode::Char('d'))); // delete last → sel clamps
+        value_editor_key(&mut app, alt(KeyCode::Down)); // no panic
+        value_editor_key(&mut app, alt(KeyCode::Up)); // no panic
+        let Some(Overlay::ValueEditor(ve)) = &app.overlay else {
+            panic!("popup should still be open");
+        };
+        assert!(ve.sel < ve.rows.len());
     }
 
     #[test]
