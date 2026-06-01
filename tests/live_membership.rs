@@ -117,6 +117,15 @@ const GROUP_DN: &str = "cn=lm-test-group,ou=users,dc=example,dc=org";
 const USER_A_DN: &str = "uid=lm-user-a,ou=users,dc=example,dc=org";
 const USER_B_DN: &str = "uid=lm-user-b,ou=users,dc=example,dc=org";
 
+// DNs for the reverse fan-out test (distinct to avoid parallel-run races).
+const REV_GROUP_DN: &str = "cn=lm-rev-group,ou=users,dc=example,dc=org";
+const REV_USER_A_DN: &str = "uid=lm-rev-user-a,ou=users,dc=example,dc=org";
+const REV_OTHER_DN: &str = "uid=lm-rev-other,ou=users,dc=example,dc=org";
+
+// DNs for the last-member rejection test.
+const LAST_GROUP_DN: &str = "cn=lm-last-group,ou=users,dc=example,dc=org";
+const LAST_USER_A_DN: &str = "uid=lm-last-user-a,ou=users,dc=example,dc=org";
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -268,4 +277,234 @@ fn forward_member_edit_round_trips() {
         "group should be gone after cleanup"
     );
     _ = CONTAINER; // used for documentation; the OU itself is not created/deleted
+}
+
+/// Seed a group that already has one other member, then apply the reverse fan-out
+/// MODIFY (Add member=userA), and assert userA now appears in the group's member list.
+/// This is the same MODIFY the back-ref fan-out produces in the combined save.
+#[test]
+fn reverse_memberof_edit_writes_group_member() {
+    let uri = match std::env::var("EDAPTOR_TEST_LDAP_URI") {
+        Ok(uri) => uri,
+        Err(_) => {
+            eprintln!(
+                "SKIP reverse_memberof_edit_writes_group_member: set EDAPTOR_TEST_LDAP_URI to run"
+            );
+            return;
+        }
+    };
+
+    let (config, password) = test_config(uri);
+    let worker = WorkerHandle::spawn(config, password).expect("spawn worker");
+
+    // Idempotent cleanup from any prior aborted run.
+    cleanup(&worker, 1, REV_GROUP_DN);
+    cleanup(&worker, 2, REV_USER_A_DN);
+    cleanup(&worker, 3, REV_OTHER_DN);
+
+    // Seed "other" user (the placeholder member so the group is never empty).
+    {
+        let mut attrs = BTreeMap::new();
+        attrs.insert(
+            "objectClass".to_string(),
+            vec!["top".to_string(), "inetOrgPerson".to_string()],
+        );
+        attrs.insert("uid".to_string(), vec!["lm-rev-other".to_string()]);
+        attrs.insert("cn".to_string(), vec!["LM Rev Other".to_string()]);
+        attrs.insert("sn".to_string(), vec!["Other".to_string()]);
+        worker
+            .submit(Request::Add {
+                id: 10,
+                dn: REV_OTHER_DN.to_string(),
+                attrs,
+            })
+            .expect("submit add other user");
+        match poll_for_id(&worker, 10, Duration::from_secs(10)) {
+            Some(Response::WriteOk { .. }) => {}
+            other => panic!("ADD other user failed: {}", describe(&other)),
+        }
+    }
+
+    // Seed userA.
+    {
+        let mut attrs = BTreeMap::new();
+        attrs.insert(
+            "objectClass".to_string(),
+            vec!["top".to_string(), "inetOrgPerson".to_string()],
+        );
+        attrs.insert("uid".to_string(), vec!["lm-rev-user-a".to_string()]);
+        attrs.insert("cn".to_string(), vec!["LM Rev User A".to_string()]);
+        attrs.insert("sn".to_string(), vec!["RevA".to_string()]);
+        worker
+            .submit(Request::Add {
+                id: 20,
+                dn: REV_USER_A_DN.to_string(),
+                attrs,
+            })
+            .expect("submit add rev user A");
+        match poll_for_id(&worker, 20, Duration::from_secs(10)) {
+            Some(Response::WriteOk { .. }) => {}
+            other => {
+                cleanup(&worker, 21, REV_OTHER_DN);
+                panic!("ADD rev user A failed: {}", describe(&other));
+            }
+        }
+    }
+
+    // Seed group with only REV_OTHER_DN as member (so it is never empty).
+    {
+        let mut attrs = BTreeMap::new();
+        attrs.insert(
+            "objectClass".to_string(),
+            vec!["top".to_string(), "groupOfNames".to_string()],
+        );
+        attrs.insert("cn".to_string(), vec!["lm-rev-group".to_string()]);
+        attrs.insert("member".to_string(), vec![REV_OTHER_DN.to_string()]);
+        worker
+            .submit(Request::Add {
+                id: 30,
+                dn: REV_GROUP_DN.to_string(),
+                attrs,
+            })
+            .expect("submit add rev group");
+        match poll_for_id(&worker, 30, Duration::from_secs(10)) {
+            Some(Response::WriteOk { .. }) => {}
+            other => {
+                cleanup(&worker, 31, REV_USER_A_DN);
+                cleanup(&worker, 32, REV_OTHER_DN);
+                panic!("ADD rev group failed: {}", describe(&other));
+            }
+        }
+    }
+
+    // Apply the reverse fan-out: Add member=userA to the group.
+    // This is the same MODIFY the back-ref fan-out emits.
+    worker
+        .submit(Request::Modify {
+            id: 40,
+            dn: REV_GROUP_DN.to_string(),
+            changes: vec![edaptor::form::changeset::ModOp::Add {
+                attr: "member".to_string(),
+                values: vec![REV_USER_A_DN.to_string()],
+            }],
+        })
+        .expect("submit Add member fan-out modify");
+    match poll_for_id(&worker, 40, Duration::from_secs(10)) {
+        Some(Response::WriteOk { .. }) => {}
+        other => {
+            cleanup(&worker, 41, REV_GROUP_DN);
+            cleanup(&worker, 42, REV_USER_A_DN);
+            cleanup(&worker, 43, REV_OTHER_DN);
+            panic!("fan-out Add member failed: {}", describe(&other));
+        }
+    }
+
+    // Verify: userA is now in the group's member list.
+    let group_attrs = read_entry(&worker, REV_GROUP_DN, 50, &["member"])
+        .expect("rev group should exist after modify");
+    let members = group_attrs.get("member").cloned().unwrap_or_default();
+    let members_lc: Vec<String> = members.iter().map(|m| m.to_lowercase()).collect();
+    assert!(
+        members_lc.contains(&REV_USER_A_DN.to_lowercase()),
+        "group member list should contain userA after fan-out Add, got: {members:?}"
+    );
+
+    // Teardown.
+    cleanup(&worker, 60, REV_GROUP_DN);
+    cleanup(&worker, 61, REV_USER_A_DN);
+    cleanup(&worker, 62, REV_OTHER_DN);
+}
+
+/// Seed a group whose ONLY member is userA, then attempt to delete that member.
+/// The server enforces groupOfNames ≥1 member via objectClassViolation and should
+/// return a WriteError — confirming the server-side guard independent of the
+/// client pre-check.
+#[test]
+fn removing_last_member_is_rejected_by_server() {
+    let uri = match std::env::var("EDAPTOR_TEST_LDAP_URI") {
+        Ok(uri) => uri,
+        Err(_) => {
+            eprintln!(
+                "SKIP removing_last_member_is_rejected_by_server: set EDAPTOR_TEST_LDAP_URI to run"
+            );
+            return;
+        }
+    };
+
+    let (config, password) = test_config(uri);
+    let worker = WorkerHandle::spawn(config, password).expect("spawn worker");
+
+    // Idempotent cleanup from any prior aborted run.
+    cleanup(&worker, 1, LAST_GROUP_DN);
+    cleanup(&worker, 2, LAST_USER_A_DN);
+
+    // Seed userA.
+    {
+        let mut attrs = BTreeMap::new();
+        attrs.insert(
+            "objectClass".to_string(),
+            vec!["top".to_string(), "inetOrgPerson".to_string()],
+        );
+        attrs.insert("uid".to_string(), vec!["lm-last-user-a".to_string()]);
+        attrs.insert("cn".to_string(), vec!["LM Last User A".to_string()]);
+        attrs.insert("sn".to_string(), vec!["LastA".to_string()]);
+        worker
+            .submit(Request::Add {
+                id: 10,
+                dn: LAST_USER_A_DN.to_string(),
+                attrs,
+            })
+            .expect("submit add last user A");
+        match poll_for_id(&worker, 10, Duration::from_secs(10)) {
+            Some(Response::WriteOk { .. }) => {}
+            other => panic!("ADD last user A failed: {}", describe(&other)),
+        }
+    }
+
+    // Seed group with exactly one member: userA.
+    {
+        let mut attrs = BTreeMap::new();
+        attrs.insert(
+            "objectClass".to_string(),
+            vec!["top".to_string(), "groupOfNames".to_string()],
+        );
+        attrs.insert("cn".to_string(), vec!["lm-last-group".to_string()]);
+        attrs.insert("member".to_string(), vec![LAST_USER_A_DN.to_string()]);
+        worker
+            .submit(Request::Add {
+                id: 20,
+                dn: LAST_GROUP_DN.to_string(),
+                attrs,
+            })
+            .expect("submit add last group");
+        match poll_for_id(&worker, 20, Duration::from_secs(10)) {
+            Some(Response::WriteOk { .. }) => {}
+            other => {
+                cleanup(&worker, 21, LAST_USER_A_DN);
+                panic!("ADD last group failed: {}", describe(&other));
+            }
+        }
+    }
+
+    // Attempt to delete the sole member — server must reject this.
+    worker
+        .submit(Request::Modify {
+            id: 30,
+            dn: LAST_GROUP_DN.to_string(),
+            changes: vec![edaptor::form::changeset::ModOp::Delete {
+                attr: "member".to_string(),
+                values: vec![LAST_USER_A_DN.to_string()],
+            }],
+        })
+        .expect("submit Delete last member modify");
+    let resp = poll_for_id(&worker, 30, Duration::from_secs(10));
+    assert!(
+        matches!(resp, Some(Response::WriteError { .. })),
+        "server should reject deleting the last member of a groupOfNames, got: {}",
+        describe(&resp)
+    );
+
+    // Teardown (group still has userA; delete group first, then user).
+    cleanup(&worker, 40, LAST_GROUP_DN);
+    cleanup(&worker, 41, LAST_USER_A_DN);
 }
