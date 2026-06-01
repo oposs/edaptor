@@ -1,15 +1,17 @@
 //! Pure rendering for the ratatui UI.
 //!
-//! Mirrors the proven spike's render functions. Each pane owns its background so
-//! the active pane is a solid light fill (the focus highlight the old
-//! turbo-vision palette chain could not do cleanly). Values are rendered through
-//! `Paragraph`, which grapheme-clips correctly — there is NO byte-slicing of
-//! values anywhere here, which is the whole reason for leaving turbo-vision (its
-//! `InputLine` byte-sliced UTF-8 and panicked on an umlaut straddling the cut).
+//! Panes use the terminal's default colours (a light/white background); the
+//! ACTIVE pane is marked by a bold **double** border, inactive panes by a dim
+//! single border — no background inversion. The focused pane's hotkeys live in
+//! the full-width status line (the narrow panes clip them in a border). Values
+//! are rendered
+//! through `Paragraph`, which grapheme-clips correctly — there is NO byte-slicing
+//! of values anywhere here, which is the whole reason for leaving turbo-vision
+//! (its `InputLine` byte-sliced UTF-8 and panicked on an umlaut at the cut).
 
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
-use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
+use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph, Wrap};
 use ratatui::Frame;
 use tui_prompts::State;
 use tui_tree_widget::Tree;
@@ -30,128 +32,91 @@ const LABEL_WIDTH: u16 = 18;
 
 /// The bottom status-line text for `app` (pure, no ratatui types — unit-tested).
 ///
-/// Layout (plan §3.5 / the old `build_status_line` logic):
-/// - Always start with the key hints: `Alt+X Quit`, plus `F2 Save  F3 Cancel`
-///   when NOT read-only (read-only mode suppresses every write affordance).
-/// - In read-only mode, prepend a `[read-only]` tag so the state is visible.
-/// - When a form is loaded, append the current DN, with a trailing ` *` dirty
-///   marker when the form has unsaved edits.
-/// - A non-empty transient `app.status` (e.g. "Saved." / "Created.") takes the
-///   place of the key hints (it is the more useful thing to surface), but the DN
-///   and dirty marker are still appended.
+/// Shows STATE plus the focused pane's hotkeys, ordered so the fixed-width
+/// affordances survive a no-wrap clip and the variable-length DN clips last:
+/// - a `[read-only]` tag in read-only mode;
+/// - the transient `app.status` (e.g. "Saved." / "Created.") when present;
+/// - the focused pane's key hints (they live here, not in the pane borders,
+///   because the narrow panes clip them — see [`pane_hints`]);
+/// - `Alt+X Quit` so the global quit is discoverable anywhere;
+/// - LAST, the current DN with a trailing ` *` dirty marker when a form is
+///   loaded — placed last because a deep DN would otherwise push the hints and
+///   quit off the right edge; the DN is also shown in the form pane title.
 pub fn status_line(app: &App) -> String {
-    let mut head = if app.status.is_empty() {
-        let mut hints = String::from("Alt+X Quit");
-        if !app.read_only {
-            hints.push_str("  F2 Save  F3 Cancel");
-        }
-        hints
-    } else {
-        app.status.clone()
-    };
-    if app.read_only {
-        head = format!("[read-only]  {head}");
-    }
-    if let Some(form) = app.form.as_ref() {
-        head.push_str("  │  ");
-        head.push_str(&form.dn);
-        if form.is_dirty() {
-            head.push_str(" *");
-        }
-    }
-    head
-}
-
-/// The top menu-bar text for `app`: each menu entry's label with its trigger key
-/// shown, derived from `app.menu_defs`. Profile-create entries get `[Alt+N]`,
-/// Delete gets `[F8]`, Refresh gets `[F5]`, Quit gets `[Alt+X]` — matching the
-/// keys actually wired in `dispatch_key`. Pure (no ratatui types).
-pub fn menu_bar(app: &App) -> String {
-    use crate::app::{CM_DELETE, CM_PROFILE_BASE, CM_QUIT, CM_REFRESH};
     let mut parts: Vec<String> = Vec::new();
-    let mut profile_n = 0u16;
-    for def in &app.menu_defs {
-        let key = if def.command == CM_DELETE {
-            "F8".to_string()
-        } else if def.command == CM_REFRESH {
-            "F5".to_string()
-        } else if def.command == CM_QUIT {
-            "Alt+X".to_string()
-        } else if def.command >= CM_PROFILE_BASE {
-            profile_n += 1;
-            format!("Alt+{profile_n}")
-        } else {
-            continue;
-        };
-        parts.push(format!("[{key}] {}", def.label));
+    if app.read_only {
+        parts.push("[read-only]".to_string());
     }
-    parts.join("  ")
+    if !app.status.is_empty() {
+        parts.push(app.status.clone());
+    }
+    parts.push(pane_hints(app.focus, app.read_only).to_string());
+    parts.push("Alt+X Quit".to_string());
+    if let Some(form) = app.form.as_ref() {
+        let dirty = if form.is_dirty() { " *" } else { "" };
+        parts.push(format!("{}{dirty}", form.dn));
+    }
+    parts.join("   ·   ")
 }
 
-/// Render the whole frame from `app`: a 1-row menu bar on top, the 3-column pane
-/// area in the middle, and a 1-row status line at the bottom. Overlays still
-/// render over the WHOLE frame (`render_overlay` uses `f.area()`).
+/// The focused pane's hotkey hints, shown in the (full-width) status line.
+/// Read-only mode drops the write keys. Pure. The narrow Tree/Leaf panes can't
+/// hold these in their bottom border without clipping mid-word, so the hints
+/// live in the status line and follow focus.
+fn pane_hints(pane: Pane, read_only: bool) -> &'static str {
+    match (pane, read_only) {
+        (Pane::Tree, _) => "↑↓ Move · ←→ Fold · F5 Refresh",
+        (Pane::Leaf, false) => "↑↓ Select · Type to search · F7 New · F8 Del",
+        (Pane::Leaf, true) => "↑↓ Select · Type to search",
+        (Pane::Form, false) => "↑↓ Field · ↵ Edit · F2 Save · F3 Cancel",
+        (Pane::Form, true) => "↑↓ Field",
+    }
+}
+
+/// Render the whole frame from `app`: the 3-column pane area, then a 1-row status
+/// line at the bottom. Overlays render over the WHOLE frame (`f.area()`).
 pub fn ui(f: &mut Frame, app: &mut App) {
     let chunks = Layout::vertical([
-        Constraint::Length(1), // menu bar
         Constraint::Min(0),    // pane area
         Constraint::Length(1), // status line
     ])
     .split(f.area());
 
-    render_menu_bar(f, app, chunks[0]);
-
-    let cols = Layout::horizontal(COLUMNS).split(chunks[1]);
+    let cols = Layout::horizontal(COLUMNS).split(chunks[0]);
     render_tree(f, app, cols[0]);
     render_leaf(f, app, cols[1]);
     render_form(f, app, cols[2]);
 
-    render_status_line(f, app, chunks[2]);
+    render_status_line(f, app, chunks[1]);
 
     if app.overlay.is_some() {
         render_overlay(f, app);
     }
 }
 
-/// Render the top menu bar (the profile/Delete/Refresh/Quit labels with their
-/// trigger keys) onto `area`.
-fn render_menu_bar(f: &mut Frame, app: &App, area: Rect) {
-    f.render_widget(
-        Paragraph::new(menu_bar(app)).style(
-            Style::default()
-                .bg(Color::Blue)
-                .fg(Color::White)
-                .add_modifier(Modifier::BOLD),
-        ),
-        area,
-    );
-}
-
-/// Render the bottom status line (key hints / transient status + DN + dirty
-/// marker) onto `area`.
+/// Render the bottom status line (state: read-only / status / DN / dirty / quit).
 fn render_status_line(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(
-        Paragraph::new(status_line(app)).style(Style::default().bg(Color::Blue).fg(Color::White)),
+        Paragraph::new(status_line(app)).style(Style::default().add_modifier(Modifier::DIM)),
         area,
     );
 }
 
-/// A bordered pane block. The focused pane gets a solid light background and a
-/// bold yellow border so the active pane is obvious even on a mono terminal;
-/// inactive panes are dim. (Spike `pane_block`.)
+/// A bordered pane block on the terminal's default background. The focused pane
+/// gets a bold **double** border; inactive panes get a dim single border. Key
+/// hints live in the status line (see [`pane_hints`]), not the bottom border.
 pub fn pane_block(title: &str, focused: bool) -> Block<'static> {
     let b = Block::default()
         .borders(Borders::ALL)
         .title(format!(" {title} "));
     if focused {
-        b.style(Style::default().bg(Color::White).fg(Color::Black))
-            .border_style(
-                Style::default()
-                    .fg(Color::Yellow)
-                    .add_modifier(Modifier::BOLD),
-            )
+        b.border_type(BorderType::Double).border_style(
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )
     } else {
-        b.style(Style::default().bg(Color::Black).fg(Color::Gray))
+        b.border_type(BorderType::Plain)
             .border_style(Style::default().fg(Color::DarkGray))
     }
 }
@@ -289,13 +254,15 @@ fn render_form(f: &mut Frame, app: &mut App, area: Rect) {
     }
 }
 
-/// The base text style for a pane, by focus (solid light when active, dim when
-/// not). Shared by the leaf and form panes so their backgrounds match the block.
+/// The base text style for a pane's content: the terminal default. Focus is shown
+/// by the pane border (double vs single), not by a background fill, so both the
+/// active and inactive panes share the default background. Inactive content is
+/// dimmed so the active pane reads as primary.
 fn pane_style(focused: bool) -> Style {
     if focused {
-        Style::default().bg(Color::White).fg(Color::Black)
+        Style::default()
     } else {
-        Style::default().bg(Color::Black).fg(Color::Gray)
+        Style::default().add_modifier(Modifier::DIM)
     }
 }
 
@@ -376,18 +343,13 @@ fn render_overlay(f: &mut Frame, app: &App) {
     f.render_widget(Clear, rect);
     let block = Block::default()
         .borders(Borders::ALL)
+        .border_type(BorderType::Double)
         .title(format!(" {title} "))
         .title_bottom(hint)
-        .style(Style::default().bg(Color::Rgb(30, 30, 40)).fg(Color::White))
         .border_style(Style::default().fg(border).add_modifier(Modifier::BOLD));
     let inner = block.inner(rect);
     f.render_widget(block, rect);
-    f.render_widget(
-        Paragraph::new(body)
-            .wrap(Wrap { trim: false })
-            .style(Style::default().bg(Color::Rgb(30, 30, 40)).fg(Color::White)),
-        inner,
-    );
+    f.render_widget(Paragraph::new(body).wrap(Wrap { trim: false }), inner);
 }
 
 /// Draw the multi-value popup editor: one inline row per value with a selection
@@ -469,15 +431,14 @@ fn render_value_editor(f: &mut Frame, ve: &ValueEditor, area: Rect) {
     } else {
         "set — reorder cosmetic"
     };
-    let bg = Color::Rgb(30, 30, 40);
     let block = Block::default()
         .borders(Borders::ALL)
+        .border_type(BorderType::Double)
         .title(format!(" Edit {} ({kind}) ", ve.label))
         .title_bottom(" Alt+↑↓ move  Alt+a add  Alt+d del  F2 save  Esc cancel ")
-        .style(Style::default().bg(bg).fg(Color::White))
         .border_style(
             Style::default()
-                .fg(Color::Yellow)
+                .fg(Color::Cyan)
                 .add_modifier(Modifier::BOLD),
         );
     let inner = block.inner(rect);
@@ -491,8 +452,8 @@ fn render_value_editor(f: &mut Frame, ve: &ValueEditor, area: Rect) {
         let selected = i == ve.sel;
         let marker = format!("{:>2} {} ", i + 1, if selected { "▶" } else { " " });
         f.render_widget(
-            Paragraph::new(marker).style(Style::default().bg(bg).fg(if selected {
-                Color::Yellow
+            Paragraph::new(marker).style(Style::default().fg(if selected {
+                Color::Blue
             } else {
                 Color::DarkGray
             })),
@@ -506,9 +467,9 @@ fn render_value_editor(f: &mut Frame, ve: &ValueEditor, area: Rect) {
             row.value().to_string()
         };
         let rstyle = if selected {
-            Style::default().bg(Color::Rgb(60, 60, 80)).fg(Color::White)
+            Style::default().bg(Color::Blue).fg(Color::White)
         } else {
-            Style::default().bg(bg).fg(Color::Gray)
+            Style::default()
         };
         f.render_widget(Paragraph::new(display).style(rstyle), vr);
         if selected {
@@ -529,12 +490,11 @@ fn render_create_form(f: &mut Frame, form: &EditForm, focus: usize, area: Rect) 
     let rect = centered(w, h, area);
     f.render_widget(Clear, rect);
 
-    let bg = Color::Rgb(30, 30, 40);
     let block = Block::default()
         .borders(Borders::ALL)
+        .border_type(BorderType::Double)
         .title(format!(" {} ", form.dn))
         .title_bottom(" ↑↓ field   F2 create   Esc cancel ")
-        .style(Style::default().bg(bg).fg(Color::White))
         .border_style(
             Style::default()
                 .fg(Color::Green)
@@ -559,11 +519,10 @@ fn render_create_form(f: &mut Frame, form: &EditForm, focus: usize, area: Rect) 
 
         let label_style = if is_focused {
             Style::default()
-                .bg(bg)
-                .fg(Color::Yellow)
+                .fg(Color::Blue)
                 .add_modifier(Modifier::BOLD)
         } else {
-            Style::default().bg(bg).fg(Color::Gray)
+            Style::default()
         };
         let star = if fld.must { "*" } else { " " };
         f.render_widget(
@@ -572,11 +531,7 @@ fn render_create_form(f: &mut Frame, form: &EditForm, focus: usize, area: Rect) 
         );
 
         let val_rect = Rect::new(inner.x + label_w, y, inner.width.saturating_sub(label_w), 1);
-        f.render_widget(
-            Paragraph::new(field_display_value(fld))
-                .style(Style::default().bg(bg).fg(Color::White)),
-            val_rect,
-        );
+        f.render_widget(Paragraph::new(field_display_value(fld)), val_rect);
         if is_focused && fld.editable && !fld.multi {
             let col = (fld.editor.position() as u16).min(val_rect.width.saturating_sub(1));
             f.set_cursor_position((val_rect.x + col, y));
@@ -610,9 +565,7 @@ pub fn clamp_scroll(focus: usize, scroll: usize, viewport: usize, n: usize) -> u
 
 #[cfg(test)]
 mod tests {
-    use super::{centered, clamp_scroll, field_display_value, menu_bar, render_form, status_line};
-    use crate::app::{build_menu_defs, MenuDef, CM_PROFILE_BASE};
-    use crate::config::EntryProfile;
+    use super::{centered, clamp_scroll, field_display_value, render_form, status_line};
     use crate::schema::FieldKind;
     use crate::ui::app::{App, Pane};
     use crate::ui::edit_form::{EditField, EditForm};
@@ -699,7 +652,6 @@ mod tests {
             form_scroll: 0,
             overlay: None,
             status: String::new(),
-            menu_defs: vec![],
             relations: vec![],
             picker_search_id: None,
             picker_last_query: String::new(),
@@ -834,7 +786,6 @@ mod tests {
             form_scroll: 0,
             overlay: None,
             status: status.to_string(),
-            menu_defs: vec![],
             relations: vec![],
             picker_search_id: None,
             picker_last_query: String::new(),
@@ -869,37 +820,41 @@ mod tests {
     }
 
     #[test]
-    fn status_line_writable_shows_save_cancel_hints() {
+    fn status_line_shows_quit_and_focused_pane_hints() {
+        // Key hints live in the status line and follow focus. The helper focuses
+        // the Tree pane, so its hints (F5 Refresh) show — not the Form's.
         let s = status_line(&status_app(false, ""));
         assert!(s.contains("Alt+X Quit"));
-        assert!(s.contains("F2 Save"));
-        assert!(s.contains("F3 Cancel"));
+        assert!(s.contains("F5 Refresh"));
+        assert!(!s.contains("F2 Save"));
         assert!(!s.contains("[read-only]"));
     }
 
     #[test]
-    fn status_line_read_only_tags_and_suppresses_save_cancel() {
+    fn status_line_hints_follow_focus() {
+        let mut app = with_cn_form(status_app(false, ""), "cn=Alice,dc=example,dc=org", false);
+        app.focus = Pane::Form;
+        let s = status_line(&app);
+        assert!(s.contains("F2 Save"));
+        assert!(!s.contains("F5 Refresh"));
+    }
+
+    #[test]
+    fn status_line_tags_read_only() {
         let s = status_line(&status_app(true, ""));
         assert!(s.contains("[read-only]"));
         assert!(s.contains("Alt+X Quit"));
-        assert!(!s.contains("F2 Save"));
-        assert!(!s.contains("F3 Cancel"));
     }
 
     #[test]
-    fn status_line_appends_dn_without_dirty_marker() {
-        let app = with_cn_form(status_app(false, ""), "cn=Alice,dc=example,dc=org", false);
-        let s = status_line(&app);
+    fn status_line_shows_dn_and_dirty_marker() {
+        let clean = with_cn_form(status_app(false, ""), "cn=Alice,dc=example,dc=org", false);
+        let s = status_line(&clean);
         assert!(s.contains("cn=Alice,dc=example,dc=org"));
-        assert!(!s.trim_end().ends_with('*'));
-    }
+        assert!(!s.contains("cn=Alice,dc=example,dc=org *"));
 
-    #[test]
-    fn status_line_appends_dirty_marker_when_form_edited() {
-        let app = with_cn_form(status_app(false, ""), "cn=Alice,dc=example,dc=org", true);
-        let s = status_line(&app);
-        assert!(s.contains("cn=Alice,dc=example,dc=org"));
-        assert!(s.trim_end().ends_with('*'));
+        let dirty = with_cn_form(status_app(false, ""), "cn=Alice,dc=example,dc=org", true);
+        assert!(status_line(&dirty).contains("cn=Alice,dc=example,dc=org *"));
     }
 
     #[test]
@@ -911,65 +866,20 @@ mod tests {
         );
         let s = status_line(&app);
         assert!(s.contains("Saved."));
-        // The transient status replaces the key hints.
-        assert!(!s.contains("F2 Save"));
-        // …but the DN is still appended.
         assert!(s.contains("cn=Bob,dc=example,dc=org"));
     }
 
     #[test]
-    fn menu_bar_shows_labels_with_trigger_keys() {
-        let profiles = vec![
-            EntryProfile {
-                name: "Users".to_string(),
-                object_class: "inetOrgPerson".to_string(),
-                ..Default::default()
-            },
-            EntryProfile {
-                name: "Groups".to_string(),
-                object_class: "groupOfNames".to_string(),
-                ..Default::default()
-            },
-        ];
-        let mut app = status_app(false, "");
-        app.menu_defs = build_menu_defs(&profiles);
-        let bar = menu_bar(&app);
-        // Profiles get Alt+1 / Alt+2 in config order; Delete/Refresh/Quit keep
-        // their wired keys.
-        assert!(bar.contains("[Alt+1] Users"));
-        assert!(bar.contains("[Alt+2] Groups"));
-        assert!(bar.contains("[F8] Delete"));
-        assert!(bar.contains("[F5] Refresh"));
-        assert!(bar.contains("[Alt+X] Quit"));
-    }
-
-    #[test]
-    fn menu_bar_handles_no_profiles() {
-        let mut app = status_app(false, "");
-        // No profiles: build_menu_defs(&[]) still yields Delete/Refresh/Quit.
-        app.menu_defs = build_menu_defs(&[]);
-        let bar = menu_bar(&app);
-        assert!(!bar.contains("Alt+1"));
-        assert!(bar.contains("[F8] Delete"));
-        assert!(bar.contains("[Alt+X] Quit"));
-    }
-
-    #[test]
-    fn menu_bar_unknown_command_is_skipped() {
-        // A stray command id (not a known CM_*) is silently dropped.
-        let mut app = status_app(false, "");
-        app.menu_defs = vec![
-            MenuDef {
-                label: "Mystery".to_string(),
-                command: 42,
-            },
-            MenuDef {
-                label: "Users".to_string(),
-                command: CM_PROFILE_BASE,
-            },
-        ];
-        let bar = menu_bar(&app);
-        assert!(!bar.contains("Mystery"));
-        assert!(bar.contains("[Alt+1] Users"));
+    fn pane_hints_drop_write_keys_in_read_only() {
+        use super::pane_hints;
+        // The Entries pane surfaces create/delete; read-only hides them.
+        assert!(pane_hints(Pane::Leaf, false).contains("F7 New"));
+        assert!(pane_hints(Pane::Leaf, false).contains("F8 Del"));
+        assert!(!pane_hints(Pane::Leaf, true).contains("F7 New"));
+        // The Form pane surfaces Save/Cancel; read-only hides them.
+        assert!(pane_hints(Pane::Form, false).contains("F2 Save"));
+        assert!(!pane_hints(Pane::Form, true).contains("F2 Save"));
+        // Refresh is allowed in read-only.
+        assert!(pane_hints(Pane::Tree, true).contains("F5 Refresh"));
     }
 }

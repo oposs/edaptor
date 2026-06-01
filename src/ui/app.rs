@@ -19,7 +19,7 @@ use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifier
 use tui_prompts::{State, TextState};
 use tui_tree_widget::{TreeItem, TreeState};
 
-use crate::app::{build_menu_defs, menu_action, MenuDef, UiAction, CM_PROFILE_BASE};
+use crate::app::UiAction;
 use crate::config::relation::{backref_lookup, resolve_relations, ResolvedRelation};
 use crate::config::{Config, EntryProfile};
 use crate::form::changeset::{diff, ChangeSet, EditEntry, ModOp};
@@ -66,11 +66,12 @@ pub enum Overlay {
     },
     /// The multi-value popup editor (Enter on a multi field).
     ValueEditor(ValueEditor),
-    /// The Save/Discard/Stay guard shown when navigating away from a dirty form.
-    /// Carries the pending navigation target to resume once the user chooses.
+    /// The Save/Discard/Stay guard shown when leaving a dirty form — by changing
+    /// the selection, moving focus off the form pane, or quitting. Carries the
+    /// pending [`GuardIntent`] to resume once the user chooses.
     Guard {
-        /// The leaf DN the user moved to (`None` = empty list); resumed on Proceed.
-        nav: Option<String>,
+        /// What to do once the guard is resolved.
+        intent: GuardIntent,
     },
     /// The create-entry form: an editable form hosted in an overlay, reusing the
     /// same [`EditForm`] widget as pane 3 (one editable-form impl, two hosts).
@@ -84,6 +85,18 @@ pub enum Overlay {
         /// The container DN the entry will be added under.
         container: String,
     },
+}
+
+/// What a dirty-form [`Overlay::Guard`] should resume once the user resolves it.
+#[derive(Clone)]
+pub enum GuardIntent {
+    /// Navigate the form to a leaf DN (`None` clears it) — the selection-change
+    /// guard fired from `reconcile`.
+    Nav(Option<String>),
+    /// Move focus to another pane — the Tab/Shift-Tab-off-the-form guard.
+    Focus(Pane),
+    /// Quit the application — the Alt+X / quit-while-dirty guard.
+    Quit,
 }
 
 /// What a confirmed [`Overlay::Confirm`] (or resolved [`Overlay::Guard`]) should
@@ -113,15 +126,13 @@ pub enum PendingAction {
         /// The DN to delete.
         dn: String,
     },
-    /// Guard outcome (Discard / Proceed): just navigate to `target`.
-    Navigate {
-        /// The entry to navigate to (`None` clears the form).
-        target: Option<String>,
-    },
-    /// Guard outcome (Save): run the save flow, then navigate to `target`.
-    SaveThenNavigate {
-        /// The entry to navigate to once the save completes.
-        target: Option<String>,
+    /// A resolved dirty-form guard: perform `intent`, running the save flow first
+    /// when `save` is true (Save) or proceeding directly when false (Discard).
+    ResolveGuard {
+        /// What to do (navigate / change focus / quit).
+        intent: GuardIntent,
+        /// Whether to save the dirty form before performing the intent.
+        save: bool,
     },
     /// A combined membership save: own-entry MODIFY + per-holder fan-out MODIFYs,
     /// applied synchronously (spec §6.3). `entry_dn` is the edited candidate entry.
@@ -132,6 +143,10 @@ pub enum PendingAction {
         own_mods: Vec<ModOp>,
         /// Per-holder fan-out: (group_dn, Add/Delete op for holder_attr).
         fanout: Vec<(String, ModOp)>,
+        /// A dirty-form guard intent to perform after a successful save (set when
+        /// the combined save is reached via a Save-then-resume guard); `None` for
+        /// a plain F2 save.
+        then_intent: Option<GuardIntent>,
     },
 }
 
@@ -144,6 +159,8 @@ enum PostWrite {
         reread_dn: String,
         /// A deferred navigation target (the entry the user moved to while dirty).
         nav: Option<String>,
+        /// Quit once the write succeeds (a quit-while-dirty guard's Save).
+        then_quit: bool,
     },
     /// A create: splice the new entry into the eager [`Structure`] under `parent`.
     Created {
@@ -201,28 +218,12 @@ pub struct App {
     pub overlay: Option<Overlay>,
     /// Transient status / error text.
     pub status: String,
-    /// The menu entries (profile creates + Delete/Refresh/Quit), built once in
-    /// [`run`] from the config profiles. Drives the top menu bar (rendered in
-    /// [`view::ui`]) and the Alt+digit create keys (mapped via [`menu_action`]).
-    pub menu_defs: Vec<MenuDef>,
     /// Resolved membership relations (built once from config).
     pub relations: Vec<ResolvedRelation>,
     /// Correlation id of the latest in-flight picker search (stale ids ignored).
     pub picker_search_id: Option<u64>,
     /// The picker search term last submitted (delta detection in the loop).
     pub picker_last_query: String,
-}
-
-impl App {
-    /// The number of configured create-profiles, derived from `menu_defs` (every
-    /// entry whose command is at or above [`CM_PROFILE_BASE`]). Used to bound the
-    /// Alt+digit create keys via [`menu_action`].
-    pub fn profile_count(&self) -> usize {
-        self.menu_defs
-            .iter()
-            .filter(|d| d.command >= CM_PROFILE_BASE)
-            .count()
-    }
 }
 
 /// Spawn the worker, fetch the schema + eager structure, then run the TUI.
@@ -286,7 +287,6 @@ pub fn run(config: Config, password: String) -> Result<()> {
         form_scroll: 0,
         overlay: None,
         status: String::new(),
-        menu_defs: build_menu_defs(&profiles),
         relations,
         picker_search_id: None,
         picker_last_query: String::new(),
@@ -428,8 +428,18 @@ fn handle_worker_response(
                 return;
             }
             match post.remove(id) {
-                Some(PostWrite::Save { reread_dn, nav }) => {
+                Some(PostWrite::Save {
+                    reread_dn,
+                    nav,
+                    then_quit,
+                }) => {
                     app.status = "Saved.".to_string();
+                    // A quit-while-dirty guard's Save defers the quit until the
+                    // write lands, so the write is never lost.
+                    if then_quit {
+                        app.should_quit = true;
+                        return;
+                    }
                     // A guard's Save defers navigation to the moved-to entry; an
                     // ordinary save just re-reads the entry that was saved.
                     // NOTE: do NOT recompute rows from `structure` here — it is not
@@ -528,59 +538,49 @@ fn dispatch_key(app: &mut App, key: KeyEvent, structure: &Structure) -> Option<U
     let alt = key.modifiers.contains(KeyModifiers::ALT);
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
 
-    // Global quit + focus cycle. Bare `q` quits only from the tree pane, where
-    // there is no text entry to swallow it; the search/edit panes need the key.
+    // Global quit. Quitting while the form has unsaved edits opens the guard
+    // first (the user picks Save / Discard / Stay) rather than dropping them.
     if (alt && matches!(key.code, KeyCode::Char('x') | KeyCode::Char('X')))
         || (ctrl && matches!(key.code, KeyCode::Char('c') | KeyCode::Char('C')))
     {
-        app.should_quit = true;
+        if !guard_if_dirty(app, GuardIntent::Quit) {
+            app.should_quit = true;
+        }
         return None;
     }
-    if matches!(key.code, KeyCode::F(6) | KeyCode::Tab) {
-        app.focus = next_pane(app.focus);
+    // Focus cycle: F6 / Tab forward, Shift-Tab (BackTab) backward. Moving focus
+    // OFF a dirty form opens the guard, carrying the destination pane.
+    if matches!(key.code, KeyCode::F(6) | KeyCode::Tab | KeyCode::BackTab) {
+        let dest = if key.code == KeyCode::BackTab {
+            prev_pane(app.focus)
+        } else {
+            next_pane(app.focus)
+        };
+        if app.focus == Pane::Form && guard_if_dirty(app, GuardIntent::Focus(dest)) {
+            return None;
+        }
+        app.focus = dest;
         return None;
     }
     // Refresh is allowed even in read-only mode (it only re-reads).
     if matches!(key.code, KeyCode::F(5)) {
         return Some(UiAction::Refresh);
     }
-    // Save / Cancel / Create / Delete (writable mode only). Read-only mode
-    // suppresses every write affordance (P4-T4). A menu bar surfaces the same
-    // actions for discoverability + multi-profile create in P5-T2.
-    //
-    // P5-T2 menu key scheme (every menu entry reachable, all via `menu_action`):
-    //   Alt+1 .. Alt+9 → create for profile (n-1): menu_action(CM_PROFILE_BASE+n-1).
-    //                    Alt-digit is used (not bare digits) so it never collides
-    //                    with the search box or inline form editing. Out-of-range
-    //                    digits map to UiAction::None (inert).
-    //   F7             → create for the first profile (legacy convenience).
-    //   F8 / [Del]     → delete the form's entry: menu_action(CM_DELETE, …).
-    //   F5             → Refresh (wired above; allowed in read-only too).
-    //   Alt+X          → Quit (wired above).
-    // All create/delete keys live inside this read-only gate, so read-only mode
-    // makes the menu's create/delete entries inert.
-    if !app.read_only {
-        // Alt+digit → create for the matching profile, routed through menu_action
-        // (the single mapping authority; gives the out-of-range → None guard).
-        if alt {
-            if let KeyCode::Char(c @ '1'..='9') = key.code {
-                let n = c.to_digit(10).unwrap() as u16; // 1..=9
-                let selected_dn = app.form.as_ref().map(|f| f.dn.as_str());
-                return match menu_action(
-                    CM_PROFILE_BASE + (n - 1),
-                    app.profile_count(),
-                    selected_dn,
-                ) {
-                    UiAction::None => None,
-                    action => Some(action),
-                };
-            }
+    // Bare `q` quits, but ONLY from the Tree pane — the search box and form need
+    // the key for text entry. Guarded when the form has unsaved edits.
+    if app.focus == Pane::Tree && key.code == KeyCode::Char('q') {
+        if !guard_if_dirty(app, GuardIntent::Quit) {
+            app.should_quit = true;
         }
+        return None;
+    }
+    // Save / Cancel / Create / Delete (writable mode only). Read-only mode
+    // suppresses every write affordance (P4-T4). These keys are surfaced in the
+    // status-line hints (view::pane_hints); F7 creates under the first profile.
+    if !app.read_only {
         match key.code {
             KeyCode::F(2) => return Some(UiAction::FormSave),
             KeyCode::F(3) => return Some(UiAction::FormCancel),
-            // F7 creates an entry for the first profile; the menu bar / Alt+digit
-            // reach the other profiles via `menu_action`.
             KeyCode::F(7) => return Some(UiAction::NewEntry(0)),
             // F8 deletes the entry currently shown in the form pane (spec §12).
             KeyCode::F(8) => {
@@ -611,7 +611,6 @@ fn dispatch_key(app: &mut App, key: KeyEvent, structure: &Structure) -> Option<U
             KeyCode::Enter | KeyCode::Char(' ') => {
                 app.tree_state.toggle_selected();
             }
-            KeyCode::Char('q') => app.should_quit = true,
             _ => {}
         },
         Pane::Leaf => match key.code {
@@ -871,8 +870,10 @@ fn handle_action(
                 return;
             };
             // Try the combined membership path first; fall back to the single-entry
-            // path when no backref field actually changed.
-            if let Some(ov) = combined_save_overlay(form, read_flow.schema(), &app.relations) {
+            // path when no backref field actually changed. No guard intent here —
+            // a plain F2 save has nothing to resume afterward.
+            if let Some(ov) = combined_save_overlay(form, read_flow.schema(), &app.relations, None)
+            {
                 app.overlay = Some(ov);
                 return;
             }
@@ -1056,8 +1057,8 @@ fn overlay_key(
 }
 
 /// Resolve the Save/Discard/Stay guard. Maps the key to a [`GuardChoice`], runs
-/// the pure [`guard_decision`], and turns the outcome into a navigation action
-/// (or, for Stay, advances `last_seen_leaf` so the guard does not re-fire).
+/// the pure [`guard_decision`], and turns the outcome into a [`PendingAction`]
+/// that performs the pending [`GuardIntent`] (or, for Stay, keeps editing).
 fn guard_key(app: &mut App, key: KeyEvent) -> Option<PendingAction> {
     let choice = match key.code {
         KeyCode::Char('s') | KeyCode::Char('S') | KeyCode::F(2) => GuardChoice::Save,
@@ -1065,21 +1066,27 @@ fn guard_key(app: &mut App, key: KeyEvent) -> Option<PendingAction> {
         KeyCode::Char('c') | KeyCode::Char('C') | KeyCode::Esc | KeyCode::F(3) => GuardChoice::Stay,
         _ => return None, // ignore unrelated keys; the guard stays open
     };
-    let nav = match &app.overlay {
-        Some(Overlay::Guard { nav }) => nav.clone(),
-        _ => None,
+    let intent = match &app.overlay {
+        Some(Overlay::Guard { intent }) => intent.clone(),
+        _ => return None,
     };
     app.overlay = None;
     match guard_decision(true, Some(choice)) {
         GuardOutcome::Cancel => {
-            // Stay: keep editing. Advance last_seen to the moved-to entry so the
-            // guard does not re-fire every tick (the highlight now differs from
-            // the form — a known wrinkle carried over from the TV loop).
-            app.last_seen_leaf = nav;
+            // Stay: keep editing. For a selection-change guard, advance last_seen
+            // to the moved-to entry so it does not re-fire every tick (the
+            // highlight now differs from the form — a known wrinkle). For a
+            // focus/quit guard there is nothing to advance.
+            if let GuardIntent::Nav(target) = intent {
+                app.last_seen_leaf = target;
+            }
             None
         }
-        GuardOutcome::Proceed => Some(PendingAction::Navigate { target: nav }),
-        GuardOutcome::SaveThenProceed => Some(PendingAction::SaveThenNavigate { target: nav }),
+        GuardOutcome::Proceed => Some(PendingAction::ResolveGuard {
+            intent,
+            save: false,
+        }),
+        GuardOutcome::SaveThenProceed => Some(PendingAction::ResolveGuard { intent, save: true }),
     }
 }
 
@@ -1201,7 +1208,7 @@ fn execute_pending(
 ) {
     match action {
         PendingAction::Save { plan, dn, nav } => {
-            submit_prepared(plan, &dn, nav, worker, post, pending_followups);
+            submit_prepared(plan, &dn, nav, false, worker, post, pending_followups);
             app.status = "Saving…".to_string();
         }
         PendingAction::Create { dn, attrs, parent } => {
@@ -1217,15 +1224,29 @@ fn execute_pending(
             post.insert(id, PostWrite::Deleted { dn });
             app.status = "Deleting…".to_string();
         }
-        PendingAction::Navigate { target } => navigate_to(app, worker, read_flow, target),
-        PendingAction::SaveThenNavigate { target } => {
-            // Guard outcome: run the save flow, then navigate to `target`.
-            // If this form has a membership change, show a combined-save Confirm
-            // (navigation waits; v1 does not combine save+navigate for membership).
+        PendingAction::ResolveGuard {
+            intent,
+            save: false,
+        } => {
+            // Discard: drop the edits and perform the intent now.
+            perform_guard_intent(app, worker, read_flow, intent);
+        }
+        PendingAction::ResolveGuard { intent, save: true } => {
+            // Save, then perform the intent. Navigation defers to the write's
+            // WriteOk (the re-read must target the post-save DN); a focus change
+            // applies immediately; a quit defers to the WriteOk so it isn't lost.
             let Some(form) = app.form.as_ref() else {
+                perform_guard_intent(app, worker, read_flow, intent);
                 return;
             };
-            if let Some(ov) = combined_save_overlay(form, read_flow.schema(), &app.relations) {
+            // A membership-bearing save runs synchronously through CombinedSave;
+            // the pending guard intent rides along and is performed on success.
+            if let Some(ov) = combined_save_overlay(
+                form,
+                read_flow.schema(),
+                &app.relations,
+                Some(intent.clone()),
+            ) {
                 app.overlay = Some(ov);
                 return;
             }
@@ -1242,14 +1263,41 @@ fn execute_pending(
             let object_classes = object_classes_of(form);
             match prepare_save(read_flow.schema(), &original, &edited, &object_classes) {
                 PrepareSave::Ready { plan, dn, .. } => {
-                    // Advance the awaited DN ONLY now that we are committing — so a
-                    // validation failure below does not silence the dirty guard.
-                    app.last_seen_leaf = target.clone();
-                    submit_prepared(plan, &dn, target, worker, post, pending_followups);
                     app.status = "Saving…".to_string();
+                    match intent {
+                        GuardIntent::Nav(target) => {
+                            // Advance the awaited DN ONLY now that we commit, so a
+                            // later failure cannot silence the dirty guard.
+                            app.last_seen_leaf = target.clone();
+                            submit_prepared(
+                                plan,
+                                &dn,
+                                target,
+                                false,
+                                worker,
+                                post,
+                                pending_followups,
+                            );
+                        }
+                        GuardIntent::Focus(pane) => {
+                            submit_prepared(
+                                plan,
+                                &dn,
+                                None,
+                                false,
+                                worker,
+                                post,
+                                pending_followups,
+                            );
+                            app.focus = pane;
+                        }
+                        GuardIntent::Quit => {
+                            submit_prepared(plan, &dn, None, true, worker, post, pending_followups);
+                        }
+                    }
                 }
-                // Nothing to save after all → just navigate (sets last_seen_leaf).
-                PrepareSave::NoChanges => navigate_to(app, worker, read_flow, target),
+                // Nothing to save after all → just perform the intent.
+                PrepareSave::NoChanges => perform_guard_intent(app, worker, read_flow, intent),
                 PrepareSave::Invalid(errs) => {
                     app.overlay = Some(Overlay::Error {
                         text: format_validation_errors(&errs),
@@ -1262,9 +1310,37 @@ fn execute_pending(
             entry_dn,
             own_mods,
             fanout,
+            then_intent,
         } => {
-            apply_combined_save(app, worker, read_flow, &entry_dn, own_mods, fanout);
+            apply_combined_save(
+                app,
+                worker,
+                read_flow,
+                &entry_dn,
+                own_mods,
+                fanout,
+                then_intent,
+            );
         }
+    }
+}
+
+/// Perform a guard intent WITHOUT saving (Discard, or a save that turned out to
+/// be a no-op): navigate / change focus (dropping the form's edits) / quit.
+fn perform_guard_intent(
+    app: &mut App,
+    worker: &WorkerHandle,
+    read_flow: &mut ReadFlow,
+    intent: GuardIntent,
+) {
+    match intent {
+        GuardIntent::Nav(target) => navigate_to(app, worker, read_flow, target),
+        GuardIntent::Focus(pane) => {
+            // Drop the edits so the (still-shown) form is clean, then move focus.
+            revert_form(app);
+            app.focus = pane;
+        }
+        GuardIntent::Quit => app.should_quit = true,
     }
 }
 
@@ -1323,7 +1399,9 @@ fn reconcile(
         let dirty = app.form.as_ref().map(|f| f.is_dirty()).unwrap_or(false);
         if dirty {
             // Do NOT advance last_seen yet — the guard remembers the target.
-            app.overlay = Some(Overlay::Guard { nav: sel_dn });
+            app.overlay = Some(Overlay::Guard {
+                intent: GuardIntent::Nav(sel_dn),
+            });
             return;
         }
         app.last_seen_leaf = sel_dn.clone();
@@ -1336,12 +1414,32 @@ fn reconcile(
     }
 }
 
-/// The focus cycle order: Tree → Leaf → Form → Tree.
+/// If the form has unsaved edits, open the Save/Discard/Stay guard carrying
+/// `intent` and return `true` (the caller should stop). Otherwise return `false`.
+fn guard_if_dirty(app: &mut App, intent: GuardIntent) -> bool {
+    if app.form.as_ref().map(|f| f.is_dirty()).unwrap_or(false) {
+        app.overlay = Some(Overlay::Guard { intent });
+        true
+    } else {
+        false
+    }
+}
+
+/// The forward focus cycle: Tree → Leaf → Form → Tree.
 fn next_pane(focus: Pane) -> Pane {
     match focus {
         Pane::Tree => Pane::Leaf,
         Pane::Leaf => Pane::Form,
         Pane::Form => Pane::Tree,
+    }
+}
+
+/// The backward focus cycle (Shift-Tab): Tree → Form → Leaf → Tree.
+fn prev_pane(focus: Pane) -> Pane {
+    match focus {
+        Pane::Tree => Pane::Form,
+        Pane::Form => Pane::Leaf,
+        Pane::Leaf => Pane::Tree,
     }
 }
 
@@ -1414,6 +1512,7 @@ fn submit_prepared(
     plan: SavePlan,
     old_dn: &str,
     nav: Option<String>,
+    then_quit: bool,
     worker: &WorkerHandle,
     post: &mut HashMap<u64, PostWrite>,
     pending_followups: &mut HashMap<u64, (String, Vec<ModOp>, Option<String>)>,
@@ -1432,6 +1531,7 @@ fn submit_prepared(
                 PostWrite::Save {
                     reread_dn: old_dn.to_string(),
                     nav,
+                    then_quit,
                 },
             );
         }
@@ -1450,6 +1550,7 @@ fn submit_prepared(
                 PostWrite::Save {
                     reread_dn: new_dn,
                     nav,
+                    then_quit,
                 },
             );
         }
@@ -1611,6 +1712,7 @@ fn combined_save_overlay(
     form: &EditForm,
     schema: &SchemaModel,
     relations: &[ResolvedRelation],
+    then_intent: Option<GuardIntent>,
 ) -> Option<Overlay> {
     match plan_combined_save(form, schema, relations) {
         CombinedPlan::Ready {
@@ -1625,6 +1727,7 @@ fn combined_save_overlay(
                 entry_dn,
                 own_mods,
                 fanout,
+                then_intent,
             },
         }),
         CombinedPlan::Blocked(msg) => Some(Overlay::Error { text: msg }),
@@ -1674,6 +1777,7 @@ fn apply_combined_save(
     entry_dn: &str,
     own_mods: Vec<ModOp>,
     fanout: Vec<(String, ModOp)>,
+    then_intent: Option<GuardIntent>,
 ) {
     // 1. Pre-validate: for each Delete, Base-read the group's current holder_attr
     //    values; block the whole batch if any removal would empty a group.
@@ -1727,6 +1831,12 @@ fn apply_combined_save(
 
     if failures.is_empty() {
         app.status = "Saved.".to_string();
+        // Resume the pending guard intent (focus change / navigation / quit) only
+        // on a clean save; on partial failure keep the user on the entry with the
+        // error visible.
+        if let Some(intent) = then_intent {
+            perform_guard_intent(app, worker, read_flow, intent);
+        }
     } else {
         app.overlay = Some(Overlay::Error {
             text: format!("Saved with errors:\n- {}", failures.join("\n- ")),
@@ -1957,7 +2067,6 @@ mod tests {
             form_scroll: 0,
             overlay: Some(Overlay::ValueEditor(ve)),
             status: String::new(),
-            menu_defs: vec![],
             relations: vec![],
             picker_search_id: None,
             picker_last_query: String::new(),
@@ -2002,10 +2111,7 @@ mod tests {
     }
 
     /// A bare App (no form) with the given read-only flag, for dispatch tests.
-    /// Seeded with two create-profiles ("Users", "Groups") so the Alt+digit menu
-    /// mapping tests can exercise both the in-range and out-of-range branches.
     fn bare_app(read_only: bool) -> App {
-        use crate::app::{CM_PROFILE_BASE, CM_QUIT};
         App {
             focus: Pane::Tree,
             should_quit: false,
@@ -2023,20 +2129,6 @@ mod tests {
             form_scroll: 0,
             overlay: None,
             status: String::new(),
-            menu_defs: vec![
-                MenuDef {
-                    label: "Users".to_string(),
-                    command: CM_PROFILE_BASE,
-                },
-                MenuDef {
-                    label: "Groups".to_string(),
-                    command: CM_PROFILE_BASE + 1,
-                },
-                MenuDef {
-                    label: "Quit".to_string(),
-                    command: CM_QUIT,
-                },
-            ],
             relations: vec![],
             picker_search_id: None,
             picker_last_query: String::new(),
@@ -2120,61 +2212,104 @@ mod tests {
     }
 
     #[test]
-    fn alt_digit_creates_matching_profile_via_menu_action() {
-        let alt_digit = |c| KeyEvent::new(KeyCode::Char(c), KeyModifiers::ALT);
+    fn focus_cycles_both_directions() {
         let s = empty_structure();
-        // bare_app seeds two profiles (Users, Groups).
-        // Alt+1 → create profile 0; Alt+2 → create profile 1.
-        assert_eq!(
-            dispatch_key(&mut bare_app(false), alt_digit('1'), &s),
-            Some(UiAction::NewEntry(0))
+        assert_eq!(prev_pane(Pane::Tree), Pane::Form);
+        assert_eq!(prev_pane(Pane::Form), Pane::Leaf);
+        assert_eq!(prev_pane(Pane::Leaf), Pane::Tree);
+        // Tab forward and Shift-Tab back are inverses through dispatch_key.
+        let mut app = bare_app(false); // no form → no guard
+        dispatch_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE),
+            &s,
         );
-        assert_eq!(
-            dispatch_key(&mut bare_app(false), alt_digit('2'), &s),
-            Some(UiAction::NewEntry(1))
+        assert_eq!(app.focus, Pane::Leaf);
+        dispatch_key(
+            &mut app,
+            KeyEvent::new(KeyCode::BackTab, KeyModifiers::NONE),
+            &s,
         );
-        // Out-of-range digit (only two profiles) → menu_action returns None → no
-        // action (the key is inert, not a spurious create).
-        assert_eq!(dispatch_key(&mut bare_app(false), alt_digit('3'), &s), None);
-        assert_eq!(dispatch_key(&mut bare_app(false), alt_digit('9'), &s), None);
-        // Read-only mode suppresses the Alt+digit create keys entirely.
-        assert_eq!(dispatch_key(&mut bare_app(true), alt_digit('1'), &s), None);
-        assert_eq!(dispatch_key(&mut bare_app(true), alt_digit('2'), &s), None);
+        assert_eq!(app.focus, Pane::Tree);
+        dispatch_key(
+            &mut app,
+            KeyEvent::new(KeyCode::BackTab, KeyModifiers::NONE),
+            &s,
+        );
+        assert_eq!(app.focus, Pane::Form);
     }
 
     #[test]
-    fn guard_key_maps_choices_to_outcomes() {
-        // Stay (Cancel): no action, last_seen advances to the target so it does
-        // not re-fire.
-        let mut app = bare_app(false);
-        app.overlay = Some(Overlay::Guard {
-            nav: Some("cn=next".to_string()),
-        });
+    fn tab_off_a_dirty_form_opens_the_focus_guard() {
+        // with_form has a value but an empty baseline → it is dirty.
+        let mut app = with_form(bare_app(false), "cn=Alice,dc=example,dc=org");
+        app.focus = Pane::Form;
+        dispatch_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE),
+            &empty_structure(),
+        );
+        // Focus did NOT move; the guard opened carrying the destination pane.
+        assert_eq!(app.focus, Pane::Form);
+        assert!(matches!(
+            app.overlay,
+            Some(Overlay::Guard {
+                intent: GuardIntent::Focus(Pane::Tree)
+            })
+        ));
+    }
+
+    #[test]
+    fn quit_while_dirty_opens_the_guard_else_quits() {
+        let altx = || KeyEvent::new(KeyCode::Char('x'), KeyModifiers::ALT);
+        // Clean (no form) → Alt+X quits immediately.
+        let mut clean = bare_app(false);
+        dispatch_key(&mut clean, altx(), &empty_structure());
+        assert!(clean.should_quit);
+        // Dirty form → Alt+X opens the quit guard, does NOT quit yet.
+        let mut dirty = with_form(bare_app(false), "cn=Alice,dc=example,dc=org");
+        dispatch_key(&mut dirty, altx(), &empty_structure());
+        assert!(!dirty.should_quit);
+        assert!(matches!(
+            dirty.overlay,
+            Some(Overlay::Guard {
+                intent: GuardIntent::Quit
+            })
+        ));
+    }
+
+    #[test]
+    fn guard_key_maps_choices_to_intents() {
         let plain = |c| KeyEvent::new(c, KeyModifiers::NONE);
+        let nav_guard = || Overlay::Guard {
+            intent: GuardIntent::Nav(Some("cn=next".to_string())),
+        };
+
+        // Stay (Cancel): no action; for a Nav intent, last_seen advances to the
+        // target so the guard does not re-fire.
+        let mut app = bare_app(false);
+        app.overlay = Some(nav_guard());
         assert!(guard_key(&mut app, plain(KeyCode::Char('c'))).is_none());
         assert_eq!(app.last_seen_leaf.as_deref(), Some("cn=next"));
         assert!(app.overlay.is_none());
 
-        // Discard → Navigate.
+        // Discard → ResolveGuard { save: false }.
         let mut app = bare_app(false);
-        app.overlay = Some(Overlay::Guard {
-            nav: Some("cn=next".to_string()),
-        });
+        app.overlay = Some(nav_guard());
         assert!(matches!(
             guard_key(&mut app, plain(KeyCode::Char('d'))),
-            Some(PendingAction::Navigate {
-                target: Some(t)
+            Some(PendingAction::ResolveGuard {
+                intent: GuardIntent::Nav(Some(t)),
+                save: false,
             }) if t == "cn=next"
         ));
 
-        // Save → SaveThenNavigate.
+        // Save → ResolveGuard { save: true }.
         let mut app = bare_app(false);
-        app.overlay = Some(Overlay::Guard {
-            nav: Some("cn=next".to_string()),
-        });
+        app.overlay = Some(nav_guard());
         assert!(matches!(
             guard_key(&mut app, plain(KeyCode::Char('s'))),
-            Some(PendingAction::SaveThenNavigate { .. })
+            Some(PendingAction::ResolveGuard { save: true, .. })
         ));
     }
 
