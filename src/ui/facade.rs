@@ -20,7 +20,9 @@ use std::time::Duration;
 use turbo_vision::app::Application;
 use turbo_vision::core::command::{CommandId, CM_CANCEL, CM_OK, CM_QUIT, CM_YES};
 use turbo_vision::core::draw::DrawBuffer;
-use turbo_vision::core::event::{Event, EventType, KB_ALT_X, KB_F10, KB_F6, KB_PGDN, KB_PGUP};
+use turbo_vision::core::event::{
+    Event, EventType, KB_ALT_X, KB_F10, KB_F2, KB_F3, KB_F6, KB_PGDN, KB_PGUP,
+};
 use turbo_vision::core::geometry::Rect;
 use turbo_vision::core::menu_data::MenuBuilder;
 use turbo_vision::core::palette::{palettes, Attr, Palette};
@@ -173,16 +175,20 @@ pub fn build_menu_bar(size_w: i16, defs: &[MenuDef]) -> MenuBar {
     mb
 }
 
-/// Build the bottom status line (spike §1). Not tty-testable.
-pub fn build_status_line(size_w: i16, size_h: i16) -> StatusLine {
-    StatusLine::new(
-        Rect::new(0, size_h - 1, size_w, size_h),
-        vec![
-            StatusItem::new("~Alt+X~ Quit", KB_ALT_X, CM_QUIT),
-            StatusItem::new("~F10~ Menu", KB_F10, 0),
-            StatusItem::new("~F6~ Pane", KB_F6, 0),
-        ],
-    )
+/// Build the bottom status line (spike §1). The F2/F3 Save/Cancel hints are
+/// omitted in `read_only` mode (the form has no Save/Cancel there). Not
+/// tty-testable.
+pub fn build_status_line(size_w: i16, size_h: i16, read_only: bool) -> StatusLine {
+    let mut items = vec![
+        StatusItem::new("~Alt+X~ Quit", KB_ALT_X, CM_QUIT),
+        StatusItem::new("~F6~ Pane", KB_F6, 0),
+    ];
+    if !read_only {
+        items.push(StatusItem::new("~F2~ Save", KB_F2, CM_FORM_SAVE));
+        items.push(StatusItem::new("~F3~ Cancel", KB_F3, CM_FORM_CANCEL));
+    }
+    items.push(StatusItem::new("~F10~ Menu", KB_F10, 0));
+    StatusLine::new(Rect::new(0, size_h - 1, size_w, size_h), items)
 }
 
 /// Shared selection handle: the DN + `loaded` flag of the currently selected tree
@@ -756,6 +762,19 @@ impl View for FormPane {
             event.clear();
             return;
         }
+        // F2 = Save, F3 = Cancel: emit the same command the (possibly scrolled
+        // off-screen) Save/Cancel buttons would, so the form is reliably saveable
+        // from the keyboard regardless of scroll position or which field has focus.
+        if !self.read_only && event.what == EventType::Keyboard {
+            if event.key_code == KB_F2 {
+                *event = Event::command(CM_FORM_SAVE);
+                return;
+            }
+            if event.key_code == KB_F3 {
+                *event = Event::command(CM_FORM_CANCEL);
+                return;
+            }
+        }
         match event.what {
             EventType::MouseWheelDown => {
                 self.apply_scroll(self.scroll + 1);
@@ -1024,11 +1043,11 @@ impl Shell {
     /// Build the application, install the profile-derived menu bar and the
     /// status line. Requires a tty (`Application::new()` puts the terminal into
     /// raw mode). Not tty-testable.
-    pub fn new(defs: &[MenuDef]) -> anyhow::Result<Shell> {
+    pub fn new(defs: &[MenuDef], read_only: bool) -> anyhow::Result<Shell> {
         let mut app = Application::new()?;
         let (w, h) = app.terminal.size();
         app.set_menu_bar(build_menu_bar(w, defs));
-        app.set_status_line(build_status_line(w, h));
+        app.set_status_line(build_status_line(w, h, read_only));
         Ok(Shell {
             app,
             selection: Rc::new(RefCell::new(None)),

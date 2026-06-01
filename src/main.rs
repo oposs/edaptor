@@ -188,7 +188,7 @@ fn run_tui(config: Config, password: String) -> Result<()> {
     let mut last_search = String::new();
     *leaf.rows.borrow_mut() = compute_rows(&structure, &current_branch, &last_search);
 
-    let mut shell = Shell::new(&menu_defs)?;
+    let mut shell = Shell::new(&menu_defs, read_only)?;
     shell.mount_split(root.clone(), read_only, leaf.clone(), form.clone());
 
     // Loop state.
