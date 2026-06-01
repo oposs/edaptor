@@ -49,7 +49,9 @@ use crate::form::changeset::{diff, EditEntry};
 use crate::form::validate::ValidationError;
 use crate::ldap::ldif::render_changeset;
 use crate::ui::form::{FormModel, WidgetSpec};
+use crate::ui::form_state::GuardChoice;
 use crate::workflows::browser::{BrowserNode, ExpandableNode};
+use crate::workflows::structure::Structure;
 
 /// App-local command emitted by [`DitOutline`] when the user activates (clicks) a
 /// tree node. Chosen above Turbo Vision's standard `CM_*` ids and distinct from
@@ -222,15 +224,28 @@ impl View for DitOutline {
             return;
         }
 
-        // Click-only activation: remember whether this was a left-click before the
-        // inner outline clears the event (it selects the row and clears on a hit).
-        let was_click = event.what == EventType::MouseDown;
+        // Activation on selection CHANGE (covers both mouse click and keyboard
+        // arrow navigation), so the three-pane loop re-spins pane 2 whenever the
+        // highlighted branch changes. Only keyboard/mouse events can change the
+        // selection — guarding on `track` ensures we never clobber a passing
+        // broadcast (e.g. CM_LEAF_REFRESH) with a command, which would break the
+        // broadcast fan-out to the sibling panes. Expand/collapse (Enter) keeps the
+        // same node selected, so it does not re-fire (no double-trigger).
+        let track = matches!(
+            event.what,
+            EventType::Keyboard | EventType::MouseDown | EventType::MouseMove | EventType::MouseUp
+        );
+        let before = if track {
+            self.selection.borrow().clone()
+        } else {
+            None
+        };
         self.inner.handle_event(event);
         self.publish_selection();
-        if was_click {
-            // Transform the (now-cleared) event into an app command so the loop
-            // wakes and reacts to the new selection (spike §10.3 child→parent
-            // pattern). The shared-Rc selection is already published above.
+        if track && *self.selection.borrow() != before {
+            // Transform the event into an app command so the loop wakes and reacts
+            // to the new selection (spike §10.3 child→parent pattern). The
+            // shared-Rc selection is already published above.
             *event = Event::command(CM_DIT_ACTIVATE);
         }
     }
@@ -433,11 +448,32 @@ impl View for SplitContainer {
 }
 
 /// Local command ids emitted by [`FormPane`] when its buttons fire. Distinct from
-/// the DIT outline ids (2100/2101). Wired up in the run_tui integration task.
-#[allow(dead_code)] // wired up in the run_tui integration task
+/// the DIT outline ids (2100/2101). Surfaced by [`Shell::run_loop`] as
+/// [`UiAction::FormSave`]/[`UiAction::FormCancel`].
 const CM_FORM_SAVE: CommandId = 2200;
-#[allow(dead_code)] // wired up in the run_tui integration task
 const CM_FORM_CANCEL: CommandId = 2201;
+
+/// Broadcast id the run-loop fires after writing a new model into
+/// [`FormHandles::model`]; [`FormPane`] matches it and (re)builds its rows (or
+/// clears when the model is `None`). Distinct from the leaf-refresh id (2500).
+const CM_FORM_REFRESH: CommandId = 2501;
+
+/// Shared handles the run-loop uses to drive — and read back — the [`FormPane`]
+/// without reaching through the desktop view tree (the broadcast-push pattern,
+/// mirroring [`DitOutline`]'s `selection`). `model` is the loop→pane channel
+/// (push a model, broadcast [`CM_FORM_REFRESH`]); `dirty`/`edit`/`dn` are the
+/// pane→loop channel (republished after every event the pane handles).
+#[derive(Clone, Default)]
+pub struct FormHandles {
+    /// Loop→pane: the model to display, or `None` to clear.
+    pub model: Rc<RefCell<Option<FormModel>>>,
+    /// Pane→loop: whether any editable binding differs from its baseline.
+    pub dirty: Rc<RefCell<bool>>,
+    /// Pane→loop: the live edited entry (`None` when no entry is shown).
+    pub edit: Rc<RefCell<Option<EditEntry>>>,
+    /// Pane→loop: the DN currently shown (empty when cleared).
+    pub dn: Rc<RefCell<String>>,
+}
 
 /// One editable row's attribute name + the shared String its InputLine mutates.
 type RowBinding = (String, Rc<RefCell<String>>);
@@ -456,12 +492,14 @@ pub struct FormPane {
     scroll: i16,
     state: StateFlags,
     palette_chain: Option<PaletteChainNode>,
+    handles: FormHandles,
 }
 
 impl FormPane {
-    /// Build an empty pane covering `bounds`. In `read_only` mode the pane shows no
-    /// Save/Cancel bar and renders every field as static text.
-    pub fn new(bounds: Rect, read_only: bool) -> Self {
+    /// Build an empty pane covering `bounds`, wired to the shared `handles`. In
+    /// `read_only` mode the pane shows no Save/Cancel bar and renders every field
+    /// as static text.
+    pub fn new(bounds: Rect, read_only: bool, handles: FormHandles) -> Self {
         FormPane {
             bounds,
             read_only,
@@ -473,6 +511,26 @@ impl FormPane {
             scroll: 0,
             state: 0,
             palette_chain: None,
+            handles,
+        }
+    }
+
+    /// Republish the pane's state (dirty / live edit / DN) into the shared handles
+    /// so the run-loop reads a current value each tick. Called after every event
+    /// the pane handles and after every (re)build.
+    fn publish(&self) {
+        *self.handles.dirty.borrow_mut() = self.is_dirty();
+        *self.handles.edit.borrow_mut() = self.take_edit();
+        *self.handles.dn.borrow_mut() = self.dn.clone();
+    }
+
+    /// React to a [`CM_FORM_REFRESH`] broadcast: load the model the loop pushed
+    /// into [`FormHandles::model`], or clear the pane when it is `None`.
+    fn apply_refresh(&mut self) {
+        let model = self.handles.model.borrow().clone();
+        match model {
+            Some(m) => self.set_model(&m),
+            None => self.clear(),
         }
     }
 
@@ -537,11 +595,10 @@ impl FormPane {
         self.content_h = y - self.bounds.a.y;
         self.scroll = 0;
         self.inner.set_initial_focus();
+        self.publish();
     }
 
-    /// Reset the pane to empty (no entry selected). Wired up in the run_tui
-    /// integration task.
-    #[allow(dead_code)] // wired up in the run_tui integration task
+    /// Reset the pane to empty (no entry selected).
     pub fn clear(&mut self) {
         self.dn.clear();
         self.bindings.clear();
@@ -549,19 +606,18 @@ impl FormPane {
         self.inner = Group::new(self.bounds);
         self.content_h = 0;
         self.scroll = 0;
+        self.publish();
     }
 
-    /// The DN of the entry currently shown (empty when cleared). Wired up in the
-    /// run_tui integration task.
-    #[allow(dead_code)] // wired up in the run_tui integration task
+    /// The DN of the entry currently shown (empty when cleared).
+    #[allow(dead_code)] // pane→loop DN is read via the shared handle
     pub fn dn(&self) -> &str {
         &self.dn
     }
 
     /// True when any editable binding's current value set differs from its
     /// baseline. Mirrors the modal dialog's value-collection semantics (newline
-    /// split, trimmed, non-empty). Wired up in the run_tui integration task.
-    #[allow(dead_code)] // wired up in the run_tui integration task
+    /// split, trimmed, non-empty).
     pub fn is_dirty(&self) -> bool {
         for (label, data) in &self.bindings {
             let current: Vec<String> = data
@@ -580,8 +636,7 @@ impl FormPane {
 
     /// Build an [`EditEntry`] from the baseline overlaid with the live bindings, or
     /// `None` when no entry is shown. Non-editable fields keep their baseline
-    /// values. Wired up in the run_tui integration task.
-    #[allow(dead_code)] // wired up in the run_tui integration task
+    /// values.
     pub fn take_edit(&self) -> Option<EditEntry> {
         if self.dn.is_empty() {
             return None;
@@ -602,9 +657,10 @@ impl FormPane {
         })
     }
 
-    /// Restore every editable binding to its baseline value. Wired up in the
-    /// run_tui integration task.
-    #[allow(dead_code)] // wired up in the run_tui integration task
+    /// Restore every editable binding to its baseline value. (Cancel is driven by
+    /// re-pushing the model through the shared handle, so this is kept only for
+    /// completeness / direct use.)
+    #[allow(dead_code)] // Cancel re-pushes the model rather than reverting in place
     pub fn revert(&mut self) {
         for (label, data) in &self.bindings {
             let base = self.baseline.get(label).cloned().unwrap_or_default();
@@ -647,6 +703,13 @@ impl View for FormPane {
     }
 
     fn handle_event(&mut self, event: &mut Event) {
+        // Refresh broadcast: (re)build the form from the model the loop pushed.
+        // Consume it so it does not propagate further.
+        if event.what == EventType::Broadcast && event.command == CM_FORM_REFRESH {
+            self.apply_refresh();
+            event.clear();
+            return;
+        }
         match event.what {
             EventType::MouseWheelDown => {
                 self.apply_scroll(self.scroll + 1);
@@ -673,6 +736,9 @@ impl View for FormPane {
             _ => {}
         }
         self.inner.handle_event(event);
+        // Keep the dirty/edit handles current as the user types into the bound
+        // InputLines (the run-loop polls `dirty` for the navigation guard).
+        self.publish();
     }
 
     fn can_focus(&self) -> bool {
@@ -713,22 +779,42 @@ impl View for FormPane {
     }
 }
 
-/// Local command ids for [`LeafListPane`]'s widgets. Distinct from the DIT outline
-/// ids (2100/2101) and the FormPane ids (2200/2201).
-#[allow(dead_code)] // search wiring lives in the run_tui integration task
-const CM_LEAF_SEARCH: CommandId = 2300;
+/// Command id the [`ListBox`] is built with (lists emit no selection-change event,
+/// so the pane publishes its selection by polling instead). Distinct from the DIT
+/// outline ids (2100/2101) and the FormPane ids (2200/2201/2501).
 const CM_LEAF_SELECT: CommandId = 2301;
+
+/// Broadcast id the run-loop fires after writing fresh rows into
+/// [`LeafHandles::rows`]; [`LeafListPane`] matches it and rebuilds its [`ListBox`].
+const CM_LEAF_REFRESH: CommandId = 2500;
+
+/// Shared handles the run-loop uses to drive — and read back — the
+/// [`LeafListPane`] without reaching through the desktop view tree. `rows` is the
+/// loop→pane channel (push rows, broadcast [`CM_LEAF_REFRESH`]); `search` is bound
+/// directly to the filter [`InputLine`] (the loop reads the live text); `selected`
+/// is the pane→loop channel (the highlighted row's DN, republished after every
+/// event).
+#[derive(Clone, Default)]
+pub struct LeafHandles {
+    /// Loop→pane: the visible rows as `(display label, dn)`.
+    pub rows: Rc<RefCell<Vec<(String, String)>>>,
+    /// Pane→loop (live): the incremental-search box text.
+    pub search: Rc<RefCell<String>>,
+    /// Pane→loop: the DN of the highlighted row, if any.
+    pub selected: Rc<RefCell<Option<String>>>,
+}
 
 /// Pane 2: an incremental-search [`InputLine`] over a [`ListBox`] of the current
 /// branch's leaves (plus a `‹self›` row for the branch entry itself). The pane is
-/// passive: the wiring layer recomputes rows from the
+/// passive: the run-loop recomputes rows from the
 /// [`crate::workflows::structure::Structure`] whenever the branch selection or the
-/// search text changes, and reads `selected_dn()` to drive pane 3. Selection
-/// changes are detected by polling (lists emit no change event).
+/// search text changes, pushes them through [`LeafHandles::rows`], and broadcasts
+/// [`CM_LEAF_REFRESH`]. The pane publishes the highlighted row's DN into
+/// [`LeafHandles::selected`] after every event (lists emit no change event).
 pub struct LeafListPane {
     bounds: Rect,
     inner: Group,
-    search: Rc<RefCell<String>>,
+    handles: LeafHandles,
     /// Parallel to the ListBox items: the DN for each visible row.
     row_dns: Vec<String>,
     state: StateFlags,
@@ -736,11 +822,11 @@ pub struct LeafListPane {
 }
 
 impl LeafListPane {
-    /// Build an empty pane covering `bounds`: a `Search:` label + [`InputLine`] on
-    /// the top row, and a [`ListBox`] filling the rest. The list starts empty; the
-    /// wiring layer populates it via `set_rows`.
-    pub fn new(bounds: Rect) -> Self {
-        let search = Rc::new(RefCell::new(String::new()));
+    /// Build an empty pane covering `bounds`, wired to the shared `handles`: a
+    /// `Search:` label + [`InputLine`] (bound to `handles.search`) on the top row,
+    /// and a [`ListBox`] filling the rest. The list starts empty; the run-loop
+    /// populates it by pushing rows and broadcasting [`CM_LEAF_REFRESH`].
+    pub fn new(bounds: Rect, handles: LeafHandles) -> Self {
         let mut inner = Group::new(bounds);
         inner.add(Box::new(StaticText::new(
             Rect::new(bounds.a.x, bounds.a.y, bounds.a.x + 8, bounds.a.y + 1),
@@ -749,25 +835,26 @@ impl LeafListPane {
         inner.add(Box::new(InputLine::new(
             Rect::new(bounds.a.x + 8, bounds.a.y, bounds.b.x, bounds.a.y + 1),
             256,
-            search.clone(),
+            handles.search.clone(),
         )));
         inner.add(Box::new(ListBox::new(
             Rect::new(bounds.a.x, bounds.a.y + 1, bounds.b.x, bounds.b.y),
             CM_LEAF_SELECT,
         )));
         inner.set_initial_focus();
-        LeafListPane {
+        let me = LeafListPane {
             bounds,
             inner,
-            search,
+            handles,
             row_dns: Vec::new(),
             state: 0,
             palette_chain: None,
-        }
+        };
+        me.publish_selection();
+        me
     }
 
     /// The ListBox is child index 2 (label, input, listbox).
-    #[allow(dead_code)] // used by set_rows; wired up in the run_tui integration task
     fn listbox_mut(&mut self) -> &mut ListBox {
         self.inner
             .child_at_mut(2)
@@ -783,25 +870,23 @@ impl LeafListPane {
             .expect("child 2 is the ListBox")
     }
 
-    /// Replace the visible rows (display label + DN). Resets selection to 0.
-    #[allow(dead_code)] // wired up in the run_tui integration task
-    pub fn set_rows(&mut self, rows: Vec<(String, String)>) {
+    /// Rebuild the visible rows from [`LeafHandles::rows`] (loop→pane), resetting
+    /// selection to row 0, then republish the (new) selection.
+    fn rebuild_rows(&mut self) {
+        let rows = self.handles.rows.borrow().clone();
         let labels: Vec<String> = rows.iter().map(|(l, _)| l.clone()).collect();
         self.row_dns = rows.into_iter().map(|(_, d)| d).collect();
         self.listbox_mut().set_items(labels);
+        self.publish_selection();
     }
 
-    /// Current search-box text.
-    #[allow(dead_code)] // wired up in the run_tui integration task
-    pub fn search_text(&self) -> String {
-        self.search.borrow().clone()
-    }
-
-    /// DN of the highlighted row, if any.
-    pub fn selected_dn(&self) -> Option<String> {
-        self.listbox()
+    /// Publish the highlighted row's DN into [`LeafHandles::selected`].
+    fn publish_selection(&self) {
+        let sel = self
+            .listbox()
             .get_selection()
-            .and_then(|i| self.row_dns.get(i).cloned())
+            .and_then(|i| self.row_dns.get(i).cloned());
+        *self.handles.selected.borrow_mut() = sel;
     }
 }
 
@@ -818,7 +903,17 @@ impl View for LeafListPane {
         self.inner.draw(terminal);
     }
     fn handle_event(&mut self, event: &mut Event) {
+        // Refresh broadcast: rebuild rows from the handle the loop pushed. Consume
+        // it so it does not propagate further.
+        if event.what == EventType::Broadcast && event.command == CM_LEAF_REFRESH {
+            self.rebuild_rows();
+            event.clear();
+            return;
+        }
         self.inner.handle_event(event);
+        // Republish the highlighted DN so the loop sees selection changes (arrow
+        // keys / clicks in the ListBox emit no change event).
+        self.publish_selection();
     }
     fn can_focus(&self) -> bool {
         true
@@ -909,6 +1004,33 @@ impl Shell {
         )));
         win.set_initial_focus();
         self.app.desktop.add(Box::new(win));
+    }
+
+    /// Mount the frameless three-pane [`SplitContainer`] as the desktop's content
+    /// (replacing [`mount_outline`](Self::mount_outline) for the M6 redesign).
+    /// Pane 1 is the branch [`DitOutline`] (sharing the Shell's `selection` handle
+    /// and the `tree_root` `Rc` so refreshes work), pane 2 the [`LeafListPane`],
+    /// pane 3 the [`FormPane`]. The run-loop drives panes 2/3 through the shared
+    /// `leaf`/`form` handles + the refresh broadcasts; it reads the tree selection
+    /// through `selection` exactly as before. Not tty-testable.
+    pub fn mount_split(
+        &mut self,
+        tree_root: BrowserNodeRef,
+        read_only: bool,
+        leaf: LeafHandles,
+        form: FormHandles,
+    ) {
+        let db = self.app.desktop.get_bounds();
+        // Incoming pane bounds are placeholders; SplitContainer assigns columns.
+        let tree = Box::new(DitOutline::new(
+            Rect::new(0, 0, 1, 1),
+            tree_root,
+            self.selection.clone(),
+        ));
+        let leaves = Box::new(LeafListPane::new(Rect::new(0, 0, 1, 1), leaf));
+        let form_pane = Box::new(FormPane::new(Rect::new(0, 0, 1, 1), read_only, form));
+        let split = SplitContainer::new(db, tree, leaves, form_pane);
+        self.app.desktop.add(Box::new(split));
     }
 
     /// The DN and `loaded` flag of the currently selected tree node, read from the
@@ -1020,6 +1142,113 @@ impl Shell {
 /// [`CM_DIT_REFRESH`] to the windowed outline. Not tty-testable.
 pub fn refresh_tree(app: &mut Application) {
     Shell::refresh(app);
+}
+
+/// Broadcast [`CM_LEAF_REFRESH`] so the [`LeafListPane`] rebuilds its rows from the
+/// shared handle the run-loop just wrote. Keeps `main.rs` turbo-vision-free. Not
+/// tty-testable.
+pub fn refresh_leaf(app: &mut Application) {
+    let mut ev = Event::broadcast(CM_LEAF_REFRESH);
+    app.handle_event(&mut ev);
+}
+
+/// Broadcast [`CM_FORM_REFRESH`] so the [`FormPane`] (re)builds from the model the
+/// run-loop just wrote into its shared handle (or clears when it is `None`). Keeps
+/// `main.rs` turbo-vision-free. Not tty-testable.
+pub fn refresh_form(app: &mut Application) {
+    let mut ev = Event::broadcast(CM_FORM_REFRESH);
+    app.handle_event(&mut ev);
+}
+
+/// Build the pane-1 branch tree from the eager [`Structure`]: a node per *branch*
+/// (leaves live in pane 2), nested by parent links and fully expanded, rooted at
+/// `structure.root_dn()`. Every node is marked `loaded` (the whole structure is
+/// already in memory). The returned `Rc` tree is handed to `mount_split` and also
+/// kept by the loop so it can be rebuilt in place after a reflow. Not unit-tested
+/// (operates on the concrete `Node<BrowserNode>` behind the facade).
+pub fn build_structure_tree(structure: &Structure) -> BrowserNodeRef {
+    fn build(structure: &Structure, dn: &str) -> BrowserNodeRef {
+        let (label, object_classes) = match structure.get(dn) {
+            Some(n) => (n.label.clone(), n.object_classes.clone()),
+            None => (
+                dn.split(',').next().unwrap_or(dn).trim().to_string(),
+                Vec::new(),
+            ),
+        };
+        let node = new_node(BrowserNode {
+            dn: dn.to_string(),
+            label,
+            loaded: true,
+            object_classes,
+        });
+        if let Some(n) = structure.get(dn) {
+            for child_dn in &n.children {
+                if structure
+                    .get(child_dn)
+                    .map(|c| c.is_branch())
+                    .unwrap_or(false)
+                {
+                    node.borrow_mut().add_child(build(structure, child_dn));
+                }
+            }
+        }
+        node.borrow_mut().expanded = true;
+        node
+    }
+    build(structure, structure.root_dn())
+}
+
+/// Rebuild the branch tree under the existing `root` `Rc` in place from a (mutated)
+/// [`Structure`], so the [`DitOutline`] that shares `root` reflects create/delete
+/// reflows after the caller broadcasts [`refresh_tree`]. Replaces `root`'s label
+/// and children rather than the node identity (the outline holds the same `Rc`).
+/// Not unit-tested (touches the concrete node behind the facade).
+pub fn rebuild_structure_tree(root: &BrowserNodeRef, structure: &Structure) {
+    let fresh = build_structure_tree(structure);
+    let new_children = fresh.borrow().children.clone();
+    let new_label = fresh.borrow().data.label.clone();
+    let mut r = root.borrow_mut();
+    r.data.label = new_label;
+    r.children = new_children;
+    r.expanded = true;
+}
+
+/// Modal Save / Discard / Stay dialog for the dirty-form navigation guard (spec
+/// §5.6). Returns the user's [`GuardChoice`]; closing the dialog any other way is
+/// treated as `Stay` (the safe, non-destructive default). Not tty-testable.
+pub fn confirm_guard(app: &mut Application) -> GuardChoice {
+    const CM_SAVE: CommandId = 2400;
+    const CM_DISCARD: CommandId = 2401;
+    const CM_STAY: CommandId = 2402;
+    let mut d = Dialog::new(Rect::new(0, 0, 44, 8), "Unsaved changes");
+    d.add(Box::new(StaticText::new(
+        Rect::new(2, 1, 42, 3),
+        "This entry has unsaved changes.",
+    )));
+    d.add(Box::new(Button::new(
+        Rect::new(2, 4, 14, 5),
+        "~S~ave",
+        CM_SAVE,
+        true,
+    )));
+    d.add(Box::new(Button::new(
+        Rect::new(15, 4, 28, 5),
+        "~D~iscard",
+        CM_DISCARD,
+        false,
+    )));
+    d.add(Box::new(Button::new(
+        Rect::new(29, 4, 41, 5),
+        "S~t~ay",
+        CM_STAY,
+        false,
+    )));
+    d.set_initial_focus();
+    match d.execute(app) {
+        x if x == CM_SAVE => GuardChoice::Save,
+        x if x == CM_DISCARD => GuardChoice::Discard,
+        _ => GuardChoice::Stay,
+    }
 }
 
 // ---------------------------------------------------------------------------
