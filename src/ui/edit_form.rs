@@ -165,6 +165,12 @@ impl ValueEditor {
 
     /// The values to write back on commit: each row trimmed, blank rows dropped.
     pub fn committed_values(&self) -> Vec<String> {
+        // Picker mode commits DNs via picker_editor_key (Task 4.4); `rows` is
+        // always empty in picker mode, so this path must not be used for it.
+        debug_assert!(
+            self.picker.is_none(),
+            "committed_values called in picker mode"
+        );
         self.rows
             .iter()
             .map(|r| r.value().trim().to_string())
@@ -233,7 +239,9 @@ fn value_set_eq(a: &[String], b: &[String]) -> bool {
 ///
 /// - `multi`    = the attribute is not single-valued in the schema;
 /// - `editable` = not global-read-only AND the field kind is editable
-///   (binary / boolean-checkbox / `memberOf` stay static — [`field_is_editable`]);
+///   (binary / boolean-checkbox / and normally `memberOf` stay static —
+///   [`field_is_editable`]; but a configured BackRef relation overrides this
+///   to enable picker editing);
 /// - `secret`   = a password attribute ([`is_secret_attr`]);
 /// - `ordered`  = an X-ORDERED config attribute ([`is_x_ordered`]).
 ///

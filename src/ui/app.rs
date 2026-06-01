@@ -639,7 +639,7 @@ fn open_value_editor(app: &mut App, structure: &Structure) {
     let Some(field) = form.fields.get(focus) else {
         return;
     };
-    if field.relation.is_some() && field.editable {
+    if field.relation.is_some() && field.multi && field.editable {
         // Picker mode: label DNs from the loaded structure (fallback = the DN).
         let label_of = |dn: &str| {
             structure
