@@ -2,6 +2,7 @@
 //! holder↔candidate link (e.g. group.member ↔ user.memberOf). Pure; resolved
 //! against the configured [`EntryProfile`]s into directional [`ResolvedRelation`]s.
 
+use crate::config::EntryProfile;
 use serde::Deserialize;
 
 /// A symmetric membership relation as declared in `[[relation]]`. Template names
@@ -19,9 +20,8 @@ pub struct Relation {
     pub back_attr: String,
 }
 
-use crate::config::EntryProfile;
-
-/// Which side of a relation a field plays.
+/// Which side of a relation a field plays. Consumed in Phase 4 by
+/// `src/ui/edit_form.rs` (`FieldRelation` variant of `EditField`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RelationRole {
     /// The entry owns the link attribute (e.g. group.member) — written directly.
@@ -67,6 +67,7 @@ pub fn resolve_relations(
     profiles: &[EntryProfile],
     relations: &[Relation],
 ) -> Vec<ResolvedRelation> {
+    // Case-sensitive: profile names are config-key identifiers, not LDAP naming.
     let find = |name: &str| profiles.iter().find(|p| p.name == name);
     relations
         .iter()
@@ -133,6 +134,9 @@ mod tests {
         )
         .unwrap();
         assert_eq!(cfg.relations.len(), 1);
+        assert_eq!(cfg.relations[0].name, "group-membership");
+        assert_eq!(cfg.relations[0].holder, "group");
+        assert_eq!(cfg.relations[0].candidate, "user");
         assert_eq!(cfg.relations[0].holder_attr, "member");
         assert_eq!(cfg.relations[0].back_attr, "memberOf");
     }
