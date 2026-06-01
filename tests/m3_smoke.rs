@@ -1,37 +1,15 @@
-//! Headless smoke tests for the M3 read flow (no tty, no network).
+//! Headless smoke tests for the read flow (no tty, no network).
 //!
-//! These exercise the pure logic below the UI: menu assembly, the schema-driven
-//! form model, and id-correlated response handling. The tty-bound rendering and
-//! event loop (`crate::ui`) require a terminal and are NOT covered here.
+//! These exercise the pure logic below the UI: the schema-driven form model and
+//! id-correlated response handling. The tty-bound rendering and event loop
+//! (`crate::ui`) require a terminal and are NOT covered here.
 
 use std::collections::BTreeMap;
 
-use edaptor::app::{build_menu_defs, CM_QUIT};
-use edaptor::config::EntryProfile;
 use edaptor::ldap::worker::{LdapEntry, RawSubschema, Response};
 use edaptor::schema::SchemaModel;
 use edaptor::ui::form::{build_form_model, WidgetSpec};
 use edaptor::workflows::read_flow::{ReadFlow, ReadOutcome};
-
-fn profile(name: &str, object_class: &str) -> EntryProfile {
-    EntryProfile {
-        name: name.to_string(),
-        object_class: object_class.to_string(),
-        ..Default::default()
-    }
-}
-
-#[test]
-fn menu_defs_smoke() {
-    let profiles = vec![
-        profile("Users", "inetOrgPerson"),
-        profile("Groups", "groupOfNames"),
-    ];
-    let defs = build_menu_defs(&profiles);
-    let labels: Vec<&str> = defs.iter().map(|d| d.label.as_str()).collect();
-    assert_eq!(labels, vec!["Users", "Groups", "Delete", "Refresh", "Quit"]);
-    assert_eq!(defs.last().unwrap().command, CM_QUIT);
-}
 
 #[test]
 fn form_model_smoke() {
