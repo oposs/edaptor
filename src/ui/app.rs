@@ -1631,10 +1631,6 @@ fn combined_save_overlay(
     }
 }
 
-/// Apply a combined membership save SYNCHRONOUSLY (mirrors `refresh_structure`):
-/// pre-validate last-member on every removal, abort the whole batch if any would
-/// empty a group, then apply own-entry mods + each fan-out MODIFY, collecting a
-/// partial-failure report, and finally re-read the edited entry (async).
 /// Synchronously re-read `dn` and rebuild the form so it reflects the directory
 /// after a combined save. Installs the fresh form directly without depending on
 /// the async poll loop or the overlay-gated install path.
@@ -1662,6 +1658,10 @@ fn reload_form_sync(app: &mut App, worker: &WorkerHandle, read_flow: &ReadFlow, 
     }
 }
 
+/// Apply a combined membership save SYNCHRONOUSLY (mirrors `refresh_structure`):
+/// pre-validate last-member on every removal, abort the whole batch if any would
+/// empty a group, then apply own-entry mods + each fan-out MODIFY, collecting a
+/// partial-failure report, and finally re-read the edited entry (synchronous).
 fn apply_combined_save(
     app: &mut App,
     worker: &WorkerHandle,
