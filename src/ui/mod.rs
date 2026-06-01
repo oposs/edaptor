@@ -1,11 +1,12 @@
-//! Terminal UI layer.
+//! Terminal UI layer (ratatui).
 //!
-//! Boundary rule: [`facade`] is the ONLY module in the crate that may import
-//! `turbo_vision`. Every other module (`form`, `crate::app`,
-//! `crate::workflows`) deals in the plain domain types defined alongside them,
-//! so the rest of the crate stays testable without a terminal and the TUI
-//! backend stays swappable.
+//! Boundary rule: ratatui / crossterm are imported only inside this `ui` module
+//! ([`app`], [`view`], [`edit_form`]). Every other module (`form`, `crate::app`,
+//! `crate::workflows`) deals in plain domain types, so the rest of the crate
+//! stays testable without a terminal and the TUI backend stays swappable.
 
-pub mod facade;
+pub mod app;
+pub mod edit_form;
 pub mod form;
 pub mod form_state;
+pub mod view;
