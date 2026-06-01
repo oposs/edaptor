@@ -26,7 +26,7 @@ use crate::form::validate::{plan_save, validate, SavePlan, ValidationError};
 use crate::ldap::ldif::render_changeset;
 use crate::ldap::worker::{Request, Response, StructureNodeRaw, WorkerHandle};
 use crate::schema::SchemaModel;
-use crate::ui::edit_form::{build_edit_form, EditForm};
+use crate::ui::edit_form::{build_edit_form, EditForm, ValueEditor};
 use crate::ui::view;
 use crate::workflows::read_flow::{ReadFlow, ReadOutcome};
 use crate::workflows::structure::{Structure, StructureInput};
@@ -61,6 +61,8 @@ pub enum Overlay {
         /// The message to show.
         text: String,
     },
+    /// The multi-value popup editor (Enter on a multi field).
+    ValueEditor(ValueEditor),
 }
 
 /// What a confirmed [`Overlay::Confirm`] should do. Grows in P4 (create/delete).
@@ -367,8 +369,10 @@ fn dispatch_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
                 // authority for form_scroll, so paging only moves the focus.
                 KeyCode::PageUp => app.form_focus = app.form_focus.saturating_sub(10),
                 KeyCode::PageDown => app.form_focus = (app.form_focus + 10).min(n.saturating_sub(1)),
-                // Editing the focused single-value field; the multi-value popup
-                // (Enter on a multi field) arrives in P3.
+                // Enter on an editable multi-value field opens the value-editor
+                // popup; on a single field it is a no-op.
+                KeyCode::Enter => open_value_editor(app),
+                // Otherwise edit the focused single-value field inline.
                 _ => edit_focused_field(app, key),
             }
         }
@@ -377,13 +381,87 @@ fn dispatch_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
 }
 
 /// Route a key to the focused field's inline editor, if it is an editable
-/// single-value field (multi-value fields are edited via the P3 popup).
+/// single-value field (multi-value fields are edited via the popup).
 fn edit_focused_field(app: &mut App, key: KeyEvent) {
     let focus = app.form_focus;
     if let Some(form) = app.form.as_mut() {
         if let Some(field) = form.fields.get_mut(focus) {
             if field.editable && !field.multi {
                 field.editor.handle_key_event(key);
+            }
+        }
+    }
+}
+
+/// Open the multi-value popup over the focused field, if it is an editable
+/// multi-valued field.
+fn open_value_editor(app: &mut App) {
+    let focus = app.form_focus;
+    let editor = app.form.as_ref().and_then(|form| {
+        form.fields
+            .get(focus)
+            .filter(|f| f.multi && f.editable)
+            .map(|f| ValueEditor::open(focus, f))
+    });
+    if let Some(ve) = editor {
+        app.overlay = Some(Overlay::ValueEditor(ve));
+    }
+}
+
+/// Handle a key inside the multi-value popup (spike `popup_key`): nav (↑↓),
+/// reorder (Alt+↑↓), insert (Alt+a / Insert), delete (Alt+d), commit (F2,
+/// dropping empties), cancel (Esc / F3); any other key edits the selected row.
+fn value_editor_key(app: &mut App, key: KeyEvent) {
+    let alt = key.modifiers.contains(KeyModifiers::ALT);
+    match (key.code, alt) {
+        (KeyCode::Esc, _) | (KeyCode::F(3), _) => {
+            app.overlay = None;
+        }
+        (KeyCode::F(2), _) => {
+            // Commit: write the trimmed, non-empty values back into the field.
+            if let Some(Overlay::ValueEditor(ve)) = app.overlay.take() {
+                let values = ve.committed_values();
+                if let Some(field) = app.form.as_mut().and_then(|f| f.fields.get_mut(ve.field)) {
+                    field.values = values;
+                }
+            }
+        }
+        _ => {
+            let Some(Overlay::ValueEditor(ve)) = app.overlay.as_mut() else {
+                return;
+            };
+            match (key.code, alt) {
+                (KeyCode::Up, false) => ve.sel = ve.sel.saturating_sub(1),
+                (KeyCode::Down, false) => ve.sel = (ve.sel + 1).min(ve.rows.len().saturating_sub(1)),
+                (KeyCode::Up, true) => {
+                    if ve.sel > 0 {
+                        ve.rows.swap(ve.sel, ve.sel - 1);
+                        ve.sel -= 1;
+                    }
+                }
+                (KeyCode::Down, true) => {
+                    if ve.sel + 1 < ve.rows.len() {
+                        ve.rows.swap(ve.sel, ve.sel + 1);
+                        ve.sel += 1;
+                    }
+                }
+                (KeyCode::Char('a'), true) | (KeyCode::Insert, _) => {
+                    let at = (ve.sel + 1).min(ve.rows.len());
+                    ve.rows.insert(at, TextState::new());
+                    ve.sel = at;
+                }
+                (KeyCode::Char('d'), true) => {
+                    if !ve.rows.is_empty() {
+                        ve.rows.remove(ve.sel);
+                        ve.sel = ve.sel.min(ve.rows.len().saturating_sub(1));
+                    }
+                }
+                // Any other key edits the selected row's text.
+                _ => {
+                    if let Some(row) = ve.rows.get_mut(ve.sel) {
+                        row.handle_key_event(key);
+                    }
+                }
             }
         }
     }
@@ -468,6 +546,10 @@ fn overlay_key(app: &mut App, key: KeyEvent) -> Option<PendingAction> {
         Some(Overlay::Error { .. }) => {
             // Any key dismisses an error.
             app.overlay = None;
+            None
+        }
+        Some(Overlay::ValueEditor(_)) => {
+            value_editor_key(app, key);
             None
         }
         None => None,

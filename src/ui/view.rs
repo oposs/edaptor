@@ -15,7 +15,7 @@ use tui_prompts::State;
 use tui_tree_widget::Tree;
 
 use crate::ui::app::{App, Overlay, Pane};
-use crate::ui::edit_form::EditField;
+use crate::ui::edit_form::{EditField, ValueEditor};
 use crate::ui::form::WidgetSpec;
 
 /// The three-pane column split: branch tree | leaf list | edit form.
@@ -238,7 +238,8 @@ fn secret_len(fld: &EditField) -> usize {
 
 /// Draw a centered modal overlay (a `Clear` + bordered `Block`) over the panes.
 /// Confirm shows the body (e.g. the LDIF preview) with a Yes/No hint; Error
-/// shows the message. Keys are captured by `app::overlay_key` while one is open.
+/// shows the message; ValueEditor is the multi-value popup. Keys are captured by
+/// `app::overlay_key` while one is open.
 fn render_overlay(f: &mut Frame, app: &App) {
     let area = f.area();
     let (title, body, hint, border) = match app.overlay.as_ref() {
@@ -254,6 +255,10 @@ fn render_overlay(f: &mut Frame, app: &App) {
             " press any key ",
             Color::Red,
         ),
+        Some(Overlay::ValueEditor(ve)) => {
+            render_value_editor(f, ve, area);
+            return;
+        }
         None => return,
     };
 
@@ -279,6 +284,66 @@ fn render_overlay(f: &mut Frame, app: &App) {
             .style(Style::default().bg(Color::Rgb(30, 30, 40)).fg(Color::White)),
         inner,
     );
+}
+
+/// Draw the multi-value popup editor: one inline row per value with a selection
+/// marker, the ordered/set hint in the title, and secret rows masked. (Spike
+/// `render_popup`; values rendered via `Paragraph`, never byte-sliced.)
+fn render_value_editor(f: &mut Frame, ve: &ValueEditor, area: Rect) {
+    let avail = area.height.saturating_sub(2).max(7);
+    let h = (ve.rows.len() as u16 + 5).clamp(7, avail).min(avail);
+    let w = 64.min(area.width.saturating_sub(4)).max(20);
+    let rect = centered(w, h, area);
+    f.render_widget(Clear, rect);
+
+    let kind = if ve.ordered {
+        "ordered — reorder matters"
+    } else {
+        "set — reorder cosmetic"
+    };
+    let bg = Color::Rgb(30, 30, 40);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(format!(" Edit {} ({kind}) ", ve.label))
+        .title_bottom(" Alt+↑↓ move  Alt+a add  Alt+d del  F2 save  Esc cancel ")
+        .style(Style::default().bg(bg).fg(Color::White))
+        .border_style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD));
+    let inner = block.inner(rect);
+    f.render_widget(block, rect);
+
+    for (i, row) in ve.rows.iter().enumerate() {
+        if i as u16 >= inner.height {
+            break;
+        }
+        let y = inner.y + i as u16;
+        let selected = i == ve.sel;
+        let marker = format!("{:>2} {} ", i + 1, if selected { "▶" } else { " " });
+        f.render_widget(
+            Paragraph::new(marker).style(
+                Style::default()
+                    .bg(bg)
+                    .fg(if selected { Color::Yellow } else { Color::DarkGray }),
+            ),
+            Rect::new(inner.x, y, 5.min(inner.width), 1),
+        );
+        let vr = Rect::new(inner.x + 5, y, inner.width.saturating_sub(5), 1);
+        // Secret multi-values are masked in the popup too (never the cleartext).
+        let display = if ve.secret {
+            "•".repeat(row.value().chars().count())
+        } else {
+            row.value().to_string()
+        };
+        let rstyle = if selected {
+            Style::default().bg(Color::Rgb(60, 60, 80)).fg(Color::White)
+        } else {
+            Style::default().bg(bg).fg(Color::Gray)
+        };
+        f.render_widget(Paragraph::new(display).style(rstyle), vr);
+        if selected {
+            let col = (row.position() as u16).min(vr.width.saturating_sub(1));
+            f.set_cursor_position((vr.x + col, y));
+        }
+    }
 }
 
 /// Center a `w`×`h` rect within `area` (clamped to fit). (Spike `centered`,

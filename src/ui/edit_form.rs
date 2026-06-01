@@ -66,6 +66,53 @@ impl EditField {
     }
 }
 
+/// The pop-up editor for a multi-valued attribute: one inline edit row per
+/// value, with insert / delete / reorder. Lives as an overlay over pane 3; on
+/// commit its [`committed_values`](ValueEditor::committed_values) replace the
+/// field's `values`. (Spike `ValueEditor`.)
+pub struct ValueEditor {
+    /// Index of the field being edited (into [`EditForm::fields`]).
+    pub field: usize,
+    /// The attribute name (shown in the popup title).
+    pub label: String,
+    /// Whether the attribute is X-ORDERED (order matters → shown in the hint).
+    pub ordered: bool,
+    /// Whether the attribute is secret (rows render masked).
+    pub secret: bool,
+    /// One edit state per value row.
+    pub rows: Vec<TextState<'static>>,
+    /// The selected row index.
+    pub sel: usize,
+}
+
+impl ValueEditor {
+    /// Open an editor over `field` (at `field_idx`), seeding one row per value.
+    pub fn open(field_idx: usize, field: &EditField) -> Self {
+        let rows = field
+            .values
+            .iter()
+            .map(|v| TextState::new().with_value(v.clone()))
+            .collect();
+        ValueEditor {
+            field: field_idx,
+            label: field.label.clone(),
+            ordered: field.ordered,
+            secret: field.secret,
+            rows,
+            sel: 0,
+        }
+    }
+
+    /// The values to write back on commit: each row trimmed, blank rows dropped.
+    pub fn committed_values(&self) -> Vec<String> {
+        self.rows
+            .iter()
+            .map(|r| r.value().trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect()
+    }
+}
+
 /// The editable form for one entry.
 pub struct EditForm {
     /// The entry's distinguished name.
@@ -243,6 +290,22 @@ mod tests {
         assert!(field("userPassword").secret, "userPassword is secret");
         assert!(!field("cn").secret);
         assert!(field("cn").editable, "cn edits in writable mode");
+    }
+
+    #[test]
+    fn value_editor_open_and_commit_drops_empties() {
+        let model = build_form_model(&schema(), &["demoPerson"], &entry(), &[]);
+        let form = build_edit_form(&model, &schema(), false);
+        let mail_idx = form.fields.iter().position(|f| f.label == "mail").unwrap();
+        let mut ve = ValueEditor::open(mail_idx, &form.fields[mail_idx]);
+        assert_eq!(ve.rows.len(), 2); // a@x.org, a@y.org
+        assert_eq!(ve.label, "mail");
+        // Add a blank row and a whitespace row; commit drops both.
+        ve.rows.push(TextState::new());
+        ve.rows.push(TextState::new().with_value("   ".to_string()));
+        ve.rows.push(TextState::new().with_value(" c@z.org ".to_string()));
+        let committed = ve.committed_values();
+        assert_eq!(committed, vec!["a@x.org", "a@y.org", "c@z.org"]);
     }
 
     #[test]
