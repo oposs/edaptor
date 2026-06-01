@@ -127,6 +127,7 @@ mod tests {
             rdn_attr: "uid".to_string(),
             search_base: "ou=people,dc=example,dc=org".to_string(),
             show: vec!["uid".to_string(), "cn".to_string(), "sn".to_string()],
+            search_attrs: vec![],
         }
     }
 

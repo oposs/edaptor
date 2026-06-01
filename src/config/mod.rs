@@ -58,6 +58,23 @@ pub struct EntryProfile {
     pub search_base: String,
     #[serde(default)]
     pub show: Vec<String>,
+    /// Attributes the picker substring-search matches on. Falls back to `show`,
+    /// then to `["cn"]` (see [`EntryProfile::search_attributes`]).
+    #[serde(default)]
+    pub search_attrs: Vec<String>,
+}
+
+impl EntryProfile {
+    /// Effective search attributes: `search_attrs`, else `show`, else `["cn"]`.
+    pub fn search_attributes(&self) -> Vec<String> {
+        if !self.search_attrs.is_empty() {
+            self.search_attrs.clone()
+        } else if !self.show.is_empty() {
+            self.show.clone()
+        } else {
+            vec!["cn".to_string()]
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -320,5 +337,34 @@ mod tests {
         "#;
         let cfg: Config = toml::from_str(toml).unwrap();
         assert!(!cfg.is_read_only());
+    }
+
+    #[test]
+    fn search_attributes_falls_back_to_show_then_cn() {
+        let p = EntryProfile {
+            name: "u".into(),
+            object_class: "inetOrgPerson".into(),
+            rdn_attr: "uid".into(),
+            search_base: "ou=people".into(),
+            show: vec!["uid".into(), "cn".into()],
+            search_attrs: vec![],
+        };
+        assert_eq!(
+            p.search_attributes(),
+            vec!["uid".to_string(), "cn".to_string()]
+        );
+
+        let p2 = EntryProfile {
+            search_attrs: vec!["mail".into()],
+            ..p.clone()
+        };
+        assert_eq!(p2.search_attributes(), vec!["mail".to_string()]);
+
+        let p3 = EntryProfile {
+            show: vec![],
+            search_attrs: vec![],
+            ..p
+        };
+        assert_eq!(p3.search_attributes(), vec!["cn".to_string()]);
     }
 }
