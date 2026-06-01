@@ -25,7 +25,7 @@ use crate::config::{Config, EntryProfile};
 use crate::form::changeset::{diff, EditEntry, ModOp};
 use crate::form::validate::{plan_save, validate, SavePlan, ValidationError};
 use crate::ldap::ldif::{render_add, render_changeset};
-use crate::ldap::worker::{Request, Response, StructureNodeRaw, WorkerHandle};
+use crate::ldap::worker::{Request, Response, SearchScope, StructureNodeRaw, WorkerHandle};
 use crate::schema::SchemaModel;
 use crate::ui::edit_form::{build_edit_form, EditForm, ValueEditor};
 use crate::ui::form_state::{guard_decision, GuardChoice, GuardOutcome};
@@ -362,6 +362,9 @@ fn event_loop(
             reconcile(app, &structure, worker, read_flow);
         }
 
+        // 4) Service picker type-ahead (runs regardless of reconcile gate).
+        service_picker_search(app, worker);
+
         if app.should_quit {
             return Ok(());
         }
@@ -381,6 +384,21 @@ fn handle_worker_response(
     pending_followups: &mut HashMap<u64, (String, Vec<ModOp>, Option<String>)>,
 ) {
     match resp {
+        // Intercept picker search results before the read-flow routing.
+        Response::Entries { id, entries } if app.picker_search_id == Some(*id) => {
+            if let Some(Overlay::ValueEditor(ve)) = app.overlay.as_mut() {
+                if let Some(p) = ve.picker.as_mut() {
+                    let results = entries
+                        .iter()
+                        .map(|e| crate::ui::picker::Candidate {
+                            dn: e.dn.clone(),
+                            label: crate::ui::picker::candidate_label(&e.dn, &e.attrs),
+                        })
+                        .collect();
+                    p.set_results(results);
+                }
+            }
+        }
         Response::WriteOk { id, .. } => {
             if let Some((new_dn, mods, nav)) = pending_followups.remove(id) {
                 // A rename's MODRDN succeeded: apply the deferred mods to the new
@@ -657,10 +675,64 @@ fn open_value_editor(app: &mut App, structure: &Structure) {
     }
 }
 
+/// Keys inside the picker: Esc/F3 cancel; F2 commit selected DNs to the field;
+/// ↑↓ move; Space toggle; any other key edits the search box (the tick-based
+/// `service_picker_search` turns a changed query into a live candidate search).
+fn picker_editor_key(app: &mut App, key: KeyEvent) {
+    match key.code {
+        KeyCode::Esc | KeyCode::F(3) => {
+            app.overlay = None;
+            app.picker_search_id = None;
+        }
+        KeyCode::F(2) => {
+            if let Some(Overlay::ValueEditor(ve)) = app.overlay.take() {
+                if let Some(picker) = &ve.picker {
+                    if let Some(field) = app.form.as_mut().and_then(|f| f.fields.get_mut(ve.field))
+                    {
+                        field.values = picker.selected_dns();
+                    }
+                }
+            }
+            app.picker_search_id = None;
+        }
+        KeyCode::Up => {
+            if let Some(Overlay::ValueEditor(ve)) = app.overlay.as_mut() {
+                if let Some(p) = ve.picker.as_mut() {
+                    p.move_cursor(-1);
+                }
+            }
+        }
+        KeyCode::Down => {
+            if let Some(Overlay::ValueEditor(ve)) = app.overlay.as_mut() {
+                if let Some(p) = ve.picker.as_mut() {
+                    p.move_cursor(1);
+                }
+            }
+        }
+        KeyCode::Char(' ') => {
+            if let Some(Overlay::ValueEditor(ve)) = app.overlay.as_mut() {
+                if let Some(p) = ve.picker.as_mut() {
+                    p.toggle_cursor();
+                }
+            }
+        }
+        _ => {
+            if let Some(Overlay::ValueEditor(ve)) = app.overlay.as_mut() {
+                ve.search.handle_key_event(key);
+            }
+        }
+    }
+}
+
 /// Handle a key inside the multi-value popup (spike `popup_key`): nav (↑↓),
 /// reorder (Alt+↑↓), insert (Alt+a / Insert), delete (Alt+d), commit (F2,
 /// dropping empties), cancel (Esc / F3); any other key edits the selected row.
 fn value_editor_key(app: &mut App, key: KeyEvent) {
+    // Picker mode has its own key map (search box + selection toggle).
+    if matches!(&app.overlay, Some(Overlay::ValueEditor(ve)) if ve.picker.is_some()) {
+        picker_editor_key(app, key);
+        return;
+    }
     let alt = key.modifiers.contains(KeyModifiers::ALT);
     match (key.code, alt) {
         (KeyCode::Esc, _) | (KeyCode::F(3), _) => {
@@ -720,6 +792,48 @@ fn value_editor_key(app: &mut App, key: KeyEvent) {
             }
         }
     }
+}
+
+/// When a picker is open and its search term changed, submit a fresh size-capped
+/// candidate search (stale ids are discarded in `handle_worker_response`). Empty
+/// term → clear results (selection-only view). Mirrors the leaf incremental search.
+fn service_picker_search(app: &mut App, worker: &WorkerHandle) {
+    let Some(Overlay::ValueEditor(ve)) = app.overlay.as_ref() else {
+        return;
+    };
+    if ve.picker.is_none() {
+        return;
+    }
+    let query = ve.search.value().to_string();
+    if query == app.picker_last_query {
+        return;
+    }
+    app.picker_last_query = query.clone();
+    let Some(scope) = ve.scope.clone() else {
+        return;
+    };
+
+    if query.is_empty() {
+        if let Some(Overlay::ValueEditor(ve)) = app.overlay.as_mut() {
+            if let Some(p) = ve.picker.as_mut() {
+                p.set_results(Vec::new());
+            }
+        }
+        app.picker_search_id = None;
+        return;
+    }
+    let id = next_id();
+    app.picker_search_id = Some(id);
+    let filter =
+        crate::ui::picker::build_member_filter(&scope.object_class, &scope.search_attrs, &query);
+    let _ = worker.submit(Request::Search {
+        id,
+        base: scope.base,
+        scope: SearchScope::Subtree,
+        filter,
+        attrs: vec!["cn".to_string()],
+        size_limit: Some(20),
+    });
 }
 
 /// Service a [`UiAction`] that needs the worker / schema. Save and cancel build
@@ -1775,5 +1889,88 @@ mod tests {
         let items = build_tree_items(&s);
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].children().len(), 1);
+    }
+
+    // ── 4.4 helpers ────────────────────────────────────────────────────────────
+
+    /// App with a one-field `member` form (index 0) and no overlay.
+    fn test_app_with_form_field_member() -> App {
+        use crate::config::relation::{CandidateScope, RelationRole};
+        use crate::schema::FieldKind;
+        use crate::ui::edit_form::{EditField, FieldRelation};
+        use crate::ui::form::WidgetSpec;
+        let scope = CandidateScope {
+            base: "ou=people".into(),
+            object_class: "inetOrgPerson".into(),
+            search_attrs: vec!["uid".into()],
+        };
+        let field = EditField {
+            label: "member".into(),
+            must: false,
+            editable: true,
+            multi: true,
+            secret: false,
+            ordered: false,
+            values: vec![],
+            kind: FieldKind::Text,
+            widget: WidgetSpec::ReadOnlyText,
+            editor: TextState::new(),
+            relation: Some(FieldRelation {
+                role: RelationRole::Holder,
+                scope,
+            }),
+        };
+        let mut app = bare_app(false);
+        app.form = Some(EditForm {
+            dn: "cn=g1,ou=groups".into(),
+            fields: vec![field],
+            baseline: Default::default(),
+        });
+        app
+    }
+
+    /// A ValueEditor in picker mode over field `idx`, empty selection.
+    fn make_picker_ve(idx: usize) -> ValueEditor {
+        use crate::config::relation::{CandidateScope, RelationRole};
+        let scope = CandidateScope {
+            base: "ou=people".into(),
+            object_class: "inetOrgPerson".into(),
+            search_attrs: vec!["uid".into()],
+        };
+        ValueEditor {
+            field: idx,
+            label: "member".into(),
+            ordered: false,
+            secret: false,
+            rows: vec![],
+            sel: 0,
+            picker: Some(crate::ui::picker::PickerState::new(vec![])),
+            search: TextState::new(),
+            scope: Some(scope),
+            role: Some(RelationRole::Holder),
+        }
+    }
+
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    #[test]
+    fn picker_space_toggles_and_f2_commits_dns() {
+        use crate::ui::picker::Candidate;
+        let mut app = test_app_with_form_field_member();
+        let mut ve = make_picker_ve(0);
+        ve.picker.as_mut().unwrap().set_results(vec![Candidate {
+            dn: "uid=a,ou=people".into(),
+            label: "a".into(),
+        }]);
+        app.overlay = Some(Overlay::ValueEditor(ve));
+        // Space toggles the cursor row (a) into the selection.
+        value_editor_key(&mut app, key(KeyCode::Char(' ')));
+        // F2 commits the selected DNs into the field.
+        value_editor_key(&mut app, key(KeyCode::F(2)));
+        let f = &app.form.as_ref().unwrap().fields[0];
+        assert_eq!(f.values, vec!["uid=a,ou=people".to_string()]);
+        assert!(app.overlay.is_none());
     }
 }
