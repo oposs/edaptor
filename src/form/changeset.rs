@@ -152,9 +152,17 @@ pub fn diff(original: &EditEntry, edited: &EditEntry) -> Result<ChangeSet, Chang
 
     if let Some((rdn_attr, rdn_value)) = &rdn {
         if let Some(new_values) = values_for(edited, rdn_attr) {
-            // The new RDN value is the edited attribute's first value.
-            if let Some(new_value) = new_values.first() {
-                if new_value != rdn_value {
+            // A rename is needed only when the value that currently names the entry
+            // (the DN's RDN value) is no longer among the edited values — i.e. the
+            // user changed or removed it. If it is still present, the RDN attribute
+            // may still have OTHER values added/removed via a normal MODIFY, and a
+            // clean (unedited) multi-valued RDN attribute must NOT trigger a spurious
+            // rename just because the RDN value isn't the attribute's first value
+            // (e.g. `cn: User1` + `cn: user01` with RDN `cn=user01`). Choosing a new
+            // RDN from a multi-valued attribute is ambiguous, so use the first
+            // remaining value.
+            if !new_values.iter().any(|v| v == rdn_value) {
+                if let Some(new_value) = new_values.first() {
                     modrdn = Some(ModRdn {
                         new_rdn: format!("{rdn_attr}={new_value}"),
                         delete_old: true,
@@ -401,6 +409,40 @@ mod tests {
             vec![ModOp::Replace {
                 attr: "sn".to_string(),
                 values: vec!["Brown".to_string()]
+            }]
+        );
+    }
+
+    #[test]
+    fn diff_multivalued_rdn_value_not_first_no_spurious_rename() {
+        // The RDN value ("user01") is the SECOND cn value; a clean (unedited) entry
+        // must NOT propose a rename to the first value ("User1"). (Regression: the
+        // old logic took the first value as the new RDN and always renamed.)
+        let e = entry(
+            "cn=user01,ou=users,dc=x",
+            &[("cn", &["User1", "user01"]), ("sn", &["Bar1"])],
+        );
+        let cs = diff(&e, &e).unwrap();
+        assert!(cs.modrdn.is_none(), "no rename expected; cs={cs:?}");
+        assert!(
+            cs.is_empty(),
+            "clean entry must produce no changes; cs={cs:?}"
+        );
+    }
+
+    #[test]
+    fn diff_multivalued_rdn_add_value_is_modify_not_rename() {
+        // Adding another cn value while the RDN value stays present is a MODIFY add,
+        // not a rename.
+        let orig = entry("cn=user01,dc=x", &[("cn", &["User1", "user01"])]);
+        let edited = entry("cn=user01,dc=x", &[("cn", &["User1", "user01", "u1"])]);
+        let cs = diff(&orig, &edited).unwrap();
+        assert!(cs.modrdn.is_none(), "no rename expected; cs={cs:?}");
+        assert_eq!(
+            cs.mods,
+            vec![ModOp::Add {
+                attr: "cn".to_string(),
+                values: vec!["u1".to_string()]
             }]
         );
     }
