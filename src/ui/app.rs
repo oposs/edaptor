@@ -2056,6 +2056,20 @@ mod tests {
     }
 
     #[test]
+    fn fanout_is_case_insensitive_on_dns() {
+        let out = membership_fanout(
+            "uid=ann,ou=people",
+            &["CN=G1,OU=GROUPS".into()],
+            &["cn=g1,ou=groups".into()],
+            "member",
+        );
+        assert!(
+            out.is_empty(),
+            "same DN in different case must not produce add/delete"
+        );
+    }
+
+    #[test]
     fn would_empty_only_when_sole_member() {
         assert!(would_empty(
             &["uid=ann,ou=people".to_string()],

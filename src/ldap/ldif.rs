@@ -63,7 +63,7 @@ pub fn render_changesets(sets: &[ChangeSet]) -> String {
         .filter(|cs| !cs.is_empty())
         .map(render_changeset)
         .collect::<Vec<_>>()
-        .join("\n\n")
+        .join("\n")
 }
 
 /// Render a full ADD as an LDIF `changetype: add` record. Attribute order is the

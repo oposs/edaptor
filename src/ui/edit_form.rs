@@ -706,6 +706,8 @@ mod tests {
             attrs: form.baseline.clone(),
         };
         let mut edited = form.to_edit_entry();
+        // Defensive: remove backref labels from both sides (to_edit_entry already
+        // omits them, but the caller pattern is illustrated here for clarity).
         for l in &labels {
             original.attrs.remove(l);
             edited.attrs.remove(l);
