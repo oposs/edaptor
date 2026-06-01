@@ -32,8 +32,13 @@ plan's **green checkpoints**, not every checkbox.
   Alt+a/Insert add, Alt+d delete, F2 commit (drops empties), Esc cancel; secret
   rows masked; ordered/set hint. Verified live: reorder+save → "No changes"
   (set-wise §4 tie); add+save → real `add: cn`. Commit `27494c4`.
-  **P3 review status: <PENDING — fill in after the background reviewer returns;
-  apply + commit any fixes before starting P4>.**
+  **P3 review done (commit `65e82be`):** reviewer's "Critical" Vec::swap panic was
+  a FALSE POSITIVE (assumed `wrapping_sub`; `saturating_sub` on empty Vec = 0, so
+  sel stays 0 and reorder arms are guarded). Added a defensive `sel` clamp +2
+  regression tests anyway. **Deferred to P4 (real, low-prob):** a base-read that
+  resolves while the popup is open can replace `app.form` under the editor — the
+  P4 guard rework should skip/defer form installation while an editing overlay is
+  open (or clear the overlay). 161 lib tests, clippy --all-targets clean.
 
 State at handoff: crate is **`cargo clippy --all-targets` clean (no dead code)**,
 **~159 lib tests pass**. Confirm with `cargo test` + `cargo clippy --all-targets -- -D warnings`.
