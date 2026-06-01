@@ -15,7 +15,7 @@ use tui_prompts::State;
 use tui_tree_widget::Tree;
 
 use crate::ui::app::{App, Overlay, Pane};
-use crate::ui::edit_form::{EditField, ValueEditor};
+use crate::ui::edit_form::{EditField, EditForm, ValueEditor};
 use crate::ui::form::WidgetSpec;
 
 /// The three-pane column split: branch tree | leaf list | edit form.
@@ -243,20 +243,27 @@ fn secret_len(fld: &EditField) -> usize {
 fn render_overlay(f: &mut Frame, app: &App) {
     let area = f.area();
     let (title, body, hint, border) = match app.overlay.as_ref() {
-        Some(Overlay::Confirm { title, body, .. }) => (
-            title.clone(),
-            body.clone(),
-            " [Y]es   [N]o ",
-            Color::Yellow,
-        ),
+        Some(Overlay::Confirm { title, body, .. }) => {
+            (title.clone(), body.clone(), " [Y]es   [N]o ", Color::Yellow)
+        }
         Some(Overlay::Error { text }) => (
             "Error".to_string(),
             text.clone(),
             " press any key ",
             Color::Red,
         ),
+        Some(Overlay::Guard { .. }) => (
+            "Unsaved changes".to_string(),
+            "This entry has unsaved edits.\nSave them before moving on?".to_string(),
+            " [S]ave   [D]iscard   [C]ancel ",
+            Color::Yellow,
+        ),
         Some(Overlay::ValueEditor(ve)) => {
             render_value_editor(f, ve, area);
+            return;
+        }
+        Some(Overlay::CreateForm { form, focus, .. }) => {
+            render_create_form(f, form, *focus, area);
             return;
         }
         None => return,
@@ -307,7 +314,11 @@ fn render_value_editor(f: &mut Frame, ve: &ValueEditor, area: Rect) {
         .title(format!(" Edit {} ({kind}) ", ve.label))
         .title_bottom(" Alt+↑↓ move  Alt+a add  Alt+d del  F2 save  Esc cancel ")
         .style(Style::default().bg(bg).fg(Color::White))
-        .border_style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD));
+        .border_style(
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        );
     let inner = block.inner(rect);
     f.render_widget(block, rect);
 
@@ -319,11 +330,11 @@ fn render_value_editor(f: &mut Frame, ve: &ValueEditor, area: Rect) {
         let selected = i == ve.sel;
         let marker = format!("{:>2} {} ", i + 1, if selected { "▶" } else { " " });
         f.render_widget(
-            Paragraph::new(marker).style(
-                Style::default()
-                    .bg(bg)
-                    .fg(if selected { Color::Yellow } else { Color::DarkGray }),
-            ),
+            Paragraph::new(marker).style(Style::default().bg(bg).fg(if selected {
+                Color::Yellow
+            } else {
+                Color::DarkGray
+            })),
             Rect::new(inner.x, y, 5.min(inner.width), 1),
         );
         let vr = Rect::new(inner.x + 5, y, inner.width.saturating_sub(5), 1);
@@ -342,6 +353,72 @@ fn render_value_editor(f: &mut Frame, ve: &ValueEditor, area: Rect) {
         if selected {
             let col = (row.position() as u16).min(vr.width.saturating_sub(1));
             f.set_cursor_position((vr.x + col, y));
+        }
+    }
+}
+
+/// Draw the create-entry overlay: the editable form for a new entry, hosted in a
+/// centered modal (reuses [`field_display_value`] and the pane-3 row layout). The
+/// focused, editable single-value field carries the cursor. (P4-T2.)
+fn render_create_form(f: &mut Frame, form: &EditForm, focus: usize, area: Rect) {
+    let n = form.fields.len();
+    let avail = area.height.saturating_sub(2).max(7);
+    let h = (n as u16 + 4).clamp(7, avail).min(avail);
+    let w = 72.min(area.width.saturating_sub(4)).max(20);
+    let rect = centered(w, h, area);
+    f.render_widget(Clear, rect);
+
+    let bg = Color::Rgb(30, 30, 40);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(format!(" {} ", form.dn))
+        .title_bottom(" ↑↓ field   F2 create   Esc cancel ")
+        .style(Style::default().bg(bg).fg(Color::White))
+        .border_style(
+            Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD),
+        );
+    let inner = block.inner(rect);
+    f.render_widget(block, rect);
+    if inner.height == 0 {
+        return;
+    }
+
+    let label_w = LABEL_WIDTH.min(inner.width);
+    let viewport = inner.height as usize;
+    let scroll = clamp_scroll(focus, 0, viewport, n);
+    for (row, idx) in (scroll..n).enumerate() {
+        if row >= viewport {
+            break;
+        }
+        let y = inner.y + row as u16;
+        let fld = &form.fields[idx];
+        let is_focused = idx == focus;
+
+        let label_style = if is_focused {
+            Style::default()
+                .bg(bg)
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().bg(bg).fg(Color::Gray)
+        };
+        let star = if fld.must { "*" } else { " " };
+        f.render_widget(
+            Paragraph::new(format!("{star}{}", fld.label)).style(label_style),
+            Rect::new(inner.x, y, label_w, 1),
+        );
+
+        let val_rect = Rect::new(inner.x + label_w, y, inner.width.saturating_sub(label_w), 1);
+        f.render_widget(
+            Paragraph::new(field_display_value(fld))
+                .style(Style::default().bg(bg).fg(Color::White)),
+            val_rect,
+        );
+        if is_focused && fld.editable && !fld.multi {
+            let col = (fld.editor.position() as u16).min(val_rect.width.saturating_sub(1));
+            f.set_cursor_position((val_rect.x + col, y));
         }
     }
 }
@@ -403,7 +480,10 @@ mod tests {
     fn secret_field_renders_masked_never_cleartext() {
         let field = secret_field("topSecret-Paßwort");
         let shown = field_display_value(&field);
-        assert!(!shown.contains("topSecret"), "must not leak cleartext: {shown:?}");
+        assert!(
+            !shown.contains("topSecret"),
+            "must not leak cleartext: {shown:?}"
+        );
         assert!(shown.chars().all(|c| c == '•'));
         // Mask length tracks the live editor (grapheme count, not bytes).
         assert_eq!(shown.chars().count(), "topSecret-Paßwort".chars().count());

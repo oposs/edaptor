@@ -303,7 +303,8 @@ mod tests {
         // Add a blank row and a whitespace row; commit drops both.
         ve.rows.push(TextState::new());
         ve.rows.push(TextState::new().with_value("   ".to_string()));
-        ve.rows.push(TextState::new().with_value(" c@z.org ".to_string()));
+        ve.rows
+            .push(TextState::new().with_value(" c@z.org ".to_string()));
         let committed = ve.committed_values();
         assert_eq!(committed, vec!["a@x.org", "a@y.org", "c@z.org"]);
     }
@@ -339,7 +340,10 @@ mod tests {
         form.fields[i].editor = TextState::new().with_value("changed");
 
         assert!(form.is_dirty());
-        assert_eq!(form.to_edit_entry().attrs["cn"], vec!["changed".to_string()]);
+        assert_eq!(
+            form.to_edit_entry().attrs["cn"],
+            vec!["changed".to_string()]
+        );
     }
 
     #[test]

@@ -11,7 +11,7 @@
 //! borrow is scoped to the closure, so it never collides with the orchestration
 //! borrows that follow it each tick.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::time::Duration;
 
 use anyhow::{anyhow, Result};
@@ -20,14 +20,16 @@ use tui_prompts::{State, TextState};
 use tui_tree_widget::{TreeItem, TreeState};
 
 use crate::app::UiAction;
-use crate::config::Config;
+use crate::config::{Config, EntryProfile};
 use crate::form::changeset::{diff, EditEntry, ModOp};
 use crate::form::validate::{plan_save, validate, SavePlan, ValidationError};
-use crate::ldap::ldif::render_changeset;
+use crate::ldap::ldif::{render_add, render_changeset};
 use crate::ldap::worker::{Request, Response, StructureNodeRaw, WorkerHandle};
 use crate::schema::SchemaModel;
 use crate::ui::edit_form::{build_edit_form, EditForm, ValueEditor};
+use crate::ui::form_state::{guard_decision, GuardChoice, GuardOutcome};
 use crate::ui::view;
+use crate::workflows::create::{build_add_entry, empty_form_for_profile};
 use crate::workflows::read_flow::{ReadFlow, ReadOutcome};
 use crate::workflows::structure::{Structure, StructureInput};
 
@@ -43,8 +45,7 @@ pub enum Pane {
 }
 
 /// A modal overlay drawn on top of the panes; while one is open it captures all
-/// keys (plan §3.4). More variants (ValueEditor, Guard, CreateForm) arrive in
-/// later phases.
+/// keys (plan §3.4).
 pub enum Overlay {
     /// A yes/no confirmation (e.g. the save LDIF preview) carrying the action to
     /// run on confirm.
@@ -63,25 +64,86 @@ pub enum Overlay {
     },
     /// The multi-value popup editor (Enter on a multi field).
     ValueEditor(ValueEditor),
+    /// The Save/Discard/Stay guard shown when navigating away from a dirty form.
+    /// Carries the pending navigation target to resume once the user chooses.
+    Guard {
+        /// The leaf DN the user moved to (`None` = empty list); resumed on Proceed.
+        nav: Option<String>,
+    },
+    /// The create-entry form: an editable form hosted in an overlay, reusing the
+    /// same [`EditForm`] widget as pane 3 (one editable-form impl, two hosts).
+    CreateForm {
+        /// The editable form for the new entry.
+        form: EditForm,
+        /// The focused field index within the create form.
+        focus: usize,
+        /// The profile index the new entry is created for.
+        profile: usize,
+        /// The container DN the entry will be added under.
+        container: String,
+    },
 }
 
-/// What a confirmed [`Overlay::Confirm`] should do. Grows in P4 (create/delete).
+/// What a confirmed [`Overlay::Confirm`] (or resolved [`Overlay::Guard`]) should
+/// do once the worker is available.
 pub enum PendingAction {
-    /// Submit a prepared save plan against `dn`.
+    /// Submit a prepared save plan against `dn`; `nav` is a deferred navigation
+    /// target (set when a guard's Save resolves), serviced after the write.
     Save {
         /// The save plan to submit on confirm.
         plan: SavePlan,
         /// The (old) DN the plan targets.
         dn: String,
+        /// A deferred navigation target (the entry to move to after the save).
+        nav: Option<String>,
+    },
+    /// Submit an `Add` for a newly created entry, then splice it into the tree.
+    Create {
+        /// The new entry's DN.
+        dn: String,
+        /// The new entry's attributes.
+        attrs: BTreeMap<String, Vec<String>>,
+        /// The container DN the entry is added under (for the structure splice).
+        parent: String,
+    },
+    /// Submit a `Delete` for `dn`, then reflow the structure.
+    Delete {
+        /// The DN to delete.
+        dn: String,
+    },
+    /// Guard outcome (Discard / Proceed): just navigate to `target`.
+    Navigate {
+        /// The entry to navigate to (`None` clears the form).
+        target: Option<String>,
+    },
+    /// Guard outcome (Save): run the save flow, then navigate to `target`.
+    SaveThenNavigate {
+        /// The entry to navigate to once the save completes.
+        target: Option<String>,
     },
 }
 
 /// What the run-loop should do when a write's `WriteOk` arrives, keyed by id.
 enum PostWrite {
-    /// A form save (Modify / RenameOnly): re-read `reread_dn` into the form.
+    /// A form save (Modify / RenameOnly): re-read `reread_dn` into the form,
+    /// unless `nav` is set (a guard Save) in which case navigate there instead.
     Save {
         /// The DN to re-read once the write succeeds.
         reread_dn: String,
+        /// A deferred navigation target (the entry the user moved to while dirty).
+        nav: Option<String>,
+    },
+    /// A create: splice the new entry into the eager [`Structure`] under `parent`.
+    Created {
+        /// The container the entry was added under.
+        parent: String,
+        /// The new entry's structure row.
+        input: StructureInput,
+    },
+    /// A delete: drop `dn` from the [`Structure`] and reflow.
+    Deleted {
+        /// The removed entry's DN.
+        dn: String,
     },
 }
 
@@ -133,6 +195,7 @@ pub struct App {
 pub fn run(config: Config, password: String) -> Result<()> {
     let base_dn = config.server.base_dn.clone();
     let read_only = config.is_read_only();
+    let profiles = config.profiles.clone();
 
     // Sync startup: spawn the worker, fetch the schema, scan the structure.
     let worker = WorkerHandle::spawn(config, password)?;
@@ -152,7 +215,11 @@ pub fn run(config: Config, password: String) -> Result<()> {
         Response::StructureError { msg, truncated, .. } => {
             eprintln!(
                 "warning: structure scan failed ({msg}){}; browsing root only",
-                if truncated { " — result truncated" } else { "" }
+                if truncated {
+                    " — result truncated"
+                } else {
+                    ""
+                }
             );
             Vec::new()
         }
@@ -187,7 +254,15 @@ pub fn run(config: Config, password: String) -> Result<()> {
     };
 
     let mut terminal = ratatui::init();
-    let res = event_loop(&mut terminal, &mut app, &worker, &mut read_flow, &structure);
+    let res = event_loop(
+        &mut terminal,
+        &mut app,
+        &worker,
+        &mut read_flow,
+        structure,
+        &profiles,
+        &base_dn,
+    );
     ratatui::restore();
     res
 }
@@ -199,7 +274,9 @@ fn event_loop(
     app: &mut App,
     worker: &WorkerHandle,
     read_flow: &mut ReadFlow,
-    structure: &Structure,
+    mut structure: Structure,
+    profiles: &[EntryProfile],
+    base_dn: &str,
 ) -> Result<()> {
     // Write-tracking maps (orchestration locals, plan §2.1).
     let mut post: HashMap<u64, PostWrite> = HashMap::new();
@@ -210,7 +287,15 @@ fn event_loop(
 
         // 1) Drain ALL pending worker responses (writes first, then read forms).
         while let Some(resp) = worker.poll() {
-            handle_worker_response(app, &resp, worker, read_flow, &mut post, &mut pending_followups);
+            handle_worker_response(
+                app,
+                &resp,
+                worker,
+                read_flow,
+                &mut structure,
+                &mut post,
+                &mut pending_followups,
+            );
         }
 
         // 2) Poll input with a timeout so the worker drain keeps ticking. An open
@@ -219,11 +304,26 @@ fn event_loop(
             if let Event::Key(key) = event::read()? {
                 if key.kind != KeyEventKind::Release {
                     if app.overlay.is_some() {
-                        if let Some(action) = overlay_key(app, key) {
-                            execute_pending(app, action, worker, &mut post, &mut pending_followups);
+                        if let Some(action) = overlay_key(app, key, read_flow, profiles) {
+                            execute_pending(
+                                app,
+                                action,
+                                worker,
+                                read_flow,
+                                &mut post,
+                                &mut pending_followups,
+                            );
                         }
                     } else if let Some(action) = dispatch_key(app, key) {
-                        handle_action(app, action, read_flow);
+                        handle_action(
+                            app,
+                            action,
+                            worker,
+                            read_flow,
+                            &mut structure,
+                            profiles,
+                            base_dn,
+                        );
                     }
                 }
             }
@@ -231,7 +331,7 @@ fn event_loop(
 
         // 3) Reconcile UI deltas (no-op while an overlay holds the keys).
         if app.overlay.is_none() {
-            reconcile(app, structure, worker, read_flow);
+            reconcile(app, &structure, worker, read_flow);
         }
 
         if app.should_quit {
@@ -248,6 +348,7 @@ fn handle_worker_response(
     resp: &Response,
     worker: &WorkerHandle,
     read_flow: &mut ReadFlow,
+    structure: &mut Structure,
     post: &mut HashMap<u64, PostWrite>,
     pending_followups: &mut HashMap<u64, (String, Vec<ModOp>)>,
 ) {
@@ -265,12 +366,40 @@ fn handle_worker_response(
                 let _ = read_flow.request_entry(worker, &new_dn, None);
                 return;
             }
-            if let Some(PostWrite::Save { reread_dn }) = post.remove(id) {
-                app.status = "Saved.".to_string();
-                rebind_selection(app, &reread_dn);
-                let _ = read_flow.request_entry(worker, &reread_dn, None);
-            } else {
-                app.status = "Saved.".to_string();
+            match post.remove(id) {
+                Some(PostWrite::Save { reread_dn, nav }) => {
+                    app.status = "Saved.".to_string();
+                    // A guard's Save defers navigation to the moved-to entry; an
+                    // ordinary save just re-reads the entry that was saved.
+                    let target = nav.unwrap_or(reread_dn);
+                    rebind_selection(app, &target);
+                    let _ = read_flow.request_entry(worker, &target, None);
+                    app.rows = compute_rows(structure, &app.current_branch, &app.last_search);
+                }
+                Some(PostWrite::Created { parent, input }) => {
+                    app.status = "Created.".to_string();
+                    // A new child may turn a former leaf into a branch → rebuild
+                    // the tree; always refresh the leaf rows.
+                    if structure.add_child(&parent, input) {
+                        app.tree_items = build_tree_items(structure);
+                    }
+                    app.rows = compute_rows(structure, &app.current_branch, &app.last_search);
+                }
+                Some(PostWrite::Deleted { dn }) => {
+                    app.status = "Deleted.".to_string();
+                    let was_branch = structure.get(&dn).map(|n| n.is_branch()).unwrap_or(false);
+                    let demoted = structure.remove(&dn);
+                    if was_branch || demoted {
+                        app.tree_items = build_tree_items(structure);
+                    }
+                    // Clear the form if it was showing the now-deleted entry.
+                    if app.form.as_ref().map(|f| f.dn == dn).unwrap_or(false) {
+                        app.form = None;
+                    }
+                    app.rows = compute_rows(structure, &app.current_branch, &app.last_search);
+                    app.last_seen_leaf = None;
+                }
+                None => app.status = "Saved.".to_string(),
             }
         }
         Response::WriteError { msg, .. } => {
@@ -282,13 +411,15 @@ fn handle_worker_response(
                 // Rapid leaf navigation submits overlapping base-reads; the worker
                 // is FIFO so an older read can resolve first. Install only the
                 // response whose DN matches the entry the user is currently on,
-                // else a stale entry would flash (and, from P2, clobber edits).
+                // else a stale entry would flash (and clobber edits). Also defer
+                // installation while an editing overlay (create / value editor) is
+                // open, so a late base-read cannot replace `app.form` under it.
                 let current = app
                     .last_seen_leaf
                     .as_deref()
                     .map(|dn| dn.eq_ignore_ascii_case(&model.title))
                     .unwrap_or(false);
-                if current {
+                if current && app.overlay.is_none() {
                     app.form = Some(build_edit_form(&model, read_flow.schema(), app.read_only));
                     app.form_focus = 0;
                     app.form_scroll = 0;
@@ -319,11 +450,28 @@ fn dispatch_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
         app.focus = next_pane(app.focus);
         return None;
     }
-    // Save / Cancel (writable mode only).
+    // Refresh is allowed even in read-only mode (it only re-reads).
+    if matches!(key.code, KeyCode::F(5)) {
+        return Some(UiAction::Refresh);
+    }
+    // Save / Cancel / Create / Delete (writable mode only). Read-only mode
+    // suppresses every write affordance (P4-T4). A menu bar surfaces the same
+    // actions for discoverability + multi-profile create in P5-T2.
     if !app.read_only {
         match key.code {
             KeyCode::F(2) => return Some(UiAction::FormSave),
             KeyCode::F(3) => return Some(UiAction::FormCancel),
+            // F7 creates an entry for the first profile; the (P5-T2) menu bar
+            // reaches the other profiles via `menu_action`.
+            KeyCode::F(7) => return Some(UiAction::NewEntry(0)),
+            // F8 deletes the entry currently shown in the form pane (spec §12).
+            KeyCode::F(8) => {
+                return app
+                    .form
+                    .as_ref()
+                    .filter(|f| !f.dn.is_empty())
+                    .map(|f| UiAction::DeleteEntry(f.dn.clone()));
+            }
             _ => {}
         }
     }
@@ -368,7 +516,9 @@ fn dispatch_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
                 // Scroll follows focus: clamp_scroll (in render_form) is the sole
                 // authority for form_scroll, so paging only moves the focus.
                 KeyCode::PageUp => app.form_focus = app.form_focus.saturating_sub(10),
-                KeyCode::PageDown => app.form_focus = (app.form_focus + 10).min(n.saturating_sub(1)),
+                KeyCode::PageDown => {
+                    app.form_focus = (app.form_focus + 10).min(n.saturating_sub(1))
+                }
                 // Enter on an editable multi-value field opens the value-editor
                 // popup; on a single field it is a no-op.
                 KeyCode::Enter => open_value_editor(app),
@@ -436,7 +586,9 @@ fn value_editor_key(app: &mut App, key: KeyEvent) {
             ve.sel = ve.sel.min(ve.rows.len().saturating_sub(1));
             match (key.code, alt) {
                 (KeyCode::Up, false) => ve.sel = ve.sel.saturating_sub(1),
-                (KeyCode::Down, false) => ve.sel = (ve.sel + 1).min(ve.rows.len().saturating_sub(1)),
+                (KeyCode::Down, false) => {
+                    ve.sel = (ve.sel + 1).min(ve.rows.len().saturating_sub(1))
+                }
                 (KeyCode::Up, true) => {
                     if ve.sel > 0 {
                         ve.rows.swap(ve.sel, ve.sel - 1);
@@ -471,12 +623,23 @@ fn value_editor_key(app: &mut App, key: KeyEvent) {
     }
 }
 
-/// Service a [`UiAction`] that needs the worker / schema. P2 handles save and
-/// cancel; create/delete/refresh arrive in P4.
-fn handle_action(app: &mut App, action: UiAction, read_flow: &mut ReadFlow) {
+/// Service a [`UiAction`] that needs the worker / schema. Save and cancel build
+/// confirm overlays; create opens an editable overlay; delete opens a confirm;
+/// refresh re-runs the eager scan synchronously and rebuilds the panes.
+fn handle_action(
+    app: &mut App,
+    action: UiAction,
+    worker: &WorkerHandle,
+    read_flow: &mut ReadFlow,
+    structure: &mut Structure,
+    profiles: &[EntryProfile],
+    base_dn: &str,
+) {
     match action {
         UiAction::FormSave => {
-            let Some(form) = app.form.as_ref() else { return };
+            let Some(form) = app.form.as_ref() else {
+                return;
+            };
             let original = EditEntry {
                 dn: form.dn.clone(),
                 attrs: form.baseline.clone(),
@@ -488,7 +651,11 @@ fn handle_action(app: &mut App, action: UiAction, read_flow: &mut ReadFlow) {
                     app.overlay = Some(Overlay::Confirm {
                         title: "Apply these changes?".to_string(),
                         body: ldif,
-                        action: PendingAction::Save { plan, dn },
+                        action: PendingAction::Save {
+                            plan,
+                            dn,
+                            nav: None,
+                        },
                     });
                 }
                 PrepareSave::NoChanges => app.status = "No changes.".to_string(),
@@ -501,7 +668,73 @@ fn handle_action(app: &mut App, action: UiAction, read_flow: &mut ReadFlow) {
             }
         }
         UiAction::FormCancel => revert_form(app),
-        _ => {}
+        UiAction::NewEntry(i) => {
+            // Build an empty schema-driven form for the profile and host it in a
+            // create overlay (reuses the EditForm widget). Submission happens on
+            // F2 → validate → LDIF confirm → Add (see create_form_key).
+            if let Some(profile) = profiles.get(i) {
+                let container = if profile.search_base.is_empty() {
+                    structure.root_dn().to_string()
+                } else {
+                    profile.search_base.clone()
+                };
+                let model = empty_form_for_profile(read_flow.schema(), profile);
+                let form = build_edit_form(&model, read_flow.schema(), false);
+                app.overlay = Some(Overlay::CreateForm {
+                    form,
+                    focus: 0,
+                    profile: i,
+                    container,
+                });
+            }
+        }
+        UiAction::DeleteEntry(dn) => {
+            if !dn.is_empty() {
+                app.overlay = Some(Overlay::Confirm {
+                    title: "Delete this entry?".to_string(),
+                    body: dn.clone(),
+                    action: PendingAction::Delete { dn },
+                });
+            }
+        }
+        UiAction::Refresh => refresh_structure(app, worker, structure, base_dn),
+        UiAction::Activate { .. } | UiAction::None => {}
+    }
+}
+
+/// Re-run the eager structure scan (synchronous, like startup) and rebuild the
+/// tree + leaf panes. Keeps the current branch if it still exists, else falls
+/// back to the base DN. (Port of the old `UiAction::Refresh` arm.)
+fn refresh_structure(
+    app: &mut App,
+    worker: &WorkerHandle,
+    structure: &mut Structure,
+    base_dn: &str,
+) {
+    match worker.request(Request::LoadStructure {
+        id: 0,
+        base: base_dn.to_string(),
+        page_size: 500,
+    }) {
+        Ok(Response::StructureEntries { nodes, .. }) => {
+            *structure = Structure::build(base_dn, structure_inputs(nodes));
+            app.tree_items = build_tree_items(structure);
+            if structure.get(&app.current_branch).is_none() {
+                app.current_branch = base_dn.to_string();
+            }
+            app.rows = compute_rows(structure, &app.current_branch, &app.last_search);
+            app.leaf_sel = 0;
+            app.last_seen_leaf = None;
+            app.status = "Refreshed.".to_string();
+        }
+        Ok(Response::StructureError { msg, .. }) => {
+            app.overlay = Some(Overlay::Error { text: msg })
+        }
+        _ => {
+            app.overlay = Some(Overlay::Error {
+                text: "refresh failed".to_string(),
+            })
+        }
     }
 }
 
@@ -530,8 +763,14 @@ fn rebind_selection(app: &mut App, dn: &str) {
 }
 
 /// Handle a key while an overlay is open. Returns the action to run when the
-/// user confirms a [`Overlay::Confirm`]; otherwise dismisses / consumes the key.
-fn overlay_key(app: &mut App, key: KeyEvent) -> Option<PendingAction> {
+/// user confirms a [`Overlay::Confirm`] or resolves a [`Overlay::Guard`];
+/// otherwise dismisses / consumes the key.
+fn overlay_key(
+    app: &mut App,
+    key: KeyEvent,
+    read_flow: &mut ReadFlow,
+    profiles: &[EntryProfile],
+) -> Option<PendingAction> {
     match &app.overlay {
         Some(Overlay::Confirm { .. }) => match key.code {
             KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
@@ -556,30 +795,224 @@ fn overlay_key(app: &mut App, key: KeyEvent) -> Option<PendingAction> {
             value_editor_key(app, key);
             None
         }
+        Some(Overlay::Guard { .. }) => guard_key(app, key),
+        Some(Overlay::CreateForm { .. }) => create_form_key(app, key, read_flow, profiles),
         None => None,
     }
 }
 
-/// Run a confirmed [`PendingAction`] (submits to the worker).
+/// Resolve the Save/Discard/Stay guard. Maps the key to a [`GuardChoice`], runs
+/// the pure [`guard_decision`], and turns the outcome into a navigation action
+/// (or, for Stay, advances `last_seen_leaf` so the guard does not re-fire).
+fn guard_key(app: &mut App, key: KeyEvent) -> Option<PendingAction> {
+    let choice = match key.code {
+        KeyCode::Char('s') | KeyCode::Char('S') | KeyCode::F(2) => GuardChoice::Save,
+        KeyCode::Char('d') | KeyCode::Char('D') => GuardChoice::Discard,
+        KeyCode::Char('c') | KeyCode::Char('C') | KeyCode::Esc | KeyCode::F(3) => GuardChoice::Stay,
+        _ => return None, // ignore unrelated keys; the guard stays open
+    };
+    let nav = match &app.overlay {
+        Some(Overlay::Guard { nav }) => nav.clone(),
+        _ => None,
+    };
+    app.overlay = None;
+    match guard_decision(true, Some(choice)) {
+        GuardOutcome::Cancel => {
+            // Stay: keep editing. Advance last_seen to the moved-to entry so the
+            // guard does not re-fire every tick (the highlight now differs from
+            // the form — a known wrinkle carried over from the TV loop).
+            app.last_seen_leaf = nav;
+            None
+        }
+        GuardOutcome::Proceed => Some(PendingAction::Navigate { target: nav }),
+        GuardOutcome::SaveThenProceed => Some(PendingAction::SaveThenNavigate { target: nav }),
+    }
+}
+
+/// Handle a key inside the create-entry overlay: field nav (↑↓), inline edit of
+/// the focused single-value field, F2 commit (validate → LDIF confirm → Add),
+/// Esc/F3 cancel. Multi-value fields in create are edited after the entry exists.
+fn create_form_key(
+    app: &mut App,
+    key: KeyEvent,
+    read_flow: &mut ReadFlow,
+    profiles: &[EntryProfile],
+) -> Option<PendingAction> {
+    match key.code {
+        KeyCode::Esc | KeyCode::F(3) => {
+            app.overlay = None;
+            None
+        }
+        KeyCode::F(2) => commit_create(app, read_flow, profiles),
+        KeyCode::Up => {
+            if let Some(Overlay::CreateForm { focus, .. }) = app.overlay.as_mut() {
+                *focus = focus.saturating_sub(1);
+            }
+            None
+        }
+        KeyCode::Down => {
+            if let Some(Overlay::CreateForm { form, focus, .. }) = app.overlay.as_mut() {
+                *focus = next_index(*focus, form.fields.len());
+            }
+            None
+        }
+        _ => {
+            // Edit the focused, editable single-value field.
+            if let Some(Overlay::CreateForm { form, focus, .. }) = app.overlay.as_mut() {
+                if let Some(field) = form.fields.get_mut(*focus) {
+                    if field.editable && !field.multi {
+                        field.editor.handle_key_event(key);
+                    }
+                }
+            }
+            None
+        }
+    }
+}
+
+/// Validate the create form and, if it is complete, replace it with an LDIF
+/// confirm carrying the [`PendingAction::Create`]. Errors open an error overlay.
+fn commit_create(
+    app: &mut App,
+    read_flow: &mut ReadFlow,
+    profiles: &[EntryProfile],
+) -> Option<PendingAction> {
+    // Extract what we need, then drop the overlay borrow before re-assigning it.
+    let (edited, profile_idx, container) = match &app.overlay {
+        Some(Overlay::CreateForm {
+            form,
+            profile,
+            container,
+            ..
+        }) => (form.to_edit_entry(), *profile, container.clone()),
+        _ => return None,
+    };
+    let Some(profile) = profiles.get(profile_idx) else {
+        app.overlay = None;
+        return None;
+    };
+
+    let oc_refs = [profile.object_class.as_str()];
+    let errors = validate(&edited, read_flow.schema(), &oc_refs);
+    if !errors.is_empty() {
+        app.overlay = Some(Overlay::Error {
+            text: format_validation_errors(&errors),
+        });
+        return None;
+    }
+
+    let rdn_value = edited
+        .attrs
+        .iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case(&profile.rdn_attr))
+        .and_then(|(_, v)| v.first().cloned())
+        .unwrap_or_default();
+    if rdn_value.trim().is_empty() {
+        app.overlay = Some(Overlay::Error {
+            text: "The RDN attribute must have a value.".to_string(),
+        });
+        return None;
+    }
+
+    let (dn, attrs) = build_add_entry(profile, &container, rdn_value.trim(), &edited);
+    let ldif = render_add(&dn, &attrs);
+    app.overlay = Some(Overlay::Confirm {
+        title: "Create this entry?".to_string(),
+        body: ldif,
+        action: PendingAction::Create {
+            dn,
+            attrs,
+            parent: container,
+        },
+    });
+    None
+}
+
+/// Run a confirmed [`PendingAction`] (submits to the worker / navigates).
 fn execute_pending(
     app: &mut App,
     action: PendingAction,
     worker: &WorkerHandle,
+    read_flow: &mut ReadFlow,
     post: &mut HashMap<u64, PostWrite>,
     pending_followups: &mut HashMap<u64, (String, Vec<ModOp>)>,
 ) {
     match action {
-        PendingAction::Save { plan, dn } => {
-            submit_prepared(plan, &dn, worker, post, pending_followups);
+        PendingAction::Save { plan, dn, nav } => {
+            submit_prepared(plan, &dn, nav, worker, post, pending_followups);
             app.status = "Saving…".to_string();
         }
+        PendingAction::Create { dn, attrs, parent } => {
+            let id = next_id();
+            let input = structure_input_from_attrs(&dn, &attrs);
+            let _ = worker.submit(Request::Add { id, dn, attrs });
+            post.insert(id, PostWrite::Created { parent, input });
+            app.status = "Creating…".to_string();
+        }
+        PendingAction::Delete { dn } => {
+            let id = next_id();
+            let _ = worker.submit(Request::Delete { id, dn: dn.clone() });
+            post.insert(id, PostWrite::Deleted { dn });
+            app.status = "Deleting…".to_string();
+        }
+        PendingAction::Navigate { target } => navigate_to(app, worker, read_flow, target),
+        PendingAction::SaveThenNavigate { target } => {
+            // Run the save flow, deferring navigation to the moved-to entry until
+            // the write's WriteOk (the re-read must target the post-save DN).
+            app.last_seen_leaf = target.clone();
+            let Some(form) = app.form.as_ref() else {
+                return;
+            };
+            let original = EditEntry {
+                dn: form.dn.clone(),
+                attrs: form.baseline.clone(),
+            };
+            let edited = form.to_edit_entry();
+            let object_classes = object_classes_of(form);
+            match prepare_save(read_flow.schema(), &original, &edited, &object_classes) {
+                PrepareSave::Ready { plan, dn, .. } => {
+                    submit_prepared(plan, &dn, target, worker, post, pending_followups);
+                    app.status = "Saving…".to_string();
+                }
+                // Nothing to save after all → just navigate.
+                PrepareSave::NoChanges => navigate_to(app, worker, read_flow, target),
+                PrepareSave::Invalid(errs) => {
+                    app.overlay = Some(Overlay::Error {
+                        text: format_validation_errors(&errs),
+                    })
+                }
+                PrepareSave::DiffError(e) => app.overlay = Some(Overlay::Error { text: e }),
+            }
+        }
+    }
+}
+
+/// Navigate the form pane to `target`: base-read the DN, or clear the form when
+/// the target is `None` (empty leaf list). Records `target` as the awaited DN.
+fn navigate_to(
+    app: &mut App,
+    worker: &WorkerHandle,
+    read_flow: &mut ReadFlow,
+    target: Option<String>,
+) {
+    app.last_seen_leaf = target.clone();
+    match target {
+        Some(dn) => {
+            let _ = read_flow.request_entry(worker, &dn, None);
+        }
+        None => app.form = None,
     }
 }
 
 /// Reconcile UI deltas each tick: a tree-selection branch switch, a search
 /// filter change, and a leaf-selection change (which fires a base-read whose
 /// result fills the form). No dirty guard yet (that is P4).
-fn reconcile(app: &mut App, structure: &Structure, worker: &WorkerHandle, read_flow: &mut ReadFlow) {
+fn reconcile(
+    app: &mut App,
+    structure: &Structure,
+    worker: &WorkerHandle,
+    read_flow: &mut ReadFlow,
+) {
     let search = app.search.value().to_string();
 
     // 1) Tree selection changed → switch the leaf pane to that branch.
@@ -601,9 +1034,17 @@ fn reconcile(app: &mut App, structure: &Structure, worker: &WorkerHandle, read_f
         }
     }
 
-    // 3) Selected leaf DN changed → base-read it into the form (or clear it).
+    // 3) Selected leaf DN changed → dirty guard, then base-read it into the form
+    //    (or clear it). A dirty form opens the Save/Discard/Stay guard instead of
+    //    navigating; the guard carries the target and resolves in `guard_key`.
     let sel_dn = app.rows.get(app.leaf_sel).map(|(_, dn)| dn.clone());
     if sel_dn != app.last_seen_leaf {
+        let dirty = app.form.as_ref().map(|f| f.is_dirty()).unwrap_or(false);
+        if dirty {
+            // Do NOT advance last_seen yet — the guard remembers the target.
+            app.overlay = Some(Overlay::Guard { nav: sel_dn });
+            return;
+        }
         app.last_seen_leaf = sel_dn.clone();
         match sel_dn {
             Some(dn) => {
@@ -691,6 +1132,7 @@ fn prepare_save(
 fn submit_prepared(
     plan: SavePlan,
     old_dn: &str,
+    nav: Option<String>,
     worker: &WorkerHandle,
     post: &mut HashMap<u64, PostWrite>,
     pending_followups: &mut HashMap<u64, (String, Vec<ModOp>)>,
@@ -708,6 +1150,7 @@ fn submit_prepared(
                 id,
                 PostWrite::Save {
                     reread_dn: old_dn.to_string(),
+                    nav,
                 },
             );
         }
@@ -721,7 +1164,13 @@ fn submit_prepared(
                 delete_old: modrdn.delete_old,
                 new_superior: modrdn.new_superior,
             });
-            post.insert(id, PostWrite::Save { reread_dn: new_dn });
+            post.insert(
+                id,
+                PostWrite::Save {
+                    reread_dn: new_dn,
+                    nav,
+                },
+            );
         }
         SavePlan::Rename { modrdn, then_mods } => {
             let id = next_id();
@@ -787,6 +1236,29 @@ fn compute_rows(structure: &Structure, branch: &str, search: &str) -> Vec<(Strin
     rows
 }
 
+/// Build the eager-[`Structure`] input row for a freshly created entry from its
+/// DN and the attributes that were sent (the structure model derives the display
+/// label from cn → description → RDN). Pure.
+fn structure_input_from_attrs(dn: &str, attrs: &BTreeMap<String, Vec<String>>) -> StructureInput {
+    let first = |name: &str| {
+        attrs
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case(name))
+            .and_then(|(_, v)| v.first().cloned())
+    };
+    let object_classes = attrs
+        .iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case("objectClass"))
+        .map(|(_, v)| v.clone())
+        .unwrap_or_default();
+    StructureInput {
+        dn: dn.to_string(),
+        cn: first("cn"),
+        description: first("description"),
+        object_classes,
+    }
+}
+
 /// Map the worker's raw structure rows into the pure model's input rows. Pure.
 fn structure_inputs(nodes: Vec<StructureNodeRaw>) -> Vec<StructureInput> {
     nodes
@@ -813,7 +1285,11 @@ fn build_tree_items(structure: &Structure) -> Vec<TreeItem<'static, String>> {
         let mut children = Vec::new();
         if let Some(n) = structure.get(dn) {
             for child_dn in &n.children {
-                if structure.get(child_dn).map(|c| c.is_branch()).unwrap_or(false) {
+                if structure
+                    .get(child_dn)
+                    .map(|c| c.is_branch())
+                    .unwrap_or(false)
+                {
                     children.push(build(structure, child_dn));
                 }
             }
@@ -909,6 +1385,130 @@ mod tests {
         assert!(ve.sel < ve.rows.len());
     }
 
+    /// A bare App (no form) with the given read-only flag, for dispatch tests.
+    fn bare_app(read_only: bool) -> App {
+        App {
+            focus: Pane::Tree,
+            should_quit: false,
+            read_only,
+            tree_state: TreeState::default(),
+            tree_items: vec![],
+            current_branch: String::new(),
+            last_search: String::new(),
+            rows: vec![],
+            leaf_sel: 0,
+            search: TextState::new(),
+            last_seen_leaf: None,
+            form: None,
+            form_focus: 0,
+            form_scroll: 0,
+            overlay: None,
+            status: String::new(),
+        }
+    }
+
+    /// Install a one-field form carrying `dn` so F8/delete has a target.
+    fn with_form(mut app: App, dn: &str) -> App {
+        use crate::schema::FieldKind;
+        use crate::ui::edit_form::EditField;
+        use crate::ui::form::WidgetSpec;
+        app.form = Some(EditForm {
+            dn: dn.to_string(),
+            fields: vec![EditField {
+                label: "cn".to_string(),
+                must: true,
+                editable: true,
+                multi: false,
+                secret: false,
+                ordered: false,
+                values: vec!["x".to_string()],
+                kind: FieldKind::Text,
+                widget: WidgetSpec::ReadOnlyText,
+                editor: TextState::new().with_value("x".to_string()),
+            }],
+            baseline: Default::default(),
+        });
+        app
+    }
+
+    fn fkey(n: u8) -> KeyEvent {
+        KeyEvent::new(KeyCode::F(n), KeyModifiers::NONE)
+    }
+
+    #[test]
+    fn f5_refreshes_even_in_read_only() {
+        assert_eq!(
+            dispatch_key(&mut bare_app(true), fkey(5)),
+            Some(UiAction::Refresh)
+        );
+        assert_eq!(
+            dispatch_key(&mut bare_app(false), fkey(5)),
+            Some(UiAction::Refresh)
+        );
+    }
+
+    #[test]
+    fn f7_creates_first_profile_when_writable_only() {
+        assert_eq!(
+            dispatch_key(&mut bare_app(false), fkey(7)),
+            Some(UiAction::NewEntry(0))
+        );
+        // Read-only mode suppresses create (P4-T4); the key falls through to nav.
+        assert_eq!(dispatch_key(&mut bare_app(true), fkey(7)), None);
+    }
+
+    #[test]
+    fn f8_deletes_the_form_entry_when_writable() {
+        let mut app = with_form(bare_app(false), "cn=Alice,dc=example,dc=org");
+        assert_eq!(
+            dispatch_key(&mut app, fkey(8)),
+            Some(UiAction::DeleteEntry(
+                "cn=Alice,dc=example,dc=org".to_string()
+            ))
+        );
+        // No form → nothing to delete.
+        assert_eq!(dispatch_key(&mut bare_app(false), fkey(8)), None);
+        // Read-only suppresses delete.
+        let mut ro = with_form(bare_app(true), "cn=Alice,dc=example,dc=org");
+        assert_eq!(dispatch_key(&mut ro, fkey(8)), None);
+    }
+
+    #[test]
+    fn guard_key_maps_choices_to_outcomes() {
+        // Stay (Cancel): no action, last_seen advances to the target so it does
+        // not re-fire.
+        let mut app = bare_app(false);
+        app.overlay = Some(Overlay::Guard {
+            nav: Some("cn=next".to_string()),
+        });
+        let plain = |c| KeyEvent::new(c, KeyModifiers::NONE);
+        assert!(guard_key(&mut app, plain(KeyCode::Char('c'))).is_none());
+        assert_eq!(app.last_seen_leaf.as_deref(), Some("cn=next"));
+        assert!(app.overlay.is_none());
+
+        // Discard → Navigate.
+        let mut app = bare_app(false);
+        app.overlay = Some(Overlay::Guard {
+            nav: Some("cn=next".to_string()),
+        });
+        assert!(matches!(
+            guard_key(&mut app, plain(KeyCode::Char('d'))),
+            Some(PendingAction::Navigate {
+                target: Some(t)
+            }) if t == "cn=next"
+        ));
+
+        // Save → SaveThenNavigate.
+        let mut app = bare_app(false);
+        app.overlay = Some(Overlay::Guard {
+            nav: Some("cn=next".to_string()),
+        });
+        assert!(matches!(
+            guard_key(&mut app, plain(KeyCode::Char('s'))),
+            Some(PendingAction::SaveThenNavigate { .. })
+        ));
+    }
+
     #[test]
     fn next_index_clamps_at_end() {
         assert_eq!(next_index(0, 3), 1);
@@ -976,9 +1576,15 @@ mod tests {
         assert_eq!(rows[0].0, "‹self› ou=users");
         assert_eq!(
             rows[1],
-            ("Jane".to_string(), "uid=jane,ou=users,dc=example,dc=org".to_string())
+            (
+                "Jane".to_string(),
+                "uid=jane,ou=users,dc=example,dc=org".to_string()
+            )
         );
-        assert_eq!(compute_rows(&s, "ou=users,dc=example,dc=org", "zzz").len(), 1);
+        assert_eq!(
+            compute_rows(&s, "ou=users,dc=example,dc=org", "zzz").len(),
+            1
+        );
     }
 
     #[test]
