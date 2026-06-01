@@ -23,7 +23,7 @@ use std::thread::{self, JoinHandle};
 use std::collections::HashSet;
 
 use ldap3::adapters::{Adapter, EntriesOnly, PagedResults};
-use ldap3::{LdapConn, Mod, Scope, SearchEntry};
+use ldap3::{LdapConn, Mod, Scope, SearchEntry, SearchOptions};
 
 use crate::config::{AuthMethod, Config};
 use crate::form::changeset::ModOp;
@@ -86,6 +86,8 @@ pub enum Request {
         filter: String,
         /// Attributes to request (`"*"` for all user attributes).
         attrs: Vec<String>,
+        /// Optional server-side size limit (picker type-ahead caps at ~20).
+        size_limit: Option<i32>,
     },
     /// Eagerly load the entire subtree structure under `base` (paged). `id` is
     /// echoed in the reply for correlation.
@@ -359,8 +361,9 @@ fn worker_loop(conn: &mut LdapConn, config: &Config, rx: Receiver<Job>) {
                 scope,
                 filter,
                 attrs,
+                size_limit,
             } => {
-                let resp = match run_search(conn, &base, scope, &filter, attrs) {
+                let resp = match run_search(conn, &base, scope, &filter, attrs, size_limit) {
                     Ok(entries) => Response::Entries { id, entries },
                     Err(e) => Response::SearchError {
                         id,
@@ -554,7 +557,12 @@ fn run_search(
     scope: SearchScope,
     filter: &str,
     attrs: Vec<String>,
+    size_limit: Option<i32>,
 ) -> Result<Vec<LdapEntry>> {
+    if let Some(n) = size_limit {
+        // `with_search_options` applies to the next search on this conn.
+        conn.with_search_options(SearchOptions::new().sizelimit(n));
+    }
     let (entries, _res) = conn
         .search(base, scope_to_ldap3(scope), filter, attrs)?
         .success()
@@ -763,6 +771,23 @@ mod tests {
                 assert!(vals.contains("Brown"));
             }
             _ => panic!("expected Replace"),
+        }
+    }
+
+    #[test]
+    fn search_request_has_size_limit_field() {
+        // Compile-level guarantee that the field exists and defaults are explicit.
+        let r = Request::Search {
+            id: 1,
+            base: "dc=x".into(),
+            scope: SearchScope::OneLevel,
+            filter: "(objectClass=*)".into(),
+            attrs: vec!["cn".into()],
+            size_limit: Some(20),
+        };
+        match r {
+            Request::Search { size_limit, .. } => assert_eq!(size_limit, Some(20)),
+            _ => panic!(),
         }
     }
 }

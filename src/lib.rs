@@ -171,6 +171,7 @@ pub fn run_passwd(
         scope: SearchScope::Base,
         filter: "(objectClass=*)".to_string(),
         attrs: vec!["objectClass".to_string()],
+        size_limit: None,
     })? {
         Response::Entries { entries, .. } => entries
             .into_iter()
@@ -220,6 +221,7 @@ pub fn run_passwd(
         scope: SearchScope::Base,
         filter: "(objectClass=*)".to_string(),
         attrs: vec!["objectClass".to_string()],
+        size_limit: None,
     })? {
         Response::Entries { entries, .. } if !entries.is_empty() => {}
         Response::Entries { .. } => return Err(anyhow!("entry vanished after write: {target_dn}")),

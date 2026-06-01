@@ -71,6 +71,7 @@ fn read_entry(worker: &WorkerHandle, dn: &str, id: u64) -> Option<BTreeMap<Strin
             scope: SearchScope::Base,
             filter: "(objectClass=*)".to_string(),
             attrs: vec!["*".to_string()],
+            size_limit: None,
         })
         .expect("submit base search");
     match poll_for_id(worker, id, Duration::from_secs(10)) {

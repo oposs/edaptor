@@ -210,6 +210,7 @@ fn synced_password_unix_round_trip() {
             scope: SearchScope::Base,
             filter: "(objectClass=*)".to_string(),
             attrs: vec!["cn".to_string()],
+            size_limit: None,
         })
         .expect("submit self-read as user");
     match poll_for_id(&user_worker, 30, Duration::from_secs(10)) {
@@ -227,6 +228,7 @@ fn synced_password_unix_round_trip() {
                 scope: SearchScope::Base,
                 filter: "(objectClass=*)".to_string(),
                 attrs: vec!["sambaNTPassword".to_string(), "sambaPwdLastSet".to_string()],
+                size_limit: None,
             })
             .expect("submit samba attr read");
         match poll_for_id(&worker, 40, Duration::from_secs(10)) {

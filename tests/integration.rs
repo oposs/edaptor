@@ -185,6 +185,7 @@ fn one_level_search_lists_children() {
             scope: SearchScope::OneLevel,
             filter: "(objectClass=*)".to_string(),
             attrs: vec!["cn".to_string(), "objectClass".to_string()],
+            size_limit: None,
         })
         .expect("submit one-level search");
 
@@ -243,6 +244,7 @@ fn base_search_reads_entry_then_form_model() {
             scope: SearchScope::Base,
             filter: "(objectClass=*)".to_string(),
             attrs: vec!["*".to_string()],
+            size_limit: None,
         })
         .expect("submit base search");
 
