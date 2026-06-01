@@ -1,7 +1,9 @@
 //! Configuration: connection properties + auth. (Entry profiles arrive in M4.)
 
 pub mod password;
+pub mod relation;
 pub use password::PasswordSource;
+use relation::Relation;
 
 use anyhow::{Context, Result};
 use serde::Deserialize;
@@ -20,6 +22,9 @@ pub struct Config {
     /// is discovered in the directory (spec §9). Absent `[samba]` table is fine.
     #[serde(default)]
     pub samba: SambaConfig,
+    /// Membership relations (`[[relation]]`); empty when absent.
+    #[serde(default, rename = "relation")]
+    pub relations: Vec<Relation>,
 }
 
 /// Fallback Samba domain settings (spec §9). The live `sambaDomain` entry takes
