@@ -224,6 +224,22 @@ pub fn diff(original: &EditEntry, edited: &EditEntry) -> Result<ChangeSet, Chang
         let orig = values_for(original, attr).cloned().unwrap_or_default();
         let new = values_for(edited, attr).cloned().unwrap_or_default();
 
+        // X-ORDERED attributes carry an ordering `{n}` prefix, so value order is
+        // significant: a pure reorder is a real change and the set-wise diff is
+        // wrong. When both sides are non-empty, compare order-sensitively and emit
+        // a single Replace of the full new ordered list on any difference (an
+        // ordered reorder cannot be expressed as Add/Delete). When either side is
+        // empty, fall through to the set-wise logic below.
+        if is_x_ordered(attr) && !orig.is_empty() && !new.is_empty() {
+            if orig != new {
+                mods.push(ModOp::Replace {
+                    attr: attr.clone(),
+                    values: new.clone(),
+                });
+            }
+            continue;
+        }
+
         if value_set_eq(&orig, &new) {
             continue;
         }
@@ -286,8 +302,12 @@ pub fn diff(original: &EditEntry, edited: &EditEntry) -> Result<ChangeSet, Chang
 }
 
 /// Set equality over two value lists (order-insensitive, duplicates ignored).
+/// Checks containment in BOTH directions so it is correct independent of equal
+/// lengths or LDAP per-attribute value uniqueness.
 fn value_set_eq(a: &[String], b: &[String]) -> bool {
-    a.len() == b.len() && a.iter().all(|v| b.iter().any(|w| w == v))
+    a.len() == b.len()
+        && a.iter().all(|v| b.iter().any(|w| w == v))
+        && b.iter().all(|v| a.iter().any(|w| w == v))
 }
 
 #[cfg(test)]
@@ -482,5 +502,62 @@ mod tests {
     #[test]
     fn changeset_is_empty_default() {
         assert!(ChangeSet::default().is_empty());
+    }
+
+    #[test]
+    fn diff_pure_reorder_of_unordered_is_no_change() {
+        // mail is not X-ORDERED: a pure reorder is set-equal -> no change.
+        let orig = entry("uid=a,dc=x", &[("uid", &["a"]), ("mail", &["a@x", "b@x"])]);
+        let edited = entry("uid=a,dc=x", &[("uid", &["a"]), ("mail", &["b@x", "a@x"])]);
+        let cs = diff(&orig, &edited).unwrap();
+        assert!(cs.is_empty(), "pure reorder must be no change; cs={cs:?}");
+    }
+
+    #[test]
+    fn diff_reorder_of_x_ordered_emits_replace() {
+        // olcAccess is X-ORDERED: reordering the {n}-prefixed values is a real
+        // change and must emit exactly one Replace with the new order.
+        let orig = entry(
+            "olcDatabase={1}mdb,cn=config",
+            &[(
+                "olcAccess",
+                &["{0}to attrs=x by * read", "{1}to * by * none"],
+            )],
+        );
+        let edited = entry(
+            "olcDatabase={1}mdb,cn=config",
+            &[(
+                "olcAccess",
+                &["{1}to * by * none", "{0}to attrs=x by * read"],
+            )],
+        );
+        let cs = diff(&orig, &edited).unwrap();
+        assert_eq!(
+            cs.mods,
+            vec![ModOp::Replace {
+                attr: "olcAccess".to_string(),
+                values: vec![
+                    "{1}to * by * none".to_string(),
+                    "{0}to attrs=x by * read".to_string(),
+                ],
+            }]
+        );
+    }
+
+    #[test]
+    fn diff_x_ordered_unchanged_is_no_change() {
+        // Identical X-ORDERED list -> no change.
+        let e = entry(
+            "olcDatabase={1}mdb,cn=config",
+            &[(
+                "olcAccess",
+                &["{0}to attrs=x by * read", "{1}to * by * none"],
+            )],
+        );
+        let cs = diff(&e, &e).unwrap();
+        assert!(
+            cs.is_empty(),
+            "unchanged ordered list must be empty; cs={cs:?}"
+        );
     }
 }
