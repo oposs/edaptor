@@ -20,14 +20,14 @@ use tui_prompts::{State, TextState};
 use tui_tree_widget::{TreeItem, TreeState};
 
 use crate::app::{build_menu_defs, menu_action, MenuDef, UiAction, CM_PROFILE_BASE};
-use crate::config::relation::{resolve_relations, ResolvedRelation};
+use crate::config::relation::{backref_lookup, resolve_relations, ResolvedRelation};
 use crate::config::{Config, EntryProfile};
-use crate::form::changeset::{diff, EditEntry, ModOp};
+use crate::form::changeset::{diff, ChangeSet, EditEntry, ModOp};
 use crate::form::validate::{plan_save, validate, SavePlan, ValidationError};
-use crate::ldap::ldif::{render_add, render_changeset};
+use crate::ldap::ldif::{render_add, render_changeset, render_changesets};
 use crate::ldap::worker::{Request, Response, SearchScope, StructureNodeRaw, WorkerHandle};
 use crate::schema::SchemaModel;
-use crate::ui::edit_form::{build_edit_form, EditForm, ValueEditor};
+use crate::ui::edit_form::{build_edit_form, value_set_eq, EditForm, ValueEditor};
 use crate::ui::form_state::{guard_decision, GuardChoice, GuardOutcome};
 use crate::ui::view;
 use crate::workflows::create::{build_add_entry, empty_form_for_profile};
@@ -121,6 +121,16 @@ pub enum PendingAction {
     SaveThenNavigate {
         /// The entry to navigate to once the save completes.
         target: Option<String>,
+    },
+    /// A combined membership save: own-entry MODIFY + per-holder fan-out MODIFYs,
+    /// applied synchronously (spec §6.3). `entry_dn` is the edited candidate entry.
+    CombinedSave {
+        /// The candidate entry being saved.
+        entry_dn: String,
+        /// Own-entry attribute mods (empty when only membership changed).
+        own_mods: Vec<ModOp>,
+        /// Per-holder fan-out: (group_dn, Add/Delete op for holder_attr).
+        fanout: Vec<(String, ModOp)>,
     },
 }
 
@@ -855,10 +865,52 @@ fn handle_action(
             let Some(form) = app.form.as_ref() else {
                 return;
             };
-            let original = EditEntry {
+            // Try the combined membership path first; fall back to the single-entry
+            // path when no backref field actually changed.
+            match plan_combined_save(form, read_flow.schema(), &app.relations) {
+                CombinedPlan::Ready {
+                    entry_dn,
+                    own_mods,
+                    fanout,
+                    ldif,
+                } => {
+                    app.overlay = Some(Overlay::Confirm {
+                        title: "Apply these changes?".to_string(),
+                        body: ldif,
+                        action: PendingAction::CombinedSave {
+                            entry_dn,
+                            own_mods,
+                            fanout,
+                        },
+                    });
+                    return;
+                }
+                CombinedPlan::Blocked(msg) => {
+                    app.overlay = Some(Overlay::Error { text: msg });
+                    return;
+                }
+                CombinedPlan::Invalid(errs) => {
+                    app.overlay = Some(Overlay::Error {
+                        text: format_validation_errors(&errs),
+                    });
+                    return;
+                }
+                CombinedPlan::DiffError(e) => {
+                    app.overlay = Some(Overlay::Error { text: e });
+                    return;
+                }
+                CombinedPlan::NoMembershipChange => {}
+            }
+            // Normal single-entry save — strip backref labels from baseline so
+            // `diff` does not emit a spurious Delete for server-maintained attrs.
+            let backref_lbls = form.backref_labels();
+            let mut original = EditEntry {
                 dn: form.dn.clone(),
                 attrs: form.baseline.clone(),
             };
+            for l in &backref_lbls {
+                original.attrs.remove(l);
+            }
             let edited = form.to_edit_entry();
             let object_classes = object_classes_of(form);
             match prepare_save(read_flow.schema(), &original, &edited, &object_classes) {
@@ -1192,15 +1244,55 @@ fn execute_pending(
         }
         PendingAction::Navigate { target } => navigate_to(app, worker, read_flow, target),
         PendingAction::SaveThenNavigate { target } => {
-            // Run the save flow, deferring navigation to the moved-to entry until
-            // the write's WriteOk (the re-read must target the post-save DN).
+            // Guard outcome: run the save flow, then navigate to `target`.
+            // If this form has a membership change, show a combined-save Confirm
+            // (navigation waits; v1 does not combine save+navigate for membership).
             let Some(form) = app.form.as_ref() else {
                 return;
             };
-            let original = EditEntry {
+            match plan_combined_save(form, read_flow.schema(), &app.relations) {
+                CombinedPlan::Ready {
+                    entry_dn,
+                    own_mods,
+                    fanout,
+                    ldif,
+                } => {
+                    app.overlay = Some(Overlay::Confirm {
+                        title: "Apply these changes?".to_string(),
+                        body: ldif,
+                        action: PendingAction::CombinedSave {
+                            entry_dn,
+                            own_mods,
+                            fanout,
+                        },
+                    });
+                    return;
+                }
+                CombinedPlan::Blocked(msg) => {
+                    app.overlay = Some(Overlay::Error { text: msg });
+                    return;
+                }
+                CombinedPlan::Invalid(errs) => {
+                    app.overlay = Some(Overlay::Error {
+                        text: format_validation_errors(&errs),
+                    });
+                    return;
+                }
+                CombinedPlan::DiffError(e) => {
+                    app.overlay = Some(Overlay::Error { text: e });
+                    return;
+                }
+                CombinedPlan::NoMembershipChange => {}
+            }
+            // Normal single-entry save — strip backref labels from baseline.
+            let backref_lbls = form.backref_labels();
+            let mut original = EditEntry {
                 dn: form.dn.clone(),
                 attrs: form.baseline.clone(),
             };
+            for l in &backref_lbls {
+                original.attrs.remove(l);
+            }
             let edited = form.to_edit_entry();
             let object_classes = object_classes_of(form);
             match prepare_save(read_flow.schema(), &original, &edited, &object_classes) {
@@ -1220,6 +1312,13 @@ fn execute_pending(
                 }
                 PrepareSave::DiffError(e) => app.overlay = Some(Overlay::Error { text: e }),
             }
+        }
+        PendingAction::CombinedSave {
+            entry_dn,
+            own_mods,
+            fanout,
+        } => {
+            apply_combined_save(app, worker, read_flow, &entry_dn, own_mods, fanout);
         }
     }
 }
@@ -1452,12 +1551,213 @@ fn format_validation_errors(errors: &[ValidationError]) -> String {
     out
 }
 
+/// Outcome of planning a save for a form that has BackRef (membership) changes.
+#[derive(Debug)]
+enum CombinedPlan {
+    /// No BackRef field changed → caller uses the normal single-entry path.
+    NoMembershipChange,
+    /// Own-entry mods + per-holder fan-out, with the combined LDIF preview.
+    Ready {
+        entry_dn: String,
+        own_mods: Vec<ModOp>,
+        fanout: Vec<(String, ModOp)>,
+        ldif: String,
+    },
+    /// Rename combined with a membership change — not supported in v1 (spec §6.3).
+    Blocked(String),
+    /// Client-side validation failed.
+    Invalid(Vec<ValidationError>),
+    /// The own-entry diff could not be computed (e.g. multi-valued RDN).
+    DiffError(String),
+}
+
+/// Plan a combined save: own-entry diff (backref stripped from BOTH sides) plus
+/// the fan-out from each BackRef field's baseline→selection delta. Blocks a
+/// rename combined with a membership change (v1 simplification, spec §6.3).
+///
+/// Returns `NoMembershipChange` when no backref field actually changed value,
+/// so the caller can fall through to the normal single-entry `prepare_save` path.
+fn plan_combined_save(
+    form: &EditForm,
+    schema: &SchemaModel,
+    relations: &[ResolvedRelation],
+) -> CombinedPlan {
+    let backref = form.backref_labels();
+    if backref.is_empty() {
+        return CombinedPlan::NoMembershipChange;
+    }
+
+    // Did any backref field actually change its value set?
+    let changed = form.fields.iter().any(|f| {
+        if !backref.contains(&f.label) {
+            return false;
+        }
+        let base = form.baseline.get(&f.label).cloned().unwrap_or_default();
+        !value_set_eq(&f.current_values(), &base)
+    });
+    if !changed {
+        return CombinedPlan::NoMembershipChange;
+    }
+
+    // Own-entry: strip backref labels from both sides, validate + diff.
+    let object_classes = object_classes_of(form);
+    let oc_refs: Vec<&str> = object_classes.iter().map(|s| s.as_str()).collect();
+    let mut original = EditEntry {
+        dn: form.dn.clone(),
+        attrs: form.baseline.clone(),
+    };
+    let mut edited = form.to_edit_entry(); // already omits backref fields
+    for l in &backref {
+        original.attrs.remove(l);
+        edited.attrs.remove(l);
+    }
+
+    let errors = validate(&edited, schema, &oc_refs);
+    if !errors.is_empty() {
+        return CombinedPlan::Invalid(errors);
+    }
+    let own_cs = match diff(&original, &edited) {
+        Ok(c) => c,
+        Err(e) => return CombinedPlan::DiffError(e.to_string()),
+    };
+    if own_cs.modrdn.is_some() {
+        return CombinedPlan::Blocked(
+            "Rename and membership changes can't be saved together — \
+             do them in separate saves."
+                .into(),
+        );
+    }
+
+    // Fan-out: one set of Add/Delete MODIFYs per backref field that changed.
+    let mut fanout: Vec<(String, ModOp)> = Vec::new();
+    let mut preview_sets: Vec<ChangeSet> = Vec::new();
+    if !own_cs.is_empty() {
+        preview_sets.push(own_cs.clone());
+    }
+    for f in form.fields.iter().filter(|f| backref.contains(&f.label)) {
+        let Some(rel) = backref_lookup(relations, &object_classes, &f.label) else {
+            continue;
+        };
+        let base = form.baseline.get(&f.label).cloned().unwrap_or_default();
+        let ops = membership_fanout(&form.dn, &base, &f.current_values(), &rel.holder_attr);
+        for (gdn, op) in ops {
+            preview_sets.push(ChangeSet {
+                dn: gdn.clone(),
+                modrdn: None,
+                mods: vec![op.clone()],
+            });
+            fanout.push((gdn, op));
+        }
+    }
+
+    CombinedPlan::Ready {
+        entry_dn: form.dn.clone(),
+        own_mods: own_cs.mods,
+        fanout,
+        ldif: render_changesets(&preview_sets),
+    }
+}
+
+/// Apply a combined membership save SYNCHRONOUSLY (mirrors `refresh_structure`):
+/// pre-validate last-member on every removal, abort the whole batch if any would
+/// empty a group, then apply own-entry mods + each fan-out MODIFY, collecting a
+/// partial-failure report, and finally re-read the edited entry (async).
+fn apply_combined_save(
+    app: &mut App,
+    worker: &WorkerHandle,
+    read_flow: &mut ReadFlow,
+    entry_dn: &str,
+    own_mods: Vec<ModOp>,
+    fanout: Vec<(String, ModOp)>,
+) {
+    // 1. Pre-validate: for each Delete, Base-read the group's current holder_attr
+    //    values; block the whole batch if any removal would empty a group.
+    let mut blocked: Vec<String> = Vec::new();
+    for (gdn, op) in &fanout {
+        if let ModOp::Delete { attr, values } = op {
+            let members = read_group_members(worker, gdn, attr);
+            if let Some(member) = values.first() {
+                if would_empty(&members, member) {
+                    blocked.push(gdn.clone());
+                }
+            }
+        }
+    }
+    if !blocked.is_empty() {
+        app.overlay = Some(Overlay::Error {
+            text: format!("Can't remove the last member of: {}", blocked.join(", ")),
+        });
+        rebind_selection(app, entry_dn);
+        let _ = read_flow.request_entry(worker, entry_dn, None);
+        return;
+    }
+
+    // 2. Apply own-entry mods, then each fan-out MODIFY; collect failures.
+    let mut failures: Vec<String> = Vec::new();
+    if !own_mods.is_empty() {
+        if let Some(msg) = apply_one_modify(worker, entry_dn, own_mods) {
+            failures.push(format!("{entry_dn}: {msg}"));
+        }
+    }
+    for (gdn, op) in fanout {
+        if let Some(msg) = apply_one_modify(worker, &gdn, vec![op]) {
+            failures.push(format!("{gdn}: {msg}"));
+        }
+    }
+
+    // 3. Report + re-read the edited entry.
+    if failures.is_empty() {
+        app.status = "Saved.".to_string();
+    } else {
+        app.overlay = Some(Overlay::Error {
+            text: format!("Some changes did not apply:\n- {}", failures.join("\n- ")),
+        });
+    }
+    rebind_selection(app, entry_dn);
+    let _ = read_flow.request_entry(worker, entry_dn, None);
+}
+
+/// Base-read a group's current `holder_attr` values (synchronous). Empty on error.
+fn read_group_members(worker: &WorkerHandle, group_dn: &str, holder_attr: &str) -> Vec<String> {
+    match worker.request(Request::Search {
+        id: next_id(),
+        base: group_dn.to_string(),
+        scope: SearchScope::Base,
+        filter: "(objectClass=*)".to_string(),
+        attrs: vec![holder_attr.to_string()],
+        size_limit: None,
+    }) {
+        Ok(Response::Entries { entries, .. }) => entries
+            .into_iter()
+            .next()
+            .and_then(|e| {
+                e.attrs
+                    .into_iter()
+                    .find(|(k, _)| k.eq_ignore_ascii_case(holder_attr))
+                    .map(|(_, v)| v)
+            })
+            .unwrap_or_default(),
+        _ => Vec::new(),
+    }
+}
+
+/// Apply one MODIFY synchronously; return `Some(human message)` on failure.
+fn apply_one_modify(worker: &WorkerHandle, dn: &str, changes: Vec<ModOp>) -> Option<String> {
+    match worker.request(Request::Modify {
+        id: next_id(),
+        dn: dn.to_string(),
+        changes,
+    }) {
+        Ok(Response::WriteOk { .. }) => None,
+        Ok(Response::WriteError { msg, .. }) => Some(msg),
+        Ok(_) => Some("unexpected response".to_string()),
+        Err(e) => Some(e.to_string()),
+    }
+}
+
 /// Per-holder MODIFYs for a membership change on the candidate's back-ref field.
 /// `entry_dn` is the candidate (user) DN written into each holder's `holder_attr`.
 /// Added groups get an Add; removed groups get a Delete. Order: adds, then deletes.
-///
-/// NOTE: This function is wired into the combined save path in Task 5.3.
-#[allow(dead_code)]
 fn membership_fanout(
     entry_dn: &str,
     baseline: &[String],
@@ -1494,9 +1794,6 @@ fn membership_fanout(
 /// True when removing `member` would leave the group with no members (groupOfNames
 /// requires ≥1). Only fires when `member` is the SOLE current member. False for
 /// empty input (the group is already empty — not our removal's fault).
-///
-/// NOTE: This function is wired into the combined save path in Task 5.3.
-#[allow(dead_code)]
 fn would_empty(current_members: &[String], member: &str) -> bool {
     current_members.len() == 1 && current_members[0].eq_ignore_ascii_case(member)
 }
@@ -2084,5 +2381,220 @@ mod tests {
         ));
         // Already empty: not our removal's fault.
         assert!(!would_empty(&[], "uid=ann,ou=people"));
+    }
+
+    // ── 5.3 helpers ────────────────────────────────────────────────────────────
+
+    use crate::ldap::worker::RawSubschema;
+    use crate::schema::FieldKind;
+    use crate::ui::edit_form::{EditField, FieldRelation};
+    use crate::ui::form::WidgetSpec;
+
+    /// Minimal schema for user (inetOrgPerson-like) with uid, description, memberOf.
+    fn user_schema() -> SchemaModel {
+        let raw = RawSubschema {
+            object_classes: vec![
+                // No SUP top so validate does not require objectClass in the entry.
+                "( 1.2.3.4 NAME 'testUser' STRUCTURAL MUST uid MAY ( description $ memberOf ) )".to_string(),
+            ],
+            attribute_types: vec![
+                "( 0.9.2342.19200300.100.1.1 NAME 'uid' SYNTAX 1.3.6.1.4.1.1466.115.121.1.15 SINGLE-VALUE )".to_string(),
+                "( 2.5.4.13 NAME 'description' SYNTAX 1.3.6.1.4.1.1466.115.121.1.15 )".to_string(),
+                "( 1.2.840.113556.1.2.102 NAME 'memberOf' SYNTAX 1.3.6.1.4.1.1466.115.121.1.15 )".to_string(),
+            ],
+            ldap_syntaxes: vec![],
+        };
+        SchemaModel::from_raw(&raw)
+    }
+
+    /// Resolved relations for the user schema: memberOf ↔ group.member.
+    fn user_relations() -> Vec<ResolvedRelation> {
+        use crate::config::relation::CandidateScope;
+        vec![ResolvedRelation {
+            name: "group-membership".into(),
+            holder_oc: "groupOfNames".into(),
+            holder_attr: "member".into(),
+            candidate_oc: "testUser".into(),
+            back_attr: "memberOf".into(),
+            candidate_scope: CandidateScope {
+                base: "ou=people,dc=x".into(),
+                object_class: "testUser".into(),
+                search_attrs: vec!["uid".into()],
+            },
+            holder_scope: CandidateScope {
+                base: "ou=groups,dc=x".into(),
+                object_class: "groupOfNames".into(),
+                search_attrs: vec!["cn".into()],
+            },
+        }]
+    }
+
+    /// Build a user EditForm with:
+    /// - own change: description baseline→["old desc"], values→["new desc"]
+    /// - memberOf change: baseline→[g1], values→[g2]
+    fn user_form_own_and_memberof_change() -> EditForm {
+        use crate::config::relation::CandidateScope;
+
+        let scope = CandidateScope {
+            base: "ou=groups,dc=x".into(),
+            object_class: "groupOfNames".into(),
+            search_attrs: vec!["cn".into()],
+        };
+
+        let uid_field = EditField {
+            label: "uid".into(),
+            must: true,
+            editable: true,
+            multi: false,
+            secret: false,
+            ordered: false,
+            values: vec!["ann".into()],
+            kind: FieldKind::Text,
+            widget: WidgetSpec::ReadOnlyText,
+            editor: TextState::new().with_value("ann".to_string()),
+            relation: None,
+        };
+
+        let desc_field = EditField {
+            label: "description".into(),
+            must: false,
+            editable: true,
+            multi: true,
+            secret: false,
+            ordered: false,
+            values: vec!["new desc".into()],
+            kind: FieldKind::Text,
+            widget: WidgetSpec::ReadOnlyText,
+            editor: TextState::new(),
+            relation: None,
+        };
+
+        let memberof_field = EditField {
+            label: "memberOf".into(),
+            must: false,
+            editable: true,
+            multi: true,
+            secret: false,
+            ordered: false,
+            values: vec!["cn=g2,ou=groups,dc=x".into()],
+            kind: FieldKind::Text,
+            widget: WidgetSpec::ReadOnlyText,
+            editor: TextState::new(),
+            relation: Some(FieldRelation {
+                role: crate::config::relation::RelationRole::BackRef,
+                scope: scope.clone(),
+            }),
+        };
+
+        let mut baseline = BTreeMap::new();
+        baseline.insert("objectClass".into(), vec!["testUser".into()]);
+        baseline.insert("uid".into(), vec!["ann".into()]);
+        baseline.insert("description".into(), vec!["old desc".into()]);
+        baseline.insert("memberOf".into(), vec!["cn=g1,ou=groups,dc=x".into()]);
+
+        EditForm {
+            dn: "uid=ann,ou=people,dc=x".into(),
+            fields: vec![uid_field, desc_field, memberof_field],
+            baseline,
+        }
+    }
+
+    /// Build a user EditForm where the RDN attr (uid) is changed AND memberOf changes.
+    fn user_form_rename_and_memberof_change() -> EditForm {
+        use crate::config::relation::{CandidateScope, RelationRole};
+
+        let scope = CandidateScope {
+            base: "ou=groups,dc=x".into(),
+            object_class: "groupOfNames".into(),
+            search_attrs: vec!["cn".into()],
+        };
+
+        // uid changed from "ann" → "bob" (triggers modrdn in diff)
+        let uid_field = EditField {
+            label: "uid".into(),
+            must: true,
+            editable: true,
+            multi: false,
+            secret: false,
+            ordered: false,
+            values: vec!["ann".into()],
+            kind: FieldKind::Text,
+            widget: WidgetSpec::ReadOnlyText,
+            editor: TextState::new().with_value("bob".to_string()),
+            relation: None,
+        };
+
+        let memberof_field = EditField {
+            label: "memberOf".into(),
+            must: false,
+            editable: true,
+            multi: true,
+            secret: false,
+            ordered: false,
+            values: vec!["cn=g2,ou=groups,dc=x".into()],
+            kind: FieldKind::Text,
+            widget: WidgetSpec::ReadOnlyText,
+            editor: TextState::new(),
+            relation: Some(FieldRelation {
+                role: RelationRole::BackRef,
+                scope,
+            }),
+        };
+
+        let mut baseline = BTreeMap::new();
+        baseline.insert("objectClass".into(), vec!["testUser".into()]);
+        baseline.insert("uid".into(), vec!["ann".into()]);
+        baseline.insert("memberOf".into(), vec!["cn=g1,ou=groups,dc=x".into()]);
+
+        EditForm {
+            dn: "uid=ann,ou=people,dc=x".into(),
+            fields: vec![uid_field, memberof_field],
+            baseline,
+        }
+    }
+
+    #[test]
+    fn plan_combined_save_splits_own_and_fanout() {
+        let form = user_form_own_and_memberof_change();
+        let schema = user_schema();
+        let relations = user_relations();
+        let plan = plan_combined_save(&form, &schema, &relations);
+        let (own_mods, fanout, _entry_dn) = match plan {
+            CombinedPlan::Ready {
+                own_mods,
+                fanout,
+                entry_dn,
+                ..
+            } => (own_mods, fanout, entry_dn),
+            other => panic!("expected Ready, got {:?}", other),
+        };
+        // own_mods touches description, NOT memberOf.
+        assert!(
+            own_mods.iter().all(|m| {
+                let attr = match m {
+                    ModOp::Add { attr, .. }
+                    | ModOp::Delete { attr, .. }
+                    | ModOp::Replace { attr, .. } => attr,
+                };
+                !attr.eq_ignore_ascii_case("memberOf")
+            }),
+            "own_mods must not contain memberOf"
+        );
+        // fanout: g2 gains the user, g1 loses the user.
+        assert_eq!(fanout.len(), 2, "expected 2 fanout ops (add g2, delete g1)");
+    }
+
+    #[test]
+    fn rename_plus_membership_is_blocked() {
+        let form = user_form_rename_and_memberof_change();
+        let schema = user_schema();
+        let relations = user_relations();
+        assert!(
+            matches!(
+                plan_combined_save(&form, &schema, &relations),
+                CombinedPlan::Blocked(_)
+            ),
+            "rename + membership change must be Blocked"
+        );
     }
 }

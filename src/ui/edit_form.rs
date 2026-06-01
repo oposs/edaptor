@@ -260,7 +260,7 @@ impl EditForm {
 /// of `changeset::diff`'s value comparison; note the changeset version is
 /// currently only a one-directional subset check (a latent asymmetry masked by
 /// LDAP per-attribute value uniqueness — to be made symmetric in P5).
-fn value_set_eq(a: &[String], b: &[String]) -> bool {
+pub(crate) fn value_set_eq(a: &[String], b: &[String]) -> bool {
     a.len() == b.len()
         && a.iter().all(|v| b.iter().any(|w| w == v))
         && b.iter().all(|v| a.iter().any(|w| w == v))
