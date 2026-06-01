@@ -41,6 +41,53 @@ and executed in milestones.
 - **Full Samba lifecycle:** client-side NT-hash, synced Unix+Samba passwords,
   SID discovered from the directory's `sambaDomain` entry.
 
+## Configuration
+
+A single TOML file (`--config <path>`, default `~/.config/edaptor/config.toml`).
+
+```toml
+[server]
+uri          = "ldaps://ldap.example.com"
+base_dn      = "dc=example,dc=com"
+start_tls    = false
+timeout_secs = 10
+
+[auth]
+method          = "simple"
+bind_dn         = "cn=ldapmanager,dc=example,dc=com"
+# Password is NEVER stored here. Supported sources: "prompt", "env:VAR", "command:cmd"
+password_source = "prompt"
+
+# Entry profiles: what a "user" and a "group" mean in this directory.
+# `search_attrs` sets which attributes the picker substring-search matches.
+# Falls back to `show`, then to `["cn"]` when omitted.
+[[profile]]
+name         = "user"
+object_class = "inetOrgPerson"
+rdn_attr     = "uid"
+search_base  = "ou=people,dc=example,dc=com"
+show         = ["uid", "cn", "sn", "givenName", "mail"]
+search_attrs = ["cn", "uid", "mail"]   # picker searches these attributes
+
+[[profile]]
+name         = "group"
+object_class = "groupOfNames"
+rdn_attr     = "cn"
+search_base  = "ou=groups,dc=example,dc=com"
+show         = ["cn", "description"]
+
+# Membership relation: enables the symmetric group↔user membership picker.
+# Opening a group's `member` field shows a live searchable user picker;
+# opening a user's `memberOf` field fans out the changes to each affected group.
+# `holder` and `candidate` reference [[profile]] `name`s above.
+[[relation]]
+name        = "group-membership"
+holder      = "group"       # profile whose entry owns the link attribute
+holder_attr = "member"      # the writable attribute on the holder (e.g. groupOfNames.member)
+candidate   = "user"        # profile that scopes the picker's candidate search
+back_attr   = "memberOf"    # virtual back-reference field shown on the candidate side
+```
+
 ## License
 
 To be determined.
