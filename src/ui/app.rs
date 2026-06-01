@@ -683,6 +683,7 @@ fn picker_editor_key(app: &mut App, key: KeyEvent) {
         KeyCode::Esc | KeyCode::F(3) => {
             app.overlay = None;
             app.picker_search_id = None;
+            app.picker_last_query.clear();
         }
         KeyCode::F(2) => {
             if let Some(Overlay::ValueEditor(ve)) = app.overlay.take() {
@@ -694,6 +695,7 @@ fn picker_editor_key(app: &mut App, key: KeyEvent) {
                 }
             }
             app.picker_search_id = None;
+            app.picker_last_query.clear();
         }
         KeyCode::Up => {
             if let Some(Overlay::ValueEditor(ve)) = app.overlay.as_mut() {

@@ -420,6 +420,10 @@ fn render_value_editor(f: &mut Frame, ve: &ValueEditor, area: Rect) {
             Paragraph::new(search_text).style(Style::default().bg(bg).fg(Color::Yellow)),
             Rect::new(inner.x, inner.y, inner.width, 1),
         );
+        // Show terminal cursor at the insertion point within the search box.
+        let prefix_width = "Search: ".len() as u16;
+        let col = (ve.search.position() as u16).min(inner.width.saturating_sub(prefix_width + 1));
+        f.set_cursor_position((inner.x + prefix_width + col, inner.y));
         // Remaining rows: visible candidates.
         let rows = picker.visible();
         let list_area_y = inner.y + 1;
