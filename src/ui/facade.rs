@@ -21,7 +21,8 @@ use turbo_vision::app::Application;
 use turbo_vision::core::command::{CommandId, CM_CANCEL, CM_OK, CM_QUIT, CM_YES};
 use turbo_vision::core::draw::DrawBuffer;
 use turbo_vision::core::event::{
-    Event, EventType, KB_ALT_X, KB_F10, KB_F2, KB_F3, KB_F6, KB_PGDN, KB_PGUP,
+    Event, EventType, KB_ALT_X, KB_F10, KB_F2, KB_F3, KB_F6, KB_HOME, KB_PGDN, KB_PGUP,
+    KB_SHIFT_TAB, KB_TAB,
 };
 use turbo_vision::core::geometry::Rect;
 use turbo_vision::core::menu_data::MenuBuilder;
@@ -657,7 +658,18 @@ impl FormPane {
         self.content_h = y;
         self.scroll = 0;
         self.inner.set_initial_focus();
+        self.home_focused_field();
         self.publish();
+    }
+
+    /// Move the currently-focused field's text cursor to the start (column 0).
+    /// `InputLine` seeds its cursor at `data.len()` on construction/focus; the crate
+    /// exposes no public cursor setter, but routing a synthetic `KB_HOME` event
+    /// through the inner group delivers it to the focused `InputLine`, whose
+    /// `KB_HOME` handler sets `cursor_pos = 0`. No-op for non-input focus.
+    fn home_focused_field(&mut self) {
+        let mut ev = Event::keyboard(KB_HOME);
+        self.inner.handle_event(&mut ev);
     }
 
     /// Reset the pane to empty (no entry selected).
@@ -828,7 +840,14 @@ impl View for FormPane {
             }
             _ => {}
         }
+        // Tab / Shift-Tab move focus to another field inside the inner group; after
+        // the move, re-home the newly focused field so it too shows from the start.
+        let tab_move = event.what == EventType::Keyboard
+            && (event.key_code == KB_TAB || event.key_code == KB_SHIFT_TAB);
         self.inner.handle_event(event);
+        if tab_move {
+            self.home_focused_field();
+        }
         // Keep the dirty/edit handles current as the user types into the bound
         // InputLines (the run-loop polls `dirty` for the navigation guard).
         self.publish();
@@ -850,6 +869,7 @@ impl View for FormPane {
         self.set_state_flag(SF_FOCUSED, focused);
         if focused {
             self.inner.set_initial_focus();
+            self.home_focused_field();
         }
     }
 
