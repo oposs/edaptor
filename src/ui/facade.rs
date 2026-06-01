@@ -454,6 +454,18 @@ impl View for SplitContainer {
                 event.clear();
                 return;
             }
+            EventType::MouseWheelUp | EventType::MouseWheelDown => {
+                // Route the wheel to the pane UNDER the cursor (positional), so
+                // scrolling the form works without focusing it first. A Group
+                // otherwise sends wheel events only to its focused child.
+                let pos = event.mouse.pos;
+                for i in 0..self.inner.len() {
+                    if self.inner.child_at(i).bounds().contains(pos) {
+                        self.inner.child_at_mut(i).handle_event(event);
+                        return;
+                    }
+                }
+            }
             _ => {}
         }
         self.inner.handle_event(event);
@@ -721,16 +733,25 @@ impl FormPane {
         self.bounds.b.y - self.bounds.a.y
     }
 
-    /// Translate the inner [`Group`] vertically to the clamped `new_scroll`. A pure
-    /// translation: both y-edges move by the same delta so the Group keeps its size
-    /// (`Group::set_bounds` adds only the size delta to children, dw=dh=0).
+    /// Scroll the form rows to the clamped `new_scroll` by translating each row
+    /// view up/down by the delta. The inner [`Group`]'s own bounds stay anchored to
+    /// the pane: `Group::set_bounds` would move the clip region with the group, so
+    /// scrolling by moving the group collapses the visible window to wherever the
+    /// group still overlaps the pane. Moving the children individually keeps the
+    /// clip fixed to the viewport while the content slides under it.
     fn apply_scroll(&mut self, new_scroll: i16) {
         let clamped = clamp_scroll(new_scroll, self.content_h, self.viewport_h());
         let dy = clamped - self.scroll;
         if dy != 0 {
-            let gb = self.inner.bounds();
-            self.inner
-                .set_bounds(Rect::new(gb.a.x, gb.a.y - dy, gb.b.x, gb.b.y - dy));
+            for i in 0..self.inner.len() {
+                let cb = self.inner.child_at(i).bounds();
+                self.inner.child_at_mut(i).set_bounds(Rect::new(
+                    cb.a.x,
+                    cb.a.y - dy,
+                    cb.b.x,
+                    cb.b.y - dy,
+                ));
+            }
             self.scroll = clamped;
         }
     }
@@ -1146,6 +1167,7 @@ impl Shell {
             self.app.idle();
             on_event(&mut self.app, LoopEvent::Idle);
             self.app.draw();
+            position_cursor(&mut self.app);
             let _ = self.app.terminal.flush();
             if let Ok(Some(mut ev)) = self.app.terminal.poll_event(Duration::from_millis(50)) {
                 // Resolve a menu command against the current selection BEFORE the
@@ -1228,6 +1250,23 @@ impl Shell {
 /// [`CM_DIT_REFRESH`] to the windowed outline. Not tty-testable.
 pub fn refresh_tree(app: &mut Application) {
     Shell::refresh(app);
+}
+
+/// Position the hardware text cursor for the focused view. turbo-vision 1.2's
+/// `Desktop::update_cursor` is a no-op (it does not override the trait default),
+/// so `app.draw()` never positions the cursor in the non-modal main loop — the
+/// form's focused `InputLine` would show no cursor. Route the update to the
+/// topmost desktop child (our [`SplitContainer`]); its `update_cursor` delegates
+/// down through the focused pane to the focused widget, which calls
+/// `terminal.show_cursor` (or hides it if the focused widget has no cursor). The
+/// borrows of `app.desktop` and `app.terminal` are disjoint fields, so this is
+/// sound. Not tty-testable.
+fn position_cursor(app: &mut Application) {
+    let n = app.desktop.child_count();
+    if n > 0 {
+        let child = app.desktop.child_at(n - 1);
+        child.update_cursor(&mut app.terminal);
+    }
 }
 
 /// Broadcast [`CM_LEAF_REFRESH`] so the [`LeafListPane`] rebuilds its rows from the
