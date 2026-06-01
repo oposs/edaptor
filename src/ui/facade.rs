@@ -20,7 +20,7 @@ use std::time::Duration;
 use turbo_vision::app::Application;
 use turbo_vision::core::command::{CommandId, CM_CANCEL, CM_OK, CM_QUIT, CM_YES};
 use turbo_vision::core::draw::DrawBuffer;
-use turbo_vision::core::event::{Event, EventType, KB_ALT_X, KB_F10, KB_PGDN, KB_PGUP};
+use turbo_vision::core::event::{Event, EventType, KB_ALT_X, KB_F10, KB_F6, KB_PGDN, KB_PGUP};
 use turbo_vision::core::geometry::Rect;
 use turbo_vision::core::menu_data::MenuBuilder;
 use turbo_vision::core::palette::Palette;
@@ -140,6 +140,7 @@ pub fn build_status_line(size_w: i16, size_h: i16) -> StatusLine {
         vec![
             StatusItem::new("~Alt+X~ Quit", KB_ALT_X, CM_QUIT),
             StatusItem::new("~F10~ Menu", KB_F10, 0),
+            StatusItem::new("~F6~ Pane", KB_F6, 0),
         ],
     )
 }
@@ -373,6 +374,15 @@ impl View for SplitContainer {
     }
 
     fn handle_event(&mut self, event: &mut Event) {
+        // F6 cycles focus between the three panes. Intercept it here (before
+        // delegating to the inner Group) because each pane's own inner Group
+        // consumes Tab to cycle its widgets, which would otherwise trap keyboard
+        // focus inside a single pane (mouse-click still switches panes freely).
+        if event.what == EventType::Keyboard && event.key_code == KB_F6 {
+            self.inner.select_next();
+            event.clear();
+            return;
+        }
         match event.what {
             EventType::MouseDown => {
                 if let Some(i) = self.divider_at(event.mouse.pos.x, event.mouse.pos.y) {
