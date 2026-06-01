@@ -1342,9 +1342,14 @@ pub fn rebuild_structure_tree(root: &BrowserNodeRef, structure: &Structure) {
 /// §5.6). Returns the user's [`GuardChoice`]; closing the dialog any other way is
 /// treated as `Stay` (the safe, non-destructive default). Not tty-testable.
 pub fn confirm_guard(app: &mut Application) -> GuardChoice {
-    const CM_SAVE: CommandId = 2400;
-    const CM_DISCARD: CommandId = 2401;
-    const CM_STAY: CommandId = 2402;
+    // Use standard modal-end command ids so `Dialog::execute`'s loop actually
+    // terminates when a button fires: the crate only ends the modal for
+    // `CM_OK`/`CM_CANCEL`/`CM_YES`/`CM_NO` (and other ids < 1000). Custom ids
+    // >= 1000 are treated as internal view commands and never close the dialog.
+    // Save → CM_OK, Discard → CM_YES, Stay → CM_CANCEL (also Esc-Esc).
+    const CM_SAVE: CommandId = CM_OK;
+    const CM_DISCARD: CommandId = CM_YES;
+    const CM_STAY: CommandId = CM_CANCEL;
     let mut d = Dialog::new(Rect::new(0, 0, 46, 9), "Unsaved changes");
     d.add(Box::new(StaticText::new(
         Rect::new(2, 1, 44, 3),
