@@ -1452,6 +1452,55 @@ fn format_validation_errors(errors: &[ValidationError]) -> String {
     out
 }
 
+/// Per-holder MODIFYs for a membership change on the candidate's back-ref field.
+/// `entry_dn` is the candidate (user) DN written into each holder's `holder_attr`.
+/// Added groups get an Add; removed groups get a Delete. Order: adds, then deletes.
+///
+/// NOTE: This function is wired into the combined save path in Task 5.3.
+#[allow(dead_code)]
+fn membership_fanout(
+    entry_dn: &str,
+    baseline: &[String],
+    selected: &[String],
+    holder_attr: &str,
+) -> Vec<(String, ModOp)> {
+    let has = |set: &[String], dn: &str| set.iter().any(|x| x.eq_ignore_ascii_case(dn));
+    let mut out = Vec::new();
+    for g in selected {
+        if !has(baseline, g) {
+            out.push((
+                g.clone(),
+                ModOp::Add {
+                    attr: holder_attr.to_string(),
+                    values: vec![entry_dn.to_string()],
+                },
+            ));
+        }
+    }
+    for g in baseline {
+        if !has(selected, g) {
+            out.push((
+                g.clone(),
+                ModOp::Delete {
+                    attr: holder_attr.to_string(),
+                    values: vec![entry_dn.to_string()],
+                },
+            ));
+        }
+    }
+    out
+}
+
+/// True when removing `member` would leave the group with no members (groupOfNames
+/// requires ≥1). Only fires when `member` is the SOLE current member. False for
+/// empty input (the group is already empty — not our removal's fault).
+///
+/// NOTE: This function is wired into the combined save path in Task 5.3.
+#[allow(dead_code)]
+fn would_empty(current_members: &[String], member: &str) -> bool {
+    current_members.len() == 1 && current_members[0].eq_ignore_ascii_case(member)
+}
+
 /// Monotonic correlation id for write requests, starting at a high base so write
 /// ids never collide with the read/browse ids (which start at 1).
 fn next_id() -> u64 {
@@ -1974,5 +2023,52 @@ mod tests {
         let f = &app.form.as_ref().unwrap().fields[0];
         assert_eq!(f.values, vec!["uid=a,ou=people".to_string()]);
         assert!(app.overlay.is_none());
+    }
+
+    #[test]
+    fn fanout_adds_and_removes_per_group() {
+        let out = membership_fanout(
+            "uid=ann,ou=people",
+            &["cn=g1,ou=groups".to_string(), "cn=g2,ou=groups".to_string()], // baseline groups
+            &["cn=g2,ou=groups".to_string(), "cn=g3,ou=groups".to_string()], // new selection
+            "member",
+        );
+        // g3 gains ann; g1 loses ann; g2 unchanged.
+        assert_eq!(
+            out,
+            vec![
+                (
+                    "cn=g3,ou=groups".to_string(),
+                    ModOp::Add {
+                        attr: "member".into(),
+                        values: vec!["uid=ann,ou=people".into()]
+                    }
+                ),
+                (
+                    "cn=g1,ou=groups".to_string(),
+                    ModOp::Delete {
+                        attr: "member".into(),
+                        values: vec!["uid=ann,ou=people".into()]
+                    }
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn would_empty_only_when_sole_member() {
+        assert!(would_empty(
+            &["uid=ann,ou=people".to_string()],
+            "uid=ann,ou=people"
+        ));
+        assert!(!would_empty(
+            &[
+                "uid=ann,ou=people".to_string(),
+                "uid=bob,ou=people".to_string()
+            ],
+            "uid=ann,ou=people"
+        ));
+        // Already empty: not our removal's fault.
+        assert!(!would_empty(&[], "uid=ann,ou=people"));
     }
 }

@@ -56,6 +56,16 @@ pub fn render_changeset(cs: &ChangeSet) -> String {
     out
 }
 
+/// Render several change sets as one LDIF preview, separated by a blank line.
+/// Empty change sets are skipped so the preview only shows real operations.
+pub fn render_changesets(sets: &[ChangeSet]) -> String {
+    sets.iter()
+        .filter(|cs| !cs.is_empty())
+        .map(render_changeset)
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
 /// Render a full ADD as an LDIF `changetype: add` record. Attribute order is the
 /// `BTreeMap`'s (deterministic for tests / display).
 pub fn render_add(dn: &str, attrs: &BTreeMap<String, Vec<String>>) -> String {
@@ -292,5 +302,29 @@ mod tests {
             render_changeset(&cs),
             include_str!("testdata/ldif/base64_value.ldif")
         );
+    }
+
+    #[test]
+    fn renders_multiple_changesets_with_separators() {
+        let a = ChangeSet {
+            dn: "cn=g1,ou=groups".into(),
+            modrdn: None,
+            mods: vec![ModOp::Delete {
+                attr: "member".into(),
+                values: vec!["uid=ann".into()],
+            }],
+        };
+        let b = ChangeSet {
+            dn: "cn=g3,ou=groups".into(),
+            modrdn: None,
+            mods: vec![ModOp::Add {
+                attr: "member".into(),
+                values: vec!["uid=ann".into()],
+            }],
+        };
+        let out = render_changesets(&[a, b]);
+        assert!(out.contains("dn: cn=g1,ou=groups"));
+        assert!(out.contains("dn: cn=g3,ou=groups"));
+        assert!(out.contains("\n\n")); // blank line between entries
     }
 }
