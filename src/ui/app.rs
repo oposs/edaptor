@@ -280,7 +280,7 @@ fn event_loop(
 ) -> Result<()> {
     // Write-tracking maps (orchestration locals, plan §2.1).
     let mut post: HashMap<u64, PostWrite> = HashMap::new();
-    let mut pending_followups: HashMap<u64, (String, Vec<ModOp>)> = HashMap::new();
+    let mut pending_followups: HashMap<u64, (String, Vec<ModOp>, Option<String>)> = HashMap::new();
 
     loop {
         terminal.draw(|f| view::ui(f, app))?;
@@ -350,20 +350,21 @@ fn handle_worker_response(
     read_flow: &mut ReadFlow,
     structure: &mut Structure,
     post: &mut HashMap<u64, PostWrite>,
-    pending_followups: &mut HashMap<u64, (String, Vec<ModOp>)>,
+    pending_followups: &mut HashMap<u64, (String, Vec<ModOp>, Option<String>)>,
 ) {
     match resp {
         Response::WriteOk { id, .. } => {
-            if let Some((new_dn, mods)) = pending_followups.remove(id) {
+            if let Some((new_dn, mods, nav)) = pending_followups.remove(id) {
                 // A rename's MODRDN succeeded: apply the deferred mods to the new
-                // DN, then re-read it.
+                // DN, then navigate to the guard's target (if any) or the new DN.
                 let _ = worker.submit(Request::Modify {
                     id: next_id(),
                     dn: new_dn.clone(),
                     changes: mods,
                 });
-                rebind_selection(app, &new_dn);
-                let _ = read_flow.request_entry(worker, &new_dn, None);
+                let target = nav.unwrap_or(new_dn);
+                rebind_selection(app, &target);
+                let _ = read_flow.request_entry(worker, &target, None);
                 return;
             }
             match post.remove(id) {
@@ -371,10 +372,14 @@ fn handle_worker_response(
                     app.status = "Saved.".to_string();
                     // A guard's Save defers navigation to the moved-to entry; an
                     // ordinary save just re-reads the entry that was saved.
+                    // NOTE: do NOT recompute rows from `structure` here — it is not
+                    // updated on a rename, so it would overwrite the rebind below
+                    // with the stale old DN (spurious guard + dropped re-read). The
+                    // structure is reflowed only on Created/Deleted; a rename's
+                    // leaf-label staleness self-heals on Refresh (F5).
                     let target = nav.unwrap_or(reread_dn);
                     rebind_selection(app, &target);
                     let _ = read_flow.request_entry(worker, &target, None);
-                    app.rows = compute_rows(structure, &app.current_branch, &app.last_search);
                 }
                 Some(PostWrite::Created { parent, input }) => {
                     app.status = "Created.".to_string();
@@ -402,7 +407,16 @@ fn handle_worker_response(
                 None => app.status = "Saved.".to_string(),
             }
         }
-        Response::WriteError { msg, .. } => {
+        Response::WriteError { id, msg } => {
+            // Drop any tracking for the failed write so its maps do not leak, and
+            // re-sync the awaited DN to the entry actually shown — otherwise a
+            // failed guard-Save would leave `last_seen_leaf` pointing at the
+            // moved-to entry, silently silencing the dirty guard.
+            post.remove(id);
+            pending_followups.remove(id);
+            if let Some(form) = app.form.as_ref() {
+                app.last_seen_leaf = Some(form.dn.clone());
+            }
             app.overlay = Some(Overlay::Error { text: msg.clone() });
         }
         // on_response consumes the pending id, so call it exactly once.
@@ -679,7 +693,18 @@ fn handle_action(
                     profile.search_base.clone()
                 };
                 let model = empty_form_for_profile(read_flow.schema(), profile);
-                let form = build_edit_form(&model, read_flow.schema(), false);
+                let mut form = build_edit_form(&model, read_flow.schema(), false);
+                // Create takes ONE value per attribute typed inline — even for
+                // schema-multi-valued attributes (cn, sn on inetOrgPerson are the
+                // RDN + a MUST and are multi-valued; without this they would render
+                // as `‹0 set›` and be unfillable). Treating every editable field as
+                // single-value inline lets the mandatory attributes be entered; a
+                // second value is added afterwards via the pane-3 popup.
+                for field in &mut form.fields {
+                    if field.editable {
+                        field.multi = false;
+                    }
+                }
                 app.overlay = Some(Overlay::CreateForm {
                     form,
                     focus: 0,
@@ -754,7 +779,8 @@ fn revert_form(app: &mut App) {
 /// After a save re-reads `dn` (possibly a rename's new DN), point both the
 /// awaited DN and the current leaf row at it, so the post-save base-read passes
 /// the DN gate and `reconcile` does not fire a competing read of the old DN.
-/// (The tree / leaf-label structure reflow is P4.)
+/// Only the selected row's DN is rebound; the eager `Structure` is not updated on
+/// a rename, so the leaf label / tree fully re-sync on the next Refresh (F5).
 fn rebind_selection(app: &mut App, dn: &str) {
     app.last_seen_leaf = Some(dn.to_string());
     if let Some(row) = app.rows.get_mut(app.leaf_sel) {
@@ -892,15 +918,7 @@ fn commit_create(
         return None;
     };
 
-    let oc_refs = [profile.object_class.as_str()];
-    let errors = validate(&edited, read_flow.schema(), &oc_refs);
-    if !errors.is_empty() {
-        app.overlay = Some(Overlay::Error {
-            text: format_validation_errors(&errors),
-        });
-        return None;
-    }
-
+    // The RDN value must be present before we can compose the DN.
     let rdn_value = edited
         .attrs
         .iter()
@@ -914,7 +932,23 @@ fn commit_create(
         return None;
     }
 
+    // Build the final entry first, THEN validate it — `build_add_entry` supplies
+    // the fixed objectClass set and ensures the RDN attribute is present, so
+    // validating the raw form here would spuriously fail the objectClass MUST.
     let (dn, attrs) = build_add_entry(profile, &container, rdn_value.trim(), &edited);
+    let oc_refs = [profile.object_class.as_str()];
+    let full_entry = EditEntry {
+        dn: dn.clone(),
+        attrs: attrs.clone(),
+    };
+    let errors = validate(&full_entry, read_flow.schema(), &oc_refs);
+    if !errors.is_empty() {
+        app.overlay = Some(Overlay::Error {
+            text: format_validation_errors(&errors),
+        });
+        return None;
+    }
+
     let ldif = render_add(&dn, &attrs);
     app.overlay = Some(Overlay::Confirm {
         title: "Create this entry?".to_string(),
@@ -935,7 +969,7 @@ fn execute_pending(
     worker: &WorkerHandle,
     read_flow: &mut ReadFlow,
     post: &mut HashMap<u64, PostWrite>,
-    pending_followups: &mut HashMap<u64, (String, Vec<ModOp>)>,
+    pending_followups: &mut HashMap<u64, (String, Vec<ModOp>, Option<String>)>,
 ) {
     match action {
         PendingAction::Save { plan, dn, nav } => {
@@ -959,7 +993,6 @@ fn execute_pending(
         PendingAction::SaveThenNavigate { target } => {
             // Run the save flow, deferring navigation to the moved-to entry until
             // the write's WriteOk (the re-read must target the post-save DN).
-            app.last_seen_leaf = target.clone();
             let Some(form) = app.form.as_ref() else {
                 return;
             };
@@ -971,10 +1004,13 @@ fn execute_pending(
             let object_classes = object_classes_of(form);
             match prepare_save(read_flow.schema(), &original, &edited, &object_classes) {
                 PrepareSave::Ready { plan, dn, .. } => {
+                    // Advance the awaited DN ONLY now that we are committing — so a
+                    // validation failure below does not silence the dirty guard.
+                    app.last_seen_leaf = target.clone();
                     submit_prepared(plan, &dn, target, worker, post, pending_followups);
                     app.status = "Saving…".to_string();
                 }
-                // Nothing to save after all → just navigate.
+                // Nothing to save after all → just navigate (sets last_seen_leaf).
                 PrepareSave::NoChanges => navigate_to(app, worker, read_flow, target),
                 PrepareSave::Invalid(errs) => {
                     app.overlay = Some(Overlay::Error {
@@ -1135,7 +1171,7 @@ fn submit_prepared(
     nav: Option<String>,
     worker: &WorkerHandle,
     post: &mut HashMap<u64, PostWrite>,
-    pending_followups: &mut HashMap<u64, (String, Vec<ModOp>)>,
+    pending_followups: &mut HashMap<u64, (String, Vec<ModOp>, Option<String>)>,
 ) {
     match plan {
         SavePlan::Nothing => {}
@@ -1175,7 +1211,7 @@ fn submit_prepared(
         SavePlan::Rename { modrdn, then_mods } => {
             let id = next_id();
             let new_dn = compose_renamed_dn(old_dn, &modrdn.new_rdn);
-            pending_followups.insert(id, (new_dn, then_mods));
+            pending_followups.insert(id, (new_dn, then_mods, nav));
             let _ = worker.submit(Request::ModRdn {
                 id,
                 dn: old_dn.to_string(),
