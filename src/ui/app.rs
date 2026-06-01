@@ -867,39 +867,9 @@ fn handle_action(
             };
             // Try the combined membership path first; fall back to the single-entry
             // path when no backref field actually changed.
-            match plan_combined_save(form, read_flow.schema(), &app.relations) {
-                CombinedPlan::Ready {
-                    entry_dn,
-                    own_mods,
-                    fanout,
-                    ldif,
-                } => {
-                    app.overlay = Some(Overlay::Confirm {
-                        title: "Apply these changes?".to_string(),
-                        body: ldif,
-                        action: PendingAction::CombinedSave {
-                            entry_dn,
-                            own_mods,
-                            fanout,
-                        },
-                    });
-                    return;
-                }
-                CombinedPlan::Blocked(msg) => {
-                    app.overlay = Some(Overlay::Error { text: msg });
-                    return;
-                }
-                CombinedPlan::Invalid(errs) => {
-                    app.overlay = Some(Overlay::Error {
-                        text: format_validation_errors(&errs),
-                    });
-                    return;
-                }
-                CombinedPlan::DiffError(e) => {
-                    app.overlay = Some(Overlay::Error { text: e });
-                    return;
-                }
-                CombinedPlan::NoMembershipChange => {}
+            if let Some(ov) = combined_save_overlay(form, read_flow.schema(), &app.relations) {
+                app.overlay = Some(ov);
+                return;
             }
             // Normal single-entry save — strip backref labels from baseline so
             // `diff` does not emit a spurious Delete for server-maintained attrs.
@@ -1250,39 +1220,9 @@ fn execute_pending(
             let Some(form) = app.form.as_ref() else {
                 return;
             };
-            match plan_combined_save(form, read_flow.schema(), &app.relations) {
-                CombinedPlan::Ready {
-                    entry_dn,
-                    own_mods,
-                    fanout,
-                    ldif,
-                } => {
-                    app.overlay = Some(Overlay::Confirm {
-                        title: "Apply these changes?".to_string(),
-                        body: ldif,
-                        action: PendingAction::CombinedSave {
-                            entry_dn,
-                            own_mods,
-                            fanout,
-                        },
-                    });
-                    return;
-                }
-                CombinedPlan::Blocked(msg) => {
-                    app.overlay = Some(Overlay::Error { text: msg });
-                    return;
-                }
-                CombinedPlan::Invalid(errs) => {
-                    app.overlay = Some(Overlay::Error {
-                        text: format_validation_errors(&errs),
-                    });
-                    return;
-                }
-                CombinedPlan::DiffError(e) => {
-                    app.overlay = Some(Overlay::Error { text: e });
-                    return;
-                }
-                CombinedPlan::NoMembershipChange => {}
+            if let Some(ov) = combined_save_overlay(form, read_flow.schema(), &app.relations) {
+                app.overlay = Some(ov);
+                return;
             }
             // Normal single-entry save — strip backref labels from baseline.
             let backref_lbls = form.backref_labels();
@@ -1658,6 +1598,39 @@ fn plan_combined_save(
     }
 }
 
+/// Map a `CombinedPlan` to the overlay that should be shown, or `None` when
+/// there is no membership change (caller falls through to the single-entry save
+/// path). Extracted to avoid duplicating the match in `FormSave` and
+/// `SaveThenNavigate`.
+fn combined_save_overlay(
+    form: &EditForm,
+    schema: &SchemaModel,
+    relations: &[ResolvedRelation],
+) -> Option<Overlay> {
+    match plan_combined_save(form, schema, relations) {
+        CombinedPlan::Ready {
+            entry_dn,
+            own_mods,
+            fanout,
+            ldif,
+        } => Some(Overlay::Confirm {
+            title: "Apply these changes?".to_string(),
+            body: ldif,
+            action: PendingAction::CombinedSave {
+                entry_dn,
+                own_mods,
+                fanout,
+            },
+        }),
+        CombinedPlan::Blocked(msg) => Some(Overlay::Error { text: msg }),
+        CombinedPlan::Invalid(errs) => Some(Overlay::Error {
+            text: format_validation_errors(&errs),
+        }),
+        CombinedPlan::DiffError(e) => Some(Overlay::Error { text: e }),
+        CombinedPlan::NoMembershipChange => None,
+    }
+}
+
 /// Apply a combined membership save SYNCHRONOUSLY (mirrors `refresh_structure`):
 /// pre-validate last-member on every removal, abort the whole batch if any would
 /// empty a group, then apply own-entry mods + each fan-out MODIFY, collecting a
@@ -1672,23 +1645,32 @@ fn apply_combined_save(
 ) {
     // 1. Pre-validate: for each Delete, Base-read the group's current holder_attr
     //    values; block the whole batch if any removal would empty a group.
+    //    A read failure is treated conservatively — also blocked.
     let mut blocked: Vec<String> = Vec::new();
     for (gdn, op) in &fanout {
         if let ModOp::Delete { attr, values } = op {
-            let members = read_group_members(worker, gdn, attr);
-            if let Some(member) = values.first() {
-                if would_empty(&members, member) {
-                    blocked.push(gdn.clone());
+            match read_group_members(worker, gdn, attr) {
+                None => {
+                    blocked.push(format!("{gdn}: could not verify members"));
+                }
+                Some(members) => {
+                    if let Some(member) = values.first() {
+                        if would_empty(&members, member) {
+                            blocked.push(format!("{gdn}: would remove last member"));
+                        }
+                    }
                 }
             }
         }
     }
     if !blocked.is_empty() {
+        // No write happened — leave form and user's edits intact, no re-read.
         app.overlay = Some(Overlay::Error {
-            text: format!("Can't remove the last member of: {}", blocked.join(", ")),
+            text: format!(
+                "Cannot save — membership change blocked:\n- {}",
+                blocked.join("\n- ")
+            ),
         });
-        rebind_selection(app, entry_dn);
-        let _ = read_flow.request_entry(worker, entry_dn, None);
         return;
     }
 
@@ -1706,19 +1688,25 @@ fn apply_combined_save(
     }
 
     // 3. Report + re-read the edited entry.
+    // Partial-failure uses the status line (not an overlay) so the subsequent
+    // re-read is not blocked by the form-install gate (`overlay.is_none()`).
     if failures.is_empty() {
         app.status = "Saved.".to_string();
     } else {
-        app.overlay = Some(Overlay::Error {
-            text: format!("Some changes did not apply:\n- {}", failures.join("\n- ")),
-        });
+        app.status = format!("Saved with errors: {}", failures.join("; "));
     }
     rebind_selection(app, entry_dn);
     let _ = read_flow.request_entry(worker, entry_dn, None);
 }
 
-/// Base-read a group's current `holder_attr` values (synchronous). Empty on error.
-fn read_group_members(worker: &WorkerHandle, group_dn: &str, holder_attr: &str) -> Vec<String> {
+/// Base-read a group's current `holder_attr` values (synchronous).
+/// Returns `None` on read error or unexpected response (caller treats this
+/// conservatively), `Some(members)` on a successful read.
+fn read_group_members(
+    worker: &WorkerHandle,
+    group_dn: &str,
+    holder_attr: &str,
+) -> Option<Vec<String>> {
     match worker.request(Request::Search {
         id: next_id(),
         base: group_dn.to_string(),
@@ -1727,17 +1715,19 @@ fn read_group_members(worker: &WorkerHandle, group_dn: &str, holder_attr: &str) 
         attrs: vec![holder_attr.to_string()],
         size_limit: None,
     }) {
-        Ok(Response::Entries { entries, .. }) => entries
-            .into_iter()
-            .next()
-            .and_then(|e| {
-                e.attrs
-                    .into_iter()
-                    .find(|(k, _)| k.eq_ignore_ascii_case(holder_attr))
-                    .map(|(_, v)| v)
-            })
-            .unwrap_or_default(),
-        _ => Vec::new(),
+        Ok(Response::Entries { entries, .. }) => Some(
+            entries
+                .into_iter()
+                .next()
+                .and_then(|e| {
+                    e.attrs
+                        .into_iter()
+                        .find(|(k, _)| k.eq_ignore_ascii_case(holder_attr))
+                        .map(|(_, v)| v)
+                })
+                .unwrap_or_default(),
+        ),
+        _ => None,
     }
 }
 
