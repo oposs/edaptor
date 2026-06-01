@@ -636,6 +636,9 @@ mod tests {
             overlay: None,
             status: String::new(),
             menu_defs: vec![],
+            relations: vec![],
+            picker_search_id: None,
+            picker_last_query: String::new(),
         }
     }
 
@@ -768,6 +771,9 @@ mod tests {
             overlay: None,
             status: status.to_string(),
             menu_defs: vec![],
+            relations: vec![],
+            picker_search_id: None,
+            picker_last_query: String::new(),
         }
     }
 

@@ -20,6 +20,7 @@ use tui_prompts::{State, TextState};
 use tui_tree_widget::{TreeItem, TreeState};
 
 use crate::app::{build_menu_defs, menu_action, MenuDef, UiAction, CM_PROFILE_BASE};
+use crate::config::relation::{resolve_relations, ResolvedRelation};
 use crate::config::{Config, EntryProfile};
 use crate::form::changeset::{diff, EditEntry, ModOp};
 use crate::form::validate::{plan_save, validate, SavePlan, ValidationError};
@@ -193,6 +194,12 @@ pub struct App {
     /// [`run`] from the config profiles. Drives the top menu bar (rendered in
     /// [`view::ui`]) and the Alt+digit create keys (mapped via [`menu_action`]).
     pub menu_defs: Vec<MenuDef>,
+    /// Resolved membership relations (built once from config).
+    pub relations: Vec<ResolvedRelation>,
+    /// Correlation id of the latest in-flight picker search (stale ids ignored).
+    pub picker_search_id: Option<u64>,
+    /// The picker search term last submitted (delta detection in the loop).
+    pub picker_last_query: String,
 }
 
 impl App {
@@ -212,6 +219,7 @@ pub fn run(config: Config, password: String) -> Result<()> {
     let base_dn = config.server.base_dn.clone();
     let read_only = config.is_read_only();
     let profiles = config.profiles.clone();
+    let relations = resolve_relations(&config.profiles, &config.relations);
 
     // Sync startup: spawn the worker, fetch the schema, scan the structure.
     let worker = WorkerHandle::spawn(config, password)?;
@@ -268,6 +276,9 @@ pub fn run(config: Config, password: String) -> Result<()> {
         overlay: None,
         status: String::new(),
         menu_defs: build_menu_defs(&profiles),
+        relations,
+        picker_search_id: None,
+        picker_last_query: String::new(),
     };
 
     let mut terminal = ratatui::init();
@@ -455,7 +466,7 @@ fn handle_worker_response(
                         &model,
                         read_flow.schema(),
                         app.read_only,
-                        &[],
+                        &app.relations,
                     ));
                     app.form_focus = 0;
                     app.form_scroll = 0;
@@ -1443,6 +1454,9 @@ mod tests {
             overlay: Some(Overlay::ValueEditor(ve)),
             status: String::new(),
             menu_defs: vec![],
+            relations: vec![],
+            picker_search_id: None,
+            picker_last_query: String::new(),
         }
     }
 
@@ -1519,6 +1533,9 @@ mod tests {
                     command: CM_QUIT,
                 },
             ],
+            relations: vec![],
+            picker_search_id: None,
+            picker_last_query: String::new(),
         }
     }
 
