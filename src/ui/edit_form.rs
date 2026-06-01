@@ -194,19 +194,50 @@ impl EditForm {
     /// The entry as currently edited, in the shape the save path's
     /// [`crate::form::changeset::diff`] consumes.
     ///
-    /// Every field is included — even those whose [`EditField::current_values`]
-    /// is empty — so the attribute key set matches the original snapshot built
-    /// from the same labels and a cleared field diffs to a delete.
+    /// BackRef relation fields (e.g. `memberOf`) are excluded: their changes drive
+    /// the fan-out save path (Task 5.3), not the single-entry diff. The caller must
+    /// also strip the same labels from the `original` (baseline) side before
+    /// calling [`crate::form::changeset::diff`] to avoid spurious deletes.
+    ///
+    /// All other fields are included — even those whose [`EditField::current_values`]
+    /// is empty — so a cleared field diffs to a delete.
     pub fn to_edit_entry(&self) -> EditEntry {
         let attrs = self
             .fields
             .iter()
+            .filter(|f| {
+                !matches!(
+                    &f.relation,
+                    Some(FieldRelation {
+                        role: RelationRole::BackRef,
+                        ..
+                    })
+                )
+            })
             .map(|f| (f.label.clone(), f.current_values()))
             .collect();
         EditEntry {
             dn: self.dn.clone(),
             attrs,
         }
+    }
+
+    /// Labels of BackRef relation fields (excluded from the own-entry diff; their
+    /// change drives the fan-out save). Used to strip them from the baseline too.
+    pub fn backref_labels(&self) -> Vec<String> {
+        self.fields
+            .iter()
+            .filter(|f| {
+                matches!(
+                    &f.relation,
+                    Some(FieldRelation {
+                        role: RelationRole::BackRef,
+                        ..
+                    })
+                )
+            })
+            .map(|f| f.label.clone())
+            .collect()
     }
 
     /// Whether any field's current value SET differs from its baseline SET.
@@ -620,5 +651,72 @@ mod tests {
             vec!["uid=a,ou=people".to_string(), "uid=b,ou=people".to_string()]
         );
         assert_eq!(ve.scope.unwrap().object_class, "inetOrgPerson");
+    }
+
+    /// Build a minimal user-form with a BackRef `memberOf` field. The field has
+    /// `multi: true`, `values = edited`, and the form `baseline` has the original
+    /// memberOf values. Used to prove that a memberOf-only change produces zero
+    /// own-entry mods once backref labels are stripped from both sides.
+    fn user_form_with_memberof(baseline_vals: Vec<String>, edited_vals: Vec<String>) -> EditForm {
+        use crate::config::relation::{CandidateScope, RelationRole};
+        let scope = CandidateScope {
+            base: "ou=groups".into(),
+            object_class: "groupOfNames".into(),
+            search_attrs: vec!["cn".into()],
+        };
+        let field = EditField {
+            label: "memberOf".into(),
+            must: false,
+            editable: true,
+            multi: true,
+            secret: false,
+            ordered: false,
+            values: edited_vals,
+            kind: crate::schema::FieldKind::Text,
+            widget: crate::ui::form::WidgetSpec::ReadOnlyText,
+            editor: TextState::new(),
+            relation: Some(FieldRelation {
+                role: RelationRole::BackRef,
+                scope,
+            }),
+        };
+        let mut baseline = BTreeMap::new();
+        baseline.insert("memberOf".to_string(), baseline_vals);
+        EditForm {
+            dn: "uid=ann,ou=people,dc=example,dc=org".to_string(),
+            fields: vec![field],
+            baseline,
+        }
+    }
+
+    #[test]
+    fn backref_field_excluded_from_own_entry_diff() {
+        use crate::form::changeset::{diff, EditEntry};
+        // Build a user form with a BackRef `memberOf` field whose selection changed.
+        let form = user_form_with_memberof(
+            /* baseline */ vec!["cn=g1,ou=groups".into()],
+            /* edited    */ vec!["cn=g2,ou=groups".into()],
+        );
+        let labels = form.backref_labels();
+        assert_eq!(labels, vec!["memberOf".to_string()]);
+
+        // Own-entry diff with backref labels stripped from BOTH sides → no mods.
+        let mut original = EditEntry {
+            dn: form.dn.clone(),
+            attrs: form.baseline.clone(),
+        };
+        let mut edited = form.to_edit_entry();
+        for l in &labels {
+            original.attrs.remove(l);
+            edited.attrs.remove(l);
+        }
+        let cs = diff(&original, &edited).unwrap();
+        assert!(
+            cs.mods.is_empty(),
+            "memberOf-only change must produce zero own-entry mods"
+        );
+
+        // And to_edit_entry already omits backref fields.
+        assert!(!edited.attrs.contains_key("memberOf"));
     }
 }
