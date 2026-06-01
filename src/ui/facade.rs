@@ -620,19 +620,20 @@ impl FormPane {
             y += 1;
         }
         if !self.read_only {
+            // Buttons MUST be ≥2 rows tall — Button::draw bails on height < 2.
             self.inner.add(Box::new(Button::new(
-                Rect::new(0, y + 1, 10, y + 2),
+                Rect::new(0, y + 1, 10, y + 3),
                 "~S~ave",
                 CM_FORM_SAVE,
                 true,
             )));
             self.inner.add(Box::new(Button::new(
-                Rect::new(12, y + 1, 22, y + 2),
+                Rect::new(12, y + 1, 22, y + 3),
                 "~C~ancel",
                 CM_FORM_CANCEL,
                 false,
             )));
-            y += 2;
+            y += 3;
         }
         self.content_h = y;
         self.scroll = 0;
@@ -1286,25 +1287,26 @@ pub fn confirm_guard(app: &mut Application) -> GuardChoice {
     const CM_SAVE: CommandId = 2400;
     const CM_DISCARD: CommandId = 2401;
     const CM_STAY: CommandId = 2402;
-    let mut d = Dialog::new(Rect::new(0, 0, 44, 8), "Unsaved changes");
+    let mut d = Dialog::new(Rect::new(0, 0, 46, 9), "Unsaved changes");
     d.add(Box::new(StaticText::new(
-        Rect::new(2, 1, 42, 3),
+        Rect::new(2, 1, 44, 3),
         "This entry has unsaved changes.",
     )));
+    // Buttons MUST be at least 2 rows tall — Button::draw bails on height < 2.
     d.add(Box::new(Button::new(
-        Rect::new(2, 4, 14, 5),
+        Rect::new(2, 4, 14, 6),
         "~S~ave",
         CM_SAVE,
         true,
     )));
     d.add(Box::new(Button::new(
-        Rect::new(15, 4, 28, 5),
+        Rect::new(16, 4, 30, 6),
         "~D~iscard",
         CM_DISCARD,
         false,
     )));
     d.add(Box::new(Button::new(
-        Rect::new(29, 4, 41, 5),
+        Rect::new(32, 4, 44, 6),
         "S~t~ay",
         CM_STAY,
         false,
@@ -1631,19 +1633,19 @@ pub fn edit_entry_dialog(app: &mut Application, model: &FormModel) -> Option<Edi
         }
 
         dialog.add(Box::new(Button::new(
-            Rect::new(2, height - 2, 14, height - 1),
+            Rect::new(2, height - 3, 14, height - 1),
             "~S~ave",
             CM_OK,
             true,
         )));
         dialog.add(Box::new(Button::new(
-            Rect::new(16, height - 2, 28, height - 1),
+            Rect::new(16, height - 3, 28, height - 1),
             "~C~ancel",
             CM_CANCEL,
             false,
         )));
         dialog.add(Box::new(Button::new(
-            Rect::new(30, height - 2, 48, height - 1),
+            Rect::new(30, height - 3, 48, height - 1),
             "~P~review LDIF",
             CM_PREVIEW,
             false,
