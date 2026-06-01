@@ -35,6 +35,7 @@ use turbo_vision::views::button::Button;
 use turbo_vision::views::dialog::Dialog;
 use turbo_vision::views::group::Group;
 use turbo_vision::views::input_line::InputLine;
+use turbo_vision::views::listbox::ListBox;
 use turbo_vision::views::menu_bar::{MenuBar, SubMenu};
 use turbo_vision::views::outline::{Node, OutlineViewer};
 use turbo_vision::views::static_text::StaticText;
@@ -707,6 +708,144 @@ impl View for FormPane {
         self.palette_chain.as_ref()
     }
 
+    fn get_palette(&self) -> Option<Palette> {
+        None
+    }
+}
+
+/// Local command ids for [`LeafListPane`]'s widgets. Distinct from the DIT outline
+/// ids (2100/2101) and the FormPane ids (2200/2201).
+#[allow(dead_code)] // search wiring lives in the run_tui integration task
+const CM_LEAF_SEARCH: CommandId = 2300;
+const CM_LEAF_SELECT: CommandId = 2301;
+
+/// Pane 2: an incremental-search [`InputLine`] over a [`ListBox`] of the current
+/// branch's leaves (plus a `‹self›` row for the branch entry itself). The pane is
+/// passive: the wiring layer recomputes rows from the
+/// [`crate::workflows::structure::Structure`] whenever the branch selection or the
+/// search text changes, and reads `selected_dn()` to drive pane 3. Selection
+/// changes are detected by polling (lists emit no change event).
+pub struct LeafListPane {
+    bounds: Rect,
+    inner: Group,
+    search: Rc<RefCell<String>>,
+    /// Parallel to the ListBox items: the DN for each visible row.
+    row_dns: Vec<String>,
+    state: StateFlags,
+    palette_chain: Option<PaletteChainNode>,
+}
+
+impl LeafListPane {
+    /// Build an empty pane covering `bounds`: a `Search:` label + [`InputLine`] on
+    /// the top row, and a [`ListBox`] filling the rest. The list starts empty; the
+    /// wiring layer populates it via `set_rows`.
+    pub fn new(bounds: Rect) -> Self {
+        let search = Rc::new(RefCell::new(String::new()));
+        let mut inner = Group::new(bounds);
+        inner.add(Box::new(StaticText::new(
+            Rect::new(bounds.a.x, bounds.a.y, bounds.a.x + 8, bounds.a.y + 1),
+            "Search:",
+        )));
+        inner.add(Box::new(InputLine::new(
+            Rect::new(bounds.a.x + 8, bounds.a.y, bounds.b.x, bounds.a.y + 1),
+            256,
+            search.clone(),
+        )));
+        inner.add(Box::new(ListBox::new(
+            Rect::new(bounds.a.x, bounds.a.y + 1, bounds.b.x, bounds.b.y),
+            CM_LEAF_SELECT,
+        )));
+        inner.set_initial_focus();
+        LeafListPane {
+            bounds,
+            inner,
+            search,
+            row_dns: Vec::new(),
+            state: 0,
+            palette_chain: None,
+        }
+    }
+
+    /// The ListBox is child index 2 (label, input, listbox).
+    #[allow(dead_code)] // used by set_rows; wired up in the run_tui integration task
+    fn listbox_mut(&mut self) -> &mut ListBox {
+        self.inner
+            .child_at_mut(2)
+            .as_any_mut()
+            .downcast_mut::<ListBox>()
+            .expect("child 2 is the ListBox")
+    }
+    fn listbox(&self) -> &ListBox {
+        self.inner
+            .child_at(2)
+            .as_any()
+            .downcast_ref::<ListBox>()
+            .expect("child 2 is the ListBox")
+    }
+
+    /// Replace the visible rows (display label + DN). Resets selection to 0.
+    #[allow(dead_code)] // wired up in the run_tui integration task
+    pub fn set_rows(&mut self, rows: Vec<(String, String)>) {
+        let labels: Vec<String> = rows.iter().map(|(l, _)| l.clone()).collect();
+        self.row_dns = rows.into_iter().map(|(_, d)| d).collect();
+        self.listbox_mut().set_items(labels);
+    }
+
+    /// Current search-box text.
+    #[allow(dead_code)] // wired up in the run_tui integration task
+    pub fn search_text(&self) -> String {
+        self.search.borrow().clone()
+    }
+
+    /// DN of the highlighted row, if any.
+    pub fn selected_dn(&self) -> Option<String> {
+        self.listbox()
+            .get_selection()
+            .and_then(|i| self.row_dns.get(i).cloned())
+    }
+}
+
+impl View for LeafListPane {
+    fn bounds(&self) -> Rect {
+        self.bounds
+    }
+    fn set_bounds(&mut self, b: Rect) {
+        self.bounds = b;
+        self.inner.set_bounds(b);
+    }
+    fn draw(&mut self, terminal: &mut Terminal) {
+        self.inner.set_palette_chain(self.palette_chain.clone());
+        self.inner.draw(terminal);
+    }
+    fn handle_event(&mut self, event: &mut Event) {
+        self.inner.handle_event(event);
+    }
+    fn can_focus(&self) -> bool {
+        true
+    }
+    fn state(&self) -> StateFlags {
+        self.state
+    }
+    fn set_state(&mut self, s: StateFlags) {
+        self.state = s;
+    }
+    fn set_focus(&mut self, focused: bool) {
+        self.set_state_flag(SF_FOCUSED, focused);
+        if focused {
+            self.inner.set_initial_focus();
+        }
+    }
+    fn update_cursor(&self, terminal: &mut Terminal) {
+        if let Some(c) = self.inner.focused_child() {
+            c.update_cursor(terminal);
+        }
+    }
+    fn set_palette_chain(&mut self, n: Option<PaletteChainNode>) {
+        self.palette_chain = n;
+    }
+    fn get_palette_chain(&self) -> Option<&PaletteChainNode> {
+        self.palette_chain.as_ref()
+    }
     fn get_palette(&self) -> Option<Palette> {
         None
     }
