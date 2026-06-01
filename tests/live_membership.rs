@@ -1,0 +1,271 @@
+//! Gated live integration test for membership editing.
+//!
+//! Enable by setting EDAPTOR_TEST_LDAP_URI (e.g. ldap://localhost:1389).
+//! Start a server with: scripts/test-ldap.sh start
+//! When the env var is unset each test prints SKIP and returns early (no silent skip).
+//!
+//! Exercises the forward (group.member) edit path end-to-end through the worker:
+//!   seed group + two users -> Replace member = [userA, userB] -> Base-search the
+//!   group and assert both DNs are present -> clean up.
+
+use std::collections::BTreeMap;
+use std::time::{Duration, Instant};
+
+use edaptor::config::{AuthConfig, AuthMethod, Config, PasswordSource, ServerConfig, TlsConfig};
+use edaptor::form::changeset::ModOp;
+use edaptor::ldap::worker::{Request, Response, SearchScope, WorkerHandle};
+
+// ---------------------------------------------------------------------------
+// Helpers (mirrored from tests/live_write.rs)
+// ---------------------------------------------------------------------------
+
+fn test_config(uri: String) -> (Config, String) {
+    let config = Config {
+        server: ServerConfig {
+            uri,
+            base_dn: "dc=example,dc=org".to_string(),
+            start_tls: false,
+            read_only: false,
+            timeout_secs: 10,
+            tls: TlsConfig::default(),
+        },
+        auth: AuthConfig {
+            method: AuthMethod::Simple,
+            bind_dn: Some("cn=admin,dc=example,dc=org".to_string()),
+            password_source: PasswordSource::Env("EDAPTOR_TEST_ADMIN_PW".to_string()),
+        },
+        profiles: Vec::new(),
+        samba: Default::default(),
+        relations: Vec::new(),
+    };
+    let password =
+        std::env::var("EDAPTOR_TEST_ADMIN_PW").unwrap_or_else(|_| "adminpassword".to_string());
+    (config, password)
+}
+
+/// Poll the worker channel until a reply correlated to `want_id` arrives.
+fn poll_for_id(worker: &WorkerHandle, want_id: u64, timeout: Duration) -> Option<Response> {
+    let deadline = Instant::now() + timeout;
+    while Instant::now() < deadline {
+        match worker.poll() {
+            Some(resp) => match &resp {
+                Response::Entries { id, .. }
+                | Response::SearchError { id, .. }
+                | Response::WriteOk { id, .. }
+                | Response::WriteError { id, .. }
+                    if *id == want_id =>
+                {
+                    return Some(resp);
+                }
+                _ => continue,
+            },
+            None => std::thread::sleep(Duration::from_millis(20)),
+        }
+    }
+    None
+}
+
+fn describe(resp: &Option<Response>) -> String {
+    match resp {
+        Some(Response::WriteOk { dn, .. }) => format!("WriteOk({dn})"),
+        Some(Response::WriteError { msg, .. }) => format!("WriteError({msg})"),
+        Some(Response::Entries { entries, .. }) => format!("Entries({})", entries.len()),
+        Some(Response::SearchError { msg, .. }) => format!("SearchError({msg})"),
+        Some(_) => "other".to_string(),
+        None => "timeout".to_string(),
+    }
+}
+
+/// Base-read a DN, returning the entry's string attrs (None if not found).
+fn read_entry(
+    worker: &WorkerHandle,
+    dn: &str,
+    id: u64,
+    attrs: &[&str],
+) -> Option<BTreeMap<String, Vec<String>>> {
+    worker
+        .submit(Request::Search {
+            id,
+            base: dn.to_string(),
+            scope: SearchScope::Base,
+            filter: "(objectClass=*)".to_string(),
+            attrs: attrs.iter().map(|s| s.to_string()).collect(),
+            size_limit: None,
+        })
+        .expect("submit base search");
+    match poll_for_id(worker, id, Duration::from_secs(10)) {
+        Some(Response::Entries { entries, .. }) => entries.into_iter().next().map(|e| e.attrs),
+        _ => None,
+    }
+}
+
+/// Delete a DN, ignoring errors (cleanup helper).
+fn cleanup(worker: &WorkerHandle, id: u64, dn: &str) {
+    let _ = worker.submit(Request::Delete {
+        id,
+        dn: dn.to_string(),
+    });
+    let _ = poll_for_id(worker, id, Duration::from_secs(5));
+}
+
+// ---------------------------------------------------------------------------
+// DN constants for the seeded entries
+// ---------------------------------------------------------------------------
+
+const CONTAINER: &str = "ou=users,dc=example,dc=org";
+const GROUP_DN: &str = "cn=lm-test-group,ou=users,dc=example,dc=org";
+const USER_A_DN: &str = "uid=lm-user-a,ou=users,dc=example,dc=org";
+const USER_B_DN: &str = "uid=lm-user-b,ou=users,dc=example,dc=org";
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+/// Seed a minimal group + two users, set member=[userA, userB] via a Replace
+/// MODIFY, then Base-search the group and assert both DNs are present.
+#[test]
+fn forward_member_edit_round_trips() {
+    let uri = match std::env::var("EDAPTOR_TEST_LDAP_URI") {
+        Ok(uri) => uri,
+        Err(_) => {
+            eprintln!("SKIP forward_member_edit_round_trips: set EDAPTOR_TEST_LDAP_URI to run");
+            return;
+        }
+    };
+
+    let (config, password) = test_config(uri);
+    let worker = WorkerHandle::spawn(config, password).expect("spawn worker");
+
+    // --- Idempotent cleanup from any prior aborted run ---
+    cleanup(&worker, 1, GROUP_DN);
+    cleanup(&worker, 2, USER_A_DN);
+    cleanup(&worker, 3, USER_B_DN);
+
+    // --- Seed user A ---
+    {
+        let mut attrs = BTreeMap::new();
+        attrs.insert(
+            "objectClass".to_string(),
+            vec!["top".to_string(), "inetOrgPerson".to_string()],
+        );
+        attrs.insert("uid".to_string(), vec!["lm-user-a".to_string()]);
+        attrs.insert("cn".to_string(), vec!["LM User A".to_string()]);
+        attrs.insert("sn".to_string(), vec!["A".to_string()]);
+        worker
+            .submit(Request::Add {
+                id: 10,
+                dn: USER_A_DN.to_string(),
+                attrs,
+            })
+            .expect("submit add user A");
+        match poll_for_id(&worker, 10, Duration::from_secs(10)) {
+            Some(Response::WriteOk { .. }) => {}
+            other => panic!("ADD user A failed: {}", describe(&other)),
+        }
+    }
+
+    // --- Seed user B ---
+    {
+        let mut attrs = BTreeMap::new();
+        attrs.insert(
+            "objectClass".to_string(),
+            vec!["top".to_string(), "inetOrgPerson".to_string()],
+        );
+        attrs.insert("uid".to_string(), vec!["lm-user-b".to_string()]);
+        attrs.insert("cn".to_string(), vec!["LM User B".to_string()]);
+        attrs.insert("sn".to_string(), vec!["B".to_string()]);
+        worker
+            .submit(Request::Add {
+                id: 20,
+                dn: USER_B_DN.to_string(),
+                attrs,
+            })
+            .expect("submit add user B");
+        match poll_for_id(&worker, 20, Duration::from_secs(10)) {
+            Some(Response::WriteOk { .. }) => {}
+            other => panic!("ADD user B failed: {}", describe(&other)),
+        }
+    }
+
+    // --- Seed group (groupOfNames requires at least one member) ---
+    {
+        let mut attrs = BTreeMap::new();
+        attrs.insert(
+            "objectClass".to_string(),
+            vec!["top".to_string(), "groupOfNames".to_string()],
+        );
+        attrs.insert("cn".to_string(), vec!["lm-test-group".to_string()]);
+        // Seed with only userA initially; the test will Replace to [userA, userB].
+        attrs.insert("member".to_string(), vec![USER_A_DN.to_string()]);
+        worker
+            .submit(Request::Add {
+                id: 30,
+                dn: GROUP_DN.to_string(),
+                attrs,
+            })
+            .expect("submit add group");
+        match poll_for_id(&worker, 30, Duration::from_secs(10)) {
+            Some(Response::WriteOk { .. }) => {}
+            other => {
+                // Clean up users before panicking.
+                cleanup(&worker, 31, USER_A_DN);
+                cleanup(&worker, 32, USER_B_DN);
+                panic!("ADD group failed: {}", describe(&other));
+            }
+        }
+    }
+
+    // --- MODIFY: Replace member = [userA, userB] ---
+    worker
+        .submit(Request::Modify {
+            id: 40,
+            dn: GROUP_DN.to_string(),
+            changes: vec![ModOp::Replace {
+                attr: "member".to_string(),
+                values: vec![USER_A_DN.to_string(), USER_B_DN.to_string()],
+            }],
+        })
+        .expect("submit modify group member");
+    match poll_for_id(&worker, 40, Duration::from_secs(10)) {
+        Some(Response::WriteOk { .. }) => {}
+        other => {
+            cleanup(&worker, 41, GROUP_DN);
+            cleanup(&worker, 42, USER_A_DN);
+            cleanup(&worker, 43, USER_B_DN);
+            panic!("MODIFY group.member failed: {}", describe(&other));
+        }
+    }
+
+    // --- Verify: Base-search the group and assert both DNs appear in member ---
+    let group_attrs =
+        read_entry(&worker, GROUP_DN, 50, &["member"]).expect("group should exist after modify");
+    let members = group_attrs.get("member").cloned().unwrap_or_default();
+
+    // Normalise to lower-case for comparison (some servers canonicalise DNs).
+    let members_lc: Vec<String> = members.iter().map(|m| m.to_lowercase()).collect();
+    assert!(
+        members_lc.contains(&USER_A_DN.to_lowercase()),
+        "member list should contain userA ({USER_A_DN}), got: {members:?}"
+    );
+    assert!(
+        members_lc.contains(&USER_B_DN.to_lowercase()),
+        "member list should contain userB ({USER_B_DN}), got: {members:?}"
+    );
+    assert_eq!(
+        members.len(),
+        2,
+        "group should have exactly 2 members after Replace, got: {members:?}"
+    );
+
+    // --- Teardown ---
+    cleanup(&worker, 60, GROUP_DN);
+    cleanup(&worker, 61, USER_A_DN);
+    cleanup(&worker, 62, USER_B_DN);
+
+    // Verify cleanup
+    assert!(
+        read_entry(&worker, GROUP_DN, 70, &["*"]).is_none(),
+        "group should be gone after cleanup"
+    );
+    _ = CONTAINER; // used for documentation; the OU itself is not created/deleted
+}
