@@ -19,6 +19,7 @@ use crate::config::relation::{
 use crate::form::changeset::{is_x_ordered, EditEntry};
 use crate::schema::{FieldKind, SchemaModel};
 use crate::ui::form::{FormField, FormModel, WidgetSpec};
+use crate::ui::picker::{Candidate, PickerState};
 
 /// Relation metadata attached to a picker-enabled field.
 #[derive(Clone)]
@@ -82,7 +83,8 @@ impl EditField {
 /// The pop-up editor for a multi-valued attribute: one inline edit row per
 /// value, with insert / delete / reorder. Lives as an overlay over pane 3; on
 /// commit its [`committed_values`](ValueEditor::committed_values) replace the
-/// field's `values`. (Spike `ValueEditor`.)
+/// field's `values`. In **picker mode** (`picker.is_some()`) the rows are
+/// replaced by a searchable candidate list. (Spike `ValueEditor`.)
 pub struct ValueEditor {
     /// Index of the field being edited (into [`EditForm::fields`]).
     pub field: usize,
@@ -92,10 +94,18 @@ pub struct ValueEditor {
     pub ordered: bool,
     /// Whether the attribute is secret (rows render masked).
     pub secret: bool,
-    /// One edit state per value row.
+    /// One edit state per value row (free-text mode only; empty in picker mode).
     pub rows: Vec<TextState<'static>>,
-    /// The selected row index.
+    /// The selected row index (free-text mode only).
     pub sel: usize,
+    /// `Some` in picker mode (relation fields); `None` for the free-text editor.
+    pub picker: Option<PickerState>,
+    /// The picker's incremental-search box (Unicode-correct edit engine).
+    pub search: TextState<'static>,
+    /// Candidate search scope (picker mode only).
+    pub scope: Option<CandidateScope>,
+    /// The relation role being edited (picker mode only).
+    pub role: Option<RelationRole>,
 }
 
 impl ValueEditor {
@@ -113,6 +123,43 @@ impl ValueEditor {
             secret: field.secret,
             rows,
             sel: 0,
+            picker: None,
+            search: TextState::new(),
+            scope: None,
+            role: None,
+        }
+    }
+
+    /// Open in PICKER mode over a relation `field`. `label_of` resolves a DN to a
+    /// display label (caller passes a lookup over the loaded structure).
+    pub fn open_picker(
+        field_idx: usize,
+        field: &EditField,
+        label_of: impl Fn(&str) -> String,
+    ) -> Self {
+        let rel = field
+            .relation
+            .as_ref()
+            .expect("open_picker on a relation field");
+        let selected: Vec<Candidate> = field
+            .values
+            .iter()
+            .map(|dn| Candidate {
+                dn: dn.clone(),
+                label: label_of(dn),
+            })
+            .collect();
+        ValueEditor {
+            field: field_idx,
+            label: field.label.clone(),
+            ordered: field.ordered,
+            secret: field.secret,
+            rows: Vec::new(),
+            sel: 0,
+            picker: Some(PickerState::new(selected)),
+            search: TextState::new(),
+            scope: Some(rel.scope.clone()),
+            role: Some(rel.role),
         }
     }
 
@@ -531,5 +578,39 @@ mod tests {
         // Restore the original value: back to clean.
         form.fields[i].editor = TextState::new().with_value("Alice");
         assert!(!form.is_dirty());
+    }
+
+    #[test]
+    fn open_picker_seeds_selection_from_field_values() {
+        use crate::config::relation::{CandidateScope, RelationRole};
+        let scope = CandidateScope {
+            base: "ou=people".into(),
+            object_class: "inetOrgPerson".into(),
+            search_attrs: vec!["uid".into()],
+        };
+        let field = EditField {
+            label: "member".into(),
+            must: false,
+            editable: true,
+            multi: true,
+            secret: false,
+            ordered: false,
+            values: vec!["uid=a,ou=people".into(), "uid=b,ou=people".into()],
+            kind: crate::schema::FieldKind::Text,
+            widget: crate::ui::form::WidgetSpec::ReadOnlyText,
+            editor: TextState::new(),
+            relation: Some(FieldRelation {
+                role: RelationRole::Holder,
+                scope: scope.clone(),
+            }),
+        };
+        // labels resolved via a closure (DN→label); here identity.
+        let ve = ValueEditor::open_picker(0, &field, |dn| dn.to_string());
+        let picker = ve.picker.expect("picker mode");
+        assert_eq!(
+            picker.selected_dns(),
+            vec!["uid=a,ou=people".to_string(), "uid=b,ou=people".to_string()]
+        );
+        assert_eq!(ve.scope.unwrap().object_class, "inetOrgPerson");
     }
 }

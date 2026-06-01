@@ -342,7 +342,7 @@ fn event_loop(
                                 &mut pending_followups,
                             );
                         }
-                    } else if let Some(action) = dispatch_key(app, key) {
+                    } else if let Some(action) = dispatch_key(app, key, &structure) {
                         handle_action(
                             app,
                             action,
@@ -492,7 +492,7 @@ fn handle_worker_response(
 
 /// Translate a key into an `App` mutation (gated by the focused pane), returning
 /// a [`UiAction`] for the few keys the loop must service with the worker.
-fn dispatch_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
+fn dispatch_key(app: &mut App, key: KeyEvent, structure: &Structure) -> Option<UiAction> {
     let alt = key.modifiers.contains(KeyModifiers::ALT);
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
 
@@ -607,7 +607,7 @@ fn dispatch_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
                 }
                 // Enter on an editable multi-value field opens the value-editor
                 // popup; on a single field it is a no-op.
-                KeyCode::Enter => open_value_editor(app),
+                KeyCode::Enter => open_value_editor(app, structure),
                 // Otherwise edit the focused single-value field inline.
                 _ => edit_focused_field(app, key),
             }
@@ -629,17 +629,30 @@ fn edit_focused_field(app: &mut App, key: KeyEvent) {
     }
 }
 
-/// Open the multi-value popup over the focused field, if it is an editable
-/// multi-valued field.
-fn open_value_editor(app: &mut App) {
+/// Open the multi-value popup over the focused field. Relation fields open in
+/// picker mode; plain multi-valued fields open in free-text mode.
+fn open_value_editor(app: &mut App, structure: &Structure) {
     let focus = app.form_focus;
-    let editor = app.form.as_ref().and_then(|form| {
-        form.fields
-            .get(focus)
-            .filter(|f| f.multi && f.editable)
-            .map(|f| ValueEditor::open(focus, f))
-    });
-    if let Some(ve) = editor {
+    let Some(form) = app.form.as_ref() else {
+        return;
+    };
+    let Some(field) = form.fields.get(focus) else {
+        return;
+    };
+    if field.relation.is_some() && field.editable {
+        // Picker mode: label DNs from the loaded structure (fallback = the DN).
+        let label_of = |dn: &str| {
+            structure
+                .get(dn)
+                .map(|n| n.label.clone())
+                .unwrap_or_else(|| dn.to_string())
+        };
+        let ve = ValueEditor::open_picker(focus, field, label_of);
+        app.overlay = Some(Overlay::ValueEditor(ve));
+        app.picker_last_query.clear();
+        app.picker_search_id = None;
+    } else if field.multi && field.editable {
+        let ve = ValueEditor::open(focus, field);
         app.overlay = Some(Overlay::ValueEditor(ve));
     }
 }
@@ -1435,6 +1448,10 @@ mod tests {
                 .map(|i| TextState::new().with_value(format!("v{i}")))
                 .collect(),
             sel: 0,
+            picker: None,
+            search: TextState::new(),
+            scope: None,
+            role: None,
         };
         App {
             focus: Pane::Form,
@@ -1568,64 +1585,74 @@ mod tests {
         KeyEvent::new(KeyCode::F(n), KeyModifiers::NONE)
     }
 
+    /// A minimal empty structure for tests that call `dispatch_key` (structure
+    /// is only used when Enter opens the picker; these tests don't exercise that).
+    fn empty_structure() -> Structure {
+        Structure::build("dc=test", vec![])
+    }
+
     #[test]
     fn f5_refreshes_even_in_read_only() {
+        let s = empty_structure();
         assert_eq!(
-            dispatch_key(&mut bare_app(true), fkey(5)),
+            dispatch_key(&mut bare_app(true), fkey(5), &s),
             Some(UiAction::Refresh)
         );
         assert_eq!(
-            dispatch_key(&mut bare_app(false), fkey(5)),
+            dispatch_key(&mut bare_app(false), fkey(5), &s),
             Some(UiAction::Refresh)
         );
     }
 
     #[test]
     fn f7_creates_first_profile_when_writable_only() {
+        let s = empty_structure();
         assert_eq!(
-            dispatch_key(&mut bare_app(false), fkey(7)),
+            dispatch_key(&mut bare_app(false), fkey(7), &s),
             Some(UiAction::NewEntry(0))
         );
         // Read-only mode suppresses create (P4-T4); the key falls through to nav.
-        assert_eq!(dispatch_key(&mut bare_app(true), fkey(7)), None);
+        assert_eq!(dispatch_key(&mut bare_app(true), fkey(7), &s), None);
     }
 
     #[test]
     fn f8_deletes_the_form_entry_when_writable() {
+        let s = empty_structure();
         let mut app = with_form(bare_app(false), "cn=Alice,dc=example,dc=org");
         assert_eq!(
-            dispatch_key(&mut app, fkey(8)),
+            dispatch_key(&mut app, fkey(8), &s),
             Some(UiAction::DeleteEntry(
                 "cn=Alice,dc=example,dc=org".to_string()
             ))
         );
         // No form → nothing to delete.
-        assert_eq!(dispatch_key(&mut bare_app(false), fkey(8)), None);
+        assert_eq!(dispatch_key(&mut bare_app(false), fkey(8), &s), None);
         // Read-only suppresses delete.
         let mut ro = with_form(bare_app(true), "cn=Alice,dc=example,dc=org");
-        assert_eq!(dispatch_key(&mut ro, fkey(8)), None);
+        assert_eq!(dispatch_key(&mut ro, fkey(8), &s), None);
     }
 
     #[test]
     fn alt_digit_creates_matching_profile_via_menu_action() {
         let alt_digit = |c| KeyEvent::new(KeyCode::Char(c), KeyModifiers::ALT);
+        let s = empty_structure();
         // bare_app seeds two profiles (Users, Groups).
         // Alt+1 → create profile 0; Alt+2 → create profile 1.
         assert_eq!(
-            dispatch_key(&mut bare_app(false), alt_digit('1')),
+            dispatch_key(&mut bare_app(false), alt_digit('1'), &s),
             Some(UiAction::NewEntry(0))
         );
         assert_eq!(
-            dispatch_key(&mut bare_app(false), alt_digit('2')),
+            dispatch_key(&mut bare_app(false), alt_digit('2'), &s),
             Some(UiAction::NewEntry(1))
         );
         // Out-of-range digit (only two profiles) → menu_action returns None → no
         // action (the key is inert, not a spurious create).
-        assert_eq!(dispatch_key(&mut bare_app(false), alt_digit('3')), None);
-        assert_eq!(dispatch_key(&mut bare_app(false), alt_digit('9')), None);
+        assert_eq!(dispatch_key(&mut bare_app(false), alt_digit('3'), &s), None);
+        assert_eq!(dispatch_key(&mut bare_app(false), alt_digit('9'), &s), None);
         // Read-only mode suppresses the Alt+digit create keys entirely.
-        assert_eq!(dispatch_key(&mut bare_app(true), alt_digit('1')), None);
-        assert_eq!(dispatch_key(&mut bare_app(true), alt_digit('2')), None);
+        assert_eq!(dispatch_key(&mut bare_app(true), alt_digit('1'), &s), None);
+        assert_eq!(dispatch_key(&mut bare_app(true), alt_digit('2'), &s), None);
     }
 
     #[test]
