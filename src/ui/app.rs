@@ -1635,6 +1635,33 @@ fn combined_save_overlay(
 /// pre-validate last-member on every removal, abort the whole batch if any would
 /// empty a group, then apply own-entry mods + each fan-out MODIFY, collecting a
 /// partial-failure report, and finally re-read the edited entry (async).
+/// Synchronously re-read `dn` and rebuild the form so it reflects the directory
+/// after a combined save. Installs the fresh form directly without depending on
+/// the async poll loop or the overlay-gated install path.
+fn reload_form_sync(app: &mut App, worker: &WorkerHandle, read_flow: &ReadFlow, dn: &str) {
+    rebind_selection(app, dn);
+    if let Ok(Response::Entries { entries, .. }) = worker.request(Request::Search {
+        id: next_id(),
+        base: dn.to_string(),
+        scope: SearchScope::Base,
+        filter: "(objectClass=*)".to_string(),
+        attrs: vec!["*".to_string()],
+        size_limit: None,
+    }) {
+        if let Some(entry) = entries.first() {
+            let model = read_flow.form_for(entry, &[]);
+            app.form = Some(build_edit_form(
+                &model,
+                read_flow.schema(),
+                app.read_only,
+                &app.relations,
+            ));
+            app.form_focus = 0;
+            app.form_scroll = 0;
+        }
+    }
+}
+
 fn apply_combined_save(
     app: &mut App,
     worker: &WorkerHandle,
@@ -1687,16 +1714,19 @@ fn apply_combined_save(
         }
     }
 
-    // 3. Report + re-read the edited entry.
-    // Partial-failure uses the status line (not an overlay) so the subsequent
-    // re-read is not blocked by the form-install gate (`overlay.is_none()`).
+    // 3. Re-read the entry synchronously so the form reflects the directory
+    // state immediately (before setting status/overlay). This avoids the
+    // async install gate clearing the partial-failure message on the next
+    // poll iteration.
+    reload_form_sync(app, worker, read_flow, entry_dn);
+
     if failures.is_empty() {
         app.status = "Saved.".to_string();
     } else {
-        app.status = format!("Saved with errors: {}", failures.join("; "));
+        app.overlay = Some(Overlay::Error {
+            text: format!("Saved with errors:\n- {}", failures.join("\n- ")),
+        });
     }
-    rebind_selection(app, entry_dn);
-    let _ = read_flow.request_entry(worker, entry_dn, None);
 }
 
 /// Base-read a group's current `holder_attr` values (synchronous).
