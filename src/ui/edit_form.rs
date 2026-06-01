@@ -9,9 +9,11 @@
 //! set-wise dirty check, and `to_edit_entry()` — deliberately left out here so
 //! that work stays a self-contained, unit-tested task.
 
-use tui_prompts::TextState;
+use std::collections::BTreeMap;
 
-use crate::form::changeset::is_x_ordered;
+use tui_prompts::{State, TextState};
+
+use crate::form::changeset::{is_x_ordered, EditEntry};
 use crate::schema::{FieldKind, SchemaModel};
 use crate::ui::form::{FormField, FormModel, WidgetSpec};
 
@@ -41,12 +43,81 @@ pub struct EditField {
     pub editor: TextState<'static>,
 }
 
+impl EditField {
+    /// The field's value set as currently edited.
+    ///
+    /// - multi field → `values` (the multi-value popup writes edits back there);
+    /// - single + editable → the live editor, trimmed; an emptied field yields no
+    ///   values so the diff emits a delete (not an empty value);
+    /// - single + not editable → the original `values` (read-only kinds are kept).
+    pub fn current_values(&self) -> Vec<String> {
+        if self.multi {
+            self.values.clone()
+        } else if self.editable {
+            let v = self.editor.value().trim();
+            if v.is_empty() {
+                vec![]
+            } else {
+                vec![v.to_string()]
+            }
+        } else {
+            self.values.clone()
+        }
+    }
+}
+
 /// The editable form for one entry.
 pub struct EditForm {
     /// The entry's distinguished name.
     pub dn: String,
     /// The ordered fields.
     pub fields: Vec<EditField>,
+    /// Immutable snapshot of the original server values (label → values), the
+    /// reference the dirty check compares the current edits against.
+    pub baseline: BTreeMap<String, Vec<String>>,
+}
+
+impl EditForm {
+    /// The entry as currently edited, in the shape the save path's
+    /// [`crate::form::changeset::diff`] consumes.
+    ///
+    /// Every field is included — even those whose [`EditField::current_values`]
+    /// is empty — so the attribute key set matches the original snapshot built
+    /// from the same labels and a cleared field diffs to a delete.
+    pub fn to_edit_entry(&self) -> EditEntry {
+        let attrs = self
+            .fields
+            .iter()
+            .map(|f| (f.label.clone(), f.current_values()))
+            .collect();
+        EditEntry {
+            dn: self.dn.clone(),
+            attrs,
+        }
+    }
+
+    /// Whether any field's current value SET differs from its baseline SET.
+    ///
+    /// Set-wise / order-insensitive, matching `changeset::diff`'s `value_set_eq`
+    /// semantics, so a pure reorder of a multi-valued attribute is NOT dirty. A
+    /// missing baseline key is treated as an empty set.
+    pub fn is_dirty(&self) -> bool {
+        const EMPTY: &Vec<String> = &Vec::new();
+        self.fields.iter().any(|f| {
+            let current = f.current_values();
+            let baseline = self.baseline.get(&f.label).unwrap_or(EMPTY);
+            !value_set_eq(&current, baseline)
+        })
+    }
+}
+
+/// Order-insensitive value-set equality, matching `changeset::diff`'s
+/// `value_set_eq`: same length and every element of each side appears in the
+/// other (symmetric check).
+fn value_set_eq(a: &[String], b: &[String]) -> bool {
+    a.len() == b.len()
+        && a.iter().all(|v| b.iter().any(|w| w == v))
+        && b.iter().all(|v| a.iter().any(|w| w == v))
 }
 
 /// Build an [`EditForm`] from a read-only [`FormModel`] plus the server schema.
@@ -60,7 +131,7 @@ pub struct EditForm {
 /// P1 uses the result purely for display. The single-value `editor` is seeded
 /// from `values[0]` so P2's editing has its starting point.
 pub fn build_edit_form(model: &FormModel, schema: &SchemaModel, read_only: bool) -> EditForm {
-    let fields = model
+    let fields: Vec<EditField> = model
         .fields
         .iter()
         .map(|f| {
@@ -80,9 +151,17 @@ pub fn build_edit_form(model: &FormModel, schema: &SchemaModel, read_only: bool)
         })
         .collect();
 
+    // The immutable snapshot of original server values the dirty check compares
+    // against: every field's original `values`, keyed by label.
+    let baseline = fields
+        .iter()
+        .map(|f| (f.label.clone(), f.values.clone()))
+        .collect();
+
     EditForm {
         dn: model.title.clone(),
         fields,
+        baseline,
     }
 }
 
@@ -170,5 +249,71 @@ mod tests {
         let form = build_edit_form(&model, &schema(), true);
         assert!(form.fields.iter().all(|f| !f.editable));
         assert_eq!(form.dn, "cn=Alice,dc=example,dc=org");
+    }
+
+    /// Build a writable form over the standard demo entry.
+    fn writable_form() -> EditForm {
+        let model = build_form_model(&schema(), &["demoPerson"], &entry(), &[]);
+        build_edit_form(&model, &schema(), false)
+    }
+
+    fn field_index(form: &EditForm, name: &str) -> usize {
+        form.fields.iter().position(|f| f.label == name).unwrap()
+    }
+
+    #[test]
+    fn fresh_form_is_not_dirty() {
+        let form = writable_form();
+        assert!(!form.is_dirty());
+    }
+
+    #[test]
+    fn editing_a_single_field_makes_it_dirty() {
+        let mut form = writable_form();
+        let i = field_index(&form, "cn");
+        form.fields[i].editor = TextState::new().with_value("changed");
+
+        assert!(form.is_dirty());
+        assert_eq!(form.to_edit_entry().attrs["cn"], vec!["changed".to_string()]);
+    }
+
+    #[test]
+    fn reorder_of_multi_value_is_not_dirty() {
+        let mut form = writable_form();
+        let i = field_index(&form, "mail");
+        form.fields[i].values.reverse();
+
+        assert!(!form.is_dirty(), "a pure reorder is set-wise equal");
+    }
+
+    #[test]
+    fn adding_a_multi_value_is_dirty() {
+        let mut form = writable_form();
+        let i = field_index(&form, "mail");
+        form.fields[i].values.push("a@z.org".to_string());
+
+        assert!(form.is_dirty());
+    }
+
+    #[test]
+    fn emptying_a_single_field_drops_the_value() {
+        let mut form = writable_form();
+        let i = field_index(&form, "cn");
+        form.fields[i].editor = TextState::new().with_value("");
+
+        assert!(form.fields[i].current_values().is_empty());
+        assert!(form.to_edit_entry().attrs["cn"].is_empty());
+    }
+
+    #[test]
+    fn reverting_an_edit_clears_dirty() {
+        let mut form = writable_form();
+        let i = field_index(&form, "cn");
+        form.fields[i].editor = TextState::new().with_value("changed");
+        assert!(form.is_dirty());
+
+        // Restore the original value: back to clean.
+        form.fields[i].editor = TextState::new().with_value("Alice");
+        assert!(!form.is_dirty());
     }
 }

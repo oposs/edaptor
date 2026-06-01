@@ -9,12 +9,12 @@
 
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
-use ratatui::widgets::{Block, Borders, Paragraph};
+use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 use ratatui::Frame;
 use tui_prompts::State;
 use tui_tree_widget::Tree;
 
-use crate::ui::app::{App, Pane};
+use crate::ui::app::{App, Overlay, Pane};
 use crate::ui::edit_form::EditField;
 use crate::ui::form::WidgetSpec;
 
@@ -34,6 +34,9 @@ pub fn ui(f: &mut Frame, app: &mut App) {
     render_tree(f, app, cols[0]);
     render_leaf(f, app, cols[1]);
     render_form(f, app, cols[2]);
+    if app.overlay.is_some() {
+        render_overlay(f, app);
+    }
 }
 
 /// A bordered pane block. The focused pane gets a solid light background and a
@@ -199,15 +202,16 @@ fn pane_style(focused: bool) -> Style {
     }
 }
 
-/// The read-only display string for a field:
-/// - secret → a run of `•` (never the cleartext);
+/// The display string for a field:
+/// - secret → a run of `•` (never the cleartext), tracking the live editor when
+///   editable so masking length follows typing;
 /// - multi  → `‹N set|ordered› v1; v2; …`;
 /// - checkbox/binary → the widget rendering (`[x]` / `<N bytes>`);
-/// - otherwise the single value.
+/// - editable single → the live editor value (so typing is visible);
+/// - read-only single → the stored value.
 fn field_display_value(fld: &EditField) -> String {
     if fld.secret {
-        let n: usize = fld.values.iter().map(|v| v.chars().count()).sum();
-        return "•".repeat(n);
+        return "•".repeat(secret_len(fld));
     }
     if fld.multi {
         let n = fld.values.len();
@@ -217,8 +221,72 @@ fn field_display_value(fld: &EditField) -> String {
     match &fld.widget {
         WidgetSpec::DisabledCheckBox(b) => (if *b { "[x]" } else { "[ ]" }).to_string(),
         WidgetSpec::BinaryNote(bytes) => format!("<{bytes} bytes>"),
+        _ if fld.editable => fld.editor.value().to_string(),
         _ => fld.values.first().cloned().unwrap_or_default(),
     }
+}
+
+/// The number of `•` to render for a secret field: the live editor length for an
+/// editable single-value field, else the stored values' total length.
+fn secret_len(fld: &EditField) -> usize {
+    if fld.editable && !fld.multi {
+        fld.editor.value().chars().count()
+    } else {
+        fld.values.iter().map(|v| v.chars().count()).sum()
+    }
+}
+
+/// Draw a centered modal overlay (a `Clear` + bordered `Block`) over the panes.
+/// Confirm shows the body (e.g. the LDIF preview) with a Yes/No hint; Error
+/// shows the message. Keys are captured by `app::overlay_key` while one is open.
+fn render_overlay(f: &mut Frame, app: &App) {
+    let area = f.area();
+    let (title, body, hint, border) = match app.overlay.as_ref() {
+        Some(Overlay::Confirm { title, body, .. }) => (
+            title.clone(),
+            body.clone(),
+            " [Y]es   [N]o ",
+            Color::Yellow,
+        ),
+        Some(Overlay::Error { text }) => (
+            "Error".to_string(),
+            text.clone(),
+            " press any key ",
+            Color::Red,
+        ),
+        None => return,
+    };
+
+    let body_lines = body.lines().count().max(1) as u16;
+    let w = 76.min(area.width.saturating_sub(4)).max(20);
+    let h = (body_lines + 4)
+        .clamp(7, area.height.saturating_sub(2).max(7))
+        .min(area.height.saturating_sub(2).max(7));
+    let rect = centered(w, h, area);
+
+    f.render_widget(Clear, rect);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(format!(" {title} "))
+        .title_bottom(hint)
+        .style(Style::default().bg(Color::Rgb(30, 30, 40)).fg(Color::White))
+        .border_style(Style::default().fg(border).add_modifier(Modifier::BOLD));
+    let inner = block.inner(rect);
+    f.render_widget(block, rect);
+    f.render_widget(
+        Paragraph::new(body)
+            .wrap(Wrap { trim: false })
+            .style(Style::default().bg(Color::Rgb(30, 30, 40)).fg(Color::White)),
+        inner,
+    );
+}
+
+/// Center a `w`×`h` rect within `area` (clamped to fit). (Spike `centered`,
+/// re-expressing the facade's `center_origin` math.)
+pub fn centered(w: u16, h: u16, area: Rect) -> Rect {
+    let x = area.x + area.width.saturating_sub(w) / 2;
+    let y = area.y + area.height.saturating_sub(h) / 2;
+    Rect::new(x, y, w.min(area.width), h.min(area.height))
 }
 
 /// Clamp `scroll` so the focused row stays within the `viewport` rows shown,
@@ -239,7 +307,7 @@ pub fn clamp_scroll(focus: usize, scroll: usize, viewport: usize, n: usize) -> u
 
 #[cfg(test)]
 mod tests {
-    use super::{clamp_scroll, render_form};
+    use super::{centered, clamp_scroll, field_display_value, render_form};
     use crate::schema::FieldKind;
     use crate::ui::app::{App, Pane};
     use crate::ui::edit_form::{EditField, EditForm};
@@ -249,6 +317,42 @@ mod tests {
     use ratatui::Terminal;
     use tui_prompts::TextState;
     use tui_tree_widget::TreeState;
+
+    /// Build a secret single-value text field carrying `value`.
+    fn secret_field(value: &str) -> EditField {
+        EditField {
+            label: "userPassword".to_string(),
+            must: false,
+            editable: true,
+            multi: false,
+            secret: true,
+            ordered: false,
+            values: vec![value.to_string()],
+            kind: FieldKind::Text,
+            widget: WidgetSpec::ReadOnlyText,
+            editor: TextState::new().with_value(value.to_string()),
+        }
+    }
+
+    #[test]
+    fn secret_field_renders_masked_never_cleartext() {
+        let field = secret_field("topSecret-Paßwort");
+        let shown = field_display_value(&field);
+        assert!(!shown.contains("topSecret"), "must not leak cleartext: {shown:?}");
+        assert!(shown.chars().all(|c| c == '•'));
+        // Mask length tracks the live editor (grapheme count, not bytes).
+        assert_eq!(shown.chars().count(), "topSecret-Paßwort".chars().count());
+    }
+
+    #[test]
+    fn centered_centers_and_clamps_to_area() {
+        let area = Rect::new(0, 0, 100, 40);
+        let r = centered(40, 10, area);
+        assert_eq!((r.x, r.y, r.width, r.height), (30, 15, 40, 10));
+        // Oversized requests clamp to the area.
+        let big = centered(200, 100, area);
+        assert_eq!((big.width, big.height), (100, 40));
+    }
 
     /// Build a one-field form whose single text value is `value`.
     fn app_with_value(value: &str) -> App {
@@ -279,9 +383,11 @@ mod tests {
             form: Some(EditForm {
                 dn: "cn=test".to_string(),
                 fields: vec![field],
+                baseline: Default::default(),
             }),
             form_focus: 0,
             form_scroll: 0,
+            overlay: None,
             status: String::new(),
         }
     }

@@ -5,11 +5,13 @@
 //! re-renders every frame, so the shared `Rc<RefCell>` pane handles and the
 //! `CM_*` refresh broadcasts collapse away.
 //!
-//! Borrow split (plan §2.1): the worker, read-flow and structure live as locals
-//! in [`run`]; `App` holds only the UI-facing state. `terminal.draw`'s `&mut
-//! App` borrow is scoped to the closure, so it never collides with the
-//! orchestration borrows that follow it each tick.
+//! Borrow split (plan §2.1): the worker, read-flow, structure and the write
+//! tracking maps live as locals in [`run`]/[`event_loop`]; `App` holds only the
+//! UI-facing state (including the modal `overlay`). `terminal.draw`'s `&mut App`
+//! borrow is scoped to the closure, so it never collides with the orchestration
+//! borrows that follow it each tick.
 
+use std::collections::HashMap;
 use std::time::Duration;
 
 use anyhow::{anyhow, Result};
@@ -17,7 +19,11 @@ use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifier
 use tui_prompts::{State, TextState};
 use tui_tree_widget::{TreeItem, TreeState};
 
+use crate::app::UiAction;
 use crate::config::Config;
+use crate::form::changeset::{diff, EditEntry, ModOp};
+use crate::form::validate::{plan_save, validate, SavePlan, ValidationError};
+use crate::ldap::ldif::render_changeset;
 use crate::ldap::worker::{Request, Response, StructureNodeRaw, WorkerHandle};
 use crate::schema::SchemaModel;
 use crate::ui::edit_form::{build_edit_form, EditForm};
@@ -36,14 +42,55 @@ pub enum Pane {
     Form,
 }
 
+/// A modal overlay drawn on top of the panes; while one is open it captures all
+/// keys (plan §3.4). More variants (ValueEditor, Guard, CreateForm) arrive in
+/// later phases.
+pub enum Overlay {
+    /// A yes/no confirmation (e.g. the save LDIF preview) carrying the action to
+    /// run on confirm.
+    Confirm {
+        /// Dialog title.
+        title: String,
+        /// Body text (e.g. the LDIF preview).
+        body: String,
+        /// What to do when the user confirms.
+        action: PendingAction,
+    },
+    /// An error message; any key dismisses it.
+    Error {
+        /// The message to show.
+        text: String,
+    },
+}
+
+/// What a confirmed [`Overlay::Confirm`] should do. Grows in P4 (create/delete).
+pub enum PendingAction {
+    /// Submit a prepared save plan against `dn`.
+    Save {
+        /// The save plan to submit on confirm.
+        plan: SavePlan,
+        /// The (old) DN the plan targets.
+        dn: String,
+    },
+}
+
+/// What the run-loop should do when a write's `WriteOk` arrives, keyed by id.
+enum PostWrite {
+    /// A form save (Modify / RenameOnly): re-read `reread_dn` into the form.
+    Save {
+        /// The DN to re-read once the write succeeds.
+        reread_dn: String,
+    },
+}
+
 /// The whole UI state. The event loop owns one of these and re-renders it every
-/// frame. (Overlays, dirty/baseline tracking and write state arrive in P2+.)
+/// frame.
 pub struct App {
     /// Which pane has focus.
     pub focus: Pane,
     /// Set to `true` to exit the event loop on the next tick.
     pub should_quit: bool,
-    /// Global read-only mode (no editing / writes); affects later phases.
+    /// Global read-only mode (no editing / writes).
     pub read_only: bool,
 
     // Pane 1 — branch tree.
@@ -74,6 +121,8 @@ pub struct App {
     /// The first visible field index (manual scroll viewport).
     pub form_scroll: usize,
 
+    /// The open modal overlay, if any (captures keys while present).
+    pub overlay: Option<Overlay>,
     /// Transient status / error text.
     pub status: String,
 }
@@ -131,6 +180,7 @@ pub fn run(config: Config, password: String) -> Result<()> {
         form: None,
         form_focus: 0,
         form_scroll: 0,
+        overlay: None,
         status: String::new(),
     };
 
@@ -149,25 +199,38 @@ fn event_loop(
     read_flow: &mut ReadFlow,
     structure: &Structure,
 ) -> Result<()> {
+    // Write-tracking maps (orchestration locals, plan §2.1).
+    let mut post: HashMap<u64, PostWrite> = HashMap::new();
+    let mut pending_followups: HashMap<u64, (String, Vec<ModOp>)> = HashMap::new();
+
     loop {
         terminal.draw(|f| view::ui(f, app))?;
 
-        // 1) Drain ALL pending worker responses (read-flow → form).
+        // 1) Drain ALL pending worker responses (writes first, then read forms).
         while let Some(resp) = worker.poll() {
-            handle_worker_response(app, &resp, read_flow);
+            handle_worker_response(app, &resp, worker, read_flow, &mut post, &mut pending_followups);
         }
 
-        // 2) Poll input with a timeout so the worker drain keeps ticking.
+        // 2) Poll input with a timeout so the worker drain keeps ticking. An open
+        //    overlay captures every key (plan §3.4).
         if event::poll(Duration::from_millis(50))? {
             if let Event::Key(key) = event::read()? {
                 if key.kind != KeyEventKind::Release {
-                    dispatch_key(app, key);
+                    if app.overlay.is_some() {
+                        if let Some(action) = overlay_key(app, key) {
+                            execute_pending(app, action, worker, &mut post, &mut pending_followups);
+                        }
+                    } else if let Some(action) = dispatch_key(app, key) {
+                        handle_action(app, action, read_flow);
+                    }
                 }
             }
         }
 
-        // 3) Reconcile UI deltas: branch switch, search filter, leaf base-read.
-        reconcile(app, structure, worker, read_flow);
+        // 3) Reconcile UI deltas (no-op while an overlay holds the keys).
+        if app.overlay.is_none() {
+            reconcile(app, structure, worker, read_flow);
+        }
 
         if app.should_quit {
             return Ok(());
@@ -175,35 +238,72 @@ fn event_loop(
     }
 }
 
-/// Feed a polled worker [`Response`] to the read flow and, on a built form,
-/// install it as the editable form (read-only-aware in P1).
-fn handle_worker_response(app: &mut App, resp: &Response, read_flow: &mut ReadFlow) {
-    match read_flow.on_response(resp) {
-        ReadOutcome::Form { model, .. } => {
-            // Rapid leaf navigation submits overlapping base-reads; the worker is
-            // FIFO, so an older read can resolve first. Install only the response
-            // whose DN matches the entry the user is currently on — otherwise a
-            // stale entry would flash now (and, from P2, clobber edit state).
-            let current = app
-                .last_seen_leaf
-                .as_deref()
-                .map(|dn| dn.eq_ignore_ascii_case(&model.title))
-                .unwrap_or(false);
-            if current {
-                app.form = Some(build_edit_form(&model, read_flow.schema(), app.read_only));
-                app.form_focus = 0;
-                app.form_scroll = 0;
-                app.status.clear();
+/// Feed a polled worker [`Response`] to the write-tracking maps and the read
+/// flow. Writes are handled first (re-read after a save); otherwise a built form
+/// is installed (only when its DN matches the current selection — see below).
+fn handle_worker_response(
+    app: &mut App,
+    resp: &Response,
+    worker: &WorkerHandle,
+    read_flow: &mut ReadFlow,
+    post: &mut HashMap<u64, PostWrite>,
+    pending_followups: &mut HashMap<u64, (String, Vec<ModOp>)>,
+) {
+    match resp {
+        Response::WriteOk { id, .. } => {
+            if let Some((new_dn, mods)) = pending_followups.remove(id) {
+                // A rename's MODRDN succeeded: apply the deferred mods to the new
+                // DN, then re-read it.
+                let _ = worker.submit(Request::Modify {
+                    id: next_id(),
+                    dn: new_dn.clone(),
+                    changes: mods,
+                });
+                app.last_seen_leaf = Some(new_dn.clone());
+                let _ = read_flow.request_entry(worker, &new_dn, None);
+                return;
+            }
+            if let Some(PostWrite::Save { reread_dn }) = post.remove(id) {
+                app.status = "Saved.".to_string();
+                // Update the awaited DN so the re-read's form passes the DN gate
+                // (covers a rename, where reread_dn is the new DN).
+                app.last_seen_leaf = Some(reread_dn.clone());
+                let _ = read_flow.request_entry(worker, &reread_dn, None);
+            } else {
+                app.status = "Saved.".to_string();
             }
         }
-        ReadOutcome::Error(msg) => app.status = msg,
-        ReadOutcome::Ignored => {}
+        Response::WriteError { msg, .. } => {
+            app.overlay = Some(Overlay::Error { text: msg.clone() });
+        }
+        // on_response consumes the pending id, so call it exactly once.
+        _ => match read_flow.on_response(resp) {
+            ReadOutcome::Form { model, .. } => {
+                // Rapid leaf navigation submits overlapping base-reads; the worker
+                // is FIFO so an older read can resolve first. Install only the
+                // response whose DN matches the entry the user is currently on,
+                // else a stale entry would flash (and, from P2, clobber edits).
+                let current = app
+                    .last_seen_leaf
+                    .as_deref()
+                    .map(|dn| dn.eq_ignore_ascii_case(&model.title))
+                    .unwrap_or(false);
+                if current {
+                    app.form = Some(build_edit_form(&model, read_flow.schema(), app.read_only));
+                    app.form_focus = 0;
+                    app.form_scroll = 0;
+                    app.status.clear();
+                }
+            }
+            ReadOutcome::Error(msg) => app.status = msg,
+            ReadOutcome::Ignored => {}
+        },
     }
 }
 
-/// Translate a key into an `App` mutation, gated by the focused pane. Editing
-/// (form text input, multi-value popup) arrives in P2/P3.
-fn dispatch_key(app: &mut App, key: KeyEvent) {
+/// Translate a key into an `App` mutation (gated by the focused pane), returning
+/// a [`UiAction`] for the few keys the loop must service with the worker.
+fn dispatch_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
     let alt = key.modifiers.contains(KeyModifiers::ALT);
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
 
@@ -213,11 +313,19 @@ fn dispatch_key(app: &mut App, key: KeyEvent) {
         || (ctrl && matches!(key.code, KeyCode::Char('c') | KeyCode::Char('C')))
     {
         app.should_quit = true;
-        return;
+        return None;
     }
     if matches!(key.code, KeyCode::F(6) | KeyCode::Tab) {
         app.focus = next_pane(app.focus);
-        return;
+        return None;
+    }
+    // Save / Cancel (writable mode only).
+    if !app.read_only {
+        match key.code {
+            KeyCode::F(2) => return Some(UiAction::FormSave),
+            KeyCode::F(3) => return Some(UiAction::FormCancel),
+            _ => {}
+        }
     }
 
     match app.focus {
@@ -261,9 +369,114 @@ fn dispatch_key(app: &mut App, key: KeyEvent) {
                 // authority for form_scroll, so paging only moves the focus.
                 KeyCode::PageUp => app.form_focus = app.form_focus.saturating_sub(10),
                 KeyCode::PageDown => app.form_focus = (app.form_focus + 10).min(n.saturating_sub(1)),
-                // Editing the focused field arrives in P2.
-                _ => {}
+                // Editing the focused single-value field; the multi-value popup
+                // (Enter on a multi field) arrives in P3.
+                _ => edit_focused_field(app, key),
             }
+        }
+    }
+    None
+}
+
+/// Route a key to the focused field's inline editor, if it is an editable
+/// single-value field (multi-value fields are edited via the P3 popup).
+fn edit_focused_field(app: &mut App, key: KeyEvent) {
+    let focus = app.form_focus;
+    if let Some(form) = app.form.as_mut() {
+        if let Some(field) = form.fields.get_mut(focus) {
+            if field.editable && !field.multi {
+                field.editor.handle_key_event(key);
+            }
+        }
+    }
+}
+
+/// Service a [`UiAction`] that needs the worker / schema. P2 handles save and
+/// cancel; create/delete/refresh arrive in P4.
+fn handle_action(app: &mut App, action: UiAction, read_flow: &mut ReadFlow) {
+    match action {
+        UiAction::FormSave => {
+            let Some(form) = app.form.as_ref() else { return };
+            let original = EditEntry {
+                dn: form.dn.clone(),
+                attrs: form.baseline.clone(),
+            };
+            let edited = form.to_edit_entry();
+            let object_classes = object_classes_of(form);
+            match prepare_save(read_flow.schema(), &original, &edited, &object_classes) {
+                PrepareSave::Ready { plan, dn, ldif } => {
+                    app.overlay = Some(Overlay::Confirm {
+                        title: "Apply these changes?".to_string(),
+                        body: ldif,
+                        action: PendingAction::Save { plan, dn },
+                    });
+                }
+                PrepareSave::NoChanges => app.status = "No changes.".to_string(),
+                PrepareSave::Invalid(errs) => {
+                    app.overlay = Some(Overlay::Error {
+                        text: format_validation_errors(&errs),
+                    })
+                }
+                PrepareSave::DiffError(e) => app.overlay = Some(Overlay::Error { text: e }),
+            }
+        }
+        UiAction::FormCancel => revert_form(app),
+        _ => {}
+    }
+}
+
+/// Revert every field to its baseline (F3 cancel): drop multi-value edits and
+/// reseed each single-value editor from the original values.
+fn revert_form(app: &mut App) {
+    if let Some(form) = app.form.as_mut() {
+        for field in &mut form.fields {
+            let base = form.baseline.get(&field.label).cloned().unwrap_or_default();
+            field.editor = TextState::new().with_value(base.first().cloned().unwrap_or_default());
+            field.values = base;
+        }
+    }
+    app.status = "Reverted.".to_string();
+}
+
+/// Handle a key while an overlay is open. Returns the action to run when the
+/// user confirms a [`Overlay::Confirm`]; otherwise dismisses / consumes the key.
+fn overlay_key(app: &mut App, key: KeyEvent) -> Option<PendingAction> {
+    match &app.overlay {
+        Some(Overlay::Confirm { .. }) => match key.code {
+            KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
+                // Take the overlay out to move its action.
+                if let Some(Overlay::Confirm { action, .. }) = app.overlay.take() {
+                    return Some(action);
+                }
+                None
+            }
+            KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc | KeyCode::F(3) => {
+                app.overlay = None;
+                None
+            }
+            _ => None,
+        },
+        Some(Overlay::Error { .. }) => {
+            // Any key dismisses an error.
+            app.overlay = None;
+            None
+        }
+        None => None,
+    }
+}
+
+/// Run a confirmed [`PendingAction`] (submits to the worker).
+fn execute_pending(
+    app: &mut App,
+    action: PendingAction,
+    worker: &WorkerHandle,
+    post: &mut HashMap<u64, PostWrite>,
+    pending_followups: &mut HashMap<u64, (String, Vec<ModOp>)>,
+) {
+    match action {
+        PendingAction::Save { plan, dn } => {
+            submit_prepared(plan, &dn, worker, post, pending_followups);
+            app.status = "Saving…".to_string();
         }
     }
 }
@@ -320,6 +533,152 @@ fn next_index(cur: usize, len: usize) -> usize {
     (cur + 1).min(len.saturating_sub(1))
 }
 
+/// The entry's objectClass values, read from a built form's baseline
+/// (case-insensitive). Needed by the write path's client-side validation.
+fn object_classes_of(form: &EditForm) -> Vec<String> {
+    form.baseline
+        .iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case("objectClass"))
+        .map(|(_, v)| v.clone())
+        .unwrap_or_default()
+}
+
+/// The outcome of preparing a form save.
+enum PrepareSave {
+    /// Client-side validation failed.
+    Invalid(Vec<ValidationError>),
+    /// The diff could not be computed (e.g. multi-valued RDN).
+    DiffError(String),
+    /// The edited entry equals the baseline — nothing to do.
+    NoChanges,
+    /// A ready plan, its target DN, and the LDIF preview.
+    Ready {
+        /// The save plan to submit.
+        plan: SavePlan,
+        /// The (old) DN the plan targets.
+        dn: String,
+        /// LDIF preview text for the confirmation overlay.
+        ldif: String,
+    },
+}
+
+/// Validate + diff the edited entry against the `original` (baseline) and, if
+/// there is a real change, return a ready [`SavePlan`] with an LDIF preview.
+fn prepare_save(
+    schema: &SchemaModel,
+    original: &EditEntry,
+    edited: &EditEntry,
+    object_classes: &[String],
+) -> PrepareSave {
+    let oc_refs: Vec<&str> = object_classes.iter().map(|s| s.as_str()).collect();
+    let errors = validate(edited, schema, &oc_refs);
+    if !errors.is_empty() {
+        return PrepareSave::Invalid(errors);
+    }
+    let cs = match diff(original, edited) {
+        Ok(cs) => cs,
+        Err(e) => return PrepareSave::DiffError(e.to_string()),
+    };
+    if cs.is_empty() {
+        return PrepareSave::NoChanges;
+    }
+    let ldif = render_changeset(&cs);
+    PrepareSave::Ready {
+        plan: plan_save(cs),
+        dn: original.dn.clone(),
+        ldif,
+    }
+}
+
+/// Submit the worker request(s) for a prepared [`SavePlan`] and record how to
+/// react to the resulting `WriteOk`. A rename with follow-up mods defers them to
+/// the rename's `WriteOk` (the MODIFY must target the post-rename DN).
+fn submit_prepared(
+    plan: SavePlan,
+    old_dn: &str,
+    worker: &WorkerHandle,
+    post: &mut HashMap<u64, PostWrite>,
+    pending_followups: &mut HashMap<u64, (String, Vec<ModOp>)>,
+) {
+    match plan {
+        SavePlan::Nothing => {}
+        SavePlan::Modify(mods) => {
+            let id = next_id();
+            let _ = worker.submit(Request::Modify {
+                id,
+                dn: old_dn.to_string(),
+                changes: mods,
+            });
+            post.insert(
+                id,
+                PostWrite::Save {
+                    reread_dn: old_dn.to_string(),
+                },
+            );
+        }
+        SavePlan::RenameOnly(modrdn) => {
+            let id = next_id();
+            let new_dn = compose_renamed_dn(old_dn, &modrdn.new_rdn);
+            let _ = worker.submit(Request::ModRdn {
+                id,
+                dn: old_dn.to_string(),
+                new_rdn: modrdn.new_rdn,
+                delete_old: modrdn.delete_old,
+                new_superior: modrdn.new_superior,
+            });
+            post.insert(id, PostWrite::Save { reread_dn: new_dn });
+        }
+        SavePlan::Rename { modrdn, then_mods } => {
+            let id = next_id();
+            let new_dn = compose_renamed_dn(old_dn, &modrdn.new_rdn);
+            pending_followups.insert(id, (new_dn, then_mods));
+            let _ = worker.submit(Request::ModRdn {
+                id,
+                dn: old_dn.to_string(),
+                new_rdn: modrdn.new_rdn,
+                delete_old: modrdn.delete_old,
+                new_superior: modrdn.new_superior,
+            });
+        }
+    }
+}
+
+/// The parent DN (everything after the first comma), or `None` at the top.
+fn parent_dn(dn: &str) -> Option<&str> {
+    dn.split_once(',').map(|(_, rest)| rest)
+}
+
+/// Compose the post-rename DN: `<new_rdn>,<parent of old_dn>`.
+fn compose_renamed_dn(old_dn: &str, new_rdn: &str) -> String {
+    match parent_dn(old_dn) {
+        Some(container) => format!("{new_rdn},{container}"),
+        None => new_rdn.to_string(),
+    }
+}
+
+/// Format a list of [`ValidationError`]s as one multi-line message.
+fn format_validation_errors(errors: &[ValidationError]) -> String {
+    let mut out = String::from("Cannot save — please fix:");
+    for e in errors {
+        let line = match e {
+            ValidationError::MissingMust(a) => format!("missing required attribute: {a}"),
+            ValidationError::MultiValueOnSingle(a) => format!("attribute is single-valued: {a}"),
+            ValidationError::SyntaxInvalid { attr, reason } => format!("{attr}: {reason}"),
+        };
+        out.push_str("\n- ");
+        out.push_str(&line);
+    }
+    out
+}
+
+/// Monotonic correlation id for write requests, starting at a high base so write
+/// ids never collide with the read/browse ids (which start at 1).
+fn next_id() -> u64 {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(1_000_000);
+    COUNTER.fetch_add(1, Ordering::Relaxed)
+}
+
 /// The pane-2 rows for `branch` filtered by `search`: a `‹self›` row for the
 /// branch entry itself, then its leaf children `(label, dn)`. Pure.
 fn compute_rows(structure: &Structure, branch: &str, search: &str) -> Vec<(String, String)> {
@@ -352,9 +711,10 @@ fn structure_inputs(nodes: Vec<StructureNodeRaw>) -> Vec<StructureInput> {
 /// `build_structure_tree`.)
 fn build_tree_items(structure: &Structure) -> Vec<TreeItem<'static, String>> {
     fn build(structure: &Structure, dn: &str) -> TreeItem<'static, String> {
-        let label = structure.get(dn).map(|n| n.label.clone()).unwrap_or_else(|| {
-            dn.split(',').next().unwrap_or(dn).trim().to_string()
-        });
+        let label = structure
+            .get(dn)
+            .map(|n| n.label.clone())
+            .unwrap_or_else(|| dn.split(',').next().unwrap_or(dn).trim().to_string());
         let mut children = Vec::new();
         if let Some(n) = structure.get(dn) {
             for child_dn in &n.children {
@@ -390,6 +750,33 @@ mod tests {
         assert_eq!(next_index(0, 0), 0);
     }
 
+    #[test]
+    fn compose_renamed_dn_replaces_rdn() {
+        assert_eq!(
+            compose_renamed_dn("cn=Alice,ou=people,dc=org", "cn=Bob"),
+            "cn=Bob,ou=people,dc=org"
+        );
+        assert_eq!(compose_renamed_dn("dc=org", "dc=net"), "dc=net");
+    }
+
+    #[test]
+    fn next_id_is_monotonic_and_high() {
+        let a = next_id();
+        let b = next_id();
+        assert!(b > a && a >= 1_000_000);
+    }
+
+    #[test]
+    fn validation_errors_format_as_bullets() {
+        let errs = vec![
+            ValidationError::MissingMust("sn".into()),
+            ValidationError::MultiValueOnSingle("cn".into()),
+        ];
+        let out = format_validation_errors(&errs);
+        assert!(out.contains("missing required attribute: sn"));
+        assert!(out.contains("attribute is single-valued: cn"));
+    }
+
     fn structure() -> Structure {
         Structure::build(
             "dc=example,dc=org",
@@ -421,17 +808,17 @@ mod tests {
         let s = structure();
         let rows = compute_rows(&s, "ou=users,dc=example,dc=org", "");
         assert_eq!(rows[0].0, "‹self› ou=users");
-        assert_eq!(rows[1], ("Jane".to_string(), "uid=jane,ou=users,dc=example,dc=org".to_string()));
-        // Search filters the leaves (the self row is always present).
-        let filtered = compute_rows(&s, "ou=users,dc=example,dc=org", "zzz");
-        assert_eq!(filtered.len(), 1);
+        assert_eq!(
+            rows[1],
+            ("Jane".to_string(), "uid=jane,ou=users,dc=example,dc=org".to_string())
+        );
+        assert_eq!(compute_rows(&s, "ou=users,dc=example,dc=org", "zzz").len(), 1);
     }
 
     #[test]
     fn tree_items_contain_only_branches() {
         let s = structure();
         let items = build_tree_items(&s);
-        // Root has exactly one branch child (ou=users); uid=jane is a leaf.
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].children().len(), 1);
     }
