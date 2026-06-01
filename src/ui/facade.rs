@@ -20,7 +20,7 @@ use std::time::Duration;
 use turbo_vision::app::Application;
 use turbo_vision::core::command::{CommandId, CM_CANCEL, CM_OK, CM_QUIT, CM_YES};
 use turbo_vision::core::draw::DrawBuffer;
-use turbo_vision::core::event::{Event, EventType, KB_ALT_X, KB_F10};
+use turbo_vision::core::event::{Event, EventType, KB_ALT_X, KB_F10, KB_PGDN, KB_PGUP};
 use turbo_vision::core::geometry::Rect;
 use turbo_vision::core::menu_data::MenuBuilder;
 use turbo_vision::core::palette::Palette;
@@ -106,6 +106,12 @@ fn pane_rects(b: Rect, d0: i16, d1: i16) -> [Rect; 3] {
         Rect::new(d0 + DIVIDER_W, top, d1, bottom),
         Rect::new(d1 + DIVIDER_W, top, b.b.x, bottom),
     ]
+}
+
+/// Clamp a desired vertical scroll `delta` to `[0, max(0, content_h - viewport_h)]`.
+fn clamp_scroll(delta: i16, content_h: i16, viewport_h: i16) -> i16 {
+    let max = (content_h - viewport_h).max(0);
+    delta.max(0).min(max)
 }
 
 /// Build the menu bar from backend-agnostic [`MenuDef`]s (spike §1/§7).
@@ -414,6 +420,287 @@ impl View for SplitContainer {
 
     fn set_palette_chain(&mut self, node: Option<PaletteChainNode>) {
         self.palette_chain = node;
+    }
+
+    fn get_palette_chain(&self) -> Option<&PaletteChainNode> {
+        self.palette_chain.as_ref()
+    }
+
+    fn get_palette(&self) -> Option<Palette> {
+        None
+    }
+}
+
+/// Local command ids emitted by [`FormPane`] when its buttons fire. Distinct from
+/// the DIT outline ids (2100/2101). Wired up in the run_tui integration task.
+#[allow(dead_code)] // wired up in the run_tui integration task
+const CM_FORM_SAVE: CommandId = 2200;
+#[allow(dead_code)] // wired up in the run_tui integration task
+const CM_FORM_CANCEL: CommandId = 2201;
+
+/// One editable row's attribute name + the shared String its InputLine mutates.
+type RowBinding = (String, Rc<RefCell<String>>);
+
+/// The live, scrollable entry-edit pane (pane 3). Holds an inner [`Group`] of
+/// label+editor rows translated by a manual scroll `delta`, plus a Save/Cancel bar
+/// (omitted in read-only mode). Dirty = any binding differs from its baseline.
+pub struct FormPane {
+    bounds: Rect,
+    read_only: bool,
+    inner: Group,
+    bindings: Vec<RowBinding>,
+    baseline: std::collections::BTreeMap<String, Vec<String>>,
+    dn: String,
+    content_h: i16,
+    scroll: i16,
+    state: StateFlags,
+    palette_chain: Option<PaletteChainNode>,
+}
+
+impl FormPane {
+    /// Build an empty pane covering `bounds`. In `read_only` mode the pane shows no
+    /// Save/Cancel bar and renders every field as static text.
+    pub fn new(bounds: Rect, read_only: bool) -> Self {
+        FormPane {
+            bounds,
+            read_only,
+            inner: Group::new(bounds),
+            bindings: Vec::new(),
+            baseline: std::collections::BTreeMap::new(),
+            dn: String::new(),
+            content_h: 0,
+            scroll: 0,
+            state: 0,
+            palette_chain: None,
+        }
+    }
+
+    /// Rebuild the pane's rows from `model`: a label (with a `*` suffix for MUST
+    /// attributes) plus an editor (an [`InputLine`] bound to a shared String for
+    /// editable fields, static text otherwise). Records every field's values as the
+    /// dirty baseline and resets the scroll position.
+    pub fn set_model(&mut self, model: &FormModel) {
+        self.dn = model.title.clone();
+        self.baseline.clear();
+        for f in &model.fields {
+            self.baseline.insert(f.label.clone(), f.values.clone());
+        }
+        self.inner = Group::new(self.bounds);
+        self.bindings.clear();
+        let width = self.bounds.b.x - self.bounds.a.x;
+        let mut y = self.bounds.a.y;
+        for field in &model.fields {
+            let label = if field.is_must {
+                format!("{} *", field.label)
+            } else {
+                field.label.clone()
+            };
+            self.inner.add(Box::new(StaticText::new(
+                Rect::new(self.bounds.a.x, y, self.bounds.a.x + 18, y + 1),
+                &label,
+            )));
+            if !self.read_only && field_is_editable(field) {
+                let seed = field.values.join("\n");
+                let data = Rc::new(RefCell::new(seed));
+                let input = InputLine::new(
+                    Rect::new(self.bounds.a.x + 19, y, self.bounds.a.x + width - 1, y + 1),
+                    1024,
+                    data.clone(),
+                );
+                self.inner.add(Box::new(input));
+                self.bindings.push((field.label.clone(), data));
+            } else {
+                let value = field_display(&field.widget, &field.values);
+                self.inner.add(Box::new(StaticText::new(
+                    Rect::new(self.bounds.a.x + 19, y, self.bounds.a.x + width - 1, y + 1),
+                    &value,
+                )));
+            }
+            y += 1;
+        }
+        if !self.read_only {
+            self.inner.add(Box::new(Button::new(
+                Rect::new(self.bounds.a.x, y + 1, self.bounds.a.x + 10, y + 2),
+                "~S~ave",
+                CM_FORM_SAVE,
+                true,
+            )));
+            self.inner.add(Box::new(Button::new(
+                Rect::new(self.bounds.a.x + 12, y + 1, self.bounds.a.x + 22, y + 2),
+                "~C~ancel",
+                CM_FORM_CANCEL,
+                false,
+            )));
+            y += 2;
+        }
+        self.content_h = y - self.bounds.a.y;
+        self.scroll = 0;
+        self.inner.set_initial_focus();
+    }
+
+    /// Reset the pane to empty (no entry selected). Wired up in the run_tui
+    /// integration task.
+    #[allow(dead_code)] // wired up in the run_tui integration task
+    pub fn clear(&mut self) {
+        self.dn.clear();
+        self.bindings.clear();
+        self.baseline.clear();
+        self.inner = Group::new(self.bounds);
+        self.content_h = 0;
+        self.scroll = 0;
+    }
+
+    /// The DN of the entry currently shown (empty when cleared). Wired up in the
+    /// run_tui integration task.
+    #[allow(dead_code)] // wired up in the run_tui integration task
+    pub fn dn(&self) -> &str {
+        &self.dn
+    }
+
+    /// True when any editable binding's current value set differs from its
+    /// baseline. Mirrors the modal dialog's value-collection semantics (newline
+    /// split, trimmed, non-empty). Wired up in the run_tui integration task.
+    #[allow(dead_code)] // wired up in the run_tui integration task
+    pub fn is_dirty(&self) -> bool {
+        for (label, data) in &self.bindings {
+            let current: Vec<String> = data
+                .borrow()
+                .split('\n')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
+            let base = self.baseline.get(label).cloned().unwrap_or_default();
+            if current != base {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Build an [`EditEntry`] from the baseline overlaid with the live bindings, or
+    /// `None` when no entry is shown. Non-editable fields keep their baseline
+    /// values. Wired up in the run_tui integration task.
+    #[allow(dead_code)] // wired up in the run_tui integration task
+    pub fn take_edit(&self) -> Option<EditEntry> {
+        if self.dn.is_empty() {
+            return None;
+        }
+        let mut attrs = self.baseline.clone();
+        for (label, data) in &self.bindings {
+            let values: Vec<String> = data
+                .borrow()
+                .split('\n')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
+            attrs.insert(label.clone(), values);
+        }
+        Some(EditEntry {
+            dn: self.dn.clone(),
+            attrs,
+        })
+    }
+
+    /// Restore every editable binding to its baseline value. Wired up in the
+    /// run_tui integration task.
+    #[allow(dead_code)] // wired up in the run_tui integration task
+    pub fn revert(&mut self) {
+        for (label, data) in &self.bindings {
+            let base = self.baseline.get(label).cloned().unwrap_or_default();
+            *data.borrow_mut() = base.join("\n");
+        }
+    }
+
+    fn viewport_h(&self) -> i16 {
+        self.bounds.b.y - self.bounds.a.y
+    }
+
+    /// Translate the inner [`Group`] vertically to the clamped `new_scroll`. A pure
+    /// translation: both y-edges move by the same delta so the Group keeps its size
+    /// (`Group::set_bounds` adds only the size delta to children, dw=dh=0).
+    fn apply_scroll(&mut self, new_scroll: i16) {
+        let clamped = clamp_scroll(new_scroll, self.content_h, self.viewport_h());
+        let dy = clamped - self.scroll;
+        if dy != 0 {
+            let gb = self.inner.bounds();
+            self.inner
+                .set_bounds(Rect::new(gb.a.x, gb.a.y - dy, gb.b.x, gb.b.y - dy));
+            self.scroll = clamped;
+        }
+    }
+}
+
+impl View for FormPane {
+    fn bounds(&self) -> Rect {
+        self.bounds
+    }
+
+    fn set_bounds(&mut self, b: Rect) {
+        self.bounds = b;
+        self.inner.set_bounds(b);
+    }
+
+    fn draw(&mut self, terminal: &mut Terminal) {
+        self.inner.set_palette_chain(self.palette_chain.clone());
+        self.inner.draw(terminal);
+    }
+
+    fn handle_event(&mut self, event: &mut Event) {
+        match event.what {
+            EventType::MouseWheelDown => {
+                self.apply_scroll(self.scroll + 1);
+                event.clear();
+                return;
+            }
+            EventType::MouseWheelUp => {
+                self.apply_scroll(self.scroll - 1);
+                event.clear();
+                return;
+            }
+            EventType::Keyboard => {
+                if event.key_code == KB_PGDN {
+                    self.apply_scroll(self.scroll + self.viewport_h());
+                    event.clear();
+                    return;
+                }
+                if event.key_code == KB_PGUP {
+                    self.apply_scroll(self.scroll - self.viewport_h());
+                    event.clear();
+                    return;
+                }
+            }
+            _ => {}
+        }
+        self.inner.handle_event(event);
+    }
+
+    fn can_focus(&self) -> bool {
+        true
+    }
+
+    fn state(&self) -> StateFlags {
+        self.state
+    }
+
+    fn set_state(&mut self, s: StateFlags) {
+        self.state = s;
+    }
+
+    fn set_focus(&mut self, focused: bool) {
+        self.set_state_flag(SF_FOCUSED, focused);
+        if focused {
+            self.inner.set_initial_focus();
+        }
+    }
+
+    fn update_cursor(&self, terminal: &mut Terminal) {
+        if let Some(c) = self.inner.focused_child() {
+            c.update_cursor(terminal);
+        }
+    }
+
+    fn set_palette_chain(&mut self, n: Option<PaletteChainNode>) {
+        self.palette_chain = n;
     }
 
     fn get_palette_chain(&self) -> Option<&PaletteChainNode> {
@@ -981,6 +1268,14 @@ mod tests {
         assert_eq!(panes[2].b.x, 60);
         assert!(panes[0].b.x <= panes[1].a.x);
         assert!(panes[1].b.x <= panes[2].a.x);
+    }
+
+    #[test]
+    fn scroll_clamps_to_content() {
+        assert_eq!(clamp_scroll(-5, 20, 10), 0);
+        assert_eq!(clamp_scroll(100, 20, 10), 10);
+        assert_eq!(clamp_scroll(3, 20, 10), 3);
+        assert_eq!(clamp_scroll(5, 8, 10), 0);
     }
 
     #[test]
