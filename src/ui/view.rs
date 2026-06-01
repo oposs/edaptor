@@ -572,6 +572,7 @@ mod tests {
             kind: FieldKind::Text,
             widget: WidgetSpec::ReadOnlyText,
             editor: TextState::new().with_value(value.to_string()),
+            relation: None,
         }
     }
 
@@ -611,6 +612,7 @@ mod tests {
             kind: FieldKind::Text,
             widget: WidgetSpec::ReadOnlyText,
             editor: TextState::new(),
+            relation: None,
         };
         App {
             focus: Pane::Form,
@@ -789,6 +791,7 @@ mod tests {
                 kind: FieldKind::Text,
                 widget: WidgetSpec::ReadOnlyText,
                 editor: TextState::new().with_value(value.to_string()),
+                relation: None,
             }],
             baseline,
         });

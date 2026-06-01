@@ -451,7 +451,12 @@ fn handle_worker_response(
                     .map(|dn| dn.eq_ignore_ascii_case(&model.title))
                     .unwrap_or(false);
                 if current && app.overlay.is_none() {
-                    app.form = Some(build_edit_form(&model, read_flow.schema(), app.read_only));
+                    app.form = Some(build_edit_form(
+                        &model,
+                        read_flow.schema(),
+                        app.read_only,
+                        &[],
+                    ));
                     app.form_focus = 0;
                     app.form_scroll = 0;
                     app.status.clear();
@@ -749,7 +754,7 @@ fn handle_action(
                     profile.search_base.clone()
                 };
                 let model = empty_form_for_profile(read_flow.schema(), profile);
-                let mut form = build_edit_form(&model, read_flow.schema(), false);
+                let mut form = build_edit_form(&model, read_flow.schema(), false, &[]);
                 // Create takes ONE value per attribute typed inline — even for
                 // schema-multi-valued attributes (cn, sn on inetOrgPerson are the
                 // RDN + a MUST and are multi-valued; without this they would render
@@ -1535,6 +1540,7 @@ mod tests {
                 kind: FieldKind::Text,
                 widget: WidgetSpec::ReadOnlyText,
                 editor: TextState::new().with_value("x".to_string()),
+                relation: None,
             }],
             baseline: Default::default(),
         });

@@ -13,9 +13,20 @@ use std::collections::BTreeMap;
 
 use tui_prompts::{State, TextState};
 
+use crate::config::relation::{
+    backref_lookup, holder_lookup, CandidateScope, RelationRole, ResolvedRelation,
+};
 use crate::form::changeset::{is_x_ordered, EditEntry};
 use crate::schema::{FieldKind, SchemaModel};
 use crate::ui::form::{FormField, FormModel, WidgetSpec};
+
+/// Relation metadata attached to a picker-enabled field.
+#[derive(Clone)]
+pub struct FieldRelation {
+    pub role: RelationRole,
+    /// Scope for the candidate search opened from THIS field.
+    pub scope: CandidateScope,
+}
 
 /// One field of the editable form.
 pub struct EditField {
@@ -41,6 +52,8 @@ pub struct EditField {
     /// Inline single-value edit state, seeded from `values[0]`. The Unicode-correct
     /// edit engine (tui-prompts); rendering is done by hand so the pane owns its bg.
     pub editor: TextState<'static>,
+    /// `Some` when this field is a membership relation (opens the picker).
+    pub relation: Option<FieldRelation>,
 }
 
 impl EditField {
@@ -179,16 +192,50 @@ fn value_set_eq(a: &[String], b: &[String]) -> bool {
 ///
 /// P1 uses the result purely for display. The single-value `editor` is seeded
 /// from `values[0]` so P2's editing has its starting point.
-pub fn build_edit_form(model: &FormModel, schema: &SchemaModel, read_only: bool) -> EditForm {
+pub fn build_edit_form(
+    model: &FormModel,
+    schema: &SchemaModel,
+    read_only: bool,
+    relations: &[ResolvedRelation],
+) -> EditForm {
+    // Derive the entry's objectClasses from the `objectClass` field values.
+    // These drive `holder_lookup` / `backref_lookup` to attach picker metadata.
+    let object_classes: Vec<String> = model
+        .fields
+        .iter()
+        .find(|f| f.label.eq_ignore_ascii_case("objectClass"))
+        .map(|f| f.values.clone())
+        .unwrap_or_default();
+
     let fields: Vec<EditField> = model
         .fields
         .iter()
         .map(|f| {
+            let relation = holder_lookup(relations, &object_classes, &f.label)
+                .map(|r| FieldRelation {
+                    role: RelationRole::Holder,
+                    scope: r.candidate_scope.clone(),
+                })
+                .or_else(|| {
+                    backref_lookup(relations, &object_classes, &f.label).map(|r| FieldRelation {
+                        role: RelationRole::BackRef,
+                        scope: r.holder_scope.clone(),
+                    })
+                });
+            // BackRef fields (e.g. memberOf) are normally non-editable; the picker
+            // makes them editable. (P5 wires the fan-out save.)
+            let editable = match &relation {
+                Some(FieldRelation {
+                    role: RelationRole::BackRef,
+                    ..
+                }) => !read_only,
+                _ => !read_only && field_is_editable(f),
+            };
             let seed = f.values.first().cloned().unwrap_or_default();
             EditField {
                 label: f.label.clone(),
                 must: f.is_must,
-                editable: !read_only && field_is_editable(f),
+                editable,
                 multi: !schema.is_single_value(&f.label),
                 secret: is_secret_attr(&f.label),
                 ordered: is_x_ordered(&f.label),
@@ -196,6 +243,7 @@ pub fn build_edit_form(model: &FormModel, schema: &SchemaModel, read_only: bool)
                 kind: f.kind,
                 widget: f.widget.clone(),
                 editor: TextState::new().with_value(seed),
+                relation,
             }
         })
         .collect();
@@ -240,6 +288,105 @@ mod tests {
     use crate::ui::form::build_form_model;
     use std::collections::BTreeMap;
 
+    /// A `FormModel` for a group entry: objectClass=groupOfNames, with a
+    /// multi-valued `member` field. The objectClass field must carry the value
+    /// so `build_edit_form`'s objectClass lookup works.
+    fn group_model_with_member() -> crate::ui::form::FormModel {
+        use crate::schema::FieldKind;
+        use crate::ui::form::{FormField, FormModel, WidgetSpec};
+        FormModel {
+            title: "cn=testgroup,ou=groups,dc=example,dc=org".to_string(),
+            fields: vec![
+                FormField {
+                    label: "objectClass".to_string(),
+                    kind: FieldKind::Text,
+                    is_must: true,
+                    values: vec!["top".to_string(), "groupOfNames".to_string()],
+                    widget: WidgetSpec::ReadOnlyText,
+                },
+                FormField {
+                    label: "cn".to_string(),
+                    kind: FieldKind::Text,
+                    is_must: true,
+                    values: vec!["testgroup".to_string()],
+                    widget: WidgetSpec::ReadOnlyText,
+                },
+                FormField {
+                    label: "member".to_string(),
+                    kind: FieldKind::DistinguishedName,
+                    is_must: false,
+                    values: vec![],
+                    widget: WidgetSpec::ReadOnlyDn,
+                },
+            ],
+        }
+    }
+
+    /// A minimal `SchemaModel` that knows `objectClass` (single), `cn` (single),
+    /// and `member` (multi-valued — no SINGLE-VALUE → picker-ready).
+    fn schema_with_member() -> SchemaModel {
+        let raw = RawSubschema {
+            object_classes: vec![
+                "( 2.5.6.0 NAME 'top' ABSTRACT MUST objectClass )".to_string(),
+                "( 2.5.6.9 NAME 'groupOfNames' SUP top STRUCTURAL \
+                  MUST ( cn $ member ) )"
+                    .to_string(),
+            ],
+            attribute_types: vec![
+                "( 2.5.4.0 NAME 'objectClass' SYNTAX 1.3.6.1.4.1.1466.115.121.1.15 )".to_string(),
+                "( 2.5.4.3 NAME 'cn' SYNTAX 1.3.6.1.4.1.1466.115.121.1.15 SINGLE-VALUE )"
+                    .to_string(),
+                "( 2.5.4.31 NAME 'member' SUP distinguishedName )".to_string(),
+            ],
+            ldap_syntaxes: vec![],
+        };
+        SchemaModel::from_raw(&raw)
+    }
+
+    #[test]
+    fn member_field_on_group_gets_holder_relation() {
+        use crate::config::relation::{resolve_relations, Relation};
+        use crate::config::EntryProfile;
+        let profiles = vec![
+            EntryProfile {
+                name: "group".into(),
+                object_class: "groupOfNames".into(),
+                rdn_attr: "cn".into(),
+                search_base: "ou=groups".into(),
+                show: vec![],
+                search_attrs: vec!["cn".into()],
+            },
+            EntryProfile {
+                name: "user".into(),
+                object_class: "inetOrgPerson".into(),
+                rdn_attr: "uid".into(),
+                search_base: "ou=people".into(),
+                show: vec![],
+                search_attrs: vec!["uid".into()],
+            },
+        ];
+        let rels = resolve_relations(
+            &profiles,
+            &[Relation {
+                name: "m".into(),
+                holder: "group".into(),
+                holder_attr: "member".into(),
+                candidate: "user".into(),
+                back_attr: "memberOf".into(),
+            }],
+        );
+        // A form for a group entry: objectClass=groupOfNames, fields include `member`.
+        let model = group_model_with_member();
+        let form = build_edit_form(&model, &schema_with_member(), false, &rels);
+        let f = form.fields.iter().find(|f| f.label == "member").unwrap();
+        let rel = f.relation.as_ref().expect("member is a relation field");
+        assert!(matches!(
+            rel.role,
+            crate::config::relation::RelationRole::Holder
+        ));
+        assert_eq!(rel.scope.object_class, "inetOrgPerson"); // searches users
+    }
+
     fn schema() -> SchemaModel {
         let raw = RawSubschema {
             object_classes: vec![
@@ -282,7 +429,7 @@ mod tests {
     #[test]
     fn flags_are_set_from_schema_and_rules() {
         let model = build_form_model(&schema(), &["demoPerson"], &entry(), &[]);
-        let form = build_edit_form(&model, &schema(), false);
+        let form = build_edit_form(&model, &schema(), false, &[]);
         let field = |name: &str| form.fields.iter().find(|f| f.label == name).unwrap();
 
         assert!(!field("cn").multi, "cn is single-valued");
@@ -295,7 +442,7 @@ mod tests {
     #[test]
     fn value_editor_open_and_commit_drops_empties() {
         let model = build_form_model(&schema(), &["demoPerson"], &entry(), &[]);
-        let form = build_edit_form(&model, &schema(), false);
+        let form = build_edit_form(&model, &schema(), false, &[]);
         let mail_idx = form.fields.iter().position(|f| f.label == "mail").unwrap();
         let mut ve = ValueEditor::open(mail_idx, &form.fields[mail_idx]);
         assert_eq!(ve.rows.len(), 2); // a@x.org, a@y.org
@@ -312,7 +459,7 @@ mod tests {
     #[test]
     fn read_only_mode_disables_all_editing() {
         let model = build_form_model(&schema(), &["demoPerson"], &entry(), &[]);
-        let form = build_edit_form(&model, &schema(), true);
+        let form = build_edit_form(&model, &schema(), true, &[]);
         assert!(form.fields.iter().all(|f| !f.editable));
         assert_eq!(form.dn, "cn=Alice,dc=example,dc=org");
     }
@@ -320,7 +467,7 @@ mod tests {
     /// Build a writable form over the standard demo entry.
     fn writable_form() -> EditForm {
         let model = build_form_model(&schema(), &["demoPerson"], &entry(), &[]);
-        build_edit_form(&model, &schema(), false)
+        build_edit_form(&model, &schema(), false, &[])
     }
 
     fn field_index(form: &EditForm, name: &str) -> usize {
