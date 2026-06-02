@@ -12,10 +12,10 @@ use crate::ui::form::{FormField, FormModel, WidgetSpec};
 /// Compose the DN and attribute set for a new entry of `profile`'s object class.
 ///
 /// The DN is `<rdn_attr>=<rdn_value>,<container_dn>`. The attribute set is the
-/// edited form's non-empty attributes merged with the fixed objectClass values
-/// `["top", profile.object_class]` (Decision D2 — the server fills in inherited
-/// superclasses; no objectClass picker in M4) and the RDN attribute (ensuring it
-/// carries the RDN value even if the form omitted it). Pure.
+/// edited form's non-empty attributes merged with the canonical objectClass set
+/// `["top"] + profile.object_classes` (deduped, case-insensitive; the server fills
+/// in inherited superclasses) and the RDN attribute (ensuring it carries the RDN
+/// value even if the form omitted it). Pure.
 pub fn build_add_entry(
     profile: &EntryProfile,
     container_dn: &str,
