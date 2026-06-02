@@ -338,6 +338,7 @@ fn event_loop(
                                 worker,
                                 read_flow,
                                 profiles,
+                                base_dn,
                                 &mut post,
                                 &mut pending_followups,
                             );
@@ -869,7 +870,7 @@ fn handle_action(
                 return;
             };
             if form.is_new() {
-                prepare_create(app, worker, read_flow, profiles);
+                prepare_create(app, worker, read_flow, profiles, base_dn);
                 return;
             }
             // Try the combined membership path first; fall back to the single-entry
@@ -1101,12 +1102,14 @@ fn guard_key(app: &mut App, key: KeyEvent) -> Option<PendingAction> {
 }
 
 /// Run a confirmed [`PendingAction`] (submits to the worker / navigates).
+#[allow(clippy::too_many_arguments)] // central write dispatcher; each arg is needed
 fn execute_pending(
     app: &mut App,
     action: PendingAction,
     worker: &WorkerHandle,
     read_flow: &mut ReadFlow,
     profiles: &[EntryProfile],
+    base_dn: &str,
     post: &mut HashMap<u64, PostWrite>,
     pending_followups: &mut HashMap<u64, (String, Vec<ModOp>, Option<String>)>,
 ) {
@@ -1148,7 +1151,7 @@ fn execute_pending(
             // confirms the create, then navigates explicitly (full
             // save-then-resume for create is out of scope here).
             if form.is_new() {
-                prepare_create(app, worker, read_flow, profiles);
+                prepare_create(app, worker, read_flow, profiles, base_dn);
                 return;
             }
             // A membership-bearing save runs synchronously through CombinedSave;
@@ -1803,7 +1806,6 @@ fn decide_allocation(values: &[u64], truncated: bool, min: u64, max: u64) -> Res
 
 /// Allocate the next free numeric `attr` in `[min,max]` by scanning the whole
 /// subtree from `base_dn`. Refuses if the scan was truncated (spec D6). Synchronous.
-#[allow(dead_code)] // wired into prepare_create in Task 3.3
 fn allocate_number(
     worker: &WorkerHandle,
     base_dn: &str,
@@ -2035,11 +2037,31 @@ fn plan_create(
 }
 
 /// Validate a Create-mode pane-3 form and open the create LDIF confirm.
+/// Apply literal/template defaults to still-empty fields (pure); return the
+/// autonumber requests `(attr, min, max)` that still need a directory scan.
+fn apply_static_defaults(
+    defaults: &crate::config::defaults::ProfileDefaults,
+    attrs: &mut std::collections::BTreeMap<String, Vec<String>>,
+) -> Vec<(String, u64, u64)> {
+    use crate::config::defaults::{plan_defaults, Resolution};
+    let mut autonum = Vec::new();
+    for res in plan_defaults(defaults, attrs) {
+        match res {
+            Resolution::Fill { attr, value } => {
+                attrs.insert(attr, vec![value]);
+            }
+            Resolution::NeedsAutonumber { attr, min, max } => autonum.push((attr, min, max)),
+        }
+    }
+    autonum
+}
+
 fn prepare_create(
     app: &mut App,
-    _worker: &WorkerHandle,
+    worker: &WorkerHandle,
     read_flow: &mut ReadFlow,
     profiles: &[EntryProfile],
+    base_dn: &str,
 ) {
     let Some(form) = app.form.as_ref() else {
         return;
@@ -2054,7 +2076,21 @@ fn prepare_create(
     let Some(profile) = profiles.get(profile_idx) else {
         return;
     };
-    let edited = form.to_edit_entry();
+    let mut edited = form.to_edit_entry();
+    // Fill empty fields from the profile's defaults; autonumber fields need a
+    // synchronous directory scan (which may refuse on a truncated result).
+    let autonum = apply_static_defaults(&profile.defaults, &mut edited.attrs);
+    for (attr, min, max) in autonum {
+        match allocate_number(worker, base_dn, &attr, min, max) {
+            Ok(n) => {
+                edited.attrs.insert(attr, vec![n.to_string()]);
+            }
+            Err(text) => {
+                app.overlay = Some(Overlay::Error { text });
+                return;
+            }
+        }
+    }
     match plan_create(read_flow.schema(), profile, &container, &edited) {
         CreatePrep::Confirm {
             dn,
@@ -2959,6 +2995,39 @@ mod tests {
         ));
         revert_form(&mut app);
         assert!(app.form.is_none(), "create form discarded on cancel");
+    }
+
+    #[test]
+    fn apply_static_defaults_fills_literals_templates_and_surfaces_autonumber() {
+        use crate::config::defaults::{parse_default_value, DefaultValue, ProfileDefaults};
+        use std::collections::BTreeMap;
+        let mut d = ProfileDefaults::default();
+        d.entries.insert(
+            "loginShell".into(),
+            DefaultValue::Literal("/bin/bash".into()),
+        );
+        d.entries.insert(
+            "homeDirectory".into(),
+            parse_default_value("/home/{uid}").unwrap(),
+        );
+        d.entries.insert(
+            "uidNumber".into(),
+            parse_default_value("{next:10000-60000}").unwrap(),
+        );
+        let mut attrs: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        attrs.insert("uid".into(), vec!["alice".into()]);
+        let autonum = apply_static_defaults(&d, &mut attrs);
+        assert_eq!(
+            attrs.get("loginShell"),
+            Some(&vec!["/bin/bash".to_string()])
+        );
+        assert_eq!(
+            attrs.get("homeDirectory"),
+            Some(&vec!["/home/alice".to_string()])
+        );
+        // autonumber is NOT filled here (needs a worker scan); it's surfaced.
+        assert_eq!(autonum, vec![("uidNumber".to_string(), 10000, 60000)]);
+        assert!(!attrs.contains_key("uidNumber"));
     }
 
     #[test]
