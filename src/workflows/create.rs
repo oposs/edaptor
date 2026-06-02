@@ -37,11 +37,14 @@ pub fn build_add_entry(
         }
     }
 
-    // Fixed objectClass set (canonical; replaces any form-supplied value).
-    attrs.insert(
-        "objectClass".to_string(),
-        vec!["top".to_string(), profile.object_class.clone()],
-    );
+    // Fixed objectClass set: "top" first, then each profile class, deduped case-insensitively.
+    let mut oc: Vec<String> = vec!["top".to_string()];
+    for c in &profile.object_classes {
+        if !oc.iter().any(|x| x.eq_ignore_ascii_case(c)) {
+            oc.push(c.clone());
+        }
+    }
+    attrs.insert("objectClass".to_string(), oc);
 
     // Ensure the RDN attribute carries the RDN value.
     match attrs
@@ -67,7 +70,8 @@ pub fn build_add_entry(
 /// the profile's `show` list first. The title is a placeholder describing the new
 /// entry. Pure.
 pub fn empty_form_for_profile(schema: &SchemaModel, profile: &EntryProfile) -> FormModel {
-    let resolved = schema.effective_attributes(&[profile.object_class.as_str()]);
+    let oc_refs: Vec<&str> = profile.object_classes.iter().map(String::as_str).collect();
+    let resolved = schema.effective_attributes(&oc_refs);
 
     let is_must = |attr: &str| resolved.must.iter().any(|m| m.eq_ignore_ascii_case(attr));
     let already =
@@ -123,7 +127,7 @@ mod tests {
     fn profile() -> EntryProfile {
         EntryProfile {
             name: "Users".to_string(),
-            object_class: "inetOrgPerson".to_string(),
+            object_classes: vec!["inetOrgPerson".to_string()],
             rdn_attr: "uid".to_string(),
             search_base: "ou=people,dc=example,dc=org".to_string(),
             show: vec!["uid".to_string(), "cn".to_string(), "sn".to_string()],
@@ -165,6 +169,21 @@ mod tests {
         let oc = attrs.get("objectClass").expect("objectClass present");
         assert!(oc.contains(&"top".to_string()));
         assert!(oc.contains(&"inetOrgPerson".to_string()));
+    }
+
+    #[test]
+    fn build_add_includes_all_object_classes_top_first_deduped() {
+        let mut p = profile();
+        p.object_classes = vec!["inetOrgPerson".into(), "posixAccount".into(), "top".into()];
+        let (_, attrs) = build_add_entry(&p, "ou=people,dc=example,dc=org", "alice", &edited());
+        let oc = attrs.get("objectClass").unwrap();
+        assert_eq!(oc[0], "top");
+        assert!(oc.contains(&"inetOrgPerson".to_string()));
+        assert!(oc.contains(&"posixAccount".to_string()));
+        assert_eq!(
+            oc.iter().filter(|v| v.eq_ignore_ascii_case("top")).count(),
+            1
+        );
     }
 
     #[test]

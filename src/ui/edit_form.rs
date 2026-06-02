@@ -475,7 +475,7 @@ mod tests {
         let profiles = vec![
             EntryProfile {
                 name: "group".into(),
-                object_class: "groupOfNames".into(),
+                object_classes: vec!["groupOfNames".into()],
                 rdn_attr: "cn".into(),
                 search_base: "ou=groups".into(),
                 show: vec![],
@@ -483,7 +483,7 @@ mod tests {
             },
             EntryProfile {
                 name: "user".into(),
-                object_class: "inetOrgPerson".into(),
+                object_classes: vec!["inetOrgPerson".into()],
                 rdn_attr: "uid".into(),
                 search_base: "ou=people".into(),
                 show: vec![],
@@ -509,7 +509,8 @@ mod tests {
             rel.role,
             crate::config::relation::RelationRole::Holder
         ));
-        assert_eq!(rel.scope.object_class, "inetOrgPerson"); // searches users
+        assert_eq!(rel.scope.object_classes, vec!["inetOrgPerson".to_string()]);
+        // searches users
     }
 
     fn schema() -> SchemaModel {
@@ -663,7 +664,7 @@ mod tests {
         use crate::config::relation::{CandidateScope, RelationRole};
         let scope = CandidateScope {
             base: "ou=people".into(),
-            object_class: "inetOrgPerson".into(),
+            object_classes: vec!["inetOrgPerson".into()],
             search_attrs: vec!["uid".into()],
         };
         let field = EditField {
@@ -689,7 +690,10 @@ mod tests {
             picker.selected_dns(),
             vec!["uid=a,ou=people".to_string(), "uid=b,ou=people".to_string()]
         );
-        assert_eq!(ve.scope.unwrap().object_class, "inetOrgPerson");
+        assert_eq!(
+            ve.scope.unwrap().object_classes,
+            vec!["inetOrgPerson".to_string()]
+        );
     }
 
     /// Build a minimal user-form with a BackRef `memberOf` field. The field has
@@ -700,7 +704,7 @@ mod tests {
         use crate::config::relation::{CandidateScope, RelationRole};
         let scope = CandidateScope {
             base: "ou=groups".into(),
-            object_class: "groupOfNames".into(),
+            object_classes: vec!["groupOfNames".into()],
             search_attrs: vec!["cn".into()],
         };
         let field = EditField {

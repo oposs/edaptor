@@ -56,7 +56,9 @@ impl Default for SambaConfig {
 #[derive(Debug, Deserialize, Default, Clone)]
 pub struct EntryProfile {
     pub name: String,
-    pub object_class: String,
+    /// One or more object classes for this profile. A single `object_class` key
+    /// (old String form) is a hard parse error — use `object_classes = ["..."]`.
+    pub object_classes: Vec<String>,
     #[serde(default)]
     pub rdn_attr: String,
     #[serde(default)]
@@ -229,23 +231,58 @@ mod tests {
 
             [[profile]]
             name = "Users"
-            object_class = "inetOrgPerson"
+            object_classes = ["inetOrgPerson"]
             rdn_attr = "uid"
             search_base = "ou=people,dc=example,dc=com"
             show = ["uid", "cn", "mail"]
 
             [[profile]]
             name = "Groups"
-            object_class = "groupOfNames"
+            object_classes = ["groupOfNames"]
         "#;
         let cfg: Config = toml::from_str(toml).expect("should parse");
         assert_eq!(cfg.profiles.len(), 2);
         assert_eq!(cfg.profiles[0].name, "Users");
-        assert_eq!(cfg.profiles[0].object_class, "inetOrgPerson");
+        assert_eq!(cfg.profiles[0].object_classes, vec!["inetOrgPerson"]);
         assert_eq!(cfg.profiles[0].rdn_attr, "uid");
         assert_eq!(cfg.profiles[0].show, vec!["uid", "cn", "mail"]);
         assert_eq!(cfg.profiles[1].name, "Groups");
-        assert_eq!(cfg.profiles[1].object_class, "groupOfNames");
+        assert_eq!(cfg.profiles[1].object_classes, vec!["groupOfNames"]);
+    }
+
+    #[test]
+    fn parses_object_classes_list() {
+        let toml = r#"
+            [server]
+            uri = "ldap://x"
+            base_dn = "dc=example,dc=org"
+            [auth]
+            bind_dn = "cn=admin,dc=example,dc=org"
+            [[profile]]
+            name = "user"
+            object_classes = ["inetOrgPerson", "posixAccount", "shadowAccount"]
+            rdn_attr = "uid"
+        "#;
+        let cfg: Config = toml::from_str(toml).expect("parse");
+        assert_eq!(
+            cfg.profiles[0].object_classes,
+            vec!["inetOrgPerson", "posixAccount", "shadowAccount"]
+        );
+    }
+
+    #[test]
+    fn single_string_object_class_is_a_parse_error() {
+        let toml = r#"
+            [server]
+            uri = "ldap://x"
+            base_dn = "dc=x"
+            [auth]
+            bind_dn = "cn=a,dc=x"
+            [[profile]]
+            name = "user"
+            object_class = "inetOrgPerson"
+        "#;
+        assert!(toml::from_str::<Config>(toml).is_err());
     }
 
     #[test]
@@ -348,7 +385,7 @@ mod tests {
     fn search_attributes_falls_back_to_show_then_cn() {
         let p = EntryProfile {
             name: "u".into(),
-            object_class: "inetOrgPerson".into(),
+            object_classes: vec!["inetOrgPerson".into()],
             rdn_attr: "uid".into(),
             search_base: "ou=people".into(),
             show: vec!["uid".into(), "cn".into()],

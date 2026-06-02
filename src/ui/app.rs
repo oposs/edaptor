@@ -840,7 +840,7 @@ fn service_picker_search(app: &mut App, worker: &WorkerHandle) {
     let id = next_id();
     app.picker_search_id = Some(id);
     let filter =
-        crate::ui::picker::build_member_filter(&scope.object_class, &scope.search_attrs, &query);
+        crate::ui::picker::build_member_filter(&scope.object_classes, &scope.search_attrs, &query);
     let _ = worker.submit(Request::Search {
         id,
         base: scope.base,
@@ -1962,7 +1962,7 @@ fn plan_create(
         return CreatePrep::Error("The RDN attribute must have a value.".to_string());
     }
     let (dn, attrs) = build_add_entry(profile, container, rdn_value.trim(), edited);
-    let oc_refs = [profile.object_class.as_str()];
+    let oc_refs: Vec<&str> = profile.object_classes.iter().map(String::as_str).collect();
     let full = EditEntry {
         dn: dn.clone(),
         attrs: attrs.clone(),
@@ -2439,7 +2439,7 @@ mod tests {
         use crate::ui::form::WidgetSpec;
         let scope = CandidateScope {
             base: "ou=people".into(),
-            object_class: "inetOrgPerson".into(),
+            object_classes: vec!["inetOrgPerson".into()],
             search_attrs: vec!["uid".into()],
         };
         let field = EditField {
@@ -2473,7 +2473,7 @@ mod tests {
         use crate::config::relation::{CandidateScope, RelationRole};
         let scope = CandidateScope {
             base: "ou=people".into(),
-            object_class: "inetOrgPerson".into(),
+            object_classes: vec!["inetOrgPerson".into()],
             search_attrs: vec!["uid".into()],
         };
         ValueEditor {
@@ -2601,7 +2601,7 @@ mod tests {
     fn create_user_profile() -> EntryProfile {
         EntryProfile {
             name: "User".into(),
-            object_class: "testUser".into(),
+            object_classes: vec!["testUser".into()],
             rdn_attr: "uid".into(),
             search_base: "ou=people,dc=example,dc=org".into(),
             show: vec!["uid".into()],
@@ -2643,12 +2643,12 @@ mod tests {
             back_attr: "memberOf".into(),
             candidate_scope: CandidateScope {
                 base: "ou=people,dc=x".into(),
-                object_class: "testUser".into(),
+                object_classes: vec!["testUser".into()],
                 search_attrs: vec!["uid".into()],
             },
             holder_scope: CandidateScope {
                 base: "ou=groups,dc=x".into(),
-                object_class: "groupOfNames".into(),
+                object_classes: vec!["groupOfNames".into()],
                 search_attrs: vec!["cn".into()],
             },
         }]
@@ -2662,7 +2662,7 @@ mod tests {
 
         let scope = CandidateScope {
             base: "ou=groups,dc=x".into(),
-            object_class: "groupOfNames".into(),
+            object_classes: vec!["groupOfNames".into()],
             search_attrs: vec!["cn".into()],
         };
 
@@ -2731,7 +2731,7 @@ mod tests {
 
         let scope = CandidateScope {
             base: "ou=groups,dc=x".into(),
-            object_class: "groupOfNames".into(),
+            object_classes: vec!["groupOfNames".into()],
             search_attrs: vec!["cn".into()],
         };
 
