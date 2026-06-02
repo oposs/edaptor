@@ -62,19 +62,19 @@ password_source = "prompt"
 # `search_attrs` sets which attributes the picker substring-search matches.
 # Falls back to `show`, then to `["cn"]` when omitted.
 [[profile]]
-name         = "user"
-object_class = "inetOrgPerson"
-rdn_attr     = "uid"
-search_base  = "ou=people,dc=example,dc=com"
-show         = ["uid", "cn", "sn", "givenName", "mail"]
-search_attrs = ["cn", "uid", "mail"]   # picker searches these attributes
+name           = "user"
+object_classes = ["inetOrgPerson"]   # a list; add posixAccount/shadowAccount for posix users
+rdn_attr       = "uid"
+search_base    = "ou=people,dc=example,dc=com"
+show           = ["uid", "cn", "sn", "givenName", "mail"]
+search_attrs   = ["cn", "uid", "mail"]   # picker searches these attributes
 
 [[profile]]
-name         = "group"
-object_class = "groupOfNames"
-rdn_attr     = "cn"
-search_base  = "ou=groups,dc=example,dc=com"
-show         = ["cn", "description"]
+name           = "group"
+object_classes = ["groupOfNames"]
+rdn_attr       = "cn"
+search_base    = "ou=groups,dc=example,dc=com"
+show           = ["cn", "description"]
 
 # Membership relation: enables the symmetric group↔user membership picker.
 # Opening a group's `member` field shows a live searchable user picker;
