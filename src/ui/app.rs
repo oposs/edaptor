@@ -278,6 +278,8 @@ pub fn run(config: Config, password: String) -> Result<()> {
     let rows = compute_rows(&structure, &current_branch, "");
     let mut tree_state = TreeState::default();
     tree_state.open(vec![current_branch.clone()]);
+    // Highlight the root node from the start so column 1 always shows a selection.
+    tree_state.select(vec![current_branch.clone()]);
     let mut app = App {
         focus: Pane::Tree,
         should_quit: false,

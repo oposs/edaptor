@@ -128,7 +128,7 @@ fn render_tree(f: &mut Frame, app: &mut App, area: Rect) {
     let tree = Tree::new(&app.tree_items)
         .expect("tree item ids are unique DNs")
         .block(pane_block("DIT", focused))
-        .highlight_style(Style::default().bg(Color::Blue).fg(Color::White));
+        .highlight_style(selection_style(focused));
     f.render_stateful_widget(tree, area, &mut app.tree_state);
 }
 
@@ -164,7 +164,7 @@ fn render_leaf(f: &mut Frame, app: &mut App, area: Rect) {
             let y = list_y + (row - off) as u16;
             let selected = row == app.leaf_sel;
             let style = if selected {
-                Style::default().bg(Color::Blue).fg(Color::White)
+                selection_style(focused)
             } else {
                 base
             };
@@ -218,11 +218,15 @@ fn render_form(f: &mut Frame, app: &mut App, area: Rect) {
         }
         let y = inner.y + row as u16;
         let fld = &form.fields[idx];
-        let is_focused_field = focused && idx == app.form_focus;
+        // The current row is highlighted whether or not the form pane is active
+        // (light blue when active, light grey when not), matching panes 1 and 2.
+        let is_current = idx == app.form_focus;
+        let is_focused_field = focused && is_current;
+        let sel = selection_style(focused);
 
         // Label cell, with a `*` MUST marker.
-        let label_style = if is_focused_field {
-            base.fg(Color::Blue).add_modifier(Modifier::BOLD)
+        let label_style = if is_current {
+            sel.add_modifier(Modifier::BOLD)
         } else {
             base
         };
@@ -235,12 +239,10 @@ fn render_form(f: &mut Frame, app: &mut App, area: Rect) {
         // Value cell — rendered via Paragraph (grapheme-clipped, never sliced).
         let val_rect = Rect::new(inner.x + label_w, y, inner.width.saturating_sub(label_w), 1);
         let display = field_display_value(fld);
-        let vstyle = if fld.multi {
-            base.fg(if is_focused_field {
-                Color::Magenta
-            } else {
-                Color::DarkGray
-            })
+        let vstyle = if is_current {
+            sel
+        } else if fld.multi {
+            base.fg(Color::DarkGray)
         } else {
             base
         };
@@ -265,6 +267,19 @@ fn pane_style(focused: bool) -> Style {
     } else {
         Style::default().add_modifier(Modifier::DIM)
     }
+}
+
+/// The selection highlight for a pane's current row, focus-aware: a very light
+/// blue background when the pane is the active column, a light grey background
+/// when the row is selected but its column is NOT focused. Black text keeps it
+/// legible on the light fill (the app renders on a light terminal background).
+fn selection_style(active: bool) -> Style {
+    let bg = if active {
+        Color::Rgb(204, 224, 255) // very light blue — the active column's row
+    } else {
+        Color::Rgb(221, 221, 221) // light grey — selected row in an unfocused column
+    };
+    Style::default().bg(bg).fg(Color::Black)
 }
 
 /// The display string for a field:
@@ -530,7 +545,8 @@ pub fn clamp_scroll(focus: usize, scroll: usize, viewport: usize, n: usize) -> u
 #[cfg(test)]
 mod tests {
     use super::{
-        centered, clamp_scroll, field_display_value, render_form, render_value_editor, status_line,
+        centered, clamp_scroll, field_display_value, render_form, render_value_editor,
+        selection_style, status_line,
     };
     use crate::schema::FieldKind;
     use crate::ui::app::{App, Pane};
@@ -538,6 +554,7 @@ mod tests {
     use crate::ui::form::WidgetSpec;
     use ratatui::backend::TestBackend;
     use ratatui::layout::Rect;
+    use ratatui::style::Color;
     use ratatui::Terminal;
     use tui_prompts::TextState;
     use tui_tree_widget::TreeState;
@@ -558,6 +575,17 @@ mod tests {
             relation: None,
             lookup: None,
         }
+    }
+
+    #[test]
+    fn selection_style_distinguishes_active_from_inactive_column() {
+        // Regression: the active and inactive column selections must NOT look the
+        // same (the original bug) — active is very light blue, inactive light grey.
+        let active = selection_style(true);
+        let inactive = selection_style(false);
+        assert_ne!(active.bg, inactive.bg);
+        assert_eq!(active.bg, Some(Color::Rgb(204, 224, 255)));
+        assert_eq!(inactive.bg, Some(Color::Rgb(221, 221, 221)));
     }
 
     #[test]
