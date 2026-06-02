@@ -23,6 +23,26 @@ pub fn is_secure(server: &ServerConfig) -> bool {
         || server.start_tls
 }
 
+/// Attribute (name, values) pairs to inject into an `Add` for a new entry's
+/// password. `userPassword` (or the configured attr) is sent cleartext — slapd
+/// hashes it over TLS and enforces ppolicy. When `samba`, also `sambaNTPassword`
+/// (NT hash) and `sambaPwdLastSet` (epoch seconds).
+// wired into the create/edit password path in Task 4.4/4.5
+#[allow(dead_code)]
+pub fn password_add_attrs(
+    password: &str,
+    ldap_attribute: &str,
+    samba: bool,
+    now_secs: u64,
+) -> Vec<(String, Vec<String>)> {
+    let mut out = vec![(ldap_attribute.to_string(), vec![password.to_string()])];
+    if samba {
+        out.push(("sambaNTPassword".to_string(), vec![nt_hash(password)]));
+        out.push(("sambaPwdLastSet".to_string(), vec![now_secs.to_string()]));
+    }
+    out
+}
+
 /// Build the synced password modify set. Always replaces `userPassword` with the
 /// cleartext (the server hashes it). When `is_samba_account`, also replaces
 /// `sambaNTPassword` (NT hash) and `sambaPwdLastSet` (now, secs) so the Unix and
@@ -63,6 +83,34 @@ mod tests {
             timeout_secs: 10,
             tls: TlsConfig::default(),
         }
+    }
+
+    #[test]
+    fn password_add_attrs_userpassword_only_when_not_samba() {
+        let a = password_add_attrs("hunter2", "userPassword", false, 1_700_000_000);
+        assert_eq!(
+            a,
+            vec![("userPassword".to_string(), vec!["hunter2".to_string()])]
+        );
+    }
+
+    #[test]
+    fn password_add_attrs_includes_nt_hash_and_lastset_when_samba() {
+        let a = password_add_attrs("hunter2", "userPassword", true, 1_700_000_000);
+        let nt = a
+            .iter()
+            .find(|(k, _)| k == "sambaNTPassword")
+            .expect("nt hash present");
+        assert_eq!(nt.1[0], crate::samba::nthash::nt_hash("hunter2"));
+        let last = a
+            .iter()
+            .find(|(k, _)| k == "sambaPwdLastSet")
+            .expect("lastset present");
+        assert_eq!(last.1[0], "1700000000");
+        assert_eq!(
+            a[0],
+            ("userPassword".to_string(), vec!["hunter2".to_string()])
+        );
     }
 
     #[test]
