@@ -2,7 +2,7 @@
 
 **Date:** 2026-06-02
 **`main` HEAD:** `54d10be` (working tree clean)
-**Active worktree:** `/scratch/oetiker/claude-worktrees/ldapedit-feat-rich-templates` on branch `feat-rich-templates` (**35 commits ahead of `main`**, HEAD `8e970ed` + this doc commit) — the **rich user templates** milestone, **all phases (0–6) complete** (see the execution-progress section below). 263 lib tests + 3 gated live `live_templates` tests green; full end-to-end tmux smoke passed (create a posix user with multi-OC, defaults, autonumber, lookup-gidNumber, and password — verified against a real slapd). Ready for final review + finish-branch.
+**Active worktree:** `/scratch/oetiker/claude-worktrees/ldapedit-feat-rich-templates` on branch `feat-rich-templates` (**37 commits ahead of `main`**, code HEAD `468c0b9` + this doc commit) — the **rich user templates** milestone, **all phases (0–6) complete**, final review done (see the execution-progress section below). 264 lib tests + 3 gated live `live_templates` tests green; full end-to-end tmux smoke passed (create a posix user with multi-OC, defaults, autonumber, lookup-gidNumber, and password — verified against a real slapd). Ready for finish-branch (merge/PR — user's call).
 
 `edaptor` is a Rust **ratatui** TUI for administering an OpenLDAP directory (users, groups, group memberships). It derives the directory's structure from live schema introspection (`cn=subschema`) and generates edit forms from `objectClass` definitions; a TOML config declares connection settings plus *entry profiles* ("what a user/group means here").
 
@@ -80,8 +80,10 @@ The branch was cut at `41f90a1`; `main` then absorbed the UI-polish refactor, wh
 - **Task 3.4 + 5.3 + 4.6** — gated `tests/live_templates.rs`: create-time password Unix round-trip, autonumber+multi-OC create, and lookup→gidNumber. All 3 pass against the podman slapd (run this session).
 - **Task 6.3** — README `## Configuration` rewritten as a rich multi-profile example (multi-OC user + `[profile.defaults]`/`[profile.password]`/`[profile.lookup.gidNumber]` + group + relation). Full tmux smoke passed end-to-end.
 
+**Final review (done):** a holistic branch review confirmed create/edit save-path coherence (defaults + autonumber + password staging + lookup-written fields compose into one Add without clobbering) and caught one real UX defect — the value-editor picker is shared by membership (commit on F2) and value-lookup (commit on Enter), but the footer hint and key handling were hardcoded for membership. Fixed in `8b34c9e`: footer branches on `ve.lookup.is_some()` (`↑↓ move · Enter select`), F2 is gated to membership only (a DN can never leak into a scalar field), and Space is a literal search char in lookup mode. Covered by `lookup_space_types_into_search_and_f2_is_ignored`.
+
 **Remaining:**
-- Final branch review + finish-branch (merge/PR). Nothing functional outstanding.
+- finish-branch (merge/PR) — user's call. Nothing functional outstanding.
 
 ---
 
