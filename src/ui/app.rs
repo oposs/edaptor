@@ -349,6 +349,7 @@ fn event_loop(
                                 action,
                                 worker,
                                 read_flow,
+                                profiles,
                                 &mut post,
                                 &mut pending_followups,
                             );
@@ -498,12 +499,7 @@ fn handle_worker_response(
                 // else a stale entry would flash (and clobber edits). Also defer
                 // installation while an editing overlay (create / value editor) is
                 // open, so a late base-read cannot replace `app.form` under it.
-                let current = app
-                    .last_seen_leaf
-                    .as_deref()
-                    .map(|dn| dn.eq_ignore_ascii_case(&model.title))
-                    .unwrap_or(false);
-                if current && app.overlay.is_none() {
+                if should_install_form(app, &model.title) {
                     app.form = Some(build_edit_form(
                         &model,
                         read_flow.schema(),
@@ -927,6 +923,8 @@ fn handle_action(
                 app.form_focus = 0;
                 app.form_scroll = 0;
                 app.overlay = None;
+                // Focus the form pane so keystrokes edit the new entry's fields.
+                app.focus = Pane::Form;
                 app.status = format!(
                     "New {} — fill fields, F2 to create, Esc to cancel.",
                     profile.name
@@ -983,9 +981,30 @@ fn refresh_structure(
     }
 }
 
+/// Whether a freshly base-read form for `title` should replace `app.form` now:
+/// it must match the entry the user is currently on, no overlay may be open, and
+/// an in-progress (unsaved) create form must not be clobbered by a late read of
+/// the previous selection.
+fn should_install_form(app: &App, title: &str) -> bool {
+    app.last_seen_leaf
+        .as_deref()
+        .map(|dn| dn.eq_ignore_ascii_case(title))
+        .unwrap_or(false)
+        && app.overlay.is_none()
+        && !app.form.as_ref().map(|f| f.is_new()).unwrap_or(false)
+}
+
 /// Revert every field to its baseline (F3 cancel): drop multi-value edits and
-/// reseed each single-value editor from the original values.
+/// reseed each single-value editor from the original values. An unsaved create
+/// form has no baseline to revert to, so cancel simply discards it.
 fn revert_form(app: &mut App) {
+    if app.form.as_ref().map(|f| f.is_new()).unwrap_or(false) {
+        app.form = None;
+        app.form_focus = 0;
+        app.form_scroll = 0;
+        app.status.clear();
+        return;
+    }
     if let Some(form) = app.form.as_mut() {
         for field in &mut form.fields {
             let base = form.baseline.get(&field.label).cloned().unwrap_or_default();
@@ -1194,6 +1213,7 @@ fn execute_pending(
     action: PendingAction,
     worker: &WorkerHandle,
     read_flow: &mut ReadFlow,
+    profiles: &[EntryProfile],
     post: &mut HashMap<u64, PostWrite>,
     pending_followups: &mut HashMap<u64, (String, Vec<ModOp>, Option<String>)>,
 ) {
@@ -1230,6 +1250,14 @@ fn execute_pending(
                 perform_guard_intent(app, worker, read_flow, intent);
                 return;
             };
+            // A create form has no diff baseline: route "Save" to the create
+            // confirm (an Add). The pending guard intent is dropped — the user
+            // confirms the create, then navigates explicitly (full
+            // save-then-resume for create is out of scope here).
+            if form.is_new() {
+                prepare_create(app, worker, read_flow, profiles);
+                return;
+            }
             // A membership-bearing save runs synchronously through CombinedSave;
             // the pending guard intent rides along and is performed on success.
             if let Some(ov) = combined_save_overlay(
@@ -1343,6 +1371,11 @@ fn navigate_to(
     read_flow: &mut ReadFlow,
     target: Option<String>,
 ) {
+    // Leaving an unsaved create form discards it, so the clobber guard in
+    // `should_install_form` does not then block the destination entry's form.
+    if app.form.as_ref().map(|f| f.is_new()).unwrap_or(false) {
+        app.form = None;
+    }
     app.last_seen_leaf = target.clone();
     match target {
         Some(dn) => {
@@ -1395,13 +1428,7 @@ fn reconcile(
             });
             return;
         }
-        app.last_seen_leaf = sel_dn.clone();
-        match sel_dn {
-            Some(dn) => {
-                let _ = read_flow.request_entry(worker, &dn, None);
-            }
-            None => app.form = None,
-        }
+        navigate_to(app, worker, read_flow, sel_dn);
     }
 }
 
@@ -2942,5 +2969,47 @@ mod tests {
             &edited,
         );
         assert!(matches!(prep, CreatePrep::Error(_)));
+    }
+
+    #[test]
+    fn should_install_blocks_a_late_read_over_a_create_form() {
+        let mut app = bare_app(false);
+        app.last_seen_leaf = Some("uid=bob,ou=people,dc=example,dc=org".to_string());
+        app.form = Some(build_new_entry_form(
+            &user_schema(),
+            &create_user_profile(),
+            0,
+            "ou=people,dc=example,dc=org".to_string(),
+        ));
+        // A base-read for the prior selection must NOT clobber the create form.
+        assert!(!should_install_form(
+            &app,
+            "uid=bob,ou=people,dc=example,dc=org"
+        ));
+    }
+
+    #[test]
+    fn should_install_allows_matching_edit_form_without_overlay() {
+        let mut app = with_form(bare_app(false), "cn=Alice,dc=example,dc=org");
+        app.last_seen_leaf = Some("cn=Alice,dc=example,dc=org".to_string());
+        assert!(should_install_form(&app, "cn=Alice,dc=example,dc=org"));
+        // An open overlay blocks installation.
+        app.overlay = Some(Overlay::Error {
+            text: "x".to_string(),
+        });
+        assert!(!should_install_form(&app, "cn=Alice,dc=example,dc=org"));
+    }
+
+    #[test]
+    fn revert_discards_an_unsaved_create_form() {
+        let mut app = bare_app(false);
+        app.form = Some(build_new_entry_form(
+            &user_schema(),
+            &create_user_profile(),
+            0,
+            "ou=people,dc=example,dc=org".to_string(),
+        ));
+        revert_form(&mut app);
+        assert!(app.form.is_none(), "create form discarded on cancel");
     }
 }
