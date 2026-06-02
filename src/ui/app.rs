@@ -767,8 +767,12 @@ fn picker_editor_key(app: &mut App, key: KeyEvent) {
                             {
                                 // Mirror the scalar into BOTH `editor` (read by a
                                 // single-value field's `current_values`) and `values`
-                                // (read by a multi-value field's), so a lookup tagged
-                                // on a multi-valued attr does not silently drop it.
+                                // (read by a multi-value field's), so the picked value
+                                // is seen regardless of the field's arity. Note this
+                                // REPLACES any existing `values` with the single pick —
+                                // it does not append. That is correct here: a
+                                // value-lookup's `value_attr` is scalar, so the field
+                                // holds exactly one value, never a growing list.
                                 field.editor = TextState::new().with_value(v.clone());
                                 field.values = vec![v];
                             }
@@ -2418,17 +2422,19 @@ fn now_unix_secs_or_zero() -> u64 {
         .unwrap_or(0)
 }
 
-/// The first configured profile that declares a `[profile.password]` block and
-/// whose object classes are all present (case-insensitive) in `entry_ocs` — i.e.
-/// the loaded entry is an instance of that profile. `None` when no
-/// password-profile matches. Tie-break: config order (declare the more specific
-/// profile first). Pure.
-fn profile_for_entry<'a>(
+/// The first profile that satisfies `pred` AND whose (non-empty) object classes
+/// are all present (case-insensitive) in `entry_ocs` — i.e. the loaded entry is
+/// an instance of that profile. Tie-break: config order (declare the more
+/// specific profile first). Shared core of the password/lookup resolvers below;
+/// only the `pred` differs, so the object-class subset check stays identical.
+/// Pure.
+fn profile_for_entry_where<'a>(
     profiles: &'a [EntryProfile],
     entry_ocs: &[String],
+    pred: impl Fn(&EntryProfile) -> bool,
 ) -> Option<&'a EntryProfile> {
     profiles.iter().find(|p| {
-        p.password.is_some()
+        pred(p)
             && !p.object_classes.is_empty()
             && p.object_classes
                 .iter()
@@ -2436,21 +2442,24 @@ fn profile_for_entry<'a>(
     })
 }
 
+/// The first configured profile that declares a `[profile.password]` block and
+/// whose object classes all match `entry_ocs`. `None` when no password-profile
+/// matches. Thin wrapper over [`profile_for_entry_where`]. Pure.
+fn profile_for_entry<'a>(
+    profiles: &'a [EntryProfile],
+    entry_ocs: &[String],
+) -> Option<&'a EntryProfile> {
+    profile_for_entry_where(profiles, entry_ocs, |p| p.password.is_some())
+}
+
 /// Like [`profile_for_entry`] but keyed on `lookups` (NOT `password`): the first
-/// profile whose object classes are all present in `entry_ocs` AND that declares
-/// at least one `[profile.lookup.<attr>]`. Kept parallel to `profile_for_entry`
-/// rather than generalized, so the password match stays exact.
+/// matching profile that declares at least one `[profile.lookup.<attr>]`. Thin
+/// wrapper over [`profile_for_entry_where`]. Pure.
 fn lookups_profile_for_entry<'a>(
     profiles: &'a [EntryProfile],
     entry_ocs: &[String],
 ) -> Option<&'a EntryProfile> {
-    profiles.iter().find(|p| {
-        !p.lookups.is_empty()
-            && !p.object_classes.is_empty()
-            && p.object_classes
-                .iter()
-                .all(|oc| entry_ocs.iter().any(|e| e.eq_ignore_ascii_case(oc)))
-    })
+    profile_for_entry_where(profiles, entry_ocs, |p| !p.lookups.is_empty())
 }
 
 /// Edit-path password mods: the same `(attr, values)` pairs as create
@@ -3207,6 +3216,35 @@ mod tests {
             label: "cn".into(),
             search_attrs: vec!["cn".into()],
         }
+    }
+
+    #[test]
+    fn candidate_label_for_lookup_prefers_label_then_falls_back_to_cn_then_dn() {
+        use std::collections::BTreeMap;
+        let dn = "cn=admins,ou=groups,dc=example,dc=org";
+
+        // (a) label attr set AND present → returns that value (case-insensitive
+        //     attr match, first value).
+        let mut spec = gid_lookup_spec();
+        spec.label = "displayName".into();
+        let mut attrs = BTreeMap::new();
+        attrs.insert("DisplayName".to_string(), vec!["Admins".to_string()]);
+        attrs.insert("cn".to_string(), vec!["admins".to_string()]);
+        assert_eq!(candidate_label_for_lookup(&spec, dn, &attrs), "Admins");
+
+        // (b) label attr set but ABSENT → falls back to candidate_label, i.e. the
+        //     `cn` first value.
+        let mut only_cn = BTreeMap::new();
+        only_cn.insert("cn".to_string(), vec!["admins".to_string()]);
+        assert_eq!(candidate_label_for_lookup(&spec, dn, &only_cn), "admins");
+
+        // (c) label empty → cn/DN fallback. With cn present → cn; with neither
+        //     label nor cn → the raw DN.
+        let mut nolabel = gid_lookup_spec();
+        nolabel.label = String::new();
+        assert_eq!(candidate_label_for_lookup(&nolabel, dn, &only_cn), "admins");
+        let empty: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        assert_eq!(candidate_label_for_lookup(&nolabel, dn, &empty), dn);
     }
 
     /// App with a single-value (`multi=false`) `gidNumber` field already tagged
