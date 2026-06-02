@@ -406,13 +406,24 @@ fn handle_worker_response(
         // Intercept picker search results before the read-flow routing.
         Response::Entries { id, entries, .. } if app.picker_search_id == Some(*id) => {
             if let Some(Overlay::ValueEditor(ve)) = app.overlay.as_mut() {
+                // A lookup picker carries the scalar `value_attr` (committed on
+                // Enter) and labels via the spec's `label` attr; membership
+                // pickers keep `value: None` and label via `cn`.
+                let lookup = ve.lookup.clone();
                 if let Some(p) = ve.picker.as_mut() {
                     let results = entries
                         .iter()
-                        .map(|e| crate::ui::picker::Candidate {
-                            dn: e.dn.clone(),
-                            label: crate::ui::picker::candidate_label(&e.dn, &e.attrs),
-                            value: None,
+                        .map(|e| match &lookup {
+                            Some(spec) => crate::ui::picker::Candidate {
+                                dn: e.dn.clone(),
+                                label: candidate_label_for_lookup(spec, &e.dn, &e.attrs),
+                                value: crate::ui::picker::pick_value(&e.attrs, &spec.value_attr),
+                            },
+                            None => crate::ui::picker::Candidate {
+                                dn: e.dn.clone(),
+                                label: crate::ui::picker::candidate_label(&e.dn, &e.attrs),
+                                value: None,
+                            },
                         })
                         .collect();
                     p.set_results(results);
@@ -651,8 +662,10 @@ fn dispatch_key(app: &mut App, key: KeyEvent, structure: &Structure) -> Option<U
                 KeyCode::PageDown => {
                     app.form_focus = (app.form_focus + 10).min(n.saturating_sub(1))
                 }
-                // Enter on an editable multi-value field opens the value-editor
-                // popup; on a single field it is a no-op.
+                // Enter opens the value-editor popup: free-text rows for a plain
+                // multi-value field, a picker for a relation field, or a
+                // single-select value-lookup picker for a `lookup`-tagged field
+                // (which may be single-valued). Plain single fields: a no-op.
                 KeyCode::Enter => open_value_editor(app, structure),
                 // Esc cancels a create form (parity with the old modal's Esc); on
                 // an edit form Esc is a no-op (F3 reverts edits).
@@ -690,7 +703,20 @@ fn open_value_editor(app: &mut App, structure: &Structure) {
     let Some(field) = form.fields.get(focus) else {
         return;
     };
-    if field.relation.is_some() && field.multi && field.editable {
+    if let Some(spec) = field.lookup.as_ref().filter(|_| field.editable) {
+        // Value-lookup picker: single-select, fires WITHOUT requiring `multi` (a
+        // scalar lookup field like gidNumber is single-valued). Resolve the base
+        // from the spec, falling back to the directory root when empty.
+        let base = if spec.search_base.is_empty() {
+            structure.root_dn().to_string()
+        } else {
+            spec.search_base.clone()
+        };
+        let ve = ValueEditor::open_lookup(focus, field, base);
+        app.overlay = Some(Overlay::ValueEditor(ve));
+        app.picker_last_query.clear();
+        app.picker_search_id = None;
+    } else if field.relation.is_some() && field.multi && field.editable {
         // Picker mode: label DNs from the loaded structure (fallback = the DN).
         let label_of = |dn: &str| {
             structure
@@ -717,6 +743,36 @@ fn picker_editor_key(app: &mut App, key: KeyEvent) {
             app.overlay = None;
             app.picker_search_id = None;
             app.picker_last_query.clear();
+        }
+        KeyCode::Enter => {
+            // Single-select value-lookup commit: write the chosen entry's scalar
+            // `value_attr` into the target field's inline editor. A single-value
+            // field saves from `editor`, NOT `values`. Membership pickers ignore
+            // Enter (their commit is F2) — gate strictly on `lookup.is_some()`.
+            if matches!(&app.overlay, Some(Overlay::ValueEditor(ve)) if ve.lookup.is_some()) {
+                if let Some(Overlay::ValueEditor(ve)) = app.overlay.take() {
+                    if let Some(picker) = &ve.picker {
+                        let chosen = picker
+                            .visible()
+                            .get(picker.cursor)
+                            .and_then(|row| row.candidate.value.clone());
+                        if let Some(v) = chosen {
+                            if let Some(field) =
+                                app.form.as_mut().and_then(|f| f.fields.get_mut(ve.field))
+                            {
+                                // Mirror the scalar into BOTH `editor` (read by a
+                                // single-value field's `current_values`) and `values`
+                                // (read by a multi-value field's), so a lookup tagged
+                                // on a multi-valued attr does not silently drop it.
+                                field.editor = TextState::new().with_value(v.clone());
+                                field.values = vec![v];
+                            }
+                        }
+                    }
+                    app.picker_search_id = None;
+                    app.picker_last_query.clear();
+                }
+            }
         }
         KeyCode::F(2) => {
             if let Some(Overlay::ValueEditor(ve)) = app.overlay.take() {
@@ -844,7 +900,36 @@ fn service_picker_search(app: &mut App, worker: &WorkerHandle) {
         return;
     }
     app.picker_last_query = query.clone();
-    let Some(scope) = ve.scope.clone() else {
+
+    // Resolve the search parameters from whichever picker mode is active. A
+    // value-lookup picker carries a `LookupSpec` (and no `CandidateScope`), so it
+    // must be handled BEFORE the membership `scope` guard or it never searches.
+    let params = if let Some(spec) = ve.lookup.as_ref() {
+        let search_attrs = effective_search_attrs(spec);
+        let filter = crate::ui::picker::build_member_filter(
+            std::slice::from_ref(&spec.object_class),
+            &search_attrs,
+            &query,
+        );
+        // Request the scalar to store, the display label, and the search attrs.
+        let mut attrs = vec![spec.value_attr.clone()];
+        if !spec.label.is_empty() {
+            attrs.push(spec.label.clone());
+        }
+        attrs.extend(spec.search_attrs.iter().cloned());
+        dedupe_ci(&mut attrs);
+        Some((ve.base.clone(), filter, attrs))
+    } else {
+        ve.scope.as_ref().map(|scope| {
+            let filter = crate::ui::picker::build_member_filter(
+                &scope.object_classes,
+                &scope.search_attrs,
+                &query,
+            );
+            (scope.base.clone(), filter, vec!["cn".to_string()])
+        })
+    };
+    let Some((base, filter, attrs)) = params else {
         return;
     };
 
@@ -860,15 +945,59 @@ fn service_picker_search(app: &mut App, worker: &WorkerHandle) {
     }
     let id = next_id();
     app.picker_search_id = Some(id);
-    let filter =
-        crate::ui::picker::build_member_filter(&scope.object_classes, &scope.search_attrs, &query);
     let _ = worker.submit(Request::Search {
         id,
-        base: scope.base,
+        base,
         scope: SearchScope::Subtree,
         filter,
-        attrs: vec!["cn".to_string()],
+        attrs,
         size_limit: Some(PICKER_SEARCH_CAP),
+    });
+}
+
+/// A lookup candidate's display label: the spec's `label` attribute's first
+/// value when configured and present, else the generic `cn`/DN fallback.
+fn candidate_label_for_lookup(
+    spec: &crate::config::LookupSpec,
+    dn: &str,
+    attrs: &std::collections::BTreeMap<String, Vec<String>>,
+) -> String {
+    if !spec.label.is_empty() {
+        if let Some((_, vs)) = attrs
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case(&spec.label))
+        {
+            if let Some(v) = vs.first() {
+                return v.clone();
+            }
+        }
+    }
+    crate::ui::picker::candidate_label(dn, attrs)
+}
+
+/// Effective substring-search attributes for a value-lookup: the spec's
+/// `search_attrs` if any, else its `label` (when set), else `["cn"]`.
+fn effective_search_attrs(spec: &crate::config::LookupSpec) -> Vec<String> {
+    if !spec.search_attrs.is_empty() {
+        spec.search_attrs.clone()
+    } else if !spec.label.is_empty() {
+        vec![spec.label.clone()]
+    } else {
+        vec!["cn".to_string()]
+    }
+}
+
+/// Case-insensitively dedupe a list of attribute names in place, keeping first
+/// occurrence and dropping empties.
+fn dedupe_ci(attrs: &mut Vec<String>) {
+    let mut seen: Vec<String> = Vec::new();
+    attrs.retain(|a| {
+        if a.is_empty() || seen.iter().any(|s| s.eq_ignore_ascii_case(a)) {
+            false
+        } else {
+            seen.push(a.clone());
+            true
+        }
     });
 }
 
@@ -1448,6 +1577,12 @@ fn build_loaded_form(
         let ocs = object_classes_of(&form);
         if let Some(spec) = profile_for_entry(profiles, &ocs).and_then(|p| p.password.as_ref()) {
             crate::ui::edit_form::inject_password_fields(&mut form, spec);
+        }
+        // Tag value-lookup fields so Enter opens the picker on edit, too. Resolved
+        // via a lookups-keyed profile match (NOT `profile_for_entry`, which keys on
+        // a password spec and would miss a lookups-only profile).
+        if let Some(profile) = lookups_profile_for_entry(profiles, &ocs) {
+            crate::ui::edit_form::tag_lookup_fields(&mut form, &profile.lookups);
         }
     }
     form
@@ -2296,6 +2431,23 @@ fn profile_for_entry<'a>(
     })
 }
 
+/// Like [`profile_for_entry`] but keyed on `lookups` (NOT `password`): the first
+/// profile whose object classes are all present in `entry_ocs` AND that declares
+/// at least one `[profile.lookup.<attr>]`. Kept parallel to `profile_for_entry`
+/// rather than generalized, so the password match stays exact.
+fn lookups_profile_for_entry<'a>(
+    profiles: &'a [EntryProfile],
+    entry_ocs: &[String],
+) -> Option<&'a EntryProfile> {
+    profiles.iter().find(|p| {
+        !p.lookups.is_empty()
+            && !p.object_classes.is_empty()
+            && p.object_classes
+                .iter()
+                .all(|oc| entry_ocs.iter().any(|e| e.eq_ignore_ascii_case(oc)))
+    })
+}
+
 /// Edit-path password mods: the same `(attr, values)` pairs as create
 /// (`password_add_attrs`), mapped to REPLACE ops so the new credential overwrites
 /// the old within one atomic MODIFY. Honors `ldap_attribute` and Samba. Pure.
@@ -2500,6 +2652,9 @@ fn build_new_entry_form(
     if let Some(spec) = &profile.password {
         crate::ui::edit_form::inject_password_fields(&mut form, spec);
     }
+    // Tag value-lookup target fields (e.g. gidNumber) so Enter opens the picker.
+    // Create is the primary use case, so the profile's lookups are known here.
+    crate::ui::edit_form::tag_lookup_fields(&mut form, &profile.lookups);
     form
 }
 
@@ -2562,6 +2717,8 @@ mod tests {
             search: TextState::new(),
             scope: None,
             role: None,
+            lookup: None,
+            base: String::new(),
         };
         App {
             focus: Pane::Form,
@@ -3005,6 +3162,8 @@ mod tests {
             search: TextState::new(),
             scope: Some(scope),
             role: Some(RelationRole::Holder),
+            lookup: None,
+            base: String::new(),
         }
     }
 
@@ -3030,6 +3189,161 @@ mod tests {
         let f = &app.form.as_ref().unwrap().fields[0];
         assert_eq!(f.values, vec!["uid=a,ou=people".to_string()]);
         assert!(app.overlay.is_none());
+    }
+
+    // ── 5.2 value-lookup picker ──────────────────────────────────────────────
+
+    /// A spec for a `gidNumber` lookup over `posixGroup` (empty base → root).
+    fn gid_lookup_spec() -> crate::config::LookupSpec {
+        crate::config::LookupSpec {
+            object_class: "posixGroup".into(),
+            search_base: String::new(),
+            value_attr: "gidNumber".into(),
+            label: "cn".into(),
+            search_attrs: vec!["cn".into()],
+        }
+    }
+
+    /// App with a single-value (`multi=false`) `gidNumber` field already tagged
+    /// with a lookup spec, focused (index 0), no overlay.
+    fn app_with_lookup_field() -> App {
+        use crate::schema::FieldKind;
+        use crate::ui::edit_form::EditField;
+        use crate::ui::form::WidgetSpec;
+        let field = EditField {
+            label: "gidNumber".into(),
+            must: false,
+            editable: true,
+            multi: false, // single-value — the trap-1 regression guard
+            secret: false,
+            ordered: false,
+            values: vec![],
+            kind: FieldKind::Text,
+            widget: WidgetSpec::ReadOnlyText,
+            editor: TextState::new(),
+            relation: None,
+            lookup: Some(gid_lookup_spec()),
+        };
+        let mut app = bare_app(false);
+        app.form = Some(EditForm {
+            dn: "uid=alice,ou=people,dc=test".into(),
+            fields: vec![field],
+            baseline: Default::default(),
+            mode: FormMode::Edit,
+        });
+        app.form_focus = 0;
+        app
+    }
+
+    #[test]
+    fn open_value_editor_opens_picker_for_single_value_lookup_field() {
+        // Trap 1: a scalar (multi=false) lookup field must still open a picker.
+        let mut app = app_with_lookup_field();
+        let s = empty_structure(); // root = dc=test
+        open_value_editor(&mut app, &s);
+        match &app.overlay {
+            Some(Overlay::ValueEditor(ve)) => {
+                assert!(ve.lookup.is_some(), "lookup picker installed");
+                assert!(ve.picker.is_some(), "picker state present");
+                // Empty search_base → resolved to the directory root.
+                assert_eq!(ve.base, "dc=test");
+                // Single-select has no pre-pinned selection.
+                assert!(ve.picker.as_ref().unwrap().selected.is_empty());
+            }
+            other => panic!("expected a ValueEditor overlay, got {:?}", other.is_some()),
+        }
+    }
+
+    #[test]
+    fn lookup_enter_commits_scalar_to_field_editor() {
+        use crate::ui::picker::Candidate;
+        let mut app = app_with_lookup_field();
+        let s = empty_structure();
+        open_value_editor(&mut app, &s);
+        // Seed one candidate carrying the scalar value_attr.
+        if let Some(Overlay::ValueEditor(ve)) = app.overlay.as_mut() {
+            ve.picker.as_mut().unwrap().set_results(vec![Candidate {
+                dn: "cn=staff,ou=groups,dc=test".into(),
+                label: "staff".into(),
+                value: Some("5001".into()),
+            }]);
+        }
+        // Enter commits the chosen scalar into the field's inline editor.
+        picker_editor_key(&mut app, key(KeyCode::Enter));
+        assert!(app.overlay.is_none(), "overlay closes on commit");
+        let f = &app.form.as_ref().unwrap().fields[0];
+        assert_eq!(f.editor.value(), "5001");
+        // A single-value field saves from `editor`, so current_values reflects it.
+        assert_eq!(f.current_values(), vec!["5001".to_string()]);
+    }
+
+    #[test]
+    fn lookup_enter_with_no_value_leaves_field_unchanged() {
+        use crate::ui::picker::Candidate;
+        let mut app = app_with_lookup_field();
+        let s = empty_structure();
+        open_value_editor(&mut app, &s);
+        if let Some(Overlay::ValueEditor(ve)) = app.overlay.as_mut() {
+            ve.picker.as_mut().unwrap().set_results(vec![Candidate {
+                dn: "cn=staff,ou=groups,dc=test".into(),
+                label: "staff".into(),
+                value: None, // candidate lacked value_attr
+            }]);
+        }
+        picker_editor_key(&mut app, key(KeyCode::Enter));
+        assert!(app.overlay.is_none());
+        // No write happened — the editor stays empty.
+        let f = &app.form.as_ref().unwrap().fields[0];
+        assert_eq!(f.editor.value(), "");
+    }
+
+    #[test]
+    fn effective_search_attrs_falls_back_through_label_then_cn() {
+        let mut spec = gid_lookup_spec();
+        assert_eq!(effective_search_attrs(&spec), vec!["cn".to_string()]);
+        spec.search_attrs.clear();
+        spec.label = "displayName".into();
+        assert_eq!(
+            effective_search_attrs(&spec),
+            vec!["displayName".to_string()]
+        );
+        spec.label.clear();
+        assert_eq!(effective_search_attrs(&spec), vec!["cn".to_string()]);
+    }
+
+    #[test]
+    fn dedupe_ci_drops_empties_and_case_dups() {
+        let mut attrs = vec![
+            "gidNumber".to_string(),
+            "cn".to_string(),
+            "CN".to_string(),
+            String::new(),
+            "gidnumber".to_string(),
+        ];
+        dedupe_ci(&mut attrs);
+        assert_eq!(attrs, vec!["gidNumber".to_string(), "cn".to_string()]);
+    }
+
+    #[test]
+    fn build_new_entry_form_tags_lookup_fields() {
+        // The create path is the primary use case: the gidNumber field must come
+        // out tagged so Enter opens the picker.
+        let mut profile = create_user_profile();
+        profile
+            .lookups
+            .insert("description".into(), gid_lookup_spec());
+        let form = build_new_entry_form(
+            &user_schema(),
+            &profile,
+            0,
+            "ou=people,dc=example,dc=org".to_string(),
+        );
+        let f = form
+            .fields
+            .iter()
+            .find(|f| f.label == "description")
+            .expect("description field present");
+        assert!(f.lookup.is_some(), "create path tagged the lookup field");
     }
 
     #[test]

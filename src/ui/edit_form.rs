@@ -106,10 +106,17 @@ pub struct ValueEditor {
     pub picker: Option<PickerState>,
     /// The picker's incremental-search box (Unicode-correct edit engine).
     pub search: TextState<'static>,
-    /// Candidate search scope (picker mode only).
+    /// Candidate search scope (membership picker mode only).
     pub scope: Option<CandidateScope>,
-    /// The relation role being edited (picker mode only).
+    /// The relation role being edited (membership picker mode only).
     pub role: Option<RelationRole>,
+    /// `Some` in value-lookup picker mode: the spec driving the single-select
+    /// search and the scalar committed on Enter. Boxed to keep `ValueEditor`
+    /// (and thus the `Overlay` enum) small.
+    pub lookup: Option<Box<crate::config::LookupSpec>>,
+    /// The resolved search base for a lookup picker (membership mode leaves this
+    /// empty and uses `scope.base`).
+    pub base: String,
 }
 
 impl ValueEditor {
@@ -131,6 +138,8 @@ impl ValueEditor {
             search: TextState::new(),
             scope: None,
             role: None,
+            lookup: None,
+            base: String::new(),
         }
     }
 
@@ -165,6 +174,33 @@ impl ValueEditor {
             search: TextState::new(),
             scope: Some(rel.scope.clone()),
             role: Some(rel.role),
+            lookup: None,
+            base: String::new(),
+        }
+    }
+
+    /// Open in single-select VALUE-LOOKUP picker mode over `field`. `base` is the
+    /// already-resolved search base (the spec's `search_base`, or the directory
+    /// root when empty). Selection starts empty — a single-select pick has no
+    /// pre-pinned candidate; Enter commits the chosen entry's `value_attr`.
+    pub fn open_lookup(field_idx: usize, field: &EditField, base: String) -> Self {
+        let spec = field
+            .lookup
+            .as_ref()
+            .expect("open_lookup on a lookup field");
+        ValueEditor {
+            field: field_idx,
+            label: field.label.clone(),
+            ordered: field.ordered,
+            secret: field.secret,
+            rows: Vec::new(),
+            sel: 0,
+            picker: Some(PickerState::new(Vec::new())),
+            search: TextState::new(),
+            scope: None,
+            role: None,
+            lookup: Some(Box::new(spec.clone())),
+            base,
         }
     }
 
