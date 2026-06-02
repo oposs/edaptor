@@ -36,6 +36,9 @@ pub struct CandidateScope {
     pub base: String,
     pub object_classes: Vec<String>,
     pub search_attrs: Vec<String>,
+    /// Parsed display-label template for entries in this scope, ready to render.
+    /// `None` when the underlying profile declares no `label`.
+    pub label_template: Option<Vec<crate::config::label::LabelSeg>>,
 }
 
 /// A relation resolved against the configured profiles: the concrete objectClass
@@ -58,6 +61,10 @@ fn scope_of(p: &EntryProfile) -> CandidateScope {
         base: p.search_base.clone(),
         object_classes: p.object_classes.clone(),
         search_attrs: p.search_attributes(),
+        label_template: p
+            .label
+            .as_ref()
+            .map(|s| crate::config::label::parse_label_template(s)),
     }
 }
 
@@ -156,6 +163,7 @@ mod tests {
             defaults: Default::default(),
             password: None,
             lookups: Default::default(),
+            label: None,
         }
     }
 
@@ -216,6 +224,40 @@ mod tests {
             vec!["groupOfNames".to_string()]
         ); // searches groups
         assert!(backref_lookup(&r, &["groupOfNames".to_string()], "memberOf").is_none());
+    }
+
+    #[test]
+    fn candidate_scope_carries_parsed_label_template() {
+        use crate::config::label::{parse_label_template, LabelSeg};
+        let mut user = profile("user", "inetOrgPerson", "ou=people,dc=x", &["uid", "cn"]);
+        user.label = Some("{cn} ({uid})".to_string());
+        let profiles = vec![
+            profile("group", "groupOfNames", "ou=groups,dc=x", &["cn"]),
+            user,
+        ];
+        let rels = vec![Relation {
+            name: "m".into(),
+            holder: "group".into(),
+            holder_attr: "member".into(),
+            candidate: "user".into(),
+            back_attr: "memberOf".into(),
+        }];
+        let r = resolve_relations(&profiles, &rels);
+        assert_eq!(
+            r[0].candidate_scope.label_template,
+            Some(vec![
+                LabelSeg::Field("cn".into()),
+                LabelSeg::Lit(" (".into()),
+                LabelSeg::Field("uid".into()),
+                LabelSeg::Lit(")".into()),
+            ])
+        );
+        assert_eq!(
+            r[0].candidate_scope.label_template,
+            Some(parse_label_template("{cn} ({uid})"))
+        );
+        // Holder profile has no label → None.
+        assert!(r[0].holder_scope.label_template.is_none());
     }
 
     #[test]

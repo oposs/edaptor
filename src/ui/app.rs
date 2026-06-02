@@ -3142,6 +3142,7 @@ mod tests {
             base: "ou=people".into(),
             object_classes: vec!["inetOrgPerson".into()],
             search_attrs: vec!["uid".into()],
+            label_template: None,
         };
         let field = EditField {
             label: "member".into(),
@@ -3177,6 +3178,7 @@ mod tests {
             base: "ou=people".into(),
             object_classes: vec!["inetOrgPerson".into()],
             search_attrs: vec!["uid".into()],
+            label_template: None,
         };
         ValueEditor {
             field: idx,
@@ -3626,6 +3628,7 @@ mod tests {
             defaults: Default::default(),
             password: None,
             lookups: Default::default(),
+            label: None,
         }
     }
 
@@ -3665,11 +3668,13 @@ mod tests {
                 base: "ou=people,dc=x".into(),
                 object_classes: vec!["testUser".into()],
                 search_attrs: vec!["uid".into()],
+                label_template: None,
             },
             holder_scope: CandidateScope {
                 base: "ou=groups,dc=x".into(),
                 object_classes: vec!["groupOfNames".into()],
                 search_attrs: vec!["cn".into()],
+                label_template: None,
             },
         }]
     }
@@ -3684,6 +3689,7 @@ mod tests {
             base: "ou=groups,dc=x".into(),
             object_classes: vec!["groupOfNames".into()],
             search_attrs: vec!["cn".into()],
+            label_template: None,
         };
 
         let uid_field = EditField {
@@ -3756,6 +3762,7 @@ mod tests {
             base: "ou=groups,dc=x".into(),
             object_classes: vec!["groupOfNames".into()],
             search_attrs: vec!["cn".into()],
+            label_template: None,
         };
 
         // uid changed from "ann" → "bob" (triggers modrdn in diff)

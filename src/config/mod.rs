@@ -1,6 +1,7 @@
 //! Configuration: connection properties + auth. (Entry profiles arrive in M4.)
 
 pub mod defaults;
+pub mod label;
 pub mod password;
 pub mod relation;
 pub use password::PasswordSource;
@@ -120,6 +121,12 @@ pub struct EntryProfile {
     /// value to a human-readable label via an LDAP search.
     #[serde(default, rename = "lookup")]
     pub lookups: std::collections::BTreeMap<String, LookupSpec>,
+    /// Optional display-label template (`label = "{cn} ({uid})"`). When set, the
+    /// membership picker renders entries of this profile via the template; `None`
+    /// keeps the default behavior. The raw string is parsed into segments in
+    /// [`crate::config::relation::CandidateScope`].
+    #[serde(default)]
+    pub label: Option<String>,
 }
 
 impl EntryProfile {
@@ -444,6 +451,7 @@ mod tests {
             defaults: Default::default(),
             password: None,
             lookups: Default::default(),
+            label: None,
         };
         assert_eq!(
             p.search_attributes(),
@@ -581,6 +589,41 @@ mod tests {
         assert_eq!(spec.value_attr, "gidNumber");
         assert_eq!(spec.label, "cn");
         assert_eq!(spec.search_attrs, vec!["cn"]);
+    }
+
+    #[test]
+    fn parses_profile_label_template() {
+        let toml = r#"
+            [server]
+            uri = "ldap://x"
+            base_dn = "dc=example,dc=org"
+            [auth]
+            bind_dn = "cn=admin,dc=example,dc=org"
+            [[profile]]
+            name = "user"
+            object_classes = ["inetOrgPerson"]
+            rdn_attr = "uid"
+            label = "{cn} ({uid})"
+        "#;
+        let cfg: Config = toml::from_str(toml).unwrap();
+        assert_eq!(cfg.profiles[0].label.as_deref(), Some("{cn} ({uid})"));
+    }
+
+    #[test]
+    fn profile_without_label_is_none() {
+        let toml = r#"
+            [server]
+            uri = "ldap://x"
+            base_dn = "dc=example,dc=org"
+            [auth]
+            bind_dn = "cn=admin,dc=example,dc=org"
+            [[profile]]
+            name = "user"
+            object_classes = ["inetOrgPerson"]
+            rdn_attr = "uid"
+        "#;
+        let cfg: Config = toml::from_str(toml).unwrap();
+        assert!(cfg.profiles[0].label.is_none());
     }
 
     #[test]

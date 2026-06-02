@@ -160,6 +160,7 @@ mod tests {
             defaults: Default::default(),
             password: None,
             lookups: Default::default(),
+            label: None,
         }
     }
 

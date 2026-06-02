@@ -579,6 +579,7 @@ mod tests {
                 defaults: Default::default(),
                 password: None,
                 lookups: Default::default(),
+                label: None,
             },
             EntryProfile {
                 name: "user".into(),
@@ -590,6 +591,7 @@ mod tests {
                 defaults: Default::default(),
                 password: None,
                 lookups: Default::default(),
+                label: None,
             },
         ];
         let rels = resolve_relations(
@@ -768,6 +770,7 @@ mod tests {
             base: "ou=people".into(),
             object_classes: vec!["inetOrgPerson".into()],
             search_attrs: vec!["uid".into()],
+            label_template: None,
         };
         let field = EditField {
             label: "member".into(),
@@ -809,6 +812,7 @@ mod tests {
             base: "ou=groups".into(),
             object_classes: vec!["groupOfNames".into()],
             search_attrs: vec!["cn".into()],
+            label_template: None,
         };
         let field = EditField {
             label: "memberOf".into(),
