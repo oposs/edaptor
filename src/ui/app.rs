@@ -335,6 +335,7 @@ fn event_loop(
                 worker,
                 read_flow,
                 &mut structure,
+                profiles,
                 &mut post,
                 &mut pending_followups,
             );
@@ -390,12 +391,14 @@ fn event_loop(
 /// Feed a polled worker [`Response`] to the write-tracking maps and the read
 /// flow. Writes are handled first (re-read after a save); otherwise a built form
 /// is installed (only when its DN matches the current selection — see below).
+#[allow(clippy::too_many_arguments)] // central response handler; each arg is needed
 fn handle_worker_response(
     app: &mut App,
     resp: &Response,
     worker: &WorkerHandle,
     read_flow: &mut ReadFlow,
     structure: &mut Structure,
+    profiles: &[EntryProfile],
     post: &mut HashMap<u64, PostWrite>,
     pending_followups: &mut HashMap<u64, (String, Vec<ModOp>, Option<String>)>,
 ) {
@@ -514,11 +517,12 @@ fn handle_worker_response(
                 // installation while an editing overlay (create / value editor) is
                 // open, so a late base-read cannot replace `app.form` under it.
                 if should_install_form(app, &model.title) {
-                    app.form = Some(build_edit_form(
+                    app.form = Some(build_loaded_form(
                         &model,
                         read_flow.schema(),
                         app.read_only,
                         &app.relations,
+                        profiles,
                     ));
                     app.form_focus = 0;
                     app.form_scroll = 0;
@@ -896,26 +900,21 @@ fn handle_action(
                 app.overlay = Some(ov);
                 return;
             }
-            // Normal single-entry save — strip backref labels from baseline so
-            // `diff` does not emit a spurious Delete for server-maintained attrs.
-            let backref_lbls = form.backref_labels();
-            let mut original = EditEntry {
-                dn: form.dn.clone(),
-                attrs: form.baseline.clone(),
-            };
-            for l in &backref_lbls {
-                original.attrs.remove(l);
-            }
-            let edited = form.to_edit_entry();
-            let object_classes = object_classes_of(form);
-            match prepare_save(
+            // Normal single-entry save (folds in any password change when the
+            // entry matches a password-profile).
+            let prep = match prepare_edit_save(
+                form,
                 read_flow.schema(),
-                &original,
-                &edited,
-                &object_classes,
-                &[],
-                &[],
+                profiles,
+                now_unix_secs_or_zero(),
             ) {
+                Ok(p) => p,
+                Err(text) => {
+                    app.overlay = Some(Overlay::Error { text });
+                    return;
+                }
+            };
+            match prep {
                 PrepareSave::Ready { plan, dn, ldif } => {
                     app.overlay = Some(Overlay::Confirm {
                         title: "Apply these changes?".to_string(),
@@ -1219,25 +1218,20 @@ fn execute_pending(
                 app.overlay = Some(ov);
                 return;
             }
-            // Normal single-entry save — strip backref labels from baseline.
-            let backref_lbls = form.backref_labels();
-            let mut original = EditEntry {
-                dn: form.dn.clone(),
-                attrs: form.baseline.clone(),
-            };
-            for l in &backref_lbls {
-                original.attrs.remove(l);
-            }
-            let edited = form.to_edit_entry();
-            let object_classes = object_classes_of(form);
-            match prepare_save(
+            // Normal single-entry save (folds in any password change).
+            let prep = match prepare_edit_save(
+                form,
                 read_flow.schema(),
-                &original,
-                &edited,
-                &object_classes,
-                &[],
-                &[],
+                profiles,
+                now_unix_secs_or_zero(),
             ) {
+                Ok(p) => p,
+                Err(text) => {
+                    app.overlay = Some(Overlay::Error { text });
+                    return;
+                }
+            };
+            match prep {
                 PrepareSave::Ready { plan, dn, .. } => {
                     app.status = "Saving…".to_string();
                     match intent {
@@ -1292,6 +1286,7 @@ fn execute_pending(
                 app,
                 worker,
                 read_flow,
+                profiles,
                 &entry_dn,
                 own_mods,
                 fanout,
@@ -1433,6 +1428,28 @@ fn object_classes_of(form: &EditForm) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// Build an edit form for a loaded entry and, when the entry is an instance of a
+/// password-profile, inject the masked password + confirm fields (suppressing the
+/// schema's password field), so the password can be changed inline. Skipped in
+/// read-only sessions — the injected field is editable. The single edit-form
+/// build seam used by the read flow and the post-combined-save reload.
+fn build_loaded_form(
+    model: &crate::ui::form::FormModel,
+    schema: &SchemaModel,
+    read_only: bool,
+    relations: &[ResolvedRelation],
+    profiles: &[EntryProfile],
+) -> EditForm {
+    let mut form = build_edit_form(model, schema, read_only, relations);
+    if !read_only {
+        let ocs = object_classes_of(&form);
+        if let Some(spec) = profile_for_entry(profiles, &ocs).and_then(|p| p.password.as_ref()) {
+            crate::ui::edit_form::inject_password_fields(&mut form, spec);
+        }
+    }
+    form
+}
+
 /// The outcome of preparing a form save.
 enum PrepareSave {
     /// Client-side validation failed.
@@ -1504,6 +1521,51 @@ fn prepare_save(
         dn: original.dn.clone(),
         ldif,
     }
+}
+
+/// Build the `(original, edited, object_classes)` for a single-entry edit save,
+/// fold in any password change when the loaded entry matches a password-profile,
+/// and return the resulting [`PrepareSave`]. `Err(text)` signals a confirm
+/// mismatch (the caller surfaces it as an Error overlay). `now_secs` is injected
+/// so the planning stays testable. Used by both the plain F2 save and the
+/// guard-resume save so password edits work from either entry point.
+fn prepare_edit_save(
+    form: &EditForm,
+    schema: &SchemaModel,
+    profiles: &[EntryProfile],
+    now_secs: u64,
+) -> Result<PrepareSave, String> {
+    // Strip backref labels from the baseline so `diff` does not emit a spurious
+    // Delete for server-maintained attrs.
+    let backref_lbls = form.backref_labels();
+    let mut original = EditEntry {
+        dn: form.dn.clone(),
+        attrs: form.baseline.clone(),
+    };
+    for l in &backref_lbls {
+        original.attrs.remove(l);
+    }
+    let mut edited = form.to_edit_entry();
+    let object_classes = object_classes_of(form);
+    let (password_mods, mask_attrs) =
+        match profile_for_entry(profiles, &object_classes).and_then(|p| p.password.clone()) {
+            Some(spec) => stage_edit_password(
+                &spec,
+                &object_classes,
+                &mut original.attrs,
+                &mut edited.attrs,
+                now_secs,
+            )?,
+            None => (Vec::new(), Vec::new()),
+        };
+    Ok(prepare_save(
+        schema,
+        &original,
+        &edited,
+        &object_classes,
+        &password_mods,
+        &mask_attrs,
+    ))
 }
 
 /// Submit the worker request(s) for a prepared [`SavePlan`] and record how to
@@ -1743,7 +1805,13 @@ fn combined_save_overlay(
 /// Synchronously re-read `dn` and rebuild the form so it reflects the directory
 /// after a combined save. Installs the fresh form directly without depending on
 /// the async poll loop or the overlay-gated install path.
-fn reload_form_sync(app: &mut App, worker: &WorkerHandle, read_flow: &ReadFlow, dn: &str) {
+fn reload_form_sync(
+    app: &mut App,
+    worker: &WorkerHandle,
+    read_flow: &ReadFlow,
+    profiles: &[EntryProfile],
+    dn: &str,
+) {
     rebind_selection(app, dn);
     if let Ok(Response::Entries { entries, .. }) = worker.request(Request::Search {
         id: next_id(),
@@ -1755,11 +1823,12 @@ fn reload_form_sync(app: &mut App, worker: &WorkerHandle, read_flow: &ReadFlow, 
     }) {
         if let Some(entry) = entries.first() {
             let model = read_flow.form_for(entry, &[]);
-            app.form = Some(build_edit_form(
+            app.form = Some(build_loaded_form(
                 &model,
                 read_flow.schema(),
                 app.read_only,
                 &app.relations,
+                profiles,
             ));
             app.form_focus = 0;
             app.form_scroll = 0;
@@ -1771,10 +1840,12 @@ fn reload_form_sync(app: &mut App, worker: &WorkerHandle, read_flow: &ReadFlow, 
 /// pre-validate last-member on every removal, abort the whole batch if any would
 /// empty a group, then apply own-entry mods + each fan-out MODIFY, collecting a
 /// partial-failure report, and finally re-read the edited entry (synchronous).
+#[allow(clippy::too_many_arguments)] // synchronous combined-save dispatcher; each arg is needed
 fn apply_combined_save(
     app: &mut App,
     worker: &WorkerHandle,
     read_flow: &mut ReadFlow,
+    profiles: &[EntryProfile],
     entry_dn: &str,
     own_mods: Vec<ModOp>,
     fanout: Vec<(String, ModOp)>,
@@ -1828,7 +1899,7 @@ fn apply_combined_save(
     // state immediately (before setting status/overlay). This avoids the
     // async install gate clearing the partial-failure message on the next
     // poll iteration.
-    reload_form_sync(app, worker, read_flow, entry_dn);
+    reload_form_sync(app, worker, read_flow, profiles, entry_dn);
 
     if failures.is_empty() {
         app.status = "Saved.".to_string();
@@ -2167,6 +2238,92 @@ fn mask_password_attrs(
         }
     }
     out
+}
+
+/// Wall-clock seconds since the Unix epoch (0 on a pre-epoch clock). The one
+/// impure call in the password paths; isolated so the planners stay pure.
+fn now_unix_secs_or_zero() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// The first configured profile that declares a `[profile.password]` block and
+/// whose object classes are all present (case-insensitive) in `entry_ocs` — i.e.
+/// the loaded entry is an instance of that profile. `None` when no
+/// password-profile matches. Tie-break: config order (declare the more specific
+/// profile first). Pure.
+fn profile_for_entry<'a>(
+    profiles: &'a [EntryProfile],
+    entry_ocs: &[String],
+) -> Option<&'a EntryProfile> {
+    profiles.iter().find(|p| {
+        p.password.is_some()
+            && !p.object_classes.is_empty()
+            && p.object_classes
+                .iter()
+                .all(|oc| entry_ocs.iter().any(|e| e.eq_ignore_ascii_case(oc)))
+    })
+}
+
+/// Edit-path password mods: the same `(attr, values)` pairs as create
+/// (`password_add_attrs`), mapped to REPLACE ops so the new credential overwrites
+/// the old within one atomic MODIFY. Honors `ldap_attribute` and Samba. Pure.
+fn password_replace_mods(
+    clear: &str,
+    ldap_attribute: &str,
+    samba: bool,
+    now_secs: u64,
+) -> Vec<ModOp> {
+    crate::samba::password::password_add_attrs(clear, ldap_attribute, samba, now_secs)
+        .into_iter()
+        .map(|(attr, values)| ModOp::Replace { attr, values })
+        .collect()
+}
+
+/// Compute the password contribution to an edit save. Always strips the password
+/// pseudo-fields (primary + confirm) from BOTH `baseline` and `edited`, so the
+/// injected masked field never appears as an attribute diff — an un-stripped
+/// baseline still carrying the directory's stored hash would otherwise diff to a
+/// spurious Delete. When a confirmed new password was entered, also strips the
+/// Samba secret attrs from both sides (the REPLACE mods are then their sole
+/// source) and returns those mods plus the attrs to mask in the preview. Returns
+/// empty vecs when the field was left blank. Pure (clock injected as `now_secs`).
+fn stage_edit_password(
+    spec: &crate::config::PasswordSpec,
+    object_classes: &[String],
+    baseline: &mut std::collections::BTreeMap<String, Vec<String>>,
+    edited: &mut std::collections::BTreeMap<String, Vec<String>>,
+    now_secs: u64,
+) -> Result<(Vec<ModOp>, Vec<String>), String> {
+    let (primary, confirm) = crate::ui::edit_form::password_field_labels(spec);
+    let strip = |m: &mut std::collections::BTreeMap<String, Vec<String>>, labels: &[&str]| {
+        m.retain(|k, _| !labels.iter().any(|l| k.eq_ignore_ascii_case(l)));
+    };
+    // `primary` == spec.ldap_attribute; drop both pseudo-fields from the baseline
+    // so the stored value never diffs against the (blank) form field.
+    strip(baseline, &[primary.as_str(), confirm.as_str()]);
+    // stage_password validates the confirm match and removes both pseudo-fields
+    // from `edited`, returning the cleartext (or None when left blank).
+    let clear = match stage_password(spec, edited)? {
+        Some(pw) => pw,
+        None => return Ok((Vec::new(), Vec::new())),
+    };
+    let samba = spec.samba
+        && object_classes
+            .iter()
+            .any(|o| o.eq_ignore_ascii_case("sambaSamAccount"));
+    if samba {
+        strip(baseline, &["sambaNTPassword", "sambaPwdLastSet"]);
+        strip(edited, &["sambaNTPassword", "sambaPwdLastSet"]);
+    }
+    let mods = password_replace_mods(&clear, &spec.ldap_attribute, samba, now_secs);
+    let mut mask = vec![spec.ldap_attribute.clone()];
+    if samba {
+        mask.push("sambaNTPassword".to_string());
+    }
+    Ok((mods, mask))
 }
 
 /// Apply literal/template defaults to still-empty fields (pure); return the
@@ -3360,6 +3517,146 @@ mod tests {
             ),
             PrepareSave::NoChanges
         ));
+    }
+
+    #[test]
+    fn profile_for_entry_requires_oc_subset_and_password_spec() {
+        use crate::config::PasswordSpec;
+        let mut pw_user = create_user_profile();
+        pw_user.object_classes = vec!["inetOrgPerson".into(), "posixAccount".into()];
+        pw_user.password = Some(PasswordSpec {
+            ldap_attribute: "userPassword".into(),
+            samba: false,
+        });
+        // A profile with no password block must never match.
+        let mut plain = create_user_profile();
+        plain.object_classes = vec!["inetOrgPerson".into()];
+        plain.password = None;
+        let profiles = vec![plain, pw_user];
+
+        let ocs = vec![
+            "top".to_string(),
+            "inetOrgPerson".to_string(),
+            "posixAccount".to_string(),
+        ];
+        let m = profile_for_entry(&profiles, &ocs).expect("password profile matches");
+        assert!(m.password.is_some());
+        assert_eq!(m.object_classes.len(), 2);
+        // Entry missing posixAccount: the 2-OC profile no longer matches, and the
+        // plain profile has no password → None.
+        assert!(profile_for_entry(&profiles, &["inetOrgPerson".to_string()]).is_none());
+    }
+
+    fn pw_spec(samba: bool) -> crate::config::PasswordSpec {
+        crate::config::PasswordSpec {
+            ldap_attribute: "userPassword".into(),
+            samba,
+        }
+    }
+
+    #[test]
+    fn stage_edit_password_blank_yields_no_mods_and_strips_pseudo_fields() {
+        use std::collections::BTreeMap;
+        // baseline carries the directory's stored hash; edited carries the blank
+        // injected fields. After staging, neither side keeps the password attr.
+        let mut baseline: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        baseline.insert("userPassword".into(), vec!["{SSHA}deadbeef".into()]);
+        baseline.insert("cn".into(), vec!["Alice".into()]);
+        let mut edited: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        edited.insert("userPassword".into(), vec!["".into()]);
+        edited.insert("userPassword (confirm)".into(), vec!["".into()]);
+        edited.insert("cn".into(), vec!["Alice".into()]);
+
+        let (mods, mask) = stage_edit_password(
+            &pw_spec(false),
+            &[],
+            &mut baseline,
+            &mut edited,
+            1_700_000_000,
+        )
+        .unwrap();
+        assert!(mods.is_empty(), "blank password produces no mods");
+        assert!(mask.is_empty());
+        assert!(
+            !baseline.contains_key("userPassword"),
+            "baseline hash stripped"
+        );
+        assert!(!edited.contains_key("userPassword"));
+        assert!(!edited.contains_key("userPassword (confirm)"));
+        assert!(baseline.contains_key("cn") && edited.contains_key("cn"));
+    }
+
+    #[test]
+    fn stage_edit_password_set_yields_replace_and_strips_baseline_hash() {
+        use std::collections::BTreeMap;
+        let mut baseline: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        baseline.insert("userPassword".into(), vec!["{SSHA}old".into()]);
+        let mut edited: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        edited.insert("userPassword".into(), vec!["hunter2".into()]);
+        edited.insert("userPassword (confirm)".into(), vec!["hunter2".into()]);
+
+        let (mods, mask) = stage_edit_password(
+            &pw_spec(false),
+            &[],
+            &mut baseline,
+            &mut edited,
+            1_700_000_000,
+        )
+        .unwrap();
+        assert_eq!(
+            mods,
+            vec![ModOp::Replace {
+                attr: "userPassword".into(),
+                values: vec!["hunter2".into()],
+            }]
+        );
+        assert_eq!(mask, vec!["userPassword".to_string()]);
+        assert!(!baseline.contains_key("userPassword"), "old hash stripped");
+    }
+
+    #[test]
+    fn stage_edit_password_samba_includes_nt_hash_and_strips_samba_attrs() {
+        use std::collections::BTreeMap;
+        let mut baseline: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        baseline.insert("sambaNTPassword".into(), vec!["OLDHASH".into()]);
+        baseline.insert("sambaPwdLastSet".into(), vec!["1".into()]);
+        let mut edited: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        edited.insert("userPassword".into(), vec!["hunter2".into()]);
+        edited.insert("userPassword (confirm)".into(), vec!["hunter2".into()]);
+
+        let ocs = vec!["sambaSamAccount".to_string()];
+        let (mods, mask) = stage_edit_password(
+            &pw_spec(true),
+            &ocs,
+            &mut baseline,
+            &mut edited,
+            1_700_000_000,
+        )
+        .unwrap();
+        // The NT hash REPLACE is present and equals the M5 nthash of the cleartext.
+        assert!(mods.contains(&ModOp::Replace {
+            attr: "sambaNTPassword".into(),
+            values: vec![crate::samba::nthash::nt_hash("hunter2")],
+        }));
+        assert!(mask.contains(&"sambaNTPassword".to_string()));
+        assert!(
+            !baseline.contains_key("sambaNTPassword"),
+            "old NT hash stripped"
+        );
+        assert!(!baseline.contains_key("sambaPwdLastSet"));
+    }
+
+    #[test]
+    fn stage_edit_password_mismatch_errors() {
+        use std::collections::BTreeMap;
+        let mut baseline: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        let mut edited: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        edited.insert("userPassword".into(), vec!["a".into()]);
+        edited.insert("userPassword (confirm)".into(), vec!["b".into()]);
+        assert!(
+            stage_edit_password(&pw_spec(false), &[], &mut baseline, &mut edited, 0).is_err(),
+            "confirm mismatch must error"
+        );
     }
 
     #[test]
