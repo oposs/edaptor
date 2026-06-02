@@ -735,8 +735,13 @@ fn open_value_editor(app: &mut App, structure: &Structure) {
 }
 
 /// Keys inside the picker: Esc/F3 cancel; F2 commit selected DNs to the field;
-/// ↑↓ move; Space toggle; any other key edits the search box (the tick-based
-/// `service_picker_search` turns a changed query into a live candidate search).
+/// Key handling for the in-overlay picker. ↑↓ move the cursor; Space toggles the
+/// highlighted candidate (membership multi-select). Enter commits the highlighted
+/// candidate's scalar `value_attr` into the target field for a value-lookup picker
+/// (`lookup.is_some()`); for a membership picker Enter is ignored — its commit is
+/// F2, which writes the selected DNs into the field. Esc / F3 cancel. Any other key
+/// edits the search box (the tick-based `service_picker_search` turns a changed
+/// query into a live candidate search).
 fn picker_editor_key(app: &mut App, key: KeyEvent) {
     match key.code {
         KeyCode::Esc | KeyCode::F(3) => {
@@ -3344,6 +3349,90 @@ mod tests {
             .find(|f| f.label == "description")
             .expect("description field present");
         assert!(f.lookup.is_some(), "create path tagged the lookup field");
+    }
+
+    #[test]
+    fn lookups_profile_for_entry_requires_oc_subset_and_lookup_spec() {
+        // A profile that declares a `[profile.lookup.*]` and whose object classes
+        // are all present in the entry → matches. Mirrors
+        // `profile_for_entry_requires_oc_subset_and_password_spec`.
+        let mut lk_user = create_user_profile();
+        lk_user.object_classes = vec!["inetOrgPerson".into(), "posixAccount".into()];
+        lk_user
+            .lookups
+            .insert("gidNumber".into(), gid_lookup_spec());
+        // A profile with no lookups must never match.
+        let mut plain = create_user_profile();
+        plain.object_classes = vec!["inetOrgPerson".into()];
+        plain.lookups = Default::default();
+        let profiles = vec![plain, lk_user];
+
+        let ocs = vec![
+            "top".to_string(),
+            "inetOrgPerson".to_string(),
+            "posixAccount".to_string(),
+        ];
+        let m = lookups_profile_for_entry(&profiles, &ocs).expect("lookups profile matches");
+        assert!(!m.lookups.is_empty());
+        assert_eq!(m.object_classes.len(), 2);
+        // Entry missing posixAccount: the 2-OC profile no longer matches, and the
+        // plain profile has no lookups → None.
+        assert!(lookups_profile_for_entry(&profiles, &["inetOrgPerson".to_string()]).is_none());
+        // No profile declares lookups → None even on a full OC match.
+        let no_lookups = vec![plain_profile_no_lookups()];
+        assert!(lookups_profile_for_entry(&no_lookups, &ocs).is_none());
+    }
+
+    #[test]
+    fn build_loaded_form_tags_lookup_fields() {
+        // The edit path resolves the lookups profile via objectClass and tags the
+        // matching field so Enter opens the picker on edit, too. Mirrors
+        // `build_new_entry_form_tags_lookup_fields` for the load seam.
+        let mut profile = create_user_profile();
+        profile.object_classes = vec!["testUser".into()];
+        profile
+            .lookups
+            .insert("description".into(), gid_lookup_spec());
+        // No password block → the password injection branch is skipped.
+        profile.password = None;
+
+        // A loaded entry that is an instance of the profile (objectClass=testUser)
+        // and carries the `description` attribute the lookup is keyed on.
+        let model = crate::ui::form::FormModel {
+            title: "uid=ann,ou=people,dc=example,dc=org".into(),
+            fields: vec![
+                crate::ui::form::FormField {
+                    label: "objectClass".into(),
+                    kind: FieldKind::Text,
+                    is_must: true,
+                    values: vec!["testUser".into()],
+                    widget: WidgetSpec::ReadOnlyText,
+                },
+                crate::ui::form::FormField {
+                    label: "description".into(),
+                    kind: FieldKind::Text,
+                    is_must: false,
+                    values: vec!["existing".into()],
+                    widget: WidgetSpec::ReadOnlyText,
+                },
+            ],
+        };
+        let form = build_loaded_form(&model, &user_schema(), false, &[], &[profile]);
+        let f = form
+            .fields
+            .iter()
+            .find(|f| f.label == "description")
+            .expect("description field present");
+        assert!(f.lookup.is_some(), "edit path tagged the lookup field");
+    }
+
+    /// A profile with object classes but no `[profile.lookup.*]` and no password.
+    fn plain_profile_no_lookups() -> EntryProfile {
+        let mut p = create_user_profile();
+        p.object_classes = vec!["inetOrgPerson".into(), "posixAccount".into()];
+        p.lookups = Default::default();
+        p.password = None;
+        p
     }
 
     #[test]
