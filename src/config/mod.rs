@@ -53,6 +53,23 @@ impl Default for SambaConfig {
     }
 }
 
+/// Password configuration for an entry profile. Controls which LDAP attribute
+/// holds the password and whether to maintain Samba NT-hash attributes.
+#[derive(Debug, Deserialize, Clone)]
+pub struct PasswordSpec {
+    /// LDAP attribute to store the password. Defaults to `userPassword`.
+    #[serde(default = "default_pw_attr")]
+    pub ldap_attribute: String,
+    /// When true, also write `sambaNTPassword` and `sambaPwdLastSet` on
+    /// create/modify so Samba credentials stay in sync with the Unix password.
+    #[serde(default)]
+    pub samba: bool,
+}
+
+fn default_pw_attr() -> String {
+    "userPassword".to_string()
+}
+
 /// A minimal entry profile (M3 slice). Richer metadata (password/membership/
 /// Samba/labels/search_attributes) arrives in M4.
 #[derive(Debug, Deserialize, Default, Clone)]
@@ -74,6 +91,10 @@ pub struct EntryProfile {
     /// Per-attribute default values for newly-created entries (`[profile.defaults]`).
     #[serde(default)]
     pub defaults: ProfileDefaults,
+    /// Optional password field configuration. When present, the create/edit form
+    /// will show an inline password field with the given attribute and Samba settings.
+    #[serde(default)]
+    pub password: Option<PasswordSpec>,
 }
 
 impl EntryProfile {
@@ -396,6 +417,7 @@ mod tests {
             show: vec!["uid".into(), "cn".into()],
             search_attrs: vec![],
             defaults: Default::default(),
+            password: None,
         };
         assert_eq!(
             p.search_attributes(),
@@ -463,5 +485,43 @@ mod tests {
             uidNumber = "{next:60000-10000}"
         "#;
         assert!(toml::from_str::<Config>(toml).is_err());
+    }
+
+    #[test]
+    fn parses_profile_password_block() {
+        let toml = r#"
+            [server]
+            uri = "ldap://x"
+            base_dn = "dc=example,dc=org"
+            [auth]
+            bind_dn = "cn=admin,dc=example,dc=org"
+            [[profile]]
+            name = "user"
+            object_classes = ["inetOrgPerson"]
+            rdn_attr = "uid"
+            [profile.password]
+            samba = true
+        "#;
+        let cfg: Config = toml::from_str(toml).unwrap();
+        let p = cfg.profiles[0].password.as_ref().unwrap();
+        assert_eq!(p.ldap_attribute, "userPassword"); // default
+        assert!(p.samba);
+    }
+
+    #[test]
+    fn profile_without_password_block_is_none() {
+        let toml = r#"
+            [server]
+            uri = "ldap://x"
+            base_dn = "dc=example,dc=org"
+            [auth]
+            bind_dn = "cn=admin,dc=example,dc=org"
+            [[profile]]
+            name = "user"
+            object_classes = ["inetOrgPerson"]
+            rdn_attr = "uid"
+        "#;
+        let cfg: Config = toml::from_str(toml).unwrap();
+        assert!(cfg.profiles[0].password.is_none());
     }
 }

@@ -2697,6 +2697,7 @@ mod tests {
             show: vec!["uid".into()],
             search_attrs: vec![],
             defaults: Default::default(),
+            password: None,
         }
     }
 

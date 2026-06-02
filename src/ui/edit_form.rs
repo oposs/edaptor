@@ -481,6 +481,7 @@ mod tests {
                 show: vec![],
                 search_attrs: vec!["cn".into()],
                 defaults: Default::default(),
+                password: None,
             },
             EntryProfile {
                 name: "user".into(),
@@ -490,6 +491,7 @@ mod tests {
                 show: vec![],
                 search_attrs: vec!["uid".into()],
                 defaults: Default::default(),
+                password: None,
             },
         ];
         let rels = resolve_relations(
