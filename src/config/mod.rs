@@ -1,5 +1,6 @@
 //! Configuration: connection properties + auth. (Entry profiles arrive in M4.)
 
+pub mod defaults;
 pub mod password;
 pub mod relation;
 pub use password::PasswordSource;
