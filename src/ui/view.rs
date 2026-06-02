@@ -377,9 +377,9 @@ fn render_value_editor(f: &mut Frame, ve: &ValueEditor, area: Rect) {
     if let Some(picker) = &ve.picker {
         let rect = centered(70, 20, area);
         f.render_widget(Clear, rect);
-        let bg = Color::Rgb(20, 30, 45);
         let block = Block::default()
             .borders(Borders::ALL)
+            .border_type(BorderType::Double)
             .title(format!(" {} ", ve.label))
             .title_bottom(match (ve.lookup.is_some(), picker.truncated) {
                 // Single-select value-lookup picker: Enter commits the chosen value.
@@ -393,7 +393,6 @@ fn render_value_editor(f: &mut Frame, ve: &ValueEditor, area: Rect) {
                 }
                 (false, false) => " Space toggle · F2 save · Esc cancel · type to search ",
             })
-            .style(Style::default().bg(bg).fg(Color::White))
             .border_style(
                 Style::default()
                     .fg(Color::Cyan)
@@ -407,7 +406,7 @@ fn render_value_editor(f: &mut Frame, ve: &ValueEditor, area: Rect) {
         // First row: search box.
         let search_text = format!("Search: {}", ve.search.value());
         f.render_widget(
-            Paragraph::new(search_text).style(Style::default().bg(bg).fg(Color::Yellow)),
+            Paragraph::new(search_text).style(Style::default().fg(Color::Blue)),
             Rect::new(inner.x, inner.y, inner.width, 1),
         );
         // Show terminal cursor at the insertion point within the search box.
@@ -424,17 +423,18 @@ fn render_value_editor(f: &mut Frame, ve: &ValueEditor, area: Rect) {
             }
             let y = list_area_y + i as u16;
             let selected_cursor = i == picker.cursor;
+            let star = if row.saved { "*" } else { " " };
             let check = if row.selected { "[x]" } else { "[ ]" };
-            let line = format!("{check} {}", row.candidate.label);
+            let line = format!("{star}{check} {}", row.candidate.label);
             let style = if selected_cursor {
                 Style::default()
-                    .bg(Color::Rgb(60, 80, 100))
+                    .bg(Color::Blue)
                     .fg(Color::White)
                     .add_modifier(Modifier::BOLD)
             } else if row.selected {
-                Style::default().bg(bg).fg(Color::Green)
+                Style::default().fg(Color::Green)
             } else {
-                Style::default().bg(bg).fg(Color::Gray)
+                Style::default()
             };
             f.render_widget(
                 Paragraph::new(line).style(style),
@@ -529,7 +529,9 @@ pub fn clamp_scroll(focus: usize, scroll: usize, viewport: usize, n: usize) -> u
 
 #[cfg(test)]
 mod tests {
-    use super::{centered, clamp_scroll, field_display_value, render_form, status_line};
+    use super::{
+        centered, clamp_scroll, field_display_value, render_form, render_value_editor, status_line,
+    };
     use crate::schema::FieldKind;
     use crate::ui::app::{App, Pane};
     use crate::ui::edit_form::{EditField, EditForm, FormMode};
@@ -569,6 +571,52 @@ mod tests {
         assert!(shown.chars().all(|c| c == '•'));
         // Mask length tracks the live editor (grapheme count, not bytes).
         assert_eq!(shown.chars().count(), "topSecret-Paßwort".chars().count());
+    }
+
+    /// A saved member renders with a leading `*` marker in the picker popup.
+    fn picker_value_editor_with_saved() -> crate::ui::edit_form::ValueEditor {
+        use crate::ui::picker::{Candidate, PickerState};
+        let selected = vec![Candidate {
+            dn: "uid=bob,ou=people,dc=example,dc=org".to_string(),
+            label: "Bob Baker (bob)".to_string(),
+            value: None,
+        }];
+        crate::ui::edit_form::ValueEditor {
+            field: 0,
+            label: "member".to_string(),
+            ordered: false,
+            secret: false,
+            rows: Vec::new(),
+            sel: 0,
+            picker: Some(PickerState::new(selected)),
+            search: TextState::new(),
+            scope: None,
+            role: None,
+            lookup: None,
+            base: String::new(),
+        }
+    }
+
+    #[test]
+    fn picker_marks_saved_row_with_star() {
+        let ve = picker_value_editor_with_saved();
+        let (w, h) = (70u16, 20u16);
+        let backend = TestBackend::new(w, h);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| render_value_editor(f, &ve, Rect::new(0, 0, w, h)))
+            .expect("picker render must not panic");
+        let buffer = terminal.backend().buffer();
+        // The saved candidate row carries the leading `*[x]` marker somewhere.
+        let mut found = false;
+        for y in 0..h {
+            let line = row_text(buffer, 0, y, w);
+            if line.contains("*[x] Bob Baker (bob)") {
+                found = true;
+                break;
+            }
+        }
+        assert!(found, "saved selected row must render `*[x] ...`");
     }
 
     #[test]
