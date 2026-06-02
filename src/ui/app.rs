@@ -31,7 +31,7 @@ use crate::ui::edit_form::{build_edit_form, value_set_eq, EditForm, FormMode, Va
 use crate::ui::form_state::{guard_decision, GuardChoice, GuardOutcome};
 use crate::ui::picker::PICKER_SEARCH_CAP;
 use crate::ui::view;
-use crate::workflows::create::{build_add_entry, empty_form_for_profile};
+use crate::workflows::create::{build_add_entry, empty_form_for_profile, profiles_for_container};
 use crate::workflows::read_flow::{ReadFlow, ReadOutcome};
 use crate::workflows::structure::{Structure, StructureInput};
 
@@ -73,6 +73,15 @@ pub enum Overlay {
         /// What to do once the guard is resolved.
         intent: GuardIntent,
     },
+    /// F7 profile chooser: pick which template to create. Each entry is the
+    /// profile's `(index, name)`; `sel` is the highlighted row. The name is carried
+    /// here so the render layer (which lacks `profiles`) can show it.
+    ChooseProfile {
+        /// The offered profiles as `(profile_index, name)`, in display order.
+        entries: Vec<(usize, String)>,
+        /// The highlighted row (into `entries`).
+        sel: usize,
+    },
 }
 
 /// What a dirty-form [`Overlay::Guard`] should resume once the user resolves it.
@@ -113,6 +122,12 @@ pub enum PendingAction {
     Delete {
         /// The DN to delete.
         dn: String,
+    },
+    /// Open a Create-mode form for the chosen profile (resolved from the F7
+    /// profile chooser, which lacks the schema/profiles to build the form itself).
+    OpenCreate {
+        /// The chosen profile index.
+        profile_idx: usize,
     },
     /// A resolved dirty-form guard: perform `intent`, running the save flow first
     /// when `save` is true (Save) or proceeding directly when false (Discard).
@@ -576,7 +591,7 @@ fn dispatch_key(app: &mut App, key: KeyEvent, structure: &Structure) -> Option<U
         match key.code {
             KeyCode::F(2) => return Some(UiAction::FormSave),
             KeyCode::F(3) => return Some(UiAction::FormCancel),
-            KeyCode::F(7) => return Some(UiAction::NewEntry(0)),
+            KeyCode::F(7) => return Some(UiAction::NewEntryChoose),
             // F8 deletes the entry currently shown in the form pane (spec §12).
             KeyCode::F(8) => {
                 return app
@@ -915,24 +930,24 @@ fn handle_action(
             }
         }
         UiAction::FormCancel => revert_form(app),
-        UiAction::NewEntry(i) => {
-            if let Some(profile) = profiles.get(i) {
-                let container = if profile.search_base.is_empty() {
-                    structure.root_dn().to_string()
-                } else {
-                    profile.search_base.clone()
-                };
-                let form = build_new_entry_form(read_flow.schema(), profile, i, container);
-                app.form = Some(form);
-                app.form_focus = 0;
-                app.form_scroll = 0;
-                app.overlay = None;
-                // Focus the form pane so keystrokes edit the new entry's fields.
-                app.focus = Pane::Form;
-                app.status = format!(
-                    "New {} — fill fields, F2 to create, Esc to cancel.",
-                    profile.name
-                );
+        UiAction::NewEntry(i) => open_create_form(app, read_flow, profiles, i, base_dn),
+        UiAction::NewEntryChoose => {
+            // Offer profiles whose search_base matches the current container;
+            // fall back to all profiles so F7 always works.
+            let mut matches = profiles_for_container(profiles, &app.current_branch);
+            if matches.is_empty() {
+                matches = (0..profiles.len()).collect();
+            }
+            match matches.len() {
+                0 => {}
+                1 => open_create_form(app, read_flow, profiles, matches[0], base_dn),
+                _ => {
+                    let entries = matches
+                        .iter()
+                        .map(|&i| (i, profiles[i].name.clone()))
+                        .collect();
+                    app.overlay = Some(Overlay::ChooseProfile { entries, sel: 0 })
+                }
             }
         }
         UiAction::DeleteEntry(dn) => {
@@ -1063,7 +1078,36 @@ fn overlay_key(app: &mut App, key: KeyEvent) -> Option<PendingAction> {
             None
         }
         Some(Overlay::Guard { .. }) => guard_key(app, key),
+        Some(Overlay::ChooseProfile { .. }) => choose_profile_key(app, key),
         None => None,
+    }
+}
+
+/// Handle a key in the F7 profile chooser: ↑↓ move the selection, Enter resolves
+/// to [`PendingAction::OpenCreate`] for the chosen profile, Esc/F3 dismisses.
+fn choose_profile_key(app: &mut App, key: KeyEvent) -> Option<PendingAction> {
+    let Some(Overlay::ChooseProfile { entries, sel }) = app.overlay.as_mut() else {
+        return None;
+    };
+    match key.code {
+        KeyCode::Up => {
+            *sel = sel.saturating_sub(1);
+            None
+        }
+        KeyCode::Down => {
+            *sel = (*sel + 1).min(entries.len().saturating_sub(1));
+            None
+        }
+        KeyCode::Enter => {
+            let profile_idx = entries.get(*sel).map(|(i, _)| *i);
+            app.overlay = None;
+            profile_idx.map(|profile_idx| PendingAction::OpenCreate { profile_idx })
+        }
+        KeyCode::Esc | KeyCode::F(3) => {
+            app.overlay = None;
+            None
+        }
+        _ => None,
     }
 }
 
@@ -1130,6 +1174,9 @@ fn execute_pending(
             let _ = worker.submit(Request::Delete { id, dn: dn.clone() });
             post.insert(id, PostWrite::Deleted { dn });
             app.status = "Deleting…".to_string();
+        }
+        PendingAction::OpenCreate { profile_idx } => {
+            open_create_form(app, read_flow, profiles, profile_idx, base_dn);
         }
         PendingAction::ResolveGuard {
             intent,
@@ -2230,6 +2277,36 @@ fn build_new_entry_form(
     form
 }
 
+/// Install a fresh Create-mode form for `profiles[i]` into pane 3 and focus it.
+/// The container is the profile's `search_base` (or `base_dn` when empty).
+fn open_create_form(
+    app: &mut App,
+    read_flow: &mut ReadFlow,
+    profiles: &[EntryProfile],
+    i: usize,
+    base_dn: &str,
+) {
+    let Some(profile) = profiles.get(i) else {
+        return;
+    };
+    let container = if profile.search_base.is_empty() {
+        base_dn.to_string()
+    } else {
+        profile.search_base.clone()
+    };
+    let form = build_new_entry_form(read_flow.schema(), profile, i, container);
+    app.form = Some(form);
+    app.form_focus = 0;
+    app.form_scroll = 0;
+    app.overlay = None;
+    // Focus the form pane so keystrokes edit the new entry's fields.
+    app.focus = Pane::Form;
+    app.status = format!(
+        "New {} — fill fields, F2 to create, Esc to cancel.",
+        profile.name
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2395,14 +2472,46 @@ mod tests {
     }
 
     #[test]
-    fn f7_creates_first_profile_when_writable_only() {
+    fn f7_opens_the_profile_chooser_when_writable_only() {
         let s = empty_structure();
         assert_eq!(
             dispatch_key(&mut bare_app(false), fkey(7), &s),
-            Some(UiAction::NewEntry(0))
+            Some(UiAction::NewEntryChoose)
         );
         // Read-only mode suppresses create (P4-T4); the key falls through to nav.
         assert_eq!(dispatch_key(&mut bare_app(true), fkey(7), &s), None);
+    }
+
+    #[test]
+    fn choose_profile_key_navigates_and_resolves_to_open_create() {
+        let mut app = bare_app(false);
+        app.overlay = Some(Overlay::ChooseProfile {
+            entries: vec![(0, "User".into()), (2, "Group".into())],
+            sel: 0,
+        });
+        // Down moves the selection.
+        assert!(choose_profile_key(&mut app, key(KeyCode::Down)).is_none());
+        match &app.overlay {
+            Some(Overlay::ChooseProfile { sel, .. }) => assert_eq!(*sel, 1),
+            _ => panic!("chooser still open"),
+        }
+        // Enter resolves to OpenCreate for the chosen profile index (2), closing it.
+        match choose_profile_key(&mut app, key(KeyCode::Enter)) {
+            Some(PendingAction::OpenCreate { profile_idx }) => assert_eq!(profile_idx, 2),
+            _ => panic!("expected OpenCreate"),
+        }
+        assert!(app.overlay.is_none());
+    }
+
+    #[test]
+    fn choose_profile_key_esc_dismisses() {
+        let mut app = bare_app(false);
+        app.overlay = Some(Overlay::ChooseProfile {
+            entries: vec![(0, "User".into())],
+            sel: 0,
+        });
+        assert!(choose_profile_key(&mut app, key(KeyCode::Esc)).is_none());
+        assert!(app.overlay.is_none());
     }
 
     #[test]

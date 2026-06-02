@@ -327,6 +327,26 @@ fn render_overlay(f: &mut Frame, app: &App) {
             render_value_editor(f, ve, area);
             return;
         }
+        Some(Overlay::ChooseProfile { entries, sel }) => {
+            let body = entries
+                .iter()
+                .enumerate()
+                .map(|(i, (_, name))| {
+                    if i == *sel {
+                        format!("> {name}")
+                    } else {
+                        format!("  {name}")
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            (
+                "New entry — choose a profile".to_string(),
+                body,
+                " ↑↓ Move · Enter Select · Esc Cancel ",
+                Color::Cyan,
+            )
+        }
         None => return,
     };
 
