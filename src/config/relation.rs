@@ -153,6 +153,7 @@ mod tests {
             search_base: base.into(),
             show: vec![],
             search_attrs: search.iter().map(|s| s.to_string()).collect(),
+            defaults: Default::default(),
         }
     }
 

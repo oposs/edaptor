@@ -6,6 +6,7 @@ pub mod relation;
 pub use password::PasswordSource;
 use relation::Relation;
 
+use crate::config::defaults::ProfileDefaults;
 use anyhow::{Context, Result};
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
@@ -70,6 +71,9 @@ pub struct EntryProfile {
     /// then to `["cn"]` (see [`EntryProfile::search_attributes`]).
     #[serde(default)]
     pub search_attrs: Vec<String>,
+    /// Per-attribute default values for newly-created entries (`[profile.defaults]`).
+    #[serde(default)]
+    pub defaults: ProfileDefaults,
 }
 
 impl EntryProfile {
@@ -391,6 +395,7 @@ mod tests {
             search_base: "ou=people".into(),
             show: vec!["uid".into(), "cn".into()],
             search_attrs: vec![],
+            defaults: Default::default(),
         };
         assert_eq!(
             p.search_attributes(),
@@ -409,5 +414,35 @@ mod tests {
             ..p
         };
         assert_eq!(p3.search_attributes(), vec!["cn".to_string()]);
+    }
+
+    #[test]
+    fn parses_profile_defaults_block() {
+        use crate::config::defaults::DefaultValue;
+        let toml = r#"
+            [server]
+            uri = "ldap://x"
+            base_dn = "dc=example,dc=org"
+            [auth]
+            bind_dn = "cn=admin,dc=example,dc=org"
+            [[profile]]
+            name = "user"
+            object_classes = ["inetOrgPerson", "posixAccount"]
+            rdn_attr = "uid"
+            [profile.defaults]
+            loginShell = "/bin/bash"
+            homeDirectory = "/home/{uid}"
+            uidNumber = "{next:10000-60000}"
+        "#;
+        let cfg: Config = toml::from_str(toml).expect("parse");
+        let d = &cfg.profiles[0].defaults;
+        assert!(matches!(
+            d.entries.get("loginShell"),
+            Some(DefaultValue::Literal(_))
+        ));
+        assert!(matches!(
+            d.entries.get("uidNumber"),
+            Some(DefaultValue::AutoNumber { .. })
+        ));
     }
 }

@@ -2606,6 +2606,7 @@ mod tests {
             search_base: "ou=people,dc=example,dc=org".into(),
             show: vec!["uid".into()],
             search_attrs: vec![],
+            defaults: Default::default(),
         }
     }
 

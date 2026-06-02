@@ -480,6 +480,7 @@ mod tests {
                 search_base: "ou=groups".into(),
                 show: vec![],
                 search_attrs: vec!["cn".into()],
+                defaults: Default::default(),
             },
             EntryProfile {
                 name: "user".into(),
@@ -488,6 +489,7 @@ mod tests {
                 search_base: "ou=people".into(),
                 show: vec![],
                 search_attrs: vec!["uid".into()],
+                defaults: Default::default(),
             },
         ];
         let rels = resolve_relations(
