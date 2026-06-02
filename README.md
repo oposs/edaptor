@@ -61,13 +61,46 @@ password_source = "prompt"
 # Entry profiles: what a "user" and a "group" mean in this directory.
 # `search_attrs` sets which attributes the picker substring-search matches.
 # Falls back to `show`, then to `["cn"]` when omitted.
+#
+# This "user" is a full posix (+optional Samba) account template: multiple
+# object classes, defaulted/templated/auto-numbered fields, an inline password
+# field, and a value-lookup that pulls gidNumber from a chosen group.
 [[profile]]
 name           = "user"
-object_classes = ["inetOrgPerson"]   # a list; add posixAccount/shadowAccount for posix users
+object_classes = ["inetOrgPerson", "posixAccount", "shadowAccount"]
 rdn_attr       = "uid"
 search_base    = "ou=people,dc=example,dc=com"
-show           = ["uid", "cn", "sn", "givenName", "mail"]
+show           = ["uid", "cn", "sn", "givenName", "mail", "uidNumber", "gidNumber", "homeDirectory"]
 search_attrs   = ["cn", "uid", "mail"]   # picker searches these attributes
+
+# Defaults fill EMPTY fields on create (operator-entered values are never
+# overwritten). Three value kinds:
+#   literal             -> a fixed string
+#   "/home/{uid}"       -> template; {attr} is substituted from another field
+#   "{next:MIN-MAX}"    -> auto-number; the next free value in [MIN,MAX] across
+#                          the whole directory (refuses if the scan is truncated
+#                          by a server size limit — bind with a high-limit identity)
+[profile.defaults]
+loginShell    = "/bin/bash"
+homeDirectory = "/home/{uid}"
+uidNumber     = "{next:10000-60000}"
+
+# Inline password field: the create/edit form shows a masked, confirm-twice
+# field for `ldap_attribute` (the schema-generated field is suppressed). The
+# cleartext goes to the directory; the LDIF preview shows `********`.
+#   samba = true  -> also write sambaNTPassword/sambaPwdLastSet (needs sambaSamAccount).
+[profile.password]
+ldap_attribute = "userPassword"   # default; omit to use userPassword
+samba          = false
+
+# Value-lookup: Enter on `gidNumber` opens a single-select picker over posixGroups;
+# selecting one writes that group's `gidNumber` scalar into the field (not its DN).
+[profile.lookup.gidNumber]
+object_class = "posixGroup"
+search_base  = "ou=groups,dc=example,dc=com"
+value_attr   = "gidNumber"             # the scalar written into the field
+label        = "cn"                     # how candidates are labelled in the picker
+search_attrs = ["cn"]                   # attributes the picker substring-search matches
 
 [[profile]]
 name           = "group"
