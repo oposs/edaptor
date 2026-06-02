@@ -34,7 +34,7 @@ pub enum RelationRole {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CandidateScope {
     pub base: String,
-    pub object_class: String,
+    pub object_classes: Vec<String>,
     pub search_attrs: Vec<String>,
 }
 
@@ -56,7 +56,7 @@ pub struct ResolvedRelation {
 fn scope_of(p: &EntryProfile) -> CandidateScope {
     CandidateScope {
         base: p.search_base.clone(),
-        object_class: p.object_class.clone(),
+        object_classes: p.object_classes.clone(),
         search_attrs: p.search_attributes(),
     }
 }
@@ -76,9 +76,13 @@ pub fn resolve_relations(
             let candidate = find(&r.candidate)?;
             Some(ResolvedRelation {
                 name: r.name.clone(),
-                holder_oc: holder.object_class.clone(),
+                holder_oc: holder.object_classes.first().cloned().unwrap_or_default(),
                 holder_attr: r.holder_attr.clone(),
-                candidate_oc: candidate.object_class.clone(),
+                candidate_oc: candidate
+                    .object_classes
+                    .first()
+                    .cloned()
+                    .unwrap_or_default(),
                 back_attr: r.back_attr.clone(),
                 candidate_scope: scope_of(candidate),
                 holder_scope: scope_of(holder),
@@ -144,11 +148,14 @@ mod tests {
     fn profile(name: &str, oc: &str, base: &str, search: &[&str]) -> crate::config::EntryProfile {
         crate::config::EntryProfile {
             name: name.into(),
-            object_class: oc.into(),
+            object_classes: vec![oc.into()],
             rdn_attr: "x".into(),
             search_base: base.into(),
             show: vec![],
             search_attrs: search.iter().map(|s| s.to_string()).collect(),
+            defaults: Default::default(),
+            password: None,
+            lookups: Default::default(),
         }
     }
 
@@ -173,10 +180,16 @@ mod tests {
         assert_eq!(r.len(), 1);
         // Holder side (editing group.member) searches CANDIDATES = users.
         assert_eq!(r[0].candidate_scope.base, "ou=people,dc=x");
-        assert_eq!(r[0].candidate_scope.object_class, "inetOrgPerson");
+        assert_eq!(
+            r[0].candidate_scope.object_classes,
+            vec!["inetOrgPerson".to_string()]
+        );
         // Back-ref side (editing user.memberOf) searches HOLDERS = groups.
         assert_eq!(r[0].holder_scope.base, "ou=groups,dc=x");
-        assert_eq!(r[0].holder_scope.object_class, "groupOfNames");
+        assert_eq!(
+            r[0].holder_scope.object_classes,
+            vec!["groupOfNames".to_string()]
+        );
     }
 
     #[test]
@@ -185,7 +198,10 @@ mod tests {
         let ocs = vec!["top".to_string(), "groupOfNames".to_string()];
         // group's `member` → Holder, candidate scope = users.
         let h = holder_lookup(&r, &ocs, "member").unwrap();
-        assert_eq!(h.candidate_scope.object_class, "inetOrgPerson");
+        assert_eq!(
+            h.candidate_scope.object_classes,
+            vec!["inetOrgPerson".to_string()]
+        );
         // a user's `member` is NOT a holder match (wrong objectClass).
         assert!(holder_lookup(&r, &["inetOrgPerson".to_string()], "member").is_none());
     }
@@ -195,7 +211,10 @@ mod tests {
         let r = fixture();
         let ocs = vec!["inetOrgPerson".to_string()];
         let b = backref_lookup(&r, &ocs, "memberOf").unwrap();
-        assert_eq!(b.holder_scope.object_class, "groupOfNames"); // searches groups
+        assert_eq!(
+            b.holder_scope.object_classes,
+            vec!["groupOfNames".to_string()]
+        ); // searches groups
         assert!(backref_lookup(&r, &["groupOfNames".to_string()], "memberOf").is_none());
     }
 

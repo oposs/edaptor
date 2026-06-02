@@ -153,9 +153,12 @@ pub struct RawSubschema {
 pub enum Response {
     Subschema(RawSubschema),
     /// Result of a [`Request::Search`]; `id` echoes the request (D4).
+    /// `truncated` is true when the server capped the result set (rc 3/4/11).
     Entries {
         id: u64,
         entries: Vec<LdapEntry>,
+        /// True when the server hit a size/time/admin limit and the list is partial.
+        truncated: bool,
     },
     /// A failed [`Request::Search`]; `id` echoes the request (D4).
     SearchError {
@@ -364,7 +367,11 @@ fn worker_loop(conn: &mut LdapConn, config: &Config, rx: Receiver<Job>) {
                 size_limit,
             } => {
                 let resp = match run_search(conn, &base, scope, &filter, attrs, size_limit) {
-                    Ok(entries) => Response::Entries { id, entries },
+                    Ok((entries, truncated)) => Response::Entries {
+                        id,
+                        entries,
+                        truncated,
+                    },
                     Err(e) => Response::SearchError {
                         id,
                         msg: format!("{e:#}"),
@@ -490,6 +497,12 @@ fn is_limit_rc(rc: u32) -> bool {
     matches!(rc, 3 | 4 | 11)
 }
 
+/// Maps a result code to a truncation flag. Thin wrapper around `is_limit_rc`
+/// so it can be unit-tested without a live connection.
+fn truncated_from_rc(rc: u32) -> bool {
+    is_limit_rc(rc)
+}
+
 /// Page through the entire subtree under `base` (RFC 2696) and return minimal
 /// per-entry structure data. Bypasses the server's per-request size limit. On a
 /// time/size/admin limit it returns the entries gathered so far paired with a
@@ -558,7 +571,7 @@ fn run_search(
     filter: &str,
     attrs: Vec<String>,
     size_limit: Option<i32>,
-) -> Result<Vec<LdapEntry>> {
+) -> Result<(Vec<LdapEntry>, bool)> {
     if let Some(n) = size_limit {
         // `with_search_options` applies to the next search on this conn.
         conn.with_search_options(SearchOptions::new().sizelimit(n));
@@ -572,11 +585,15 @@ fn run_search(
         return Err(anyhow!(result_code_message(res.rc, &res.text)))
             .with_context(|| format!("searching {base}"));
     }
-    Ok(raw_entries
-        .into_iter()
-        .map(SearchEntry::construct)
-        .map(to_ldap_entry)
-        .collect())
+    let truncated = truncated_from_rc(res.rc);
+    Ok((
+        raw_entries
+            .into_iter()
+            .map(SearchEntry::construct)
+            .map(to_ldap_entry)
+            .collect(),
+        truncated,
+    ))
 }
 
 fn fetch_subschema(conn: &mut LdapConn, base_dn: &str) -> Result<RawSubschema> {
@@ -634,6 +651,15 @@ fn fetch_subschema(conn: &mut LdapConn, base_dn: &str) -> Result<RawSubschema> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn run_search_truncated_flag_tracks_limit_rc() {
+        assert!(truncated_from_rc(4)); // sizeLimitExceeded
+        assert!(truncated_from_rc(3)); // timeLimitExceeded
+        assert!(truncated_from_rc(11)); // adminLimitExceeded
+        assert!(!truncated_from_rc(0)); // clean
+        assert!(!truncated_from_rc(32)); // noSuchObject
+    }
 
     #[test]
     fn limit_rc_triggers_truncation_fallback() {
@@ -702,6 +728,7 @@ mod tests {
             .send(Response::Entries {
                 id: 7,
                 entries: vec![],
+                truncated: false,
             })
             .unwrap();
         match handle.poll() {

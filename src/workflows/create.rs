@@ -9,13 +9,38 @@ use crate::form::changeset::EditEntry;
 use crate::schema::SchemaModel;
 use crate::ui::form::{FormField, FormModel, WidgetSpec};
 
+/// Indices of profiles whose `search_base` matches `container_dn` at a DN-component
+/// boundary: equal, or one is a proper suffix of the other (case-insensitive). So
+/// `ou=people,…` matches but `ou=people2,…` does not. Profiles with an empty
+/// `search_base` never match. Pure.
+pub fn profiles_for_container(profiles: &[EntryProfile], container_dn: &str) -> Vec<usize> {
+    profiles
+        .iter()
+        .enumerate()
+        .filter(|(_, p)| {
+            !p.search_base.is_empty() && dn_boundary_match(&p.search_base, container_dn)
+        })
+        .map(|(i, _)| i)
+        .collect()
+}
+
+/// True when `a` == `b` or one ends with `,<other>` (case-insensitive): a match at
+/// a DN-component boundary, so `ou=people2,dc=x` does NOT match `ou=people,dc=x`.
+fn dn_boundary_match(a: &str, b: &str) -> bool {
+    let (a, b) = (a.trim().to_lowercase(), b.trim().to_lowercase());
+    if a == b {
+        return true;
+    }
+    a.ends_with(&format!(",{b}")) || b.ends_with(&format!(",{a}"))
+}
+
 /// Compose the DN and attribute set for a new entry of `profile`'s object class.
 ///
 /// The DN is `<rdn_attr>=<rdn_value>,<container_dn>`. The attribute set is the
-/// edited form's non-empty attributes merged with the fixed objectClass values
-/// `["top", profile.object_class]` (Decision D2 — the server fills in inherited
-/// superclasses; no objectClass picker in M4) and the RDN attribute (ensuring it
-/// carries the RDN value even if the form omitted it). Pure.
+/// edited form's non-empty attributes merged with the canonical objectClass set
+/// `["top"] + profile.object_classes` (deduped, case-insensitive; the server fills
+/// in inherited superclasses) and the RDN attribute (ensuring it carries the RDN
+/// value even if the form omitted it). Pure.
 pub fn build_add_entry(
     profile: &EntryProfile,
     container_dn: &str,
@@ -37,11 +62,14 @@ pub fn build_add_entry(
         }
     }
 
-    // Fixed objectClass set (canonical; replaces any form-supplied value).
-    attrs.insert(
-        "objectClass".to_string(),
-        vec!["top".to_string(), profile.object_class.clone()],
-    );
+    // Fixed objectClass set: "top" first, then each profile class, deduped case-insensitively.
+    let mut oc: Vec<String> = vec!["top".to_string()];
+    for c in &profile.object_classes {
+        if !oc.iter().any(|x| x.eq_ignore_ascii_case(c)) {
+            oc.push(c.clone());
+        }
+    }
+    attrs.insert("objectClass".to_string(), oc);
 
     // Ensure the RDN attribute carries the RDN value.
     match attrs
@@ -67,7 +95,8 @@ pub fn build_add_entry(
 /// the profile's `show` list first. The title is a placeholder describing the new
 /// entry. Pure.
 pub fn empty_form_for_profile(schema: &SchemaModel, profile: &EntryProfile) -> FormModel {
-    let resolved = schema.effective_attributes(&[profile.object_class.as_str()]);
+    let oc_refs: Vec<&str> = profile.object_classes.iter().map(String::as_str).collect();
+    let resolved = schema.effective_attributes(&oc_refs);
 
     let is_must = |attr: &str| resolved.must.iter().any(|m| m.eq_ignore_ascii_case(attr));
     let already =
@@ -123,11 +152,14 @@ mod tests {
     fn profile() -> EntryProfile {
         EntryProfile {
             name: "Users".to_string(),
-            object_class: "inetOrgPerson".to_string(),
+            object_classes: vec!["inetOrgPerson".to_string()],
             rdn_attr: "uid".to_string(),
             search_base: "ou=people,dc=example,dc=org".to_string(),
             show: vec!["uid".to_string(), "cn".to_string(), "sn".to_string()],
             search_attrs: vec![],
+            defaults: Default::default(),
+            password: None,
+            lookups: Default::default(),
         }
     }
 
@@ -165,6 +197,21 @@ mod tests {
         let oc = attrs.get("objectClass").expect("objectClass present");
         assert!(oc.contains(&"top".to_string()));
         assert!(oc.contains(&"inetOrgPerson".to_string()));
+    }
+
+    #[test]
+    fn build_add_includes_all_object_classes_top_first_deduped() {
+        let mut p = profile();
+        p.object_classes = vec!["inetOrgPerson".into(), "posixAccount".into(), "top".into()];
+        let (_, attrs) = build_add_entry(&p, "ou=people,dc=example,dc=org", "alice", &edited());
+        let oc = attrs.get("objectClass").unwrap();
+        assert_eq!(oc[0], "top");
+        assert!(oc.contains(&"inetOrgPerson".to_string()));
+        assert!(oc.contains(&"posixAccount".to_string()));
+        assert_eq!(
+            oc.iter().filter(|v| v.eq_ignore_ascii_case("top")).count(),
+            1
+        );
     }
 
     #[test]
@@ -230,5 +277,48 @@ mod tests {
         let model = empty_form_for_profile(&schema(), &profile());
         let labels: Vec<&str> = model.fields.iter().map(|f| f.label.as_str()).collect();
         assert_eq!(&labels[..3], &["uid", "cn", "sn"]);
+    }
+
+    fn prof(base: &str) -> EntryProfile {
+        EntryProfile {
+            search_base: base.to_string(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn profiles_for_container_matches_exact_and_descendant() {
+        let ps = vec![
+            prof("ou=people,dc=example,dc=org"),
+            prof("ou=groups,dc=example,dc=org"),
+        ];
+        // Exact container → just that profile.
+        assert_eq!(
+            profiles_for_container(&ps, "ou=people,dc=example,dc=org"),
+            vec![0]
+        );
+        // A parent container offers all profiles whose search_base is under it.
+        assert_eq!(profiles_for_container(&ps, "dc=example,dc=org"), vec![0, 1]);
+    }
+
+    #[test]
+    fn profiles_for_container_rejects_non_boundary_prefix() {
+        let ps = vec![prof("ou=people,dc=example,dc=org")];
+        assert!(profiles_for_container(&ps, "ou=people2,dc=example,dc=org").is_empty());
+    }
+
+    #[test]
+    fn profiles_for_container_is_case_insensitive() {
+        let ps = vec![prof("OU=People,DC=Example,DC=Org")];
+        assert_eq!(
+            profiles_for_container(&ps, "ou=people,dc=example,dc=org"),
+            vec![0]
+        );
+    }
+
+    #[test]
+    fn profiles_for_container_empty_search_base_never_matches() {
+        let ps = vec![prof("")];
+        assert!(profiles_for_container(&ps, "dc=example,dc=org").is_empty());
     }
 }

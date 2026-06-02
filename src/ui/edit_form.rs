@@ -55,6 +55,10 @@ pub struct EditField {
     pub editor: TextState<'static>,
     /// `Some` when this field is a membership relation (opens the picker).
     pub relation: Option<FieldRelation>,
+    /// `Some` when this field is a value-lookup target (`[profile.lookup.<attr>]`),
+    /// so Enter opens a single-select picker that writes the chosen entry's
+    /// `value_attr` scalar into the field.
+    pub lookup: Option<crate::config::LookupSpec>,
 }
 
 impl EditField {
@@ -102,10 +106,17 @@ pub struct ValueEditor {
     pub picker: Option<PickerState>,
     /// The picker's incremental-search box (Unicode-correct edit engine).
     pub search: TextState<'static>,
-    /// Candidate search scope (picker mode only).
+    /// Candidate search scope (membership picker mode only).
     pub scope: Option<CandidateScope>,
-    /// The relation role being edited (picker mode only).
+    /// The relation role being edited (membership picker mode only).
     pub role: Option<RelationRole>,
+    /// `Some` in value-lookup picker mode: the spec driving the single-select
+    /// search and the scalar committed on Enter. Boxed to keep `ValueEditor`
+    /// (and thus the `Overlay` enum) small.
+    pub lookup: Option<Box<crate::config::LookupSpec>>,
+    /// The resolved search base for a lookup picker (membership mode leaves this
+    /// empty and uses `scope.base`).
+    pub base: String,
 }
 
 impl ValueEditor {
@@ -127,6 +138,8 @@ impl ValueEditor {
             search: TextState::new(),
             scope: None,
             role: None,
+            lookup: None,
+            base: String::new(),
         }
     }
 
@@ -147,6 +160,7 @@ impl ValueEditor {
             .map(|dn| Candidate {
                 dn: dn.clone(),
                 label: label_of(dn),
+                value: None,
             })
             .collect();
         ValueEditor {
@@ -160,6 +174,33 @@ impl ValueEditor {
             search: TextState::new(),
             scope: Some(rel.scope.clone()),
             role: Some(rel.role),
+            lookup: None,
+            base: String::new(),
+        }
+    }
+
+    /// Open in single-select VALUE-LOOKUP picker mode over `field`. `base` is the
+    /// already-resolved search base (the spec's `search_base`, or the directory
+    /// root when empty). Selection starts empty — a single-select pick has no
+    /// pre-pinned candidate; Enter commits the chosen entry's `value_attr`.
+    pub fn open_lookup(field_idx: usize, field: &EditField, base: String) -> Self {
+        let spec = field
+            .lookup
+            .as_ref()
+            .expect("open_lookup on a lookup field");
+        ValueEditor {
+            field: field_idx,
+            label: field.label.clone(),
+            ordered: field.ordered,
+            secret: field.secret,
+            rows: Vec::new(),
+            sel: 0,
+            picker: Some(PickerState::new(Vec::new())),
+            search: TextState::new(),
+            scope: None,
+            role: None,
+            lookup: Some(Box::new(spec.clone())),
+            base,
         }
     }
 
@@ -179,6 +220,17 @@ impl ValueEditor {
     }
 }
 
+/// Whether the form edits an existing entry or composes a new one.
+pub enum FormMode {
+    /// Editing an entry already in the directory (diff against `baseline`).
+    Edit,
+    /// Composing a new entry of `profile_idx`, to be added under `container`.
+    Create {
+        profile_idx: usize,
+        container: String,
+    },
+}
+
 /// The editable form for one entry.
 pub struct EditForm {
     /// The entry's distinguished name.
@@ -188,9 +240,16 @@ pub struct EditForm {
     /// Immutable snapshot of the original server values (label → values), the
     /// reference the dirty check compares the current edits against.
     pub baseline: BTreeMap<String, Vec<String>>,
+    /// Edit an existing entry, or compose a new one (Create → Add on save).
+    pub mode: FormMode,
 }
 
 impl EditForm {
+    /// True when this form composes a not-yet-saved new entry.
+    pub fn is_new(&self) -> bool {
+        matches!(self.mode, FormMode::Create { .. })
+    }
+
     /// The entry as currently edited, in the shape the save path's
     /// [`crate::form::changeset::diff`] consumes.
     ///
@@ -330,6 +389,7 @@ pub fn build_edit_form(
                 widget: f.widget.clone(),
                 editor: TextState::new().with_value(seed),
                 relation,
+                lookup: None,
             }
         })
         .collect();
@@ -345,6 +405,61 @@ pub fn build_edit_form(
         dn: model.title.clone(),
         fields,
         baseline,
+        mode: FormMode::Edit,
+    }
+}
+
+/// The two synthetic form-field labels for a password spec: the primary (the
+/// configured LDAP attribute) and the confirmation field.
+pub fn password_field_labels(spec: &crate::config::PasswordSpec) -> (String, String) {
+    (
+        spec.ldap_attribute.clone(),
+        format!("{} (confirm)", spec.ldap_attribute),
+    )
+}
+
+/// Replace any schema-generated field for the password attribute with two masked
+/// password fields (the attribute + a confirmation). Call on a freshly built
+/// create/edit form when the profile declares `[profile.password]`. The schema
+/// password MAY field (if present) is removed first to avoid a duplicate (D8).
+pub fn inject_password_fields(form: &mut EditForm, spec: &crate::config::PasswordSpec) {
+    let (primary, confirm) = password_field_labels(spec);
+    form.fields
+        .retain(|f| !f.label.eq_ignore_ascii_case(&primary));
+    let mk = |label: String| EditField {
+        label,
+        must: false,
+        editable: true,
+        multi: false,
+        secret: true,
+        ordered: false,
+        values: Vec::new(),
+        kind: FieldKind::Text,
+        widget: WidgetSpec::ReadOnlyText,
+        editor: TextState::new(),
+        relation: None,
+        lookup: None,
+    };
+    form.fields.push(mk(primary));
+    form.fields.push(mk(confirm));
+}
+
+/// Tag fields whose attr name matches a `[profile.lookup.<attr>]` entry, so
+/// Enter opens a single-select value-lookup picker. Only editable fields are
+/// tagged (a read-only field offers no picker).
+pub fn tag_lookup_fields(
+    form: &mut EditForm,
+    lookups: &std::collections::BTreeMap<String, crate::config::LookupSpec>,
+) {
+    for field in &mut form.fields {
+        if let Some((_, spec)) = lookups
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case(&field.label))
+        {
+            if field.editable {
+                field.lookup = Some(spec.clone());
+            }
+        }
     }
 }
 
@@ -373,6 +488,26 @@ mod tests {
     use crate::ldap::worker::{LdapEntry, RawSubschema};
     use crate::ui::form::build_form_model;
     use std::collections::BTreeMap;
+
+    fn empty_schema() -> SchemaModel {
+        SchemaModel::from_raw(&crate::ldap::worker::RawSubschema {
+            object_classes: vec![],
+            attribute_types: vec![],
+            ldap_syntaxes: vec![],
+        })
+    }
+
+    #[test]
+    fn editform_mode_defaults_to_edit_and_reports_not_new() {
+        use crate::ui::form::FormModel;
+        let model = FormModel {
+            title: "cn=x,dc=example,dc=org".into(),
+            fields: vec![],
+        };
+        let form = build_edit_form(&model, &empty_schema(), false, &[]);
+        assert!(matches!(form.mode, FormMode::Edit));
+        assert!(!form.is_new());
+    }
 
     /// A `FormModel` for a group entry: objectClass=groupOfNames, with a
     /// multi-valued `member` field. The objectClass field must carry the value
@@ -436,19 +571,25 @@ mod tests {
         let profiles = vec![
             EntryProfile {
                 name: "group".into(),
-                object_class: "groupOfNames".into(),
+                object_classes: vec!["groupOfNames".into()],
                 rdn_attr: "cn".into(),
                 search_base: "ou=groups".into(),
                 show: vec![],
                 search_attrs: vec!["cn".into()],
+                defaults: Default::default(),
+                password: None,
+                lookups: Default::default(),
             },
             EntryProfile {
                 name: "user".into(),
-                object_class: "inetOrgPerson".into(),
+                object_classes: vec!["inetOrgPerson".into()],
                 rdn_attr: "uid".into(),
                 search_base: "ou=people".into(),
                 show: vec![],
                 search_attrs: vec!["uid".into()],
+                defaults: Default::default(),
+                password: None,
+                lookups: Default::default(),
             },
         ];
         let rels = resolve_relations(
@@ -470,7 +611,8 @@ mod tests {
             rel.role,
             crate::config::relation::RelationRole::Holder
         ));
-        assert_eq!(rel.scope.object_class, "inetOrgPerson"); // searches users
+        assert_eq!(rel.scope.object_classes, vec!["inetOrgPerson".to_string()]);
+        // searches users
     }
 
     fn schema() -> SchemaModel {
@@ -624,7 +766,7 @@ mod tests {
         use crate::config::relation::{CandidateScope, RelationRole};
         let scope = CandidateScope {
             base: "ou=people".into(),
-            object_class: "inetOrgPerson".into(),
+            object_classes: vec!["inetOrgPerson".into()],
             search_attrs: vec!["uid".into()],
         };
         let field = EditField {
@@ -642,6 +784,7 @@ mod tests {
                 role: RelationRole::Holder,
                 scope: scope.clone(),
             }),
+            lookup: None,
         };
         // labels resolved via a closure (DN→label); here identity.
         let ve = ValueEditor::open_picker(0, &field, |dn| dn.to_string());
@@ -650,7 +793,10 @@ mod tests {
             picker.selected_dns(),
             vec!["uid=a,ou=people".to_string(), "uid=b,ou=people".to_string()]
         );
-        assert_eq!(ve.scope.unwrap().object_class, "inetOrgPerson");
+        assert_eq!(
+            ve.scope.unwrap().object_classes,
+            vec!["inetOrgPerson".to_string()]
+        );
     }
 
     /// Build a minimal user-form with a BackRef `memberOf` field. The field has
@@ -661,7 +807,7 @@ mod tests {
         use crate::config::relation::{CandidateScope, RelationRole};
         let scope = CandidateScope {
             base: "ou=groups".into(),
-            object_class: "groupOfNames".into(),
+            object_classes: vec!["groupOfNames".into()],
             search_attrs: vec!["cn".into()],
         };
         let field = EditField {
@@ -679,6 +825,7 @@ mod tests {
                 role: RelationRole::BackRef,
                 scope,
             }),
+            lookup: None,
         };
         let mut baseline = BTreeMap::new();
         baseline.insert("memberOf".to_string(), baseline_vals);
@@ -686,6 +833,7 @@ mod tests {
             dn: "uid=ann,ou=people,dc=example,dc=org".to_string(),
             fields: vec![field],
             baseline,
+            mode: FormMode::Edit,
         }
     }
 
@@ -720,5 +868,120 @@ mod tests {
 
         // And to_edit_entry already omits backref fields.
         assert!(!edited.attrs.contains_key("memberOf"));
+    }
+
+    #[test]
+    fn inject_password_replaces_schema_field_with_two_masked_fields() {
+        let plain = |label: &str| EditField {
+            label: label.into(),
+            must: false,
+            editable: true,
+            multi: false,
+            secret: false,
+            ordered: false,
+            values: vec![],
+            kind: crate::schema::FieldKind::Text,
+            widget: crate::ui::form::WidgetSpec::ReadOnlyText,
+            editor: TextState::new(),
+            relation: None,
+            lookup: None,
+        };
+        let mut form = EditForm {
+            dn: "uid=alice,ou=people,dc=example,dc=org".into(),
+            fields: vec![plain("cn"), plain("userPassword")],
+            baseline: Default::default(),
+            mode: FormMode::Edit,
+        };
+        let spec = crate::config::PasswordSpec {
+            ldap_attribute: "userPassword".into(),
+            samba: false,
+        };
+        inject_password_fields(&mut form, &spec);
+        // Exactly one primary userPassword field (the schema one was removed).
+        let primaries: Vec<&EditField> = form
+            .fields
+            .iter()
+            .filter(|f| f.label.eq_ignore_ascii_case("userPassword"))
+            .collect();
+        assert_eq!(primaries.len(), 1);
+        assert!(form
+            .fields
+            .iter()
+            .any(|f| f.label == "userPassword (confirm)"));
+        // Both password fields are masked.
+        assert!(form
+            .fields
+            .iter()
+            .filter(|f| f.label.to_lowercase().contains("userpassword"))
+            .all(|f| f.secret && f.editable && !f.multi));
+        // The unrelated field survives.
+        assert!(form.fields.iter().any(|f| f.label == "cn"));
+    }
+
+    #[test]
+    fn tag_lookup_fields_tags_matching_editable_field_only() {
+        let plain = |label: &str, editable: bool| EditField {
+            label: label.into(),
+            must: false,
+            editable,
+            multi: false,
+            secret: false,
+            ordered: false,
+            values: vec![],
+            kind: crate::schema::FieldKind::Text,
+            widget: crate::ui::form::WidgetSpec::ReadOnlyText,
+            editor: TextState::new(),
+            relation: None,
+            lookup: None,
+        };
+        let mut form = EditForm {
+            dn: "uid=alice,ou=people,dc=example,dc=org".into(),
+            // gidNumber (editable, matches), cn (no lookup), homeDir (read-only).
+            fields: vec![
+                plain("gidNumber", true),
+                plain("cn", true),
+                plain("homeDir", false),
+            ],
+            baseline: Default::default(),
+            mode: FormMode::Edit,
+        };
+        let mut lookups = std::collections::BTreeMap::new();
+        lookups.insert(
+            // Mixed-case key proves the match is case-insensitive.
+            "GIDNUMBER".to_string(),
+            crate::config::LookupSpec {
+                object_class: "posixGroup".into(),
+                search_base: String::new(),
+                value_attr: "gidNumber".into(),
+                label: "cn".into(),
+                search_attrs: vec!["cn".into()],
+            },
+        );
+        // A lookup for a read-only field must not tag it.
+        lookups.insert(
+            "homeDir".to_string(),
+            crate::config::LookupSpec {
+                object_class: "x".into(),
+                search_base: String::new(),
+                value_attr: "x".into(),
+                label: String::new(),
+                search_attrs: vec![],
+            },
+        );
+        tag_lookup_fields(&mut form, &lookups);
+        let f = |name: &str| form.fields.iter().find(|f| f.label == name).unwrap();
+        assert!(
+            f("gidNumber").lookup.is_some(),
+            "matching editable field is tagged"
+        );
+        assert_eq!(
+            f("gidNumber").lookup.as_ref().unwrap().value_attr,
+            "gidNumber"
+        );
+        assert!(f("cn").lookup.is_none(), "non-matching field stays None");
+        assert!(
+            f("homeDir").lookup.is_none(),
+            "read-only field is not tagged even with a matching lookup"
+        );
     }
 }

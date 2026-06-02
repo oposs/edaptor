@@ -20,21 +20,34 @@ pub fn escape_filter(s: &str) -> String {
 }
 
 /// Build the candidate search filter. Empty `term` → objectClass only; otherwise
-/// AND the objectClass with an OR of `attr=*term*` over each search attribute.
-pub fn build_member_filter(object_class: &str, search_attrs: &[String], term: &str) -> String {
-    let oc = format!("(objectClass={})", object_class);
-    if term.is_empty() {
-        return oc;
-    }
-    if search_attrs.is_empty() {
-        return oc;
-    }
-    let esc = escape_filter(term);
-    let ors: String = search_attrs
+/// AND each objectClass with an OR of `attr=*term*` over each search attribute.
+///
+/// Single class, no term: `(objectClass=X)` — bare, no outer `(&...)`.
+/// Otherwise: `(&(objectClass=a)(objectClass=b)(|(attr=*term*)))`.
+pub fn build_member_filter(
+    object_classes: &[String],
+    search_attrs: &[String],
+    term: &str,
+) -> String {
+    let oc_filters: String = object_classes
         .iter()
-        .map(|a| format!("({a}=*{esc}*)"))
+        .map(|oc| format!("(objectClass={})", escape_filter(oc)))
         .collect();
-    format!("(&{oc}(|{ors}))")
+    let has_term_group = !term.is_empty() && !search_attrs.is_empty();
+    // Single class, no term group: return bare filter (preserves legacy shape).
+    if object_classes.len() == 1 && !has_term_group {
+        return oc_filters;
+    }
+    if has_term_group {
+        let esc = escape_filter(term);
+        let ors: String = search_attrs
+            .iter()
+            .map(|a| format!("({a}=*{esc}*)"))
+            .collect();
+        format!("(&{oc_filters}(|{ors}))")
+    } else {
+        format!("(&{oc_filters})")
+    }
 }
 
 /// A candidate's display label: first `cn` value, else the raw DN.
@@ -47,10 +60,28 @@ pub fn candidate_label(dn: &str, attrs: &BTreeMap<String, Vec<String>>) -> Strin
 }
 
 /// One candidate entry: the DN that is stored, and the human label that is shown.
+/// For value-lookup pickers `value` also carries the scalar attribute (the
+/// `value_attr`) committed on Enter; membership pickers leave it `None`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Candidate {
     pub dn: String,
     pub label: String,
+    /// The scalar to commit for a value-lookup pick (the chosen entry's
+    /// `value_attr`); `None` for membership candidates and when absent/empty.
+    pub value: Option<String>,
+}
+
+/// Pull the scalar `value_attr` from a candidate's attributes (first value).
+pub fn pick_value(
+    attrs: &std::collections::BTreeMap<String, Vec<String>>,
+    value_attr: &str,
+) -> Option<String> {
+    attrs
+        .iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case(value_attr))
+        .and_then(|(_, vs)| vs.first())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
 }
 
 /// A row as displayed in the picker: a candidate plus whether it is selected.
@@ -163,6 +194,7 @@ mod tests {
         Candidate {
             dn: dn.into(),
             label: dn.into(),
+            value: None,
         }
     }
 
@@ -226,20 +258,42 @@ mod tests {
 
     #[test]
     fn builds_or_filter_with_objectclass_and_term() {
-        let f = build_member_filter("inetOrgPerson", &["uid".into(), "cn".into()], "ann");
+        let f = build_member_filter(
+            &["inetOrgPerson".into()],
+            &["uid".into(), "cn".into()],
+            "ann",
+        );
         assert_eq!(f, "(&(objectClass=inetOrgPerson)(|(uid=*ann*)(cn=*ann*)))");
     }
 
     #[test]
     fn empty_term_filters_objectclass_only() {
-        let f = build_member_filter("groupOfNames", &["cn".into()], "");
+        let f = build_member_filter(&["groupOfNames".into()], &["cn".into()], "");
         assert_eq!(f, "(objectClass=groupOfNames)");
     }
 
     #[test]
     fn empty_search_attrs_with_term_returns_oc_only() {
-        let f = build_member_filter("inetOrgPerson", &[], "ann");
+        let f = build_member_filter(&["inetOrgPerson".into()], &[], "ann");
         assert_eq!(f, "(objectClass=inetOrgPerson)");
+    }
+
+    #[test]
+    fn member_filter_ands_multiple_object_classes() {
+        let f = build_member_filter(
+            &["posixAccount".into(), "inetOrgPerson".into()],
+            &["cn".into(), "uid".into()],
+            "ali",
+        );
+        assert!(f.starts_with("(&(objectClass=posixAccount)(objectClass=inetOrgPerson)"));
+        assert!(f.contains("(cn=*ali*)"));
+        assert!(f.contains("(uid=*ali*)"));
+    }
+
+    #[test]
+    fn member_filter_single_class_unchanged_shape() {
+        let f = build_member_filter(&["inetOrgPerson".into()], &["cn".into()], "bob");
+        assert_eq!(f, "(&(objectClass=inetOrgPerson)(|(cn=*bob*)))");
     }
 
     #[test]
@@ -266,5 +320,28 @@ mod tests {
             !p2.truncated,
             "Default impl should also set truncated=false"
         );
+    }
+
+    #[test]
+    fn pick_value_returns_scalar_case_insensitive() {
+        use std::collections::BTreeMap;
+        let mut attrs = BTreeMap::new();
+        attrs.insert("gidNumber".to_string(), vec!["1234".to_string()]);
+        // Attr name lookup is case-insensitive.
+        assert_eq!(pick_value(&attrs, "gidnumber"), Some("1234".to_string()));
+        assert_eq!(pick_value(&attrs, "gidNumber"), Some("1234".to_string()));
+    }
+
+    #[test]
+    fn pick_value_trims_and_returns_none_when_absent_or_empty() {
+        use std::collections::BTreeMap;
+        let mut attrs = BTreeMap::new();
+        attrs.insert("gidNumber".to_string(), vec!["  42  ".to_string()]);
+        attrs.insert("blank".to_string(), vec!["   ".to_string()]);
+        assert_eq!(pick_value(&attrs, "gidNumber"), Some("42".to_string()));
+        // Absent attribute → None.
+        assert_eq!(pick_value(&attrs, "uidNumber"), None);
+        // Present but whitespace-only → None.
+        assert_eq!(pick_value(&attrs, "blank"), None);
     }
 }

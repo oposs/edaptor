@@ -27,11 +27,11 @@ use crate::form::validate::{plan_save, validate, SavePlan, ValidationError};
 use crate::ldap::ldif::{render_add, render_changeset, render_changesets};
 use crate::ldap::worker::{Request, Response, SearchScope, StructureNodeRaw, WorkerHandle};
 use crate::schema::SchemaModel;
-use crate::ui::edit_form::{build_edit_form, value_set_eq, EditForm, ValueEditor};
+use crate::ui::edit_form::{build_edit_form, value_set_eq, EditForm, FormMode, ValueEditor};
 use crate::ui::form_state::{guard_decision, GuardChoice, GuardOutcome};
 use crate::ui::picker::PICKER_SEARCH_CAP;
 use crate::ui::view;
-use crate::workflows::create::{build_add_entry, empty_form_for_profile};
+use crate::workflows::create::{build_add_entry, empty_form_for_profile, profiles_for_container};
 use crate::workflows::read_flow::{ReadFlow, ReadOutcome};
 use crate::workflows::structure::{Structure, StructureInput};
 
@@ -73,17 +73,14 @@ pub enum Overlay {
         /// What to do once the guard is resolved.
         intent: GuardIntent,
     },
-    /// The create-entry form: an editable form hosted in an overlay, reusing the
-    /// same [`EditForm`] widget as pane 3 (one editable-form impl, two hosts).
-    CreateForm {
-        /// The editable form for the new entry.
-        form: EditForm,
-        /// The focused field index within the create form.
-        focus: usize,
-        /// The profile index the new entry is created for.
-        profile: usize,
-        /// The container DN the entry will be added under.
-        container: String,
+    /// F7 profile chooser: pick which template to create. Each entry is the
+    /// profile's `(index, name)`; `sel` is the highlighted row. The name is carried
+    /// here so the render layer (which lacks `profiles`) can show it.
+    ChooseProfile {
+        /// The offered profiles as `(profile_index, name)`, in display order.
+        entries: Vec<(usize, String)>,
+        /// The highlighted row (into `entries`).
+        sel: usize,
     },
 }
 
@@ -125,6 +122,12 @@ pub enum PendingAction {
     Delete {
         /// The DN to delete.
         dn: String,
+    },
+    /// Open a Create-mode form for the chosen profile (resolved from the F7
+    /// profile chooser, which lacks the schema/profiles to build the form itself).
+    OpenCreate {
+        /// The chosen profile index.
+        profile_idx: usize,
     },
     /// A resolved dirty-form guard: perform `intent`, running the save flow first
     /// when `save` is true (Save) or proceeding directly when false (Discard).
@@ -332,6 +335,7 @@ fn event_loop(
                 worker,
                 read_flow,
                 &mut structure,
+                profiles,
                 &mut post,
                 &mut pending_followups,
             );
@@ -343,12 +347,14 @@ fn event_loop(
             if let Event::Key(key) = event::read()? {
                 if key.kind != KeyEventKind::Release {
                     if app.overlay.is_some() {
-                        if let Some(action) = overlay_key(app, key, read_flow, profiles) {
+                        if let Some(action) = overlay_key(app, key) {
                             execute_pending(
                                 app,
                                 action,
                                 worker,
                                 read_flow,
+                                profiles,
+                                base_dn,
                                 &mut post,
                                 &mut pending_followups,
                             );
@@ -385,25 +391,39 @@ fn event_loop(
 /// Feed a polled worker [`Response`] to the write-tracking maps and the read
 /// flow. Writes are handled first (re-read after a save); otherwise a built form
 /// is installed (only when its DN matches the current selection — see below).
+#[allow(clippy::too_many_arguments)] // central response handler; each arg is needed
 fn handle_worker_response(
     app: &mut App,
     resp: &Response,
     worker: &WorkerHandle,
     read_flow: &mut ReadFlow,
     structure: &mut Structure,
+    profiles: &[EntryProfile],
     post: &mut HashMap<u64, PostWrite>,
     pending_followups: &mut HashMap<u64, (String, Vec<ModOp>, Option<String>)>,
 ) {
     match resp {
         // Intercept picker search results before the read-flow routing.
-        Response::Entries { id, entries } if app.picker_search_id == Some(*id) => {
+        Response::Entries { id, entries, .. } if app.picker_search_id == Some(*id) => {
             if let Some(Overlay::ValueEditor(ve)) = app.overlay.as_mut() {
+                // A lookup picker carries the scalar `value_attr` (committed on
+                // Enter) and labels via the spec's `label` attr; membership
+                // pickers keep `value: None` and label via `cn`.
+                let lookup = ve.lookup.clone();
                 if let Some(p) = ve.picker.as_mut() {
                     let results = entries
                         .iter()
-                        .map(|e| crate::ui::picker::Candidate {
-                            dn: e.dn.clone(),
-                            label: crate::ui::picker::candidate_label(&e.dn, &e.attrs),
+                        .map(|e| match &lookup {
+                            Some(spec) => crate::ui::picker::Candidate {
+                                dn: e.dn.clone(),
+                                label: candidate_label_for_lookup(spec, &e.dn, &e.attrs),
+                                value: crate::ui::picker::pick_value(&e.attrs, &spec.value_attr),
+                            },
+                            None => crate::ui::picker::Candidate {
+                                dn: e.dn.clone(),
+                                label: crate::ui::picker::candidate_label(&e.dn, &e.attrs),
+                                value: None,
+                            },
                         })
                         .collect();
                     p.set_results(results);
@@ -453,6 +473,16 @@ fn handle_worker_response(
                 }
                 Some(PostWrite::Created { parent, input }) => {
                     app.status = "Created.".to_string();
+                    // The pane-3 create form has been committed — drop it so the
+                    // clobber guard no longer blocks reads and `reconcile` re-reads
+                    // the current tree selection into the form pane (the new entry
+                    // now appears in the leaf list).
+                    if app.form.as_ref().map(|f| f.is_new()).unwrap_or(false) {
+                        app.form = None;
+                        app.form_focus = 0;
+                        app.form_scroll = 0;
+                        app.last_seen_leaf = None;
+                    }
                     // A new child may turn a former leaf into a branch → rebuild
                     // the tree; always refresh the leaf rows.
                     if structure.add_child(&parent, input) {
@@ -498,17 +528,13 @@ fn handle_worker_response(
                 // else a stale entry would flash (and clobber edits). Also defer
                 // installation while an editing overlay (create / value editor) is
                 // open, so a late base-read cannot replace `app.form` under it.
-                let current = app
-                    .last_seen_leaf
-                    .as_deref()
-                    .map(|dn| dn.eq_ignore_ascii_case(&model.title))
-                    .unwrap_or(false);
-                if current && app.overlay.is_none() {
-                    app.form = Some(build_edit_form(
+                if should_install_form(app, &model.title) {
+                    app.form = Some(build_loaded_form(
                         &model,
                         read_flow.schema(),
                         app.read_only,
                         &app.relations,
+                        profiles,
                     ));
                     app.form_focus = 0;
                     app.form_scroll = 0;
@@ -581,7 +607,7 @@ fn dispatch_key(app: &mut App, key: KeyEvent, structure: &Structure) -> Option<U
         match key.code {
             KeyCode::F(2) => return Some(UiAction::FormSave),
             KeyCode::F(3) => return Some(UiAction::FormCancel),
-            KeyCode::F(7) => return Some(UiAction::NewEntry(0)),
+            KeyCode::F(7) => return Some(UiAction::NewEntryChoose),
             // F8 deletes the entry currently shown in the form pane (spec §12).
             KeyCode::F(8) => {
                 return app
@@ -636,9 +662,16 @@ fn dispatch_key(app: &mut App, key: KeyEvent, structure: &Structure) -> Option<U
                 KeyCode::PageDown => {
                     app.form_focus = (app.form_focus + 10).min(n.saturating_sub(1))
                 }
-                // Enter on an editable multi-value field opens the value-editor
-                // popup; on a single field it is a no-op.
+                // Enter opens the value-editor popup: free-text rows for a plain
+                // multi-value field, a picker for a relation field, or a
+                // single-select value-lookup picker for a `lookup`-tagged field
+                // (which may be single-valued). Plain single fields: a no-op.
                 KeyCode::Enter => open_value_editor(app, structure),
+                // Esc cancels a create form (parity with the old modal's Esc); on
+                // an edit form Esc is a no-op (F3 reverts edits).
+                KeyCode::Esc if app.form.as_ref().map(|f| f.is_new()).unwrap_or(false) => {
+                    return Some(UiAction::FormCancel)
+                }
                 // Otherwise edit the focused single-value field inline.
                 _ => edit_focused_field(app, key),
             }
@@ -670,7 +703,20 @@ fn open_value_editor(app: &mut App, structure: &Structure) {
     let Some(field) = form.fields.get(focus) else {
         return;
     };
-    if field.relation.is_some() && field.multi && field.editable {
+    if let Some(spec) = field.lookup.as_ref().filter(|_| field.editable) {
+        // Value-lookup picker: single-select, fires WITHOUT requiring `multi` (a
+        // scalar lookup field like gidNumber is single-valued). Resolve the base
+        // from the spec, falling back to the directory root when empty.
+        let base = if spec.search_base.is_empty() {
+            structure.root_dn().to_string()
+        } else {
+            spec.search_base.clone()
+        };
+        let ve = ValueEditor::open_lookup(focus, field, base);
+        app.overlay = Some(Overlay::ValueEditor(ve));
+        app.picker_last_query.clear();
+        app.picker_search_id = None;
+    } else if field.relation.is_some() && field.multi && field.editable {
         // Picker mode: label DNs from the loaded structure (fallback = the DN).
         let label_of = |dn: &str| {
             structure
@@ -688,9 +734,17 @@ fn open_value_editor(app: &mut App, structure: &Structure) {
     }
 }
 
-/// Keys inside the picker: Esc/F3 cancel; F2 commit selected DNs to the field;
-/// ↑↓ move; Space toggle; any other key edits the search box (the tick-based
-/// `service_picker_search` turns a changed query into a live candidate search).
+/// Key handling for the in-overlay picker. The two picker modes commit
+/// differently and the keys are gated on which is active:
+/// - Membership (`lookup.is_none()`): Space toggles the highlighted candidate
+///   (multi-select); F2 commits the selected DN set into the field; Enter is
+///   ignored.
+/// - Value-lookup (`lookup.is_some()`): single-select; Enter commits the
+///   highlighted candidate's scalar `value_attr` into the field; F2 is ignored
+///   and Space is a literal search character (group names may contain spaces).
+///
+/// ↑↓ move the cursor; Esc / F3 cancel. Any other key edits the search box (the
+/// tick-based `service_picker_search` turns a changed query into a live search).
 fn picker_editor_key(app: &mut App, key: KeyEvent) {
     match key.code {
         KeyCode::Esc | KeyCode::F(3) => {
@@ -698,17 +752,57 @@ fn picker_editor_key(app: &mut App, key: KeyEvent) {
             app.picker_search_id = None;
             app.picker_last_query.clear();
         }
-        KeyCode::F(2) => {
-            if let Some(Overlay::ValueEditor(ve)) = app.overlay.take() {
-                if let Some(picker) = &ve.picker {
-                    if let Some(field) = app.form.as_mut().and_then(|f| f.fields.get_mut(ve.field))
-                    {
-                        field.values = picker.selected_dns();
+        KeyCode::Enter => {
+            // Single-select value-lookup commit: write the chosen entry's scalar
+            // `value_attr` into the target field's inline editor. A single-value
+            // field saves from `editor`, NOT `values`. Membership pickers ignore
+            // Enter (their commit is F2) — gate strictly on `lookup.is_some()`.
+            if matches!(&app.overlay, Some(Overlay::ValueEditor(ve)) if ve.lookup.is_some()) {
+                if let Some(Overlay::ValueEditor(ve)) = app.overlay.take() {
+                    if let Some(picker) = &ve.picker {
+                        let chosen = picker
+                            .visible()
+                            .get(picker.cursor)
+                            .and_then(|row| row.candidate.value.clone());
+                        if let Some(v) = chosen {
+                            if let Some(field) =
+                                app.form.as_mut().and_then(|f| f.fields.get_mut(ve.field))
+                            {
+                                // Mirror the scalar into BOTH `editor` (read by a
+                                // single-value field's `current_values`) and `values`
+                                // (read by a multi-value field's), so the picked value
+                                // is seen regardless of the field's arity. Note this
+                                // REPLACES any existing `values` with the single pick —
+                                // it does not append. That is correct here: a
+                                // value-lookup's `value_attr` is scalar, so the field
+                                // holds exactly one value, never a growing list.
+                                field.editor = TextState::new().with_value(v.clone());
+                                field.values = vec![v];
+                            }
+                        }
                     }
+                    app.picker_search_id = None;
+                    app.picker_last_query.clear();
                 }
             }
-            app.picker_search_id = None;
-            app.picker_last_query.clear();
+        }
+        KeyCode::F(2) => {
+            // F2 is the MEMBERSHIP commit (writes the selected DN set). A lookup
+            // picker commits a scalar via Enter and never builds a DN selection, so
+            // ignore F2 there — never let a DN leak into a scalar value field.
+            if matches!(&app.overlay, Some(Overlay::ValueEditor(ve)) if ve.lookup.is_none()) {
+                if let Some(Overlay::ValueEditor(ve)) = app.overlay.take() {
+                    if let Some(picker) = &ve.picker {
+                        if let Some(field) =
+                            app.form.as_mut().and_then(|f| f.fields.get_mut(ve.field))
+                        {
+                            field.values = picker.selected_dns();
+                        }
+                    }
+                }
+                app.picker_search_id = None;
+                app.picker_last_query.clear();
+            }
         }
         KeyCode::Up => {
             if let Some(Overlay::ValueEditor(ve)) = app.overlay.as_mut() {
@@ -725,8 +819,12 @@ fn picker_editor_key(app: &mut App, key: KeyEvent) {
             }
         }
         KeyCode::Char(' ') => {
+            // Space toggles a MEMBERSHIP selection. A lookup picker is single-select
+            // (commit via Enter), so Space is a literal search character there.
             if let Some(Overlay::ValueEditor(ve)) = app.overlay.as_mut() {
-                if let Some(p) = ve.picker.as_mut() {
+                if ve.lookup.is_some() {
+                    ve.search.handle_key_event(key);
+                } else if let Some(p) = ve.picker.as_mut() {
                     p.toggle_cursor();
                 }
             }
@@ -824,7 +922,36 @@ fn service_picker_search(app: &mut App, worker: &WorkerHandle) {
         return;
     }
     app.picker_last_query = query.clone();
-    let Some(scope) = ve.scope.clone() else {
+
+    // Resolve the search parameters from whichever picker mode is active. A
+    // value-lookup picker carries a `LookupSpec` (and no `CandidateScope`), so it
+    // must be handled BEFORE the membership `scope` guard or it never searches.
+    let params = if let Some(spec) = ve.lookup.as_ref() {
+        let search_attrs = effective_search_attrs(spec);
+        let filter = crate::ui::picker::build_member_filter(
+            std::slice::from_ref(&spec.object_class),
+            &search_attrs,
+            &query,
+        );
+        // Request the scalar to store, the display label, and the search attrs.
+        let mut attrs = vec![spec.value_attr.clone()];
+        if !spec.label.is_empty() {
+            attrs.push(spec.label.clone());
+        }
+        attrs.extend(spec.search_attrs.iter().cloned());
+        dedupe_ci(&mut attrs);
+        Some((ve.base.clone(), filter, attrs))
+    } else {
+        ve.scope.as_ref().map(|scope| {
+            let filter = crate::ui::picker::build_member_filter(
+                &scope.object_classes,
+                &scope.search_attrs,
+                &query,
+            );
+            (scope.base.clone(), filter, vec!["cn".to_string()])
+        })
+    };
+    let Some((base, filter, attrs)) = params else {
         return;
     };
 
@@ -840,15 +967,59 @@ fn service_picker_search(app: &mut App, worker: &WorkerHandle) {
     }
     let id = next_id();
     app.picker_search_id = Some(id);
-    let filter =
-        crate::ui::picker::build_member_filter(&scope.object_class, &scope.search_attrs, &query);
     let _ = worker.submit(Request::Search {
         id,
-        base: scope.base,
+        base,
         scope: SearchScope::Subtree,
         filter,
-        attrs: vec!["cn".to_string()],
+        attrs,
         size_limit: Some(PICKER_SEARCH_CAP),
+    });
+}
+
+/// A lookup candidate's display label: the spec's `label` attribute's first
+/// value when configured and present, else the generic `cn`/DN fallback.
+fn candidate_label_for_lookup(
+    spec: &crate::config::LookupSpec,
+    dn: &str,
+    attrs: &std::collections::BTreeMap<String, Vec<String>>,
+) -> String {
+    if !spec.label.is_empty() {
+        if let Some((_, vs)) = attrs
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case(&spec.label))
+        {
+            if let Some(v) = vs.first() {
+                return v.clone();
+            }
+        }
+    }
+    crate::ui::picker::candidate_label(dn, attrs)
+}
+
+/// Effective substring-search attributes for a value-lookup: the spec's
+/// `search_attrs` if any, else its `label` (when set), else `["cn"]`.
+fn effective_search_attrs(spec: &crate::config::LookupSpec) -> Vec<String> {
+    if !spec.search_attrs.is_empty() {
+        spec.search_attrs.clone()
+    } else if !spec.label.is_empty() {
+        vec![spec.label.clone()]
+    } else {
+        vec!["cn".to_string()]
+    }
+}
+
+/// Case-insensitively dedupe a list of attribute names in place, keeping first
+/// occurrence and dropping empties.
+fn dedupe_ci(attrs: &mut Vec<String>) {
+    let mut seen: Vec<String> = Vec::new();
+    attrs.retain(|a| {
+        if a.is_empty() || seen.iter().any(|s| s.eq_ignore_ascii_case(a)) {
+            false
+        } else {
+            seen.push(a.clone());
+            true
+        }
     });
 }
 
@@ -869,27 +1040,34 @@ fn handle_action(
             let Some(form) = app.form.as_ref() else {
                 return;
             };
+            if form.is_new() {
+                prepare_create(app, worker, read_flow, profiles, base_dn);
+                return;
+            }
             // Try the combined membership path first; fall back to the single-entry
             // path when no backref field actually changed. No guard intent here —
             // a plain F2 save has nothing to resume afterward.
-            if let Some(ov) = combined_save_overlay(form, read_flow.schema(), &app.relations, None)
+            if let Some(ov) =
+                combined_save_overlay(form, read_flow.schema(), &app.relations, profiles, None)
             {
                 app.overlay = Some(ov);
                 return;
             }
-            // Normal single-entry save — strip backref labels from baseline so
-            // `diff` does not emit a spurious Delete for server-maintained attrs.
-            let backref_lbls = form.backref_labels();
-            let mut original = EditEntry {
-                dn: form.dn.clone(),
-                attrs: form.baseline.clone(),
+            // Normal single-entry save (folds in any password change when the
+            // entry matches a password-profile).
+            let prep = match prepare_edit_save(
+                form,
+                read_flow.schema(),
+                profiles,
+                now_unix_secs_or_zero(),
+            ) {
+                Ok(p) => p,
+                Err(text) => {
+                    app.overlay = Some(Overlay::Error { text });
+                    return;
+                }
             };
-            for l in &backref_lbls {
-                original.attrs.remove(l);
-            }
-            let edited = form.to_edit_entry();
-            let object_classes = object_classes_of(form);
-            match prepare_save(read_flow.schema(), &original, &edited, &object_classes) {
+            match prep {
                 PrepareSave::Ready { plan, dn, ldif } => {
                     app.overlay = Some(Overlay::Confirm {
                         title: "Apply these changes?".to_string(),
@@ -911,35 +1089,24 @@ fn handle_action(
             }
         }
         UiAction::FormCancel => revert_form(app),
-        UiAction::NewEntry(i) => {
-            // Build an empty schema-driven form for the profile and host it in a
-            // create overlay (reuses the EditForm widget). Submission happens on
-            // F2 → validate → LDIF confirm → Add (see create_form_key).
-            if let Some(profile) = profiles.get(i) {
-                let container = if profile.search_base.is_empty() {
-                    structure.root_dn().to_string()
-                } else {
-                    profile.search_base.clone()
-                };
-                let model = empty_form_for_profile(read_flow.schema(), profile);
-                let mut form = build_edit_form(&model, read_flow.schema(), false, &[]);
-                // Create takes ONE value per attribute typed inline — even for
-                // schema-multi-valued attributes (cn, sn on inetOrgPerson are the
-                // RDN + a MUST and are multi-valued; without this they would render
-                // as `‹0 set›` and be unfillable). Treating every editable field as
-                // single-value inline lets the mandatory attributes be entered; a
-                // second value is added afterwards via the pane-3 popup.
-                for field in &mut form.fields {
-                    if field.editable {
-                        field.multi = false;
-                    }
+        UiAction::NewEntry(i) => open_create_form(app, read_flow, profiles, i, base_dn),
+        UiAction::NewEntryChoose => {
+            // Offer profiles whose search_base matches the current container;
+            // fall back to all profiles so F7 always works.
+            let mut matches = profiles_for_container(profiles, &app.current_branch);
+            if matches.is_empty() {
+                matches = (0..profiles.len()).collect();
+            }
+            match matches.len() {
+                0 => {}
+                1 => open_create_form(app, read_flow, profiles, matches[0], base_dn),
+                _ => {
+                    let entries = matches
+                        .iter()
+                        .map(|&i| (i, profiles[i].name.clone()))
+                        .collect();
+                    app.overlay = Some(Overlay::ChooseProfile { entries, sel: 0 })
                 }
-                app.overlay = Some(Overlay::CreateForm {
-                    form,
-                    focus: 0,
-                    profile: i,
-                    container,
-                });
             }
         }
         UiAction::DeleteEntry(dn) => {
@@ -992,9 +1159,33 @@ fn refresh_structure(
     }
 }
 
+/// Whether a freshly base-read form for `title` should replace `app.form` now:
+/// it must match the entry the user is currently on, no overlay may be open, and
+/// an in-progress (unsaved) create form must not be clobbered by a late read of
+/// the previous selection.
+fn should_install_form(app: &App, title: &str) -> bool {
+    app.last_seen_leaf
+        .as_deref()
+        .map(|dn| dn.eq_ignore_ascii_case(title))
+        .unwrap_or(false)
+        && app.overlay.is_none()
+        && !app.form.as_ref().map(|f| f.is_new()).unwrap_or(false)
+}
+
 /// Revert every field to its baseline (F3 cancel): drop multi-value edits and
-/// reseed each single-value editor from the original values.
+/// reseed each single-value editor from the original values. An unsaved create
+/// form has no baseline to revert to, so cancel simply discards it.
 fn revert_form(app: &mut App) {
+    if app.form.as_ref().map(|f| f.is_new()).unwrap_or(false) {
+        app.form = None;
+        app.form_focus = 0;
+        app.form_scroll = 0;
+        app.status.clear();
+        // Forget the awaited DN so the next reconcile tick re-reads the currently
+        // selected leaf into the form pane (instead of leaving it blank).
+        app.last_seen_leaf = None;
+        return;
+    }
     if let Some(form) = app.form.as_mut() {
         for field in &mut form.fields {
             let base = form.baseline.get(&field.label).cloned().unwrap_or_default();
@@ -1020,12 +1211,7 @@ fn rebind_selection(app: &mut App, dn: &str) {
 /// Handle a key while an overlay is open. Returns the action to run when the
 /// user confirms a [`Overlay::Confirm`] or resolves a [`Overlay::Guard`];
 /// otherwise dismisses / consumes the key.
-fn overlay_key(
-    app: &mut App,
-    key: KeyEvent,
-    read_flow: &mut ReadFlow,
-    profiles: &[EntryProfile],
-) -> Option<PendingAction> {
+fn overlay_key(app: &mut App, key: KeyEvent) -> Option<PendingAction> {
     match &app.overlay {
         Some(Overlay::Confirm { .. }) => match key.code {
             KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
@@ -1051,8 +1237,36 @@ fn overlay_key(
             None
         }
         Some(Overlay::Guard { .. }) => guard_key(app, key),
-        Some(Overlay::CreateForm { .. }) => create_form_key(app, key, read_flow, profiles),
+        Some(Overlay::ChooseProfile { .. }) => choose_profile_key(app, key),
         None => None,
+    }
+}
+
+/// Handle a key in the F7 profile chooser: ↑↓ move the selection, Enter resolves
+/// to [`PendingAction::OpenCreate`] for the chosen profile, Esc/F3 dismisses.
+fn choose_profile_key(app: &mut App, key: KeyEvent) -> Option<PendingAction> {
+    let Some(Overlay::ChooseProfile { entries, sel }) = app.overlay.as_mut() else {
+        return None;
+    };
+    match key.code {
+        KeyCode::Up => {
+            *sel = sel.saturating_sub(1);
+            None
+        }
+        KeyCode::Down => {
+            *sel = (*sel + 1).min(entries.len().saturating_sub(1));
+            None
+        }
+        KeyCode::Enter => {
+            let profile_idx = entries.get(*sel).map(|(i, _)| *i);
+            app.overlay = None;
+            profile_idx.map(|profile_idx| PendingAction::OpenCreate { profile_idx })
+        }
+        KeyCode::Esc | KeyCode::F(3) => {
+            app.overlay = None;
+            None
+        }
+        _ => None,
     }
 }
 
@@ -1090,119 +1304,15 @@ fn guard_key(app: &mut App, key: KeyEvent) -> Option<PendingAction> {
     }
 }
 
-/// Handle a key inside the create-entry overlay: field nav (↑↓), inline edit of
-/// the focused single-value field, F2 commit (validate → LDIF confirm → Add),
-/// Esc/F3 cancel. Multi-value fields in create are edited after the entry exists.
-fn create_form_key(
-    app: &mut App,
-    key: KeyEvent,
-    read_flow: &mut ReadFlow,
-    profiles: &[EntryProfile],
-) -> Option<PendingAction> {
-    match key.code {
-        KeyCode::Esc | KeyCode::F(3) => {
-            app.overlay = None;
-            None
-        }
-        KeyCode::F(2) => commit_create(app, read_flow, profiles),
-        KeyCode::Up => {
-            if let Some(Overlay::CreateForm { focus, .. }) = app.overlay.as_mut() {
-                *focus = focus.saturating_sub(1);
-            }
-            None
-        }
-        KeyCode::Down => {
-            if let Some(Overlay::CreateForm { form, focus, .. }) = app.overlay.as_mut() {
-                *focus = next_index(*focus, form.fields.len());
-            }
-            None
-        }
-        _ => {
-            // Edit the focused, editable single-value field.
-            if let Some(Overlay::CreateForm { form, focus, .. }) = app.overlay.as_mut() {
-                if let Some(field) = form.fields.get_mut(*focus) {
-                    if field.editable && !field.multi {
-                        field.editor.handle_key_event(key);
-                    }
-                }
-            }
-            None
-        }
-    }
-}
-
-/// Validate the create form and, if it is complete, replace it with an LDIF
-/// confirm carrying the [`PendingAction::Create`]. Errors open an error overlay.
-fn commit_create(
-    app: &mut App,
-    read_flow: &mut ReadFlow,
-    profiles: &[EntryProfile],
-) -> Option<PendingAction> {
-    // Extract what we need, then drop the overlay borrow before re-assigning it.
-    let (edited, profile_idx, container) = match &app.overlay {
-        Some(Overlay::CreateForm {
-            form,
-            profile,
-            container,
-            ..
-        }) => (form.to_edit_entry(), *profile, container.clone()),
-        _ => return None,
-    };
-    let Some(profile) = profiles.get(profile_idx) else {
-        app.overlay = None;
-        return None;
-    };
-
-    // The RDN value must be present before we can compose the DN.
-    let rdn_value = edited
-        .attrs
-        .iter()
-        .find(|(k, _)| k.eq_ignore_ascii_case(&profile.rdn_attr))
-        .and_then(|(_, v)| v.first().cloned())
-        .unwrap_or_default();
-    if rdn_value.trim().is_empty() {
-        app.overlay = Some(Overlay::Error {
-            text: "The RDN attribute must have a value.".to_string(),
-        });
-        return None;
-    }
-
-    // Build the final entry first, THEN validate it — `build_add_entry` supplies
-    // the fixed objectClass set and ensures the RDN attribute is present, so
-    // validating the raw form here would spuriously fail the objectClass MUST.
-    let (dn, attrs) = build_add_entry(profile, &container, rdn_value.trim(), &edited);
-    let oc_refs = [profile.object_class.as_str()];
-    let full_entry = EditEntry {
-        dn: dn.clone(),
-        attrs: attrs.clone(),
-    };
-    let errors = validate(&full_entry, read_flow.schema(), &oc_refs);
-    if !errors.is_empty() {
-        app.overlay = Some(Overlay::Error {
-            text: format_validation_errors(&errors),
-        });
-        return None;
-    }
-
-    let ldif = render_add(&dn, &attrs);
-    app.overlay = Some(Overlay::Confirm {
-        title: "Create this entry?".to_string(),
-        body: ldif,
-        action: PendingAction::Create {
-            dn,
-            attrs,
-            parent: container,
-        },
-    });
-    None
-}
-
 /// Run a confirmed [`PendingAction`] (submits to the worker / navigates).
+#[allow(clippy::too_many_arguments)] // central write dispatcher; each arg is needed
 fn execute_pending(
     app: &mut App,
     action: PendingAction,
     worker: &WorkerHandle,
     read_flow: &mut ReadFlow,
+    profiles: &[EntryProfile],
+    base_dn: &str,
     post: &mut HashMap<u64, PostWrite>,
     pending_followups: &mut HashMap<u64, (String, Vec<ModOp>, Option<String>)>,
 ) {
@@ -1224,6 +1334,9 @@ fn execute_pending(
             post.insert(id, PostWrite::Deleted { dn });
             app.status = "Deleting…".to_string();
         }
+        PendingAction::OpenCreate { profile_idx } => {
+            open_create_form(app, read_flow, profiles, profile_idx, base_dn);
+        }
         PendingAction::ResolveGuard {
             intent,
             save: false,
@@ -1239,29 +1352,40 @@ fn execute_pending(
                 perform_guard_intent(app, worker, read_flow, intent);
                 return;
             };
+            // A create form has no diff baseline: route "Save" to the create
+            // confirm (an Add). The pending guard intent is dropped — the user
+            // confirms the create, then navigates explicitly (full
+            // save-then-resume for create is out of scope here).
+            if form.is_new() {
+                prepare_create(app, worker, read_flow, profiles, base_dn);
+                return;
+            }
             // A membership-bearing save runs synchronously through CombinedSave;
             // the pending guard intent rides along and is performed on success.
             if let Some(ov) = combined_save_overlay(
                 form,
                 read_flow.schema(),
                 &app.relations,
+                profiles,
                 Some(intent.clone()),
             ) {
                 app.overlay = Some(ov);
                 return;
             }
-            // Normal single-entry save — strip backref labels from baseline.
-            let backref_lbls = form.backref_labels();
-            let mut original = EditEntry {
-                dn: form.dn.clone(),
-                attrs: form.baseline.clone(),
+            // Normal single-entry save (folds in any password change).
+            let prep = match prepare_edit_save(
+                form,
+                read_flow.schema(),
+                profiles,
+                now_unix_secs_or_zero(),
+            ) {
+                Ok(p) => p,
+                Err(text) => {
+                    app.overlay = Some(Overlay::Error { text });
+                    return;
+                }
             };
-            for l in &backref_lbls {
-                original.attrs.remove(l);
-            }
-            let edited = form.to_edit_entry();
-            let object_classes = object_classes_of(form);
-            match prepare_save(read_flow.schema(), &original, &edited, &object_classes) {
+            match prep {
                 PrepareSave::Ready { plan, dn, .. } => {
                     app.status = "Saving…".to_string();
                     match intent {
@@ -1316,6 +1440,7 @@ fn execute_pending(
                 app,
                 worker,
                 read_flow,
+                profiles,
                 &entry_dn,
                 own_mods,
                 fanout,
@@ -1352,6 +1477,11 @@ fn navigate_to(
     read_flow: &mut ReadFlow,
     target: Option<String>,
 ) {
+    // Leaving an unsaved create form discards it, so the clobber guard in
+    // `should_install_form` does not then block the destination entry's form.
+    if app.form.as_ref().map(|f| f.is_new()).unwrap_or(false) {
+        app.form = None;
+    }
     app.last_seen_leaf = target.clone();
     match target {
         Some(dn) => {
@@ -1404,13 +1534,7 @@ fn reconcile(
             });
             return;
         }
-        app.last_seen_leaf = sel_dn.clone();
-        match sel_dn {
-            Some(dn) => {
-                let _ = read_flow.request_entry(worker, &dn, None);
-            }
-            None => app.form = None,
-        }
+        navigate_to(app, worker, read_flow, sel_dn);
     }
 }
 
@@ -1458,6 +1582,34 @@ fn object_classes_of(form: &EditForm) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// Build an edit form for a loaded entry and, when the entry is an instance of a
+/// password-profile, inject the masked password + confirm fields (suppressing the
+/// schema's password field), so the password can be changed inline. Skipped in
+/// read-only sessions — the injected field is editable. The single edit-form
+/// build seam used by the read flow and the post-combined-save reload.
+fn build_loaded_form(
+    model: &crate::ui::form::FormModel,
+    schema: &SchemaModel,
+    read_only: bool,
+    relations: &[ResolvedRelation],
+    profiles: &[EntryProfile],
+) -> EditForm {
+    let mut form = build_edit_form(model, schema, read_only, relations);
+    if !read_only {
+        let ocs = object_classes_of(&form);
+        if let Some(spec) = profile_for_entry(profiles, &ocs).and_then(|p| p.password.as_ref()) {
+            crate::ui::edit_form::inject_password_fields(&mut form, spec);
+        }
+        // Tag value-lookup fields so Enter opens the picker on edit, too. Resolved
+        // via a lookups-keyed profile match (NOT `profile_for_entry`, which keys on
+        // a password spec and would miss a lookups-only profile).
+        if let Some(profile) = lookups_profile_for_entry(profiles, &ocs) {
+            crate::ui::edit_form::tag_lookup_fields(&mut form, &profile.lookups);
+        }
+    }
+    form
+}
+
 /// The outcome of preparing a form save.
 enum PrepareSave {
     /// Client-side validation failed.
@@ -1477,32 +1629,103 @@ enum PrepareSave {
     },
 }
 
+/// A copy of `cs` with the values of any `Add`/`Replace` touching a masked
+/// attribute replaced by `********`, for the confirm preview — never show a
+/// cleartext password or NT hash. `sambaPwdLastSet` is not secret and is left
+/// intact (it is not in `mask_attrs`). Pure.
+fn mask_changeset_secrets(cs: &ChangeSet, mask_attrs: &[String]) -> ChangeSet {
+    let is_masked = |attr: &str| mask_attrs.iter().any(|a| a.eq_ignore_ascii_case(attr));
+    let mut out = cs.clone();
+    for m in &mut out.mods {
+        match m {
+            ModOp::Replace { attr, values } | ModOp::Add { attr, values } if is_masked(attr) => {
+                *values = vec!["********".to_string()];
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
 /// Validate + diff the edited entry against the `original` (baseline) and, if
 /// there is a real change, return a ready [`SavePlan`] with an LDIF preview.
+///
+/// `password_mods` (REPLACE ops produced by the edit-password path) are folded
+/// into the changeset so one source of truth drives both the plan and the
+/// preview — a password-only edit (empty attribute diff) is still a change.
+/// `mask_attrs` lists the attributes whose values to mask in the preview LDIF.
 fn prepare_save(
     schema: &SchemaModel,
     original: &EditEntry,
     edited: &EditEntry,
     object_classes: &[String],
+    password_mods: &[ModOp],
+    mask_attrs: &[String],
 ) -> PrepareSave {
     let oc_refs: Vec<&str> = object_classes.iter().map(|s| s.as_str()).collect();
     let errors = validate(edited, schema, &oc_refs);
     if !errors.is_empty() {
         return PrepareSave::Invalid(errors);
     }
-    let cs = match diff(original, edited) {
+    let mut cs = match diff(original, edited) {
         Ok(cs) => cs,
         Err(e) => return PrepareSave::DiffError(e.to_string()),
     };
+    cs.mods.extend(password_mods.iter().cloned());
     if cs.is_empty() {
         return PrepareSave::NoChanges;
     }
-    let ldif = render_changeset(&cs);
+    let ldif = render_changeset(&mask_changeset_secrets(&cs, mask_attrs));
     PrepareSave::Ready {
         plan: plan_save(cs),
         dn: original.dn.clone(),
         ldif,
     }
+}
+
+/// Build the `(original, edited, object_classes)` for a single-entry edit save,
+/// fold in any password change when the loaded entry matches a password-profile,
+/// and return the resulting [`PrepareSave`]. `Err(text)` signals a confirm
+/// mismatch (the caller surfaces it as an Error overlay). `now_secs` is injected
+/// so the planning stays testable. Used by both the plain F2 save and the
+/// guard-resume save so password edits work from either entry point.
+fn prepare_edit_save(
+    form: &EditForm,
+    schema: &SchemaModel,
+    profiles: &[EntryProfile],
+    now_secs: u64,
+) -> Result<PrepareSave, String> {
+    // Strip backref labels from the baseline so `diff` does not emit a spurious
+    // Delete for server-maintained attrs.
+    let backref_lbls = form.backref_labels();
+    let mut original = EditEntry {
+        dn: form.dn.clone(),
+        attrs: form.baseline.clone(),
+    };
+    for l in &backref_lbls {
+        original.attrs.remove(l);
+    }
+    let mut edited = form.to_edit_entry();
+    let object_classes = object_classes_of(form);
+    let (password_mods, mask_attrs) =
+        match profile_for_entry(profiles, &object_classes).and_then(|p| p.password.clone()) {
+            Some(spec) => stage_edit_password(
+                &spec,
+                &object_classes,
+                &mut original.attrs,
+                &mut edited.attrs,
+                now_secs,
+            )?,
+            None => (Vec::new(), Vec::new()),
+        };
+    Ok(prepare_save(
+        schema,
+        &original,
+        &edited,
+        &object_classes,
+        &password_mods,
+        &mask_attrs,
+    ))
 }
 
 /// Submit the worker request(s) for a prepared [`SavePlan`] and record how to
@@ -1627,6 +1850,8 @@ fn plan_combined_save(
     form: &EditForm,
     schema: &SchemaModel,
     relations: &[ResolvedRelation],
+    profiles: &[EntryProfile],
+    now_secs: u64,
 ) -> CombinedPlan {
     let backref = form.backref_labels();
     if backref.is_empty() {
@@ -1658,11 +1883,31 @@ fn plan_combined_save(
         edited.attrs.remove(l);
     }
 
+    // Stage any password change the same way the single-entry path does: strip the
+    // injected password pseudo-fields from BOTH sides (so a blank field never diffs
+    // to a Delete that would clobber the stored password, and the `(confirm)`
+    // pseudo-attribute never leaks), and collect the REPLACE mods to fold into the
+    // own-entry MODIFY. A confirm mismatch blocks the whole combined save.
+    let (password_mods, mask_attrs) =
+        match profile_for_entry(profiles, &object_classes).and_then(|p| p.password.clone()) {
+            Some(spec) => match stage_edit_password(
+                &spec,
+                &object_classes,
+                &mut original.attrs,
+                &mut edited.attrs,
+                now_secs,
+            ) {
+                Ok(x) => x,
+                Err(text) => return CombinedPlan::Blocked(text),
+            },
+            None => (Vec::new(), Vec::new()),
+        };
+
     let errors = validate(&edited, schema, &oc_refs);
     if !errors.is_empty() {
         return CombinedPlan::Invalid(errors);
     }
-    let own_cs = match diff(&original, &edited) {
+    let mut own_cs = match diff(&original, &edited) {
         Ok(c) => c,
         Err(e) => return CombinedPlan::DiffError(e.to_string()),
     };
@@ -1673,12 +1918,15 @@ fn plan_combined_save(
                 .into(),
         );
     }
+    own_cs.mods.extend(password_mods);
 
     // Fan-out: one set of Add/Delete MODIFYs per backref field that changed.
     let mut fanout: Vec<(String, ModOp)> = Vec::new();
     let mut preview_sets: Vec<ChangeSet> = Vec::new();
     if !own_cs.is_empty() {
-        preview_sets.push(own_cs.clone());
+        // Mask the password values in the preview only; `own_mods` keeps the real
+        // cleartext/hash for the apply.
+        preview_sets.push(mask_changeset_secrets(&own_cs, &mask_attrs));
     }
     for f in form.fields.iter().filter(|f| backref.contains(&f.label)) {
         let Some(rel) = backref_lookup(relations, &object_classes, &f.label) else {
@@ -1712,9 +1960,10 @@ fn combined_save_overlay(
     form: &EditForm,
     schema: &SchemaModel,
     relations: &[ResolvedRelation],
+    profiles: &[EntryProfile],
     then_intent: Option<GuardIntent>,
 ) -> Option<Overlay> {
-    match plan_combined_save(form, schema, relations) {
+    match plan_combined_save(form, schema, relations, profiles, now_unix_secs_or_zero()) {
         CombinedPlan::Ready {
             entry_dn,
             own_mods,
@@ -1742,7 +1991,13 @@ fn combined_save_overlay(
 /// Synchronously re-read `dn` and rebuild the form so it reflects the directory
 /// after a combined save. Installs the fresh form directly without depending on
 /// the async poll loop or the overlay-gated install path.
-fn reload_form_sync(app: &mut App, worker: &WorkerHandle, read_flow: &ReadFlow, dn: &str) {
+fn reload_form_sync(
+    app: &mut App,
+    worker: &WorkerHandle,
+    read_flow: &ReadFlow,
+    profiles: &[EntryProfile],
+    dn: &str,
+) {
     rebind_selection(app, dn);
     if let Ok(Response::Entries { entries, .. }) = worker.request(Request::Search {
         id: next_id(),
@@ -1754,11 +2009,12 @@ fn reload_form_sync(app: &mut App, worker: &WorkerHandle, read_flow: &ReadFlow, 
     }) {
         if let Some(entry) = entries.first() {
             let model = read_flow.form_for(entry, &[]);
-            app.form = Some(build_edit_form(
+            app.form = Some(build_loaded_form(
                 &model,
                 read_flow.schema(),
                 app.read_only,
                 &app.relations,
+                profiles,
             ));
             app.form_focus = 0;
             app.form_scroll = 0;
@@ -1770,10 +2026,12 @@ fn reload_form_sync(app: &mut App, worker: &WorkerHandle, read_flow: &ReadFlow, 
 /// pre-validate last-member on every removal, abort the whole batch if any would
 /// empty a group, then apply own-entry mods + each fan-out MODIFY, collecting a
 /// partial-failure report, and finally re-read the edited entry (synchronous).
+#[allow(clippy::too_many_arguments)] // synchronous combined-save dispatcher; each arg is needed
 fn apply_combined_save(
     app: &mut App,
     worker: &WorkerHandle,
     read_flow: &mut ReadFlow,
+    profiles: &[EntryProfile],
     entry_dn: &str,
     own_mods: Vec<ModOp>,
     fanout: Vec<(String, ModOp)>,
@@ -1827,7 +2085,7 @@ fn apply_combined_save(
     // state immediately (before setting status/overlay). This avoids the
     // async install gate clearing the partial-failure message on the next
     // poll iteration.
-    reload_form_sync(app, worker, read_flow, entry_dn);
+    reload_form_sync(app, worker, read_flow, profiles, entry_dn);
 
     if failures.is_empty() {
         app.status = "Saved.".to_string();
@@ -1874,6 +2132,59 @@ fn read_group_members(
         ),
         _ => None,
     }
+}
+
+/// Decide an allocation from a (possibly truncated) directory scan. Refuses when
+/// the scan was truncated by a server limit — never allocates over a partial set
+/// (a silent duplicate would be worse than a constraint violation).
+fn decide_allocation(values: &[u64], truncated: bool, min: u64, max: u64) -> Result<u64, String> {
+    if truncated {
+        return Err(
+            "refusing to allocate: the number scan hit a server size limit \
+             (bind with a higher-limit identity or configure a counter)"
+                .to_string(),
+        );
+    }
+    crate::config::defaults::next_in_range(values, min, max)
+}
+
+/// Allocate the next free numeric `attr` in `[min,max]` by scanning the whole
+/// subtree from `base_dn`. Refuses if the scan was truncated (spec D6). Synchronous.
+fn allocate_number(
+    worker: &WorkerHandle,
+    base_dn: &str,
+    attr: &str,
+    min: u64,
+    max: u64,
+) -> Result<u64, String> {
+    let resp = worker
+        .request(Request::Search {
+            id: next_id(),
+            base: base_dn.to_string(),
+            scope: SearchScope::Subtree,
+            filter: format!("({attr}=*)"),
+            attrs: vec![attr.to_string()],
+            size_limit: None,
+        })
+        .map_err(|e| e.to_string())?;
+    let (entries, truncated) = match resp {
+        Response::Entries {
+            entries, truncated, ..
+        } => (entries, truncated),
+        Response::SearchError { msg, .. } => return Err(msg),
+        _ => return Err("unexpected response while allocating".to_string()),
+    };
+    let mut values: Vec<u64> = Vec::new();
+    for e in &entries {
+        if let Some((_, vs)) = e.attrs.iter().find(|(k, _)| k.eq_ignore_ascii_case(attr)) {
+            for v in vs {
+                if let Ok(n) = v.trim().parse::<u64>() {
+                    values.push(n);
+                }
+            }
+        }
+    }
+    decide_allocation(&values, truncated, min, max)
 }
 
 /// Apply one MODIFY synchronously; return `Some(human message)` on failure.
@@ -2021,9 +2332,393 @@ fn build_tree_items(structure: &Structure) -> Vec<TreeItem<'static, String>> {
     vec![build(structure, structure.root_dn())]
 }
 
+/// Outcome of planning a create from a Create-mode form (pure).
+enum CreatePrep {
+    /// Ready to confirm: composed DN, attribute set, container, and LDIF preview.
+    Confirm {
+        dn: String,
+        attrs: BTreeMap<String, Vec<String>>,
+        container: String,
+        ldif: String,
+    },
+    /// A blocking problem (RDN missing, schema validation failure).
+    Error(String),
+}
+
+/// Pure: validate a Create-mode form's edited entry and produce the confirm data.
+fn plan_create(
+    schema: &SchemaModel,
+    profile: &EntryProfile,
+    container: &str,
+    edited: &EditEntry,
+) -> CreatePrep {
+    let rdn_value = edited
+        .attrs
+        .iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case(&profile.rdn_attr))
+        .and_then(|(_, v)| v.first().cloned())
+        .unwrap_or_default();
+    if rdn_value.trim().is_empty() {
+        return CreatePrep::Error("The RDN attribute must have a value.".to_string());
+    }
+    let (dn, attrs) = build_add_entry(profile, container, rdn_value.trim(), edited);
+    let oc_refs: Vec<&str> = profile.object_classes.iter().map(String::as_str).collect();
+    let full = EditEntry {
+        dn: dn.clone(),
+        attrs: attrs.clone(),
+    };
+    let errors = validate(&full, schema, &oc_refs);
+    if !errors.is_empty() {
+        return CreatePrep::Error(format_validation_errors(&errors));
+    }
+    let ldif = render_add(&dn, &attrs);
+    CreatePrep::Confirm {
+        dn,
+        attrs,
+        container: container.to_string(),
+        ldif,
+    }
+}
+
+/// Validate a Create-mode pane-3 form and open the create LDIF confirm.
+/// Extract + validate the password from edited create/edit attrs. Removes BOTH
+/// the primary and confirm pseudo-attributes from `attrs` (confirm is never a real
+/// attribute). Returns `Ok(None)` when no password was entered, `Ok(Some(pw))` for
+/// a confirmed password, `Err` when the two entries disagree. Pure.
+fn stage_password(
+    spec: &crate::config::PasswordSpec,
+    attrs: &mut std::collections::BTreeMap<String, Vec<String>>,
+) -> Result<Option<String>, String> {
+    let (primary, confirm) = crate::ui::edit_form::password_field_labels(spec);
+    let take = |attrs: &std::collections::BTreeMap<String, Vec<String>>, label: &str| {
+        attrs
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case(label))
+            .and_then(|(_, v)| v.first().cloned())
+            .unwrap_or_default()
+            .trim()
+            .to_string()
+    };
+    let pw = take(attrs, &primary);
+    let cf = take(attrs, &confirm);
+    attrs.retain(|k, _| !k.eq_ignore_ascii_case(&primary) && !k.eq_ignore_ascii_case(&confirm));
+    if pw.is_empty() {
+        return Ok(None);
+    }
+    if pw != cf {
+        return Err("Passwords do not match.".to_string());
+    }
+    Ok(Some(pw))
+}
+
+/// A copy of `attrs` with the password-related attribute values masked, for the
+/// LDIF confirm preview (never show the cleartext or the NT hash). Pure.
+fn mask_password_attrs(
+    attrs: &std::collections::BTreeMap<String, Vec<String>>,
+    ldap_attribute: &str,
+) -> std::collections::BTreeMap<String, Vec<String>> {
+    let mut out = attrs.clone();
+    for key in [ldap_attribute, "sambaNTPassword", "sambaPwdLastSet"] {
+        if let Some(k) = out.keys().find(|k| k.eq_ignore_ascii_case(key)).cloned() {
+            out.insert(k, vec!["********".to_string()]);
+        }
+    }
+    out
+}
+
+/// Wall-clock seconds since the Unix epoch (0 on a pre-epoch clock). The one
+/// impure call in the password paths; isolated so the planners stay pure.
+fn now_unix_secs_or_zero() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// The first profile that satisfies `pred` AND whose (non-empty) object classes
+/// are all present (case-insensitive) in `entry_ocs` — i.e. the loaded entry is
+/// an instance of that profile. Tie-break: config order (declare the more
+/// specific profile first). Shared core of the password/lookup resolvers below;
+/// only the `pred` differs, so the object-class subset check stays identical.
+/// Pure.
+fn profile_for_entry_where<'a>(
+    profiles: &'a [EntryProfile],
+    entry_ocs: &[String],
+    pred: impl Fn(&EntryProfile) -> bool,
+) -> Option<&'a EntryProfile> {
+    profiles.iter().find(|p| {
+        pred(p)
+            && !p.object_classes.is_empty()
+            && p.object_classes
+                .iter()
+                .all(|oc| entry_ocs.iter().any(|e| e.eq_ignore_ascii_case(oc)))
+    })
+}
+
+/// The first configured profile that declares a `[profile.password]` block and
+/// whose object classes all match `entry_ocs`. `None` when no password-profile
+/// matches. Thin wrapper over [`profile_for_entry_where`]. Pure.
+fn profile_for_entry<'a>(
+    profiles: &'a [EntryProfile],
+    entry_ocs: &[String],
+) -> Option<&'a EntryProfile> {
+    profile_for_entry_where(profiles, entry_ocs, |p| p.password.is_some())
+}
+
+/// Like [`profile_for_entry`] but keyed on `lookups` (NOT `password`): the first
+/// matching profile that declares at least one `[profile.lookup.<attr>]`. Thin
+/// wrapper over [`profile_for_entry_where`]. Pure.
+fn lookups_profile_for_entry<'a>(
+    profiles: &'a [EntryProfile],
+    entry_ocs: &[String],
+) -> Option<&'a EntryProfile> {
+    profile_for_entry_where(profiles, entry_ocs, |p| !p.lookups.is_empty())
+}
+
+/// Edit-path password mods: the same `(attr, values)` pairs as create
+/// (`password_add_attrs`), mapped to REPLACE ops so the new credential overwrites
+/// the old within one atomic MODIFY. Honors `ldap_attribute` and Samba. Pure.
+fn password_replace_mods(
+    clear: &str,
+    ldap_attribute: &str,
+    samba: bool,
+    now_secs: u64,
+) -> Vec<ModOp> {
+    crate::samba::password::password_add_attrs(clear, ldap_attribute, samba, now_secs)
+        .into_iter()
+        .map(|(attr, values)| ModOp::Replace { attr, values })
+        .collect()
+}
+
+/// Compute the password contribution to an edit save. Always strips the password
+/// pseudo-fields (primary + confirm) from BOTH `baseline` and `edited`, so the
+/// injected masked field never appears as an attribute diff — an un-stripped
+/// baseline still carrying the directory's stored hash would otherwise diff to a
+/// spurious Delete. When a confirmed new password was entered, also strips the
+/// Samba secret attrs from both sides (the REPLACE mods are then their sole
+/// source) and returns those mods plus the attrs to mask in the preview. Returns
+/// empty vecs when the field was left blank. Pure (clock injected as `now_secs`).
+fn stage_edit_password(
+    spec: &crate::config::PasswordSpec,
+    object_classes: &[String],
+    baseline: &mut std::collections::BTreeMap<String, Vec<String>>,
+    edited: &mut std::collections::BTreeMap<String, Vec<String>>,
+    now_secs: u64,
+) -> Result<(Vec<ModOp>, Vec<String>), String> {
+    let (primary, confirm) = crate::ui::edit_form::password_field_labels(spec);
+    let strip = |m: &mut std::collections::BTreeMap<String, Vec<String>>, labels: &[&str]| {
+        m.retain(|k, _| !labels.iter().any(|l| k.eq_ignore_ascii_case(l)));
+    };
+    // `primary` == spec.ldap_attribute; drop both pseudo-fields from the baseline
+    // so the stored value never diffs against the (blank) form field.
+    strip(baseline, &[primary.as_str(), confirm.as_str()]);
+    // stage_password validates the confirm match and removes both pseudo-fields
+    // from `edited`, returning the cleartext (or None when left blank).
+    let clear = match stage_password(spec, edited)? {
+        Some(pw) => pw,
+        None => return Ok((Vec::new(), Vec::new())),
+    };
+    let samba = spec.samba
+        && object_classes
+            .iter()
+            .any(|o| o.eq_ignore_ascii_case("sambaSamAccount"));
+    if samba {
+        strip(baseline, &["sambaNTPassword", "sambaPwdLastSet"]);
+        strip(edited, &["sambaNTPassword", "sambaPwdLastSet"]);
+    }
+    let mods = password_replace_mods(&clear, &spec.ldap_attribute, samba, now_secs);
+    let mut mask = vec![spec.ldap_attribute.clone()];
+    if samba {
+        mask.push("sambaNTPassword".to_string());
+    }
+    Ok((mods, mask))
+}
+
+/// Apply literal/template defaults to still-empty fields (pure); return the
+/// autonumber requests `(attr, min, max)` that still need a directory scan.
+fn apply_static_defaults(
+    defaults: &crate::config::defaults::ProfileDefaults,
+    attrs: &mut std::collections::BTreeMap<String, Vec<String>>,
+) -> Vec<(String, u64, u64)> {
+    use crate::config::defaults::{plan_defaults, Resolution};
+    let mut autonum = Vec::new();
+    for res in plan_defaults(defaults, attrs) {
+        match res {
+            Resolution::Fill { attr, value } => {
+                attrs.insert(attr, vec![value]);
+            }
+            Resolution::NeedsAutonumber { attr, min, max } => autonum.push((attr, min, max)),
+        }
+    }
+    autonum
+}
+
+fn prepare_create(
+    app: &mut App,
+    worker: &WorkerHandle,
+    read_flow: &mut ReadFlow,
+    profiles: &[EntryProfile],
+    base_dn: &str,
+) {
+    let Some(form) = app.form.as_ref() else {
+        return;
+    };
+    let (profile_idx, container) = match &form.mode {
+        FormMode::Create {
+            profile_idx,
+            container,
+        } => (*profile_idx, container.clone()),
+        FormMode::Edit => return,
+    };
+    let Some(profile) = profiles.get(profile_idx) else {
+        return;
+    };
+    let mut edited = form.to_edit_entry();
+    // Fill empty fields from the profile's defaults; autonumber fields need a
+    // synchronous directory scan (which may refuse on a truncated result).
+    let autonum = apply_static_defaults(&profile.defaults, &mut edited.attrs);
+    for (attr, min, max) in autonum {
+        match allocate_number(worker, base_dn, &attr, min, max) {
+            Ok(n) => {
+                edited.attrs.insert(attr, vec![n.to_string()]);
+            }
+            Err(text) => {
+                app.overlay = Some(Overlay::Error { text });
+                return;
+            }
+        }
+    }
+    // Strip the password + confirm pseudo-fields (validating they match) BEFORE
+    // building/validating the entry; the cleartext is injected into the real Add
+    // afterwards and masked in the preview.
+    let password = match &profile.password {
+        Some(spec) => match stage_password(spec, &mut edited.attrs) {
+            Ok(pw) => pw,
+            Err(text) => {
+                app.overlay = Some(Overlay::Error { text });
+                return;
+            }
+        },
+        None => None,
+    };
+    match plan_create(read_flow.schema(), profile, &container, &edited) {
+        CreatePrep::Confirm {
+            dn,
+            mut attrs,
+            container,
+            ldif,
+        } => {
+            // Inject the password (cleartext + optional Samba hashes) into the real
+            // Add, and mask those values in the preview body.
+            let body = match (&profile.password, &password) {
+                (Some(spec), Some(cleartext)) => {
+                    let samba = spec.samba
+                        && attrs
+                            .get("objectClass")
+                            .map(|ocs| {
+                                ocs.iter()
+                                    .any(|o| o.eq_ignore_ascii_case("sambaSamAccount"))
+                            })
+                            .unwrap_or(false);
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_secs())
+                        .unwrap_or(0);
+                    for (k, v) in crate::samba::password::password_add_attrs(
+                        cleartext,
+                        &spec.ldap_attribute,
+                        samba,
+                        now,
+                    ) {
+                        attrs.insert(k, v);
+                    }
+                    render_add(&dn, &mask_password_attrs(&attrs, &spec.ldap_attribute))
+                }
+                _ => ldif,
+            };
+            app.overlay = Some(Overlay::Confirm {
+                title: "Create this entry?".to_string(),
+                body,
+                action: PendingAction::Create {
+                    dn,
+                    attrs,
+                    parent: container,
+                },
+            });
+        }
+        CreatePrep::Error(text) => {
+            app.overlay = Some(Overlay::Error { text });
+        }
+    }
+}
+
+/// Build an empty Create-mode pane-3 form for `profile` (index `profile_idx`),
+/// to be added under `container`. Editable fields are forced single-value so the
+/// mandatory attributes can be typed inline (a second value is added post-create
+/// via the value-editor popup). No relations are attached on create (parity with
+/// the previous modal create path).
+fn build_new_entry_form(
+    schema: &SchemaModel,
+    profile: &EntryProfile,
+    profile_idx: usize,
+    container: String,
+) -> EditForm {
+    let model = empty_form_for_profile(schema, profile);
+    let mut form = build_edit_form(&model, schema, false, &[]);
+    for field in &mut form.fields {
+        if field.editable {
+            field.multi = false;
+        }
+    }
+    form.mode = FormMode::Create {
+        profile_idx,
+        container,
+    };
+    // When the profile declares a password, replace the schema password field
+    // with the masked password + confirm fields.
+    if let Some(spec) = &profile.password {
+        crate::ui::edit_form::inject_password_fields(&mut form, spec);
+    }
+    // Tag value-lookup target fields (e.g. gidNumber) so Enter opens the picker.
+    // Create is the primary use case, so the profile's lookups are known here.
+    crate::ui::edit_form::tag_lookup_fields(&mut form, &profile.lookups);
+    form
+}
+
+/// Install a fresh Create-mode form for `profiles[i]` into pane 3 and focus it.
+/// The container is the profile's `search_base` (or `base_dn` when empty).
+fn open_create_form(
+    app: &mut App,
+    read_flow: &mut ReadFlow,
+    profiles: &[EntryProfile],
+    i: usize,
+    base_dn: &str,
+) {
+    let Some(profile) = profiles.get(i) else {
+        return;
+    };
+    let container = if profile.search_base.is_empty() {
+        base_dn.to_string()
+    } else {
+        profile.search_base.clone()
+    };
+    let form = build_new_entry_form(read_flow.schema(), profile, i, container);
+    app.form = Some(form);
+    app.form_focus = 0;
+    app.form_scroll = 0;
+    app.overlay = None;
+    // Focus the form pane so keystrokes edit the new entry's fields.
+    app.focus = Pane::Form;
+    app.status = format!(
+        "New {} — fill fields, F2 to create, Esc to cancel.",
+        profile.name
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ui::edit_form::FormMode;
 
     #[test]
     fn focus_cycles_tree_leaf_form() {
@@ -2049,6 +2744,8 @@ mod tests {
             search: TextState::new(),
             scope: None,
             role: None,
+            lookup: None,
+            base: String::new(),
         };
         App {
             focus: Pane::Form,
@@ -2154,8 +2851,10 @@ mod tests {
                 widget: WidgetSpec::ReadOnlyText,
                 editor: TextState::new().with_value("x".to_string()),
                 relation: None,
+                lookup: None,
             }],
             baseline: Default::default(),
+            mode: FormMode::Edit,
         });
         app
     }
@@ -2184,14 +2883,46 @@ mod tests {
     }
 
     #[test]
-    fn f7_creates_first_profile_when_writable_only() {
+    fn f7_opens_the_profile_chooser_when_writable_only() {
         let s = empty_structure();
         assert_eq!(
             dispatch_key(&mut bare_app(false), fkey(7), &s),
-            Some(UiAction::NewEntry(0))
+            Some(UiAction::NewEntryChoose)
         );
         // Read-only mode suppresses create (P4-T4); the key falls through to nav.
         assert_eq!(dispatch_key(&mut bare_app(true), fkey(7), &s), None);
+    }
+
+    #[test]
+    fn choose_profile_key_navigates_and_resolves_to_open_create() {
+        let mut app = bare_app(false);
+        app.overlay = Some(Overlay::ChooseProfile {
+            entries: vec![(0, "User".into()), (2, "Group".into())],
+            sel: 0,
+        });
+        // Down moves the selection.
+        assert!(choose_profile_key(&mut app, key(KeyCode::Down)).is_none());
+        match &app.overlay {
+            Some(Overlay::ChooseProfile { sel, .. }) => assert_eq!(*sel, 1),
+            _ => panic!("chooser still open"),
+        }
+        // Enter resolves to OpenCreate for the chosen profile index (2), closing it.
+        match choose_profile_key(&mut app, key(KeyCode::Enter)) {
+            Some(PendingAction::OpenCreate { profile_idx }) => assert_eq!(profile_idx, 2),
+            _ => panic!("expected OpenCreate"),
+        }
+        assert!(app.overlay.is_none());
+    }
+
+    #[test]
+    fn choose_profile_key_esc_dismisses() {
+        let mut app = bare_app(false);
+        app.overlay = Some(Overlay::ChooseProfile {
+            entries: vec![(0, "User".into())],
+            sel: 0,
+        });
+        assert!(choose_profile_key(&mut app, key(KeyCode::Esc)).is_none());
+        assert!(app.overlay.is_none());
     }
 
     #[test]
@@ -2409,7 +3140,7 @@ mod tests {
         use crate::ui::form::WidgetSpec;
         let scope = CandidateScope {
             base: "ou=people".into(),
-            object_class: "inetOrgPerson".into(),
+            object_classes: vec!["inetOrgPerson".into()],
             search_attrs: vec!["uid".into()],
         };
         let field = EditField {
@@ -2427,12 +3158,14 @@ mod tests {
                 role: RelationRole::Holder,
                 scope,
             }),
+            lookup: None,
         };
         let mut app = bare_app(false);
         app.form = Some(EditForm {
             dn: "cn=g1,ou=groups".into(),
             fields: vec![field],
             baseline: Default::default(),
+            mode: FormMode::Edit,
         });
         app
     }
@@ -2442,7 +3175,7 @@ mod tests {
         use crate::config::relation::{CandidateScope, RelationRole};
         let scope = CandidateScope {
             base: "ou=people".into(),
-            object_class: "inetOrgPerson".into(),
+            object_classes: vec!["inetOrgPerson".into()],
             search_attrs: vec!["uid".into()],
         };
         ValueEditor {
@@ -2456,6 +3189,8 @@ mod tests {
             search: TextState::new(),
             scope: Some(scope),
             role: Some(RelationRole::Holder),
+            lookup: None,
+            base: String::new(),
         }
     }
 
@@ -2471,6 +3206,7 @@ mod tests {
         ve.picker.as_mut().unwrap().set_results(vec![Candidate {
             dn: "uid=a,ou=people".into(),
             label: "a".into(),
+            value: None,
         }]);
         app.overlay = Some(Overlay::ValueEditor(ve));
         // Space toggles the cursor row (a) into the selection.
@@ -2480,6 +3216,318 @@ mod tests {
         let f = &app.form.as_ref().unwrap().fields[0];
         assert_eq!(f.values, vec!["uid=a,ou=people".to_string()]);
         assert!(app.overlay.is_none());
+    }
+
+    // ── 5.2 value-lookup picker ──────────────────────────────────────────────
+
+    /// A spec for a `gidNumber` lookup over `posixGroup` (empty base → root).
+    fn gid_lookup_spec() -> crate::config::LookupSpec {
+        crate::config::LookupSpec {
+            object_class: "posixGroup".into(),
+            search_base: String::new(),
+            value_attr: "gidNumber".into(),
+            label: "cn".into(),
+            search_attrs: vec!["cn".into()],
+        }
+    }
+
+    #[test]
+    fn candidate_label_for_lookup_prefers_label_then_falls_back_to_cn_then_dn() {
+        use std::collections::BTreeMap;
+        let dn = "cn=admins,ou=groups,dc=example,dc=org";
+
+        // (a) label attr set AND present → returns that value (case-insensitive
+        //     attr match, first value).
+        let mut spec = gid_lookup_spec();
+        spec.label = "displayName".into();
+        let mut attrs = BTreeMap::new();
+        attrs.insert("DisplayName".to_string(), vec!["Admins".to_string()]);
+        attrs.insert("cn".to_string(), vec!["admins".to_string()]);
+        assert_eq!(candidate_label_for_lookup(&spec, dn, &attrs), "Admins");
+
+        // (b) label attr set but ABSENT → falls back to candidate_label, i.e. the
+        //     `cn` first value.
+        let mut only_cn = BTreeMap::new();
+        only_cn.insert("cn".to_string(), vec!["admins".to_string()]);
+        assert_eq!(candidate_label_for_lookup(&spec, dn, &only_cn), "admins");
+
+        // (c) label empty → cn/DN fallback. With cn present → cn; with neither
+        //     label nor cn → the raw DN.
+        let mut nolabel = gid_lookup_spec();
+        nolabel.label = String::new();
+        assert_eq!(candidate_label_for_lookup(&nolabel, dn, &only_cn), "admins");
+        let empty: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        assert_eq!(candidate_label_for_lookup(&nolabel, dn, &empty), dn);
+    }
+
+    /// App with a single-value (`multi=false`) `gidNumber` field already tagged
+    /// with a lookup spec, focused (index 0), no overlay.
+    fn app_with_lookup_field() -> App {
+        use crate::schema::FieldKind;
+        use crate::ui::edit_form::EditField;
+        use crate::ui::form::WidgetSpec;
+        let field = EditField {
+            label: "gidNumber".into(),
+            must: false,
+            editable: true,
+            multi: false, // single-value — the trap-1 regression guard
+            secret: false,
+            ordered: false,
+            values: vec![],
+            kind: FieldKind::Text,
+            widget: WidgetSpec::ReadOnlyText,
+            editor: TextState::new(),
+            relation: None,
+            lookup: Some(gid_lookup_spec()),
+        };
+        let mut app = bare_app(false);
+        app.form = Some(EditForm {
+            dn: "uid=alice,ou=people,dc=test".into(),
+            fields: vec![field],
+            baseline: Default::default(),
+            mode: FormMode::Edit,
+        });
+        app.form_focus = 0;
+        app
+    }
+
+    #[test]
+    fn open_value_editor_opens_picker_for_single_value_lookup_field() {
+        // Trap 1: a scalar (multi=false) lookup field must still open a picker.
+        let mut app = app_with_lookup_field();
+        let s = empty_structure(); // root = dc=test
+        open_value_editor(&mut app, &s);
+        match &app.overlay {
+            Some(Overlay::ValueEditor(ve)) => {
+                assert!(ve.lookup.is_some(), "lookup picker installed");
+                assert!(ve.picker.is_some(), "picker state present");
+                // Empty search_base → resolved to the directory root.
+                assert_eq!(ve.base, "dc=test");
+                // Single-select has no pre-pinned selection.
+                assert!(ve.picker.as_ref().unwrap().selected.is_empty());
+            }
+            other => panic!("expected a ValueEditor overlay, got {:?}", other.is_some()),
+        }
+    }
+
+    #[test]
+    fn lookup_enter_commits_scalar_to_field_editor() {
+        use crate::ui::picker::Candidate;
+        let mut app = app_with_lookup_field();
+        let s = empty_structure();
+        open_value_editor(&mut app, &s);
+        // Seed one candidate carrying the scalar value_attr.
+        if let Some(Overlay::ValueEditor(ve)) = app.overlay.as_mut() {
+            ve.picker.as_mut().unwrap().set_results(vec![Candidate {
+                dn: "cn=staff,ou=groups,dc=test".into(),
+                label: "staff".into(),
+                value: Some("5001".into()),
+            }]);
+        }
+        // Enter commits the chosen scalar into the field's inline editor.
+        picker_editor_key(&mut app, key(KeyCode::Enter));
+        assert!(app.overlay.is_none(), "overlay closes on commit");
+        let f = &app.form.as_ref().unwrap().fields[0];
+        assert_eq!(f.editor.value(), "5001");
+        // A single-value field saves from `editor`, so current_values reflects it.
+        assert_eq!(f.current_values(), vec!["5001".to_string()]);
+    }
+
+    #[test]
+    fn lookup_enter_with_no_value_leaves_field_unchanged() {
+        use crate::ui::picker::Candidate;
+        let mut app = app_with_lookup_field();
+        let s = empty_structure();
+        open_value_editor(&mut app, &s);
+        if let Some(Overlay::ValueEditor(ve)) = app.overlay.as_mut() {
+            ve.picker.as_mut().unwrap().set_results(vec![Candidate {
+                dn: "cn=staff,ou=groups,dc=test".into(),
+                label: "staff".into(),
+                value: None, // candidate lacked value_attr
+            }]);
+        }
+        picker_editor_key(&mut app, key(KeyCode::Enter));
+        assert!(app.overlay.is_none());
+        // No write happened — the editor stays empty.
+        let f = &app.form.as_ref().unwrap().fields[0];
+        assert_eq!(f.editor.value(), "");
+    }
+
+    #[test]
+    fn lookup_space_types_into_search_and_f2_is_ignored() {
+        // The picker is shared with membership mode (Space toggles, F2 commits a
+        // DN set). In a single-select lookup picker neither applies: Space is a
+        // literal search char (group names may contain spaces) and F2 must not
+        // leak a DN into the scalar field.
+        use crate::ui::picker::Candidate;
+        let mut app = app_with_lookup_field();
+        let s = empty_structure();
+        open_value_editor(&mut app, &s);
+        if let Some(Overlay::ValueEditor(ve)) = app.overlay.as_mut() {
+            ve.picker.as_mut().unwrap().set_results(vec![Candidate {
+                dn: "cn=staff group,ou=groups,dc=test".into(),
+                label: "staff group".into(),
+                value: Some("5001".into()),
+            }]);
+        }
+        // Space → search box, not a selection toggle.
+        picker_editor_key(&mut app, key(KeyCode::Char(' ')));
+        match app.overlay.as_ref() {
+            Some(Overlay::ValueEditor(ve)) => {
+                assert_eq!(ve.search.value(), " ", "Space is typed into the search box");
+                assert!(
+                    ve.picker.as_ref().unwrap().selected.is_empty(),
+                    "Space must not toggle a selection in lookup mode"
+                );
+            }
+            _ => panic!("overlay must stay open after Space"),
+        }
+        // F2 → no-op for a lookup picker (membership-only commit).
+        picker_editor_key(&mut app, key(KeyCode::F(2)));
+        assert!(
+            app.overlay.is_some(),
+            "F2 is ignored for a lookup picker — overlay stays open"
+        );
+        let f = &app.form.as_ref().unwrap().fields[0];
+        assert_eq!(
+            f.editor.value(),
+            "",
+            "F2 must not write a DN into a scalar field"
+        );
+        assert!(f.values.is_empty(), "F2 must not populate values with a DN");
+    }
+
+    #[test]
+    fn effective_search_attrs_falls_back_through_label_then_cn() {
+        let mut spec = gid_lookup_spec();
+        assert_eq!(effective_search_attrs(&spec), vec!["cn".to_string()]);
+        spec.search_attrs.clear();
+        spec.label = "displayName".into();
+        assert_eq!(
+            effective_search_attrs(&spec),
+            vec!["displayName".to_string()]
+        );
+        spec.label.clear();
+        assert_eq!(effective_search_attrs(&spec), vec!["cn".to_string()]);
+    }
+
+    #[test]
+    fn dedupe_ci_drops_empties_and_case_dups() {
+        let mut attrs = vec![
+            "gidNumber".to_string(),
+            "cn".to_string(),
+            "CN".to_string(),
+            String::new(),
+            "gidnumber".to_string(),
+        ];
+        dedupe_ci(&mut attrs);
+        assert_eq!(attrs, vec!["gidNumber".to_string(), "cn".to_string()]);
+    }
+
+    #[test]
+    fn build_new_entry_form_tags_lookup_fields() {
+        // The create path is the primary use case: the gidNumber field must come
+        // out tagged so Enter opens the picker.
+        let mut profile = create_user_profile();
+        profile
+            .lookups
+            .insert("description".into(), gid_lookup_spec());
+        let form = build_new_entry_form(
+            &user_schema(),
+            &profile,
+            0,
+            "ou=people,dc=example,dc=org".to_string(),
+        );
+        let f = form
+            .fields
+            .iter()
+            .find(|f| f.label == "description")
+            .expect("description field present");
+        assert!(f.lookup.is_some(), "create path tagged the lookup field");
+    }
+
+    #[test]
+    fn lookups_profile_for_entry_requires_oc_subset_and_lookup_spec() {
+        // A profile that declares a `[profile.lookup.*]` and whose object classes
+        // are all present in the entry → matches. Mirrors
+        // `profile_for_entry_requires_oc_subset_and_password_spec`.
+        let mut lk_user = create_user_profile();
+        lk_user.object_classes = vec!["inetOrgPerson".into(), "posixAccount".into()];
+        lk_user
+            .lookups
+            .insert("gidNumber".into(), gid_lookup_spec());
+        // A profile with no lookups must never match.
+        let mut plain = create_user_profile();
+        plain.object_classes = vec!["inetOrgPerson".into()];
+        plain.lookups = Default::default();
+        let profiles = vec![plain, lk_user];
+
+        let ocs = vec![
+            "top".to_string(),
+            "inetOrgPerson".to_string(),
+            "posixAccount".to_string(),
+        ];
+        let m = lookups_profile_for_entry(&profiles, &ocs).expect("lookups profile matches");
+        assert!(!m.lookups.is_empty());
+        assert_eq!(m.object_classes.len(), 2);
+        // Entry missing posixAccount: the 2-OC profile no longer matches, and the
+        // plain profile has no lookups → None.
+        assert!(lookups_profile_for_entry(&profiles, &["inetOrgPerson".to_string()]).is_none());
+        // No profile declares lookups → None even on a full OC match.
+        let no_lookups = vec![plain_profile_no_lookups()];
+        assert!(lookups_profile_for_entry(&no_lookups, &ocs).is_none());
+    }
+
+    #[test]
+    fn build_loaded_form_tags_lookup_fields() {
+        // The edit path resolves the lookups profile via objectClass and tags the
+        // matching field so Enter opens the picker on edit, too. Mirrors
+        // `build_new_entry_form_tags_lookup_fields` for the load seam.
+        let mut profile = create_user_profile();
+        profile.object_classes = vec!["testUser".into()];
+        profile
+            .lookups
+            .insert("description".into(), gid_lookup_spec());
+        // No password block → the password injection branch is skipped.
+        profile.password = None;
+
+        // A loaded entry that is an instance of the profile (objectClass=testUser)
+        // and carries the `description` attribute the lookup is keyed on.
+        let model = crate::ui::form::FormModel {
+            title: "uid=ann,ou=people,dc=example,dc=org".into(),
+            fields: vec![
+                crate::ui::form::FormField {
+                    label: "objectClass".into(),
+                    kind: FieldKind::Text,
+                    is_must: true,
+                    values: vec!["testUser".into()],
+                    widget: WidgetSpec::ReadOnlyText,
+                },
+                crate::ui::form::FormField {
+                    label: "description".into(),
+                    kind: FieldKind::Text,
+                    is_must: false,
+                    values: vec!["existing".into()],
+                    widget: WidgetSpec::ReadOnlyText,
+                },
+            ],
+        };
+        let form = build_loaded_form(&model, &user_schema(), false, &[], &[profile]);
+        let f = form
+            .fields
+            .iter()
+            .find(|f| f.label == "description")
+            .expect("description field present");
+        assert!(f.lookup.is_some(), "edit path tagged the lookup field");
+    }
+
+    /// A profile with object classes but no `[profile.lookup.*]` and no password.
+    fn plain_profile_no_lookups() -> EntryProfile {
+        let mut p = create_user_profile();
+        p.object_classes = vec!["inetOrgPerson".into(), "posixAccount".into()];
+        p.lookups = Default::default();
+        p.password = None;
+        p
     }
 
     #[test]
@@ -2567,6 +3615,43 @@ mod tests {
         SchemaModel::from_raw(&raw)
     }
 
+    fn create_user_profile() -> EntryProfile {
+        EntryProfile {
+            name: "User".into(),
+            object_classes: vec!["testUser".into()],
+            rdn_attr: "uid".into(),
+            search_base: "ou=people,dc=example,dc=org".into(),
+            show: vec!["uid".into()],
+            search_attrs: vec![],
+            defaults: Default::default(),
+            password: None,
+            lookups: Default::default(),
+        }
+    }
+
+    #[test]
+    fn build_new_entry_form_is_create_mode_and_single_value() {
+        let form = build_new_entry_form(
+            &user_schema(),
+            &create_user_profile(),
+            0,
+            "ou=people,dc=example,dc=org".to_string(),
+        );
+        assert!(form.is_new());
+        match &form.mode {
+            FormMode::Create {
+                profile_idx,
+                container,
+            } => {
+                assert_eq!(*profile_idx, 0);
+                assert_eq!(container, "ou=people,dc=example,dc=org");
+            }
+            _ => panic!("expected Create mode"),
+        }
+        // every editable field is forced single-value for inline create
+        assert!(form.fields.iter().all(|f| !(f.editable && f.multi)));
+    }
+
     /// Resolved relations for the user schema: memberOf ↔ group.member.
     fn user_relations() -> Vec<ResolvedRelation> {
         use crate::config::relation::CandidateScope;
@@ -2578,12 +3663,12 @@ mod tests {
             back_attr: "memberOf".into(),
             candidate_scope: CandidateScope {
                 base: "ou=people,dc=x".into(),
-                object_class: "testUser".into(),
+                object_classes: vec!["testUser".into()],
                 search_attrs: vec!["uid".into()],
             },
             holder_scope: CandidateScope {
                 base: "ou=groups,dc=x".into(),
-                object_class: "groupOfNames".into(),
+                object_classes: vec!["groupOfNames".into()],
                 search_attrs: vec!["cn".into()],
             },
         }]
@@ -2597,7 +3682,7 @@ mod tests {
 
         let scope = CandidateScope {
             base: "ou=groups,dc=x".into(),
-            object_class: "groupOfNames".into(),
+            object_classes: vec!["groupOfNames".into()],
             search_attrs: vec!["cn".into()],
         };
 
@@ -2613,6 +3698,7 @@ mod tests {
             widget: WidgetSpec::ReadOnlyText,
             editor: TextState::new().with_value("ann".to_string()),
             relation: None,
+            lookup: None,
         };
 
         let desc_field = EditField {
@@ -2627,6 +3713,7 @@ mod tests {
             widget: WidgetSpec::ReadOnlyText,
             editor: TextState::new(),
             relation: None,
+            lookup: None,
         };
 
         let memberof_field = EditField {
@@ -2644,6 +3731,7 @@ mod tests {
                 role: crate::config::relation::RelationRole::BackRef,
                 scope: scope.clone(),
             }),
+            lookup: None,
         };
 
         let mut baseline = BTreeMap::new();
@@ -2656,6 +3744,7 @@ mod tests {
             dn: "uid=ann,ou=people,dc=x".into(),
             fields: vec![uid_field, desc_field, memberof_field],
             baseline,
+            mode: FormMode::Edit,
         }
     }
 
@@ -2665,7 +3754,7 @@ mod tests {
 
         let scope = CandidateScope {
             base: "ou=groups,dc=x".into(),
-            object_class: "groupOfNames".into(),
+            object_classes: vec!["groupOfNames".into()],
             search_attrs: vec!["cn".into()],
         };
 
@@ -2682,6 +3771,7 @@ mod tests {
             widget: WidgetSpec::ReadOnlyText,
             editor: TextState::new().with_value("bob".to_string()),
             relation: None,
+            lookup: None,
         };
 
         let memberof_field = EditField {
@@ -2699,6 +3789,7 @@ mod tests {
                 role: RelationRole::BackRef,
                 scope,
             }),
+            lookup: None,
         };
 
         let mut baseline = BTreeMap::new();
@@ -2710,6 +3801,7 @@ mod tests {
             dn: "uid=ann,ou=people,dc=x".into(),
             fields: vec![uid_field, memberof_field],
             baseline,
+            mode: FormMode::Edit,
         }
     }
 
@@ -2718,7 +3810,7 @@ mod tests {
         let form = user_form_own_and_memberof_change();
         let schema = user_schema();
         let relations = user_relations();
-        let plan = plan_combined_save(&form, &schema, &relations);
+        let plan = plan_combined_save(&form, &schema, &relations, &[], 0);
         let (own_mods, fanout, _entry_dn) = match plan {
             CombinedPlan::Ready {
                 own_mods,
@@ -2751,10 +3843,520 @@ mod tests {
         let relations = user_relations();
         assert!(
             matches!(
-                plan_combined_save(&form, &schema, &relations),
+                plan_combined_save(&form, &schema, &relations, &[], 0),
                 CombinedPlan::Blocked(_)
             ),
             "rename + membership change must be Blocked"
         );
+    }
+
+    /// A password-profile entry edited via the combined (membership) save path must
+    /// not let the injected password pseudo-fields leak into the own-entry MODIFY:
+    /// a BLANK field must never clobber the stored password, and the `(confirm)`
+    /// field must never become a real attribute.
+    fn pw_user_form_with_memberof_change() -> (EditForm, Vec<EntryProfile>) {
+        let mut form = user_form_own_and_memberof_change();
+        // The directory returned the stored password hash on the entry.
+        form.baseline
+            .insert("userPassword".into(), vec!["{SSHA}old".into()]);
+        let spec = crate::config::PasswordSpec {
+            ldap_attribute: "userPassword".into(),
+            samba: false,
+        };
+        crate::ui::edit_form::inject_password_fields(&mut form, &spec);
+        let mut profile = create_user_profile();
+        profile.object_classes = vec!["testUser".into()];
+        profile.password = Some(spec);
+        (form, vec![profile])
+    }
+
+    fn own_mods_touch(mods: &[ModOp], attr: &str) -> bool {
+        mods.iter().any(|m| {
+            let a = match m {
+                ModOp::Add { attr, .. }
+                | ModOp::Delete { attr, .. }
+                | ModOp::Replace { attr, .. } => attr,
+            };
+            a.eq_ignore_ascii_case(attr)
+        })
+    }
+
+    #[test]
+    fn combined_save_blank_password_does_not_clobber_or_leak() {
+        let (form, profiles) = pw_user_form_with_memberof_change();
+        // Password fields left blank by the operator.
+        match plan_combined_save(
+            &form,
+            &user_schema(),
+            &user_relations(),
+            &profiles,
+            1_700_000_000,
+        ) {
+            CombinedPlan::Ready { own_mods, ldif, .. } => {
+                assert!(
+                    !own_mods_touch(&own_mods, "userPassword"),
+                    "blank password must not emit a userPassword mod (clobber!)"
+                );
+                assert!(
+                    !own_mods_touch(&own_mods, "userPassword (confirm)"),
+                    "confirm pseudo-field must never become a real attribute"
+                );
+                assert!(
+                    !ldif.contains("(confirm)"),
+                    "confirm field must not leak to preview"
+                );
+            }
+            _ => panic!("expected Ready"),
+        }
+    }
+
+    #[test]
+    fn combined_save_sets_password_as_replace_and_masks_preview() {
+        let (mut form, profiles) = pw_user_form_with_memberof_change();
+        // Operator typed a new password into both injected fields.
+        for f in form.fields.iter_mut() {
+            if f.label.eq_ignore_ascii_case("userPassword")
+                || f.label.eq_ignore_ascii_case("userPassword (confirm)")
+            {
+                f.editor = TextState::new().with_value("hunter2".to_string());
+            }
+        }
+        match plan_combined_save(
+            &form,
+            &user_schema(),
+            &user_relations(),
+            &profiles,
+            1_700_000_000,
+        ) {
+            CombinedPlan::Ready { own_mods, ldif, .. } => {
+                assert!(
+                    own_mods.contains(&ModOp::Replace {
+                        attr: "userPassword".into(),
+                        values: vec!["hunter2".into()],
+                    }),
+                    "new password must be a REPLACE in own_mods"
+                );
+                assert!(
+                    !own_mods_touch(&own_mods, "userPassword (confirm)"),
+                    "confirm pseudo-field must never become a real attribute"
+                );
+                assert!(ldif.contains("********"), "preview masks the password");
+                assert!(
+                    !ldif.contains("hunter2"),
+                    "cleartext must not appear in preview"
+                );
+            }
+            _ => panic!("expected Ready"),
+        }
+    }
+
+    #[test]
+    fn plan_create_builds_confirm_with_composed_dn() {
+        use std::collections::BTreeMap;
+        let mut attrs = BTreeMap::new();
+        attrs.insert("uid".to_string(), vec!["alice".to_string()]);
+        let edited = EditEntry {
+            dn: String::new(),
+            attrs,
+        };
+        let prep = plan_create(
+            &user_schema(),
+            &create_user_profile(),
+            "ou=people,dc=example,dc=org",
+            &edited,
+        );
+        match prep {
+            CreatePrep::Confirm { dn, .. } => {
+                assert_eq!(dn, "uid=alice,ou=people,dc=example,dc=org")
+            }
+            CreatePrep::Error(e) => panic!("unexpected error: {e}"),
+        }
+    }
+
+    #[test]
+    fn plan_create_errors_when_rdn_missing() {
+        use std::collections::BTreeMap;
+        let edited = EditEntry {
+            dn: String::new(),
+            attrs: BTreeMap::new(),
+        };
+        let prep = plan_create(
+            &user_schema(),
+            &create_user_profile(),
+            "ou=people,dc=example,dc=org",
+            &edited,
+        );
+        assert!(matches!(prep, CreatePrep::Error(_)));
+    }
+
+    #[test]
+    fn should_install_blocks_a_late_read_over_a_create_form() {
+        let mut app = bare_app(false);
+        app.last_seen_leaf = Some("uid=bob,ou=people,dc=example,dc=org".to_string());
+        app.form = Some(build_new_entry_form(
+            &user_schema(),
+            &create_user_profile(),
+            0,
+            "ou=people,dc=example,dc=org".to_string(),
+        ));
+        // A base-read for the prior selection must NOT clobber the create form.
+        assert!(!should_install_form(
+            &app,
+            "uid=bob,ou=people,dc=example,dc=org"
+        ));
+    }
+
+    #[test]
+    fn should_install_allows_matching_edit_form_without_overlay() {
+        let mut app = with_form(bare_app(false), "cn=Alice,dc=example,dc=org");
+        app.last_seen_leaf = Some("cn=Alice,dc=example,dc=org".to_string());
+        assert!(should_install_form(&app, "cn=Alice,dc=example,dc=org"));
+        // An open overlay blocks installation.
+        app.overlay = Some(Overlay::Error {
+            text: "x".to_string(),
+        });
+        assert!(!should_install_form(&app, "cn=Alice,dc=example,dc=org"));
+    }
+
+    #[test]
+    fn revert_discards_an_unsaved_create_form() {
+        let mut app = bare_app(false);
+        app.form = Some(build_new_entry_form(
+            &user_schema(),
+            &create_user_profile(),
+            0,
+            "ou=people,dc=example,dc=org".to_string(),
+        ));
+        revert_form(&mut app);
+        assert!(app.form.is_none(), "create form discarded on cancel");
+    }
+
+    #[test]
+    fn stage_password_strips_fields_validates_match_and_empty() {
+        use crate::config::PasswordSpec;
+        use std::collections::BTreeMap;
+        let spec = PasswordSpec {
+            ldap_attribute: "userPassword".into(),
+            samba: false,
+        };
+        // matching pair → Some, both pseudo-fields stripped, other attrs kept
+        let mut attrs: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        attrs.insert("userPassword".into(), vec!["hunter2".into()]);
+        attrs.insert("userPassword (confirm)".into(), vec!["hunter2".into()]);
+        attrs.insert("cn".into(), vec!["Alice".into()]);
+        assert_eq!(
+            stage_password(&spec, &mut attrs).unwrap(),
+            Some("hunter2".to_string())
+        );
+        assert!(!attrs.contains_key("userPassword"));
+        assert!(!attrs.contains_key("userPassword (confirm)"));
+        assert!(attrs.contains_key("cn"));
+        // mismatch → Err
+        let mut a2: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        a2.insert("userPassword".into(), vec!["a".into()]);
+        a2.insert("userPassword (confirm)".into(), vec!["b".into()]);
+        assert!(stage_password(&spec, &mut a2).is_err());
+        // empty → None
+        let mut a3: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        a3.insert("userPassword".into(), vec!["".into()]);
+        a3.insert("userPassword (confirm)".into(), vec!["".into()]);
+        assert_eq!(stage_password(&spec, &mut a3).unwrap(), None);
+    }
+
+    #[test]
+    fn mask_password_attrs_masks_secret_values_only() {
+        use std::collections::BTreeMap;
+        let mut attrs: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        attrs.insert("userPassword".into(), vec!["hunter2".into()]);
+        attrs.insert("sambaNTPassword".into(), vec!["DEADBEEF".into()]);
+        attrs.insert("cn".into(), vec!["Alice".into()]);
+        let m = mask_password_attrs(&attrs, "userPassword");
+        assert_eq!(m.get("userPassword"), Some(&vec!["********".to_string()]));
+        assert_eq!(
+            m.get("sambaNTPassword"),
+            Some(&vec!["********".to_string()])
+        );
+        assert_eq!(m.get("cn"), Some(&vec!["Alice".to_string()]));
+    }
+
+    #[test]
+    fn prepare_save_folds_password_mods_and_masks_preview() {
+        use std::collections::BTreeMap;
+        // No attribute diff (original == edited): a password-only edit is still a
+        // change. The real plan carries the cleartext + hash; the preview masks them.
+        let mut attrs: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        attrs.insert("uid".into(), vec!["alice".into()]);
+        let entry = EditEntry {
+            dn: "uid=alice,ou=people,dc=example,dc=org".into(),
+            attrs,
+        };
+        let pw_mods = vec![
+            ModOp::Replace {
+                attr: "userPassword".into(),
+                values: vec!["hunter2".into()],
+            },
+            ModOp::Replace {
+                attr: "sambaNTPassword".into(),
+                values: vec!["DEADBEEF".into()],
+            },
+        ];
+        let mask = vec!["userPassword".to_string(), "sambaNTPassword".to_string()];
+        match prepare_save(
+            &user_schema(),
+            &entry,
+            &entry,
+            &["testUser".to_string()],
+            &pw_mods,
+            &mask,
+        ) {
+            PrepareSave::Ready { plan, ldif, .. } => {
+                // Preview masks both secrets, never the cleartext or hash.
+                assert!(ldif.contains("********"), "preview must mask secrets");
+                assert!(!ldif.contains("hunter2"), "cleartext must not appear");
+                assert!(!ldif.contains("DEADBEEF"), "NT hash must not appear");
+                // The real plan carries the unmasked values.
+                match plan {
+                    SavePlan::Modify(mods) => {
+                        assert!(mods.contains(&ModOp::Replace {
+                            attr: "userPassword".into(),
+                            values: vec!["hunter2".into()],
+                        }));
+                        assert!(mods.contains(&ModOp::Replace {
+                            attr: "sambaNTPassword".into(),
+                            values: vec!["DEADBEEF".into()],
+                        }));
+                    }
+                    _ => panic!("expected Modify"),
+                }
+            }
+            _ => panic!("expected Ready"),
+        }
+    }
+
+    #[test]
+    fn prepare_save_no_password_no_diff_is_no_changes() {
+        use std::collections::BTreeMap;
+        let mut attrs: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        attrs.insert("uid".into(), vec!["alice".into()]);
+        let entry = EditEntry {
+            dn: "uid=alice,ou=people,dc=example,dc=org".into(),
+            attrs,
+        };
+        assert!(matches!(
+            prepare_save(
+                &user_schema(),
+                &entry,
+                &entry,
+                &["testUser".to_string()],
+                &[],
+                &[]
+            ),
+            PrepareSave::NoChanges
+        ));
+    }
+
+    #[test]
+    fn profile_for_entry_requires_oc_subset_and_password_spec() {
+        use crate::config::PasswordSpec;
+        let mut pw_user = create_user_profile();
+        pw_user.object_classes = vec!["inetOrgPerson".into(), "posixAccount".into()];
+        pw_user.password = Some(PasswordSpec {
+            ldap_attribute: "userPassword".into(),
+            samba: false,
+        });
+        // A profile with no password block must never match.
+        let mut plain = create_user_profile();
+        plain.object_classes = vec!["inetOrgPerson".into()];
+        plain.password = None;
+        let profiles = vec![plain, pw_user];
+
+        let ocs = vec![
+            "top".to_string(),
+            "inetOrgPerson".to_string(),
+            "posixAccount".to_string(),
+        ];
+        let m = profile_for_entry(&profiles, &ocs).expect("password profile matches");
+        assert!(m.password.is_some());
+        assert_eq!(m.object_classes.len(), 2);
+        // Entry missing posixAccount: the 2-OC profile no longer matches, and the
+        // plain profile has no password → None.
+        assert!(profile_for_entry(&profiles, &["inetOrgPerson".to_string()]).is_none());
+    }
+
+    fn pw_spec(samba: bool) -> crate::config::PasswordSpec {
+        crate::config::PasswordSpec {
+            ldap_attribute: "userPassword".into(),
+            samba,
+        }
+    }
+
+    #[test]
+    fn stage_edit_password_blank_yields_no_mods_and_strips_pseudo_fields() {
+        use std::collections::BTreeMap;
+        // baseline carries the directory's stored hash; edited carries the blank
+        // injected fields. After staging, neither side keeps the password attr.
+        let mut baseline: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        baseline.insert("userPassword".into(), vec!["{SSHA}deadbeef".into()]);
+        baseline.insert("cn".into(), vec!["Alice".into()]);
+        let mut edited: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        edited.insert("userPassword".into(), vec!["".into()]);
+        edited.insert("userPassword (confirm)".into(), vec!["".into()]);
+        edited.insert("cn".into(), vec!["Alice".into()]);
+
+        let (mods, mask) = stage_edit_password(
+            &pw_spec(false),
+            &[],
+            &mut baseline,
+            &mut edited,
+            1_700_000_000,
+        )
+        .unwrap();
+        assert!(mods.is_empty(), "blank password produces no mods");
+        assert!(mask.is_empty());
+        assert!(
+            !baseline.contains_key("userPassword"),
+            "baseline hash stripped"
+        );
+        assert!(!edited.contains_key("userPassword"));
+        assert!(!edited.contains_key("userPassword (confirm)"));
+        assert!(baseline.contains_key("cn") && edited.contains_key("cn"));
+    }
+
+    #[test]
+    fn stage_edit_password_set_yields_replace_and_strips_baseline_hash() {
+        use std::collections::BTreeMap;
+        let mut baseline: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        baseline.insert("userPassword".into(), vec!["{SSHA}old".into()]);
+        let mut edited: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        edited.insert("userPassword".into(), vec!["hunter2".into()]);
+        edited.insert("userPassword (confirm)".into(), vec!["hunter2".into()]);
+
+        let (mods, mask) = stage_edit_password(
+            &pw_spec(false),
+            &[],
+            &mut baseline,
+            &mut edited,
+            1_700_000_000,
+        )
+        .unwrap();
+        assert_eq!(
+            mods,
+            vec![ModOp::Replace {
+                attr: "userPassword".into(),
+                values: vec!["hunter2".into()],
+            }]
+        );
+        assert_eq!(mask, vec!["userPassword".to_string()]);
+        assert!(!baseline.contains_key("userPassword"), "old hash stripped");
+    }
+
+    #[test]
+    fn stage_edit_password_samba_includes_nt_hash_and_strips_samba_attrs() {
+        use std::collections::BTreeMap;
+        let mut baseline: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        baseline.insert("sambaNTPassword".into(), vec!["OLDHASH".into()]);
+        baseline.insert("sambaPwdLastSet".into(), vec!["1".into()]);
+        let mut edited: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        edited.insert("userPassword".into(), vec!["hunter2".into()]);
+        edited.insert("userPassword (confirm)".into(), vec!["hunter2".into()]);
+
+        let ocs = vec!["sambaSamAccount".to_string()];
+        let (mods, mask) = stage_edit_password(
+            &pw_spec(true),
+            &ocs,
+            &mut baseline,
+            &mut edited,
+            1_700_000_000,
+        )
+        .unwrap();
+        // The NT hash REPLACE is present and equals the M5 nthash of the cleartext.
+        assert!(mods.contains(&ModOp::Replace {
+            attr: "sambaNTPassword".into(),
+            values: vec![crate::samba::nthash::nt_hash("hunter2")],
+        }));
+        assert!(mask.contains(&"sambaNTPassword".to_string()));
+        assert!(
+            !baseline.contains_key("sambaNTPassword"),
+            "old NT hash stripped"
+        );
+        assert!(!baseline.contains_key("sambaPwdLastSet"));
+    }
+
+    #[test]
+    fn stage_edit_password_mismatch_errors() {
+        use std::collections::BTreeMap;
+        let mut baseline: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        let mut edited: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        edited.insert("userPassword".into(), vec!["a".into()]);
+        edited.insert("userPassword (confirm)".into(), vec!["b".into()]);
+        assert!(
+            stage_edit_password(&pw_spec(false), &[], &mut baseline, &mut edited, 0).is_err(),
+            "confirm mismatch must error"
+        );
+    }
+
+    #[test]
+    fn apply_static_defaults_fills_literals_templates_and_surfaces_autonumber() {
+        use crate::config::defaults::{parse_default_value, DefaultValue, ProfileDefaults};
+        use std::collections::BTreeMap;
+        let mut d = ProfileDefaults::default();
+        d.entries.insert(
+            "loginShell".into(),
+            DefaultValue::Literal("/bin/bash".into()),
+        );
+        d.entries.insert(
+            "homeDirectory".into(),
+            parse_default_value("/home/{uid}").unwrap(),
+        );
+        d.entries.insert(
+            "uidNumber".into(),
+            parse_default_value("{next:10000-60000}").unwrap(),
+        );
+        let mut attrs: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        attrs.insert("uid".into(), vec!["alice".into()]);
+        let autonum = apply_static_defaults(&d, &mut attrs);
+        assert_eq!(
+            attrs.get("loginShell"),
+            Some(&vec!["/bin/bash".to_string()])
+        );
+        assert_eq!(
+            attrs.get("homeDirectory"),
+            Some(&vec!["/home/alice".to_string()])
+        );
+        // autonumber is NOT filled here (needs a worker scan); it's surfaced.
+        assert_eq!(autonum, vec![("uidNumber".to_string(), 10000, 60000)]);
+        assert!(!attrs.contains_key("uidNumber"));
+    }
+
+    #[test]
+    fn esc_cancels_a_create_form_but_is_a_noop_on_an_edit_form() {
+        let s = empty_structure();
+        // A create form: Esc requests cancel.
+        let mut app = bare_app(false);
+        app.focus = Pane::Form;
+        app.form = Some(build_new_entry_form(
+            &user_schema(),
+            &create_user_profile(),
+            0,
+            "ou=people,dc=example,dc=org".to_string(),
+        ));
+        assert_eq!(
+            dispatch_key(&mut app, key(KeyCode::Esc), &s),
+            Some(UiAction::FormCancel)
+        );
+        // An edit form: Esc does not cancel (F3 reverts instead).
+        let mut app2 = with_form(bare_app(false), "cn=Alice,dc=example,dc=org");
+        app2.focus = Pane::Form;
+        assert_eq!(dispatch_key(&mut app2, key(KeyCode::Esc), &s), None);
+    }
+
+    #[test]
+    fn allocation_refuses_on_truncation() {
+        assert!(decide_allocation(&[10000], true, 10000, 60000).is_err());
+        assert_eq!(
+            decide_allocation(&[10000], false, 10000, 60000).unwrap(),
+            10001
+        );
+        assert_eq!(decide_allocation(&[], false, 10000, 60000).unwrap(), 10000);
     }
 }

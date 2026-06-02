@@ -2,7 +2,7 @@
 
 **Date:** 2026-06-02
 **`main` HEAD:** `54d10be` (working tree clean)
-**Active worktree:** `/scratch/oetiker/claude-worktrees/ldapedit-feat-three-pane` on branch `feat-three-pane` — **now equal to `main`** (the membership picker was merged and `main` fast-forwarded). The branch/worktree are preserved for the next milestone.
+**Active worktree:** `/scratch/oetiker/claude-worktrees/ldapedit-feat-rich-templates` on branch `feat-rich-templates` (**37 commits ahead of `main`**, code HEAD `468c0b9` + this doc commit) — the **rich user templates** milestone, **all phases (0–6) complete**, final review done (see the execution-progress section below). 264 lib tests + 3 gated live `live_templates` tests green; full end-to-end tmux smoke passed (create a posix user with multi-OC, defaults, autonumber, lookup-gidNumber, and password — verified against a real slapd). Ready for finish-branch (merge/PR — user's call).
 
 `edaptor` is a Rust **ratatui** TUI for administering an OpenLDAP directory (users, groups, group memberships). It derives the directory's structure from live schema introspection (`cn=subschema`) and generates edit forms from `objectClass` definitions; a TOML config declares connection settings plus *entry profiles* ("what a user/group means here").
 
@@ -22,13 +22,13 @@
 | 3-pane redesign | ✅ merged |
 | turbo-vision → **ratatui 0.30** migration | ✅ merged |
 | UI polish (white theme, double-border focus, per-pane footers, F7 create, status-line hints, `GuardIntent`/`ResolveGuard` dirty-guard) | ✅ merged |
-| **Relation membership picker** | ✅ **merged this session (`54d10be`)** |
+| **Relation membership picker** | ✅ merged (`54d10be`) |
 | M6 leftovers (paged-scale lists, result-code→human table polish, SASL EXTERNAL/GSSAPI auth, packaging) | ⏳ pending |
-| **Rich user templates (next milestone)** | ⏳ not started — see below |
+| **Rich user templates** (branch `feat-rich-templates`) | ✅ complete — all phases 0–6 done; gated live tests + full tmux smoke green; awaiting final review + merge |
 
 ---
 
-## What just landed: the relation membership picker
+## Background: the relation membership picker (merged to `main`)
 
 **Symmetric group↔user membership editing as a *picker mode* of the existing multi-value value-editor** — no separate dual-pane screen. Driven by one `[[relation]]` config block.
 
@@ -59,17 +59,31 @@ The branch was cut at `41f90a1`; `main` then absorbed the UI-polish refactor, wh
 
 ## Open items / known gaps
 
-1. **The membership apply-seam is inspection-verified, not run live.** The fan-out / last-member / partial-failure paths are exercised only by `tests/live_membership.rs` (gated) and the manual tmux smoke (plan task 5.5) — **neither has been run against a real directory.** Always-on unit tests cover the *planning* logic, not the live apply. Closing this = run the live tests + a manual smoke (see below).
-2. **README status section is stale** (says Turbo Vision / early development).
-3. **M5 Samba** is headless-only (`edaptor passwd <dn>` CLI); no in-TUI "Set Password"/Samba-enable action yet.
+1. **Membership apply-seam:** the gated `tests/live_membership.rs` (fan-out / last-member / size-cap, 4 tests) **now run green against a real podman slapd** (run this session). The manual tmux smoke of the live apply is still not done.
+2. **README status section is stale** (says Turbo Vision / early development) — the `## Status` blurb still needs a refresh. The `## Configuration` example is now current (rewritten in Task 6.3 as a rich multi-profile example with `object_classes`, defaults, password, and lookup).
+3. **M5 Samba** is headless-only as a *CLI* (`edaptor passwd <dn>`); password setting is now surfaced in the TUI for create- and edit-of password-profile entries (Phase 4), but there is still no standalone in-TUI "Set Password"/Samba-enable action on arbitrary entries.
 
 ---
 
-## Next milestone: rich user templates
+## Current milestone: rich user templates — execution progress
 
-**Agreed next step** (recorded in project memory). Problem: `EntryProfile.object_class` is a **single `String`**, so a created "user" only gets `["top","inetOrgPerson"]` — not a real `posixAccount`/`shadowAccount` account (no `uidNumber`/`gidNumber`/`homeDirectory` fields even appear), and there's no password/default-value support. So no profile can express a sensible user template today.
+**Spec:** [`docs/superpowers/specs/2026-06-02-rich-user-templates-design.md`](superpowers/specs/2026-06-02-rich-user-templates-design.md) · **Plan:** [`docs/superpowers/plans/2026-06-02-rich-user-templates.md`](superpowers/plans/2026-06-02-rich-user-templates.md). Branch `feat-rich-templates`, 27 commits, HEAD `39a33cd`.
 
-**Target shape** (already in the design spec §5): `object_classes = [...]` (a **list**) + a `[profile.password]` block. **Touch points:** `src/config/mod.rs` (`EntryProfile`), `src/workflows/create.rs` (currently `objectClass: ["top", profile.object_class]` ~line 43; create-form fields from `effective_attributes(&[single_oc])`), and the picker candidate filter. Run the full **brainstorm → spec → plan → subagent-driven** flow (this is config + create + tests, deserves a design pass).
+**Done (all phases):**
+- **Phase 0** — create-host unification: NEW renders in the pane-3 `FormMode::Create` form (Save→Add); the modal `Overlay::CreateForm` is deleted. Key fns: `build_new_entry_form`, `plan_create`/`prepare_create`, `should_install_form`.
+- **Phase 1** — `EntryProfile.object_class: String` → `object_classes: Vec<String>` (BREAKING, no alias). `build_add_entry` emits `top`+all classes deduped; `build_member_filter` ANDs classes; create resolves MUST/MAY over all classes.
+- **Phase 2** — `src/config/defaults.rs` (pure): `parse_default_value` (literal / `{attr}` template / `{next:MIN-MAX}`), `next_in_range`, `plan_defaults`; `[profile.defaults]` parsed onto `EntryProfile`.
+- **Phase 3** — `Response::Entries.truncated`; `decide_allocation`/`allocate_number` (sync subtree scan, REFUSES on truncation); defaults + autonumber applied in `prepare_create`.
+- **Phase 4 (FULL: 4.1–4.6 + combined-path fix)** — `[profile.password]` (`PasswordSpec`); `password_add_attrs` (create) / `password_replace_mods` (edit, honors `ldap_attribute`+samba); `inject_password_fields` (masked attr + `(confirm)` fields, schema password suppressed); `stage_password` (create) / `stage_edit_password` (edit, strips pseudo-fields from baseline+edited so a blank field never clobbers); `prepare_save` folds password mods into the ChangeSet + masks the preview; `prepare_edit_save` shared by plain-F2 and guard-resume. **All 5 save entry points stage the password** — create, single-edit ×2, **combined membership ×2** (the combined path was a real clobber bug, found in review and fixed in `39a33cd`). `tests/live_templates.rs` (gated) verifies create-time password Add→re-bind green against real slapd.
+- **Phase 6** — context-filtered profile chooser on F7 (`profiles_for_container` DN-boundary match; 0→all, 1→direct, >1→`Overlay::ChooseProfile`).
+- **Phase 5** — value-lookup picker (gidNumber-from-group). A field declared in `[profile.lookup.<attr>]` opens a **single-select** picker; Enter writes the chosen entry's `value_attr` **scalar** (not a DN) into the field. Key pieces: `config::LookupSpec` + `EntryProfile.lookups`; pure `picker::pick_value` + `Candidate.value: Option<String>`; `edit_form::tag_lookup_fields` + `EditField.lookup` (wired at create **and** edit form-build sites; edit uses `lookups_profile_for_entry`); `ValueEditor` carries `lookup`; `open_value_editor` opens the picker for a **single-value** field (no `multi` requirement — the key trap); `service_picker_search` requests `[value_attr, label, …search_attrs]`; the `Response::Entries` intercept fills `Candidate.value` via `pick_value`; `picker_editor_key` binds **Enter** to commit the scalar to `field.editor`. Both `profile_for_entry`/`lookups_profile_for_entry` now share `profile_for_entry_where`.
+- **Task 3.4 + 5.3 + 4.6** — gated `tests/live_templates.rs`: create-time password Unix round-trip, autonumber+multi-OC create, and lookup→gidNumber. All 3 pass against the podman slapd (run this session).
+- **Task 6.3** — README `## Configuration` rewritten as a rich multi-profile example (multi-OC user + `[profile.defaults]`/`[profile.password]`/`[profile.lookup.gidNumber]` + group + relation). Full tmux smoke passed end-to-end.
+
+**Final review (done):** a holistic branch review confirmed create/edit save-path coherence (defaults + autonumber + password staging + lookup-written fields compose into one Add without clobbering) and caught one real UX defect — the value-editor picker is shared by membership (commit on F2) and value-lookup (commit on Enter), but the footer hint and key handling were hardcoded for membership. Fixed in `8b34c9e`: footer branches on `ve.lookup.is_some()` (`↑↓ move · Enter select`), F2 is gated to membership only (a DN can never leak into a scalar field), and Space is a literal search char in lookup mode. Covered by `lookup_space_types_into_search_and_f2_is_ignored`.
+
+**Remaining:**
+- finish-branch (merge/PR) — user's call. Nothing functional outstanding.
 
 ---
 
@@ -78,7 +92,7 @@ The branch was cut at `41f90a1`; `main` then absorbed the UI-polish refactor, wh
 ```bash
 # Build + checks (must be green before any commit)
 cargo build --all-targets
-cargo test -p edaptor                       # 207 pass; live_* tests SKIP without the env var
+cargo test -p edaptor                       # 249 pass; live_* tests SKIP without the env var
 cargo clippy --all-targets -- -D warnings
 cargo fmt --check
 
