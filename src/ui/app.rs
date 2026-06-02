@@ -1787,6 +1787,60 @@ fn read_group_members(
     }
 }
 
+/// Decide an allocation from a (possibly truncated) directory scan. Refuses when
+/// the scan was truncated by a server limit — never allocates over a partial set
+/// (a silent duplicate would be worse than a constraint violation).
+fn decide_allocation(values: &[u64], truncated: bool, min: u64, max: u64) -> Result<u64, String> {
+    if truncated {
+        return Err(
+            "refusing to allocate: the number scan hit a server size limit \
+             (bind with a higher-limit identity or configure a counter)"
+                .to_string(),
+        );
+    }
+    crate::config::defaults::next_in_range(values, min, max)
+}
+
+/// Allocate the next free numeric `attr` in `[min,max]` by scanning the whole
+/// subtree from `base_dn`. Refuses if the scan was truncated (spec D6). Synchronous.
+#[allow(dead_code)] // wired into prepare_create in Task 3.3
+fn allocate_number(
+    worker: &WorkerHandle,
+    base_dn: &str,
+    attr: &str,
+    min: u64,
+    max: u64,
+) -> Result<u64, String> {
+    let resp = worker
+        .request(Request::Search {
+            id: next_id(),
+            base: base_dn.to_string(),
+            scope: SearchScope::Subtree,
+            filter: format!("({attr}=*)"),
+            attrs: vec![attr.to_string()],
+            size_limit: None,
+        })
+        .map_err(|e| e.to_string())?;
+    let (entries, truncated) = match resp {
+        Response::Entries {
+            entries, truncated, ..
+        } => (entries, truncated),
+        Response::SearchError { msg, .. } => return Err(msg),
+        _ => return Err("unexpected response while allocating".to_string()),
+    };
+    let mut values: Vec<u64> = Vec::new();
+    for e in &entries {
+        if let Some((_, vs)) = e.attrs.iter().find(|(k, _)| k.eq_ignore_ascii_case(attr)) {
+            for v in vs {
+                if let Ok(n) = v.trim().parse::<u64>() {
+                    values.push(n);
+                }
+            }
+        }
+    }
+    decide_allocation(&values, truncated, min, max)
+}
+
 /// Apply one MODIFY synchronously; return `Some(human message)` on failure.
 fn apply_one_modify(worker: &WorkerHandle, dn: &str, changes: Vec<ModOp>) -> Option<String> {
     match worker.request(Request::Modify {
@@ -2927,5 +2981,15 @@ mod tests {
         let mut app2 = with_form(bare_app(false), "cn=Alice,dc=example,dc=org");
         app2.focus = Pane::Form;
         assert_eq!(dispatch_key(&mut app2, key(KeyCode::Esc), &s), None);
+    }
+
+    #[test]
+    fn allocation_refuses_on_truncation() {
+        assert!(decide_allocation(&[10000], true, 10000, 60000).is_err());
+        assert_eq!(
+            decide_allocation(&[10000], false, 10000, 60000).unwrap(),
+            10001
+        );
+        assert_eq!(decide_allocation(&[], false, 10000, 60000).unwrap(), 10000);
     }
 }
