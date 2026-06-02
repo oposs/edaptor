@@ -381,10 +381,17 @@ fn render_value_editor(f: &mut Frame, ve: &ValueEditor, area: Rect) {
         let block = Block::default()
             .borders(Borders::ALL)
             .title(format!(" {} ", ve.label))
-            .title_bottom(if picker.truncated {
-                " Space toggle · F2 save · Esc cancel · type to search · more match — narrow search "
-            } else {
-                " Space toggle · F2 save · Esc cancel · type to search "
+            .title_bottom(match (ve.lookup.is_some(), picker.truncated) {
+                // Single-select value-lookup picker: Enter commits the chosen value.
+                (true, true) => {
+                    " ↑↓ move · Enter select · Esc cancel · type to search · more match — narrow search "
+                }
+                (true, false) => " ↑↓ move · Enter select · Esc cancel · type to search ",
+                // Membership multi-select picker: Space toggles, F2 commits the set.
+                (false, true) => {
+                    " Space toggle · F2 save · Esc cancel · type to search · more match — narrow search "
+                }
+                (false, false) => " Space toggle · F2 save · Esc cancel · type to search ",
             })
             .style(Style::default().bg(bg).fg(Color::White))
             .border_style(

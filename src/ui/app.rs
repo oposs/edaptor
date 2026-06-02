@@ -734,14 +734,17 @@ fn open_value_editor(app: &mut App, structure: &Structure) {
     }
 }
 
-/// Keys inside the picker: Esc/F3 cancel; F2 commit selected DNs to the field;
-/// Key handling for the in-overlay picker. ↑↓ move the cursor; Space toggles the
-/// highlighted candidate (membership multi-select). Enter commits the highlighted
-/// candidate's scalar `value_attr` into the target field for a value-lookup picker
-/// (`lookup.is_some()`); for a membership picker Enter is ignored — its commit is
-/// F2, which writes the selected DNs into the field. Esc / F3 cancel. Any other key
-/// edits the search box (the tick-based `service_picker_search` turns a changed
-/// query into a live candidate search).
+/// Key handling for the in-overlay picker. The two picker modes commit
+/// differently and the keys are gated on which is active:
+/// - Membership (`lookup.is_none()`): Space toggles the highlighted candidate
+///   (multi-select); F2 commits the selected DN set into the field; Enter is
+///   ignored.
+/// - Value-lookup (`lookup.is_some()`): single-select; Enter commits the
+///   highlighted candidate's scalar `value_attr` into the field; F2 is ignored
+///   and Space is a literal search character (group names may contain spaces).
+///
+/// ↑↓ move the cursor; Esc / F3 cancel. Any other key edits the search box (the
+/// tick-based `service_picker_search` turns a changed query into a live search).
 fn picker_editor_key(app: &mut App, key: KeyEvent) {
     match key.code {
         KeyCode::Esc | KeyCode::F(3) => {
@@ -784,16 +787,22 @@ fn picker_editor_key(app: &mut App, key: KeyEvent) {
             }
         }
         KeyCode::F(2) => {
-            if let Some(Overlay::ValueEditor(ve)) = app.overlay.take() {
-                if let Some(picker) = &ve.picker {
-                    if let Some(field) = app.form.as_mut().and_then(|f| f.fields.get_mut(ve.field))
-                    {
-                        field.values = picker.selected_dns();
+            // F2 is the MEMBERSHIP commit (writes the selected DN set). A lookup
+            // picker commits a scalar via Enter and never builds a DN selection, so
+            // ignore F2 there — never let a DN leak into a scalar value field.
+            if matches!(&app.overlay, Some(Overlay::ValueEditor(ve)) if ve.lookup.is_none()) {
+                if let Some(Overlay::ValueEditor(ve)) = app.overlay.take() {
+                    if let Some(picker) = &ve.picker {
+                        if let Some(field) =
+                            app.form.as_mut().and_then(|f| f.fields.get_mut(ve.field))
+                        {
+                            field.values = picker.selected_dns();
+                        }
                     }
                 }
+                app.picker_search_id = None;
+                app.picker_last_query.clear();
             }
-            app.picker_search_id = None;
-            app.picker_last_query.clear();
         }
         KeyCode::Up => {
             if let Some(Overlay::ValueEditor(ve)) = app.overlay.as_mut() {
@@ -810,8 +819,12 @@ fn picker_editor_key(app: &mut App, key: KeyEvent) {
             }
         }
         KeyCode::Char(' ') => {
+            // Space toggles a MEMBERSHIP selection. A lookup picker is single-select
+            // (commit via Enter), so Space is a literal search character there.
             if let Some(Overlay::ValueEditor(ve)) = app.overlay.as_mut() {
-                if let Some(p) = ve.picker.as_mut() {
+                if ve.lookup.is_some() {
+                    ve.search.handle_key_event(key);
+                } else if let Some(p) = ve.picker.as_mut() {
                     p.toggle_cursor();
                 }
             }
