@@ -30,6 +30,7 @@ In scope (all confirmed with the maintainer):
 3. **Inline password field** — a masked, confirm-twice field on the create/edit form; cleartext over TLS to the configured attribute; optional `sambaNTPassword`.
 4. **uidNumber auto-allocation** — directory-scan `{next:MIN-MAX}` allocator (also usable for a group profile's `gidNumber`).
 5. **Value-lookup picker** — a field may pick another entry and pull one of its attribute values into itself (the `gidNumber`-from-group case).
+6. **Profile chooser at create** — F7 lets the operator choose *which* template to create (today it is hardcoded to the first profile), filtered by the current tree container.
 
 Explicitly **out of scope** (recorded for follow-up):
 
@@ -54,6 +55,7 @@ Explicitly **out of scope** (recorded for follow-up):
 | D7 | Password is sent **cleartext over TLS** to `ldap_attribute`; slapd hashes + enforces ppolicy. Masked in the LDIF preview. | Per design §5; the server is the single source of hashing/policy truth. Never render the cleartext. |
 | D8 | The schema-generated `userPassword` field is **suppressed** when `[profile.password]` is declared; the synthetic field replaces it. | `userPassword` is a MAY on the person classes, so the generator already emits it — avoid a duplicate. |
 | D9 | Value-lookup picker **reuses** the membership picker infrastructure (single-select variant). | `PickerState`, `build_member_filter`, `service_picker_search`, the search intercept, `candidate_label` already exist; don't fork. |
+| D10 | F7 opens a **context-filtered profile chooser**. Filter = profiles whose `search_base` matches the current container at a DN-component boundary; 0 matches → offer all; exactly 1 → create directly (no chooser); >1 → chooser overlay. Placement still comes from the chosen profile's `search_base`. | Multi-template is the point of this milestone; F7→`NewEntry(0)` can only ever reach `profile[0]`. The `NewEntry(i)` plumbing already takes an index — only the selection UI is missing. Context filter keeps the list short and relevant; the all-profiles fallback guarantees F7 always works. |
 
 ## 4. Config format (authoritative)
 
@@ -108,8 +110,8 @@ search_attrs = ["cn"]
 | `src/workflows/create.rs` | objectClass set `["top", oc1, oc2,…]` (ordered, deduped); `effective_attributes(&all_ocs)`. |
 | `src/samba/password.rs` | reuse `build_password_mods` / `nt_hash`; add a small create-time helper that returns **attribute values** (not ModOps) for an Add: `userPassword` (cleartext) and, when samba, `sambaNTPassword` + `sambaPwdLastSet`. |
 | `src/ui/edit_form.rs` | tag fields: password field (suppress schema `userPassword`, render masked-confirm) and lookup fields; carry `PasswordSpec`/`LookupSpec` onto `EditField`. |
-| `src/ui/app.rs` | `commit_create`: apply defaults (pure plan + worker autonumber scan) before `build_add_entry`; thread `worker` in. Password handling on commit (mask in preview, cleartext in Add). Lookup-picker open + selection handler. `allocate_number(worker, base_dn, attr, min, max)` synchronous scan with truncation refusal. |
-| `src/ui/view.rs` | render the masked-confirm password field; reuse the picker branch for the lookup picker. |
+| `src/ui/app.rs` | `commit_create`: apply defaults (pure plan + worker autonumber scan) before `build_add_entry`; thread `worker` in. Password handling on commit (mask in preview, cleartext in Add). Lookup-picker open + selection handler. `allocate_number(worker, base_dn, attr, min, max)` synchronous scan with truncation refusal. F7 → context-filtered profile chooser (`Overlay::ChooseProfile`); pure `profiles_for_container(profiles, container_dn) -> Vec<usize>` matcher. |
+| `src/ui/view.rs` | render the masked-confirm password field; reuse the picker branch for the lookup picker; render the `ChooseProfile` select overlay. |
 
 ### 5.2 Defaults resolution flow (the heart)
 
@@ -158,6 +160,27 @@ Enter on a lookup field (profile.lookup.<attr> declared)
   (no DN written; this is the read-only "pull a value" variant of the membership picker)
 ```
 
+### 5.4 Profile chooser flow (context-filtered)
+
+```
+F7 (Leaf pane, writable)
+  container = current node's DN (its parent if the node is a leaf)
+  matches   = profiles_for_container(profiles, container)   [PURE]
+                profile matches iff search_base == container
+                OR one is a proper suffix of the other at a DN-component boundary
+                (case-insensitive; "ou=people2,…" does NOT match "ou=people,…")
+  if matches.is_empty():  matches = all profile indices   (fallback — F7 always works)
+  match matches.len():
+     0 → (no profiles configured) do nothing
+     1 → NewEntry(matches[0])                              (skip the chooser)
+    _  → open Overlay::ChooseProfile { indices: matches }
+           ↑↓ select · Enter → NewEntry(selected) · Esc cancels
+```
+
+Placement is unchanged: `NewEntry(i)` uses `profile[i].search_base` as the container
+(falling back to the tree root), exactly as today. The chooser is a static in-memory
+select list — **not** the search picker — so it needs no worker round-trip.
+
 ## 6. Testing
 
 **Pure unit tests (always on):**
@@ -167,6 +190,7 @@ Enter on a lookup field (profile.lookup.<attr> declared)
 - `build_member_filter` with multiple object classes (AND form, RFC 4515 escaping unchanged).
 - `build_add_entry`: multi-OC objectClass set (ordered, deduped, `top` first).
 - password attribute staging: cleartext value present; samba on/off; preview masking.
+- `profiles_for_container`: exact match, ancestor/descendant suffix match, component-boundary rejection (`ou=people2`), case-insensitivity, no-match → empty (caller falls back to all).
 
 **Gated live tests** (`tests/live_templates.rs`, `EDAPTOR_TEST_LDAP_URI`, base `dc=example,dc=org`):
 - autonumber allocates the next free uidNumber; a seeded gap is filled correctly.
@@ -186,6 +210,7 @@ Enter on a lookup field (profile.lookup.<attr> declared)
 ## 8. Open items / follow-ups (recorded, not in this milestone)
 
 1. **gidNumber lookup is IN scope** (§5.3) — but a broader "value lookup from any entry" UX (multiple lookup fields, recents, validation that `value_attr` exists) can grow later.
+1b. **Profile chooser is IN scope** (§5.4) — context-filtered. A richer chooser (descriptions, per-profile icons/keys, remembering the last choice) can grow later.
 2. **True user-private-groups** (create a posixGroup per user) — deferred; needs a multi-entry create with partial-failure handling like the membership fan-out.
 3. **Standalone "Set password" action** on existing entries (outside the form) — deferred; CLI `edaptor passwd` covers headless.
 4. **Automatic retry on `uidNumber` constraint violation** — optional hardening.
