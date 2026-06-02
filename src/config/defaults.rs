@@ -243,6 +243,11 @@ mod tests {
         assert!(parse_default_value("/home/{uid").is_err());
     }
 
+    #[test]
+    fn empty_placeholder_is_error() {
+        assert!(parse_default_value("/home/{}").is_err());
+    }
+
     // Task 2.2 tests — next_in_range
 
     #[test]

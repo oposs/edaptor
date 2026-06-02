@@ -445,4 +445,23 @@ mod tests {
             Some(DefaultValue::AutoNumber { .. })
         ));
     }
+
+    #[test]
+    fn bad_default_value_fails_whole_config_parse() {
+        // An invalid autonumber range must propagate to a Config parse error.
+        let toml = r#"
+            [server]
+            uri = "ldap://x"
+            base_dn = "dc=example,dc=org"
+            [auth]
+            bind_dn = "cn=admin,dc=example,dc=org"
+            [[profile]]
+            name = "user"
+            object_classes = ["inetOrgPerson"]
+            rdn_attr = "uid"
+            [profile.defaults]
+            uidNumber = "{next:60000-10000}"
+        "#;
+        assert!(toml::from_str::<Config>(toml).is_err());
+    }
 }
