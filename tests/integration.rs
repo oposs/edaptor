@@ -151,8 +151,16 @@ fn poll_for_id(worker: &WorkerHandle, want_id: u64, timeout: Duration) -> Option
     let deadline = Instant::now() + timeout;
     while Instant::now() < deadline {
         match worker.poll() {
-            Some(Response::Entries { id, entries }) if id == want_id => {
-                return Some(Response::Entries { id, entries });
+            Some(Response::Entries {
+                id,
+                entries,
+                truncated,
+            }) if id == want_id => {
+                return Some(Response::Entries {
+                    id,
+                    entries,
+                    truncated,
+                });
             }
             Some(Response::SearchError { id, msg }) if id == want_id => {
                 return Some(Response::SearchError { id, msg });
@@ -190,7 +198,7 @@ fn one_level_search_lists_children() {
         .expect("submit one-level search");
 
     match poll_for_id(&worker, 1, Duration::from_secs(10)) {
-        Some(Response::Entries { id, entries }) => {
+        Some(Response::Entries { id, entries, .. }) => {
             assert_eq!(id, 1, "reply must echo the request id");
             assert!(!entries.is_empty(), "base should have children");
             let dns: Vec<&str> = entries.iter().map(|e| e.dn.as_str()).collect();
@@ -249,7 +257,7 @@ fn base_search_reads_entry_then_form_model() {
         .expect("submit base search");
 
     match poll_for_id(&worker, 2, Duration::from_secs(10)) {
-        Some(Response::Entries { id, entries }) => {
+        Some(Response::Entries { id, entries, .. }) => {
             assert_eq!(id, 2);
             let entry = entries.first().expect("user01 should exist");
             let model = read_flow.form_for(entry, &[]);

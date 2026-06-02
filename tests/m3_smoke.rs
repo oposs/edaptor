@@ -102,6 +102,7 @@ fn correlation_smoke() {
     let resp = Response::Entries {
         id: 12345,
         entries: vec![mk("cn=a,dc=example,dc=org", "a")],
+        truncated: false,
     };
     assert!(matches!(flow2.on_response(&resp), ReadOutcome::Ignored));
 }

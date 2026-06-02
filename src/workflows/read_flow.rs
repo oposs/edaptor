@@ -80,7 +80,7 @@ impl ReadFlow {
     /// a matching `SearchError`, return the error; otherwise `Ignored`.
     pub fn on_response(&mut self, resp: &Response) -> ReadOutcome {
         match resp {
-            Response::Entries { id, entries } => {
+            Response::Entries { id, entries, .. } => {
                 let Some(show) = self.pending.remove(id) else {
                     return ReadOutcome::Ignored;
                 };
@@ -172,6 +172,7 @@ mod tests {
         let resp = Response::Entries {
             id: 999,
             entries: vec![entry()],
+            truncated: false,
         };
         assert!(matches!(flow.on_response(&resp), ReadOutcome::Ignored));
         assert_eq!(flow.pending.len(), 1);
@@ -184,6 +185,7 @@ mod tests {
         let resp = Response::Entries {
             id: 3,
             entries: vec![entry()],
+            truncated: false,
         };
         match flow.on_response(&resp) {
             ReadOutcome::Form {
@@ -209,12 +211,14 @@ mod tests {
         let r11 = flow.on_response(&Response::Entries {
             id: 11,
             entries: vec![entry()],
+            truncated: false,
         });
         assert!(matches!(r11, ReadOutcome::Form { .. }));
         assert_eq!(flow.pending.len(), 1);
         let r10 = flow.on_response(&Response::Entries {
             id: 10,
             entries: vec![entry()],
+            truncated: false,
         });
         assert!(matches!(r10, ReadOutcome::Form { .. }));
         assert!(flow.pending.is_empty());
@@ -241,6 +245,7 @@ mod tests {
         let resp = Response::Entries {
             id: 5,
             entries: vec![],
+            truncated: false,
         };
         assert!(matches!(flow.on_response(&resp), ReadOutcome::Error(_)));
     }

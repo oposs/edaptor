@@ -385,7 +385,7 @@ fn handle_worker_response(
 ) {
     match resp {
         // Intercept picker search results before the read-flow routing.
-        Response::Entries { id, entries } if app.picker_search_id == Some(*id) => {
+        Response::Entries { id, entries, .. } if app.picker_search_id == Some(*id) => {
             if let Some(Overlay::ValueEditor(ve)) = app.overlay.as_mut() {
                 if let Some(p) = ve.picker.as_mut() {
                     let results = entries
