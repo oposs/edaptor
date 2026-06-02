@@ -104,6 +104,24 @@ impl<'de> Deserialize<'de> for ProfileDefaults {
     }
 }
 
+/// Next free number: max of `existing` within `[min,max]`, plus one; `min` if none
+/// in window. Errors if the pool is exhausted.
+pub fn next_in_range(existing: &[u64], min: u64, max: u64) -> Result<u64, String> {
+    let cur_max = existing
+        .iter()
+        .copied()
+        .filter(|n| *n >= min && *n <= max)
+        .max();
+    let next = match cur_max {
+        Some(m) => m + 1,
+        None => min,
+    };
+    if next > max {
+        return Err(format!("number pool {min}-{max} is exhausted"));
+    }
+    Ok(next)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -161,5 +179,33 @@ mod tests {
     #[test]
     fn unterminated_placeholder_is_error() {
         assert!(parse_default_value("/home/{uid").is_err());
+    }
+
+    // Task 2.2 tests — next_in_range
+
+    #[test]
+    fn next_in_range_empty_returns_min() {
+        assert_eq!(next_in_range(&[], 10000, 60000).unwrap(), 10000);
+    }
+
+    #[test]
+    fn next_in_range_is_max_plus_one() {
+        assert_eq!(
+            next_in_range(&[10000, 10005, 10003], 10000, 60000).unwrap(),
+            10006
+        );
+    }
+
+    #[test]
+    fn next_in_range_ignores_out_of_window_values() {
+        assert_eq!(
+            next_in_range(&[9000, 70000, 10002], 10000, 60000).unwrap(),
+            10003
+        );
+    }
+
+    #[test]
+    fn next_in_range_exhausted_errors() {
+        assert!(next_in_range(&[60000], 10000, 60000).is_err());
     }
 }
