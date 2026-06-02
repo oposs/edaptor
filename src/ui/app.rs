@@ -895,7 +895,8 @@ fn handle_action(
             // Try the combined membership path first; fall back to the single-entry
             // path when no backref field actually changed. No guard intent here —
             // a plain F2 save has nothing to resume afterward.
-            if let Some(ov) = combined_save_overlay(form, read_flow.schema(), &app.relations, None)
+            if let Some(ov) =
+                combined_save_overlay(form, read_flow.schema(), &app.relations, profiles, None)
             {
                 app.overlay = Some(ov);
                 return;
@@ -1213,6 +1214,7 @@ fn execute_pending(
                 form,
                 read_flow.schema(),
                 &app.relations,
+                profiles,
                 Some(intent.clone()),
             ) {
                 app.overlay = Some(ov);
@@ -1690,6 +1692,8 @@ fn plan_combined_save(
     form: &EditForm,
     schema: &SchemaModel,
     relations: &[ResolvedRelation],
+    profiles: &[EntryProfile],
+    now_secs: u64,
 ) -> CombinedPlan {
     let backref = form.backref_labels();
     if backref.is_empty() {
@@ -1721,11 +1725,31 @@ fn plan_combined_save(
         edited.attrs.remove(l);
     }
 
+    // Stage any password change the same way the single-entry path does: strip the
+    // injected password pseudo-fields from BOTH sides (so a blank field never diffs
+    // to a Delete that would clobber the stored password, and the `(confirm)`
+    // pseudo-attribute never leaks), and collect the REPLACE mods to fold into the
+    // own-entry MODIFY. A confirm mismatch blocks the whole combined save.
+    let (password_mods, mask_attrs) =
+        match profile_for_entry(profiles, &object_classes).and_then(|p| p.password.clone()) {
+            Some(spec) => match stage_edit_password(
+                &spec,
+                &object_classes,
+                &mut original.attrs,
+                &mut edited.attrs,
+                now_secs,
+            ) {
+                Ok(x) => x,
+                Err(text) => return CombinedPlan::Blocked(text),
+            },
+            None => (Vec::new(), Vec::new()),
+        };
+
     let errors = validate(&edited, schema, &oc_refs);
     if !errors.is_empty() {
         return CombinedPlan::Invalid(errors);
     }
-    let own_cs = match diff(&original, &edited) {
+    let mut own_cs = match diff(&original, &edited) {
         Ok(c) => c,
         Err(e) => return CombinedPlan::DiffError(e.to_string()),
     };
@@ -1736,12 +1760,15 @@ fn plan_combined_save(
                 .into(),
         );
     }
+    own_cs.mods.extend(password_mods);
 
     // Fan-out: one set of Add/Delete MODIFYs per backref field that changed.
     let mut fanout: Vec<(String, ModOp)> = Vec::new();
     let mut preview_sets: Vec<ChangeSet> = Vec::new();
     if !own_cs.is_empty() {
-        preview_sets.push(own_cs.clone());
+        // Mask the password values in the preview only; `own_mods` keeps the real
+        // cleartext/hash for the apply.
+        preview_sets.push(mask_changeset_secrets(&own_cs, &mask_attrs));
     }
     for f in form.fields.iter().filter(|f| backref.contains(&f.label)) {
         let Some(rel) = backref_lookup(relations, &object_classes, &f.label) else {
@@ -1775,9 +1802,10 @@ fn combined_save_overlay(
     form: &EditForm,
     schema: &SchemaModel,
     relations: &[ResolvedRelation],
+    profiles: &[EntryProfile],
     then_intent: Option<GuardIntent>,
 ) -> Option<Overlay> {
-    match plan_combined_save(form, schema, relations) {
+    match plan_combined_save(form, schema, relations, profiles, now_unix_secs_or_zero()) {
         CombinedPlan::Ready {
             entry_dn,
             own_mods,
@@ -3274,7 +3302,7 @@ mod tests {
         let form = user_form_own_and_memberof_change();
         let schema = user_schema();
         let relations = user_relations();
-        let plan = plan_combined_save(&form, &schema, &relations);
+        let plan = plan_combined_save(&form, &schema, &relations, &[], 0);
         let (own_mods, fanout, _entry_dn) = match plan {
             CombinedPlan::Ready {
                 own_mods,
@@ -3307,11 +3335,111 @@ mod tests {
         let relations = user_relations();
         assert!(
             matches!(
-                plan_combined_save(&form, &schema, &relations),
+                plan_combined_save(&form, &schema, &relations, &[], 0),
                 CombinedPlan::Blocked(_)
             ),
             "rename + membership change must be Blocked"
         );
+    }
+
+    /// A password-profile entry edited via the combined (membership) save path must
+    /// not let the injected password pseudo-fields leak into the own-entry MODIFY:
+    /// a BLANK field must never clobber the stored password, and the `(confirm)`
+    /// field must never become a real attribute.
+    fn pw_user_form_with_memberof_change() -> (EditForm, Vec<EntryProfile>) {
+        let mut form = user_form_own_and_memberof_change();
+        // The directory returned the stored password hash on the entry.
+        form.baseline
+            .insert("userPassword".into(), vec!["{SSHA}old".into()]);
+        let spec = crate::config::PasswordSpec {
+            ldap_attribute: "userPassword".into(),
+            samba: false,
+        };
+        crate::ui::edit_form::inject_password_fields(&mut form, &spec);
+        let mut profile = create_user_profile();
+        profile.object_classes = vec!["testUser".into()];
+        profile.password = Some(spec);
+        (form, vec![profile])
+    }
+
+    fn own_mods_touch(mods: &[ModOp], attr: &str) -> bool {
+        mods.iter().any(|m| {
+            let a = match m {
+                ModOp::Add { attr, .. }
+                | ModOp::Delete { attr, .. }
+                | ModOp::Replace { attr, .. } => attr,
+            };
+            a.eq_ignore_ascii_case(attr)
+        })
+    }
+
+    #[test]
+    fn combined_save_blank_password_does_not_clobber_or_leak() {
+        let (form, profiles) = pw_user_form_with_memberof_change();
+        // Password fields left blank by the operator.
+        match plan_combined_save(
+            &form,
+            &user_schema(),
+            &user_relations(),
+            &profiles,
+            1_700_000_000,
+        ) {
+            CombinedPlan::Ready { own_mods, ldif, .. } => {
+                assert!(
+                    !own_mods_touch(&own_mods, "userPassword"),
+                    "blank password must not emit a userPassword mod (clobber!)"
+                );
+                assert!(
+                    !own_mods_touch(&own_mods, "userPassword (confirm)"),
+                    "confirm pseudo-field must never become a real attribute"
+                );
+                assert!(
+                    !ldif.contains("(confirm)"),
+                    "confirm field must not leak to preview"
+                );
+            }
+            _ => panic!("expected Ready"),
+        }
+    }
+
+    #[test]
+    fn combined_save_sets_password_as_replace_and_masks_preview() {
+        let (mut form, profiles) = pw_user_form_with_memberof_change();
+        // Operator typed a new password into both injected fields.
+        for f in form.fields.iter_mut() {
+            if f.label.eq_ignore_ascii_case("userPassword")
+                || f.label.eq_ignore_ascii_case("userPassword (confirm)")
+            {
+                f.editor = TextState::new().with_value("hunter2".to_string());
+            }
+        }
+        match plan_combined_save(
+            &form,
+            &user_schema(),
+            &user_relations(),
+            &profiles,
+            1_700_000_000,
+        ) {
+            CombinedPlan::Ready { own_mods, ldif, .. } => {
+                assert!(
+                    own_mods.contains(&ModOp::Replace {
+                        attr: "userPassword".into(),
+                        values: vec!["hunter2".into()],
+                    }),
+                    "new password must be a REPLACE in own_mods"
+                );
+                assert!(
+                    !own_mods_touch(&own_mods, "userPassword (confirm)"),
+                    "confirm pseudo-field must never become a real attribute"
+                );
+                assert!(ldif.contains("********"), "preview masks the password");
+                assert!(
+                    !ldif.contains("hunter2"),
+                    "cleartext must not appear in preview"
+                );
+            }
+            _ => panic!("expected Ready"),
+        }
     }
 
     #[test]
