@@ -547,6 +547,7 @@ mod tests {
             widget: WidgetSpec::ReadOnlyText,
             editor: TextState::new().with_value(value.to_string()),
             relation: None,
+            lookup: None,
         }
     }
 
@@ -587,6 +588,7 @@ mod tests {
             widget: WidgetSpec::ReadOnlyText,
             editor: TextState::new(),
             relation: None,
+            lookup: None,
         };
         App {
             focus: Pane::Form,
@@ -793,6 +795,7 @@ mod tests {
                 widget: WidgetSpec::ReadOnlyText,
                 editor: TextState::new().with_value(value.to_string()),
                 relation: None,
+                lookup: None,
             }],
             baseline,
             mode: FormMode::Edit,

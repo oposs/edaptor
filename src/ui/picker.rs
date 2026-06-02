@@ -60,10 +60,28 @@ pub fn candidate_label(dn: &str, attrs: &BTreeMap<String, Vec<String>>) -> Strin
 }
 
 /// One candidate entry: the DN that is stored, and the human label that is shown.
+/// For value-lookup pickers `value` also carries the scalar attribute (the
+/// `value_attr`) committed on Enter; membership pickers leave it `None`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Candidate {
     pub dn: String,
     pub label: String,
+    /// The scalar to commit for a value-lookup pick (the chosen entry's
+    /// `value_attr`); `None` for membership candidates and when absent/empty.
+    pub value: Option<String>,
+}
+
+/// Pull the scalar `value_attr` from a candidate's attributes (first value).
+pub fn pick_value(
+    attrs: &std::collections::BTreeMap<String, Vec<String>>,
+    value_attr: &str,
+) -> Option<String> {
+    attrs
+        .iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case(value_attr))
+        .and_then(|(_, vs)| vs.first())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
 }
 
 /// A row as displayed in the picker: a candidate plus whether it is selected.
@@ -176,6 +194,7 @@ mod tests {
         Candidate {
             dn: dn.into(),
             label: dn.into(),
+            value: None,
         }
     }
 
@@ -301,5 +320,28 @@ mod tests {
             !p2.truncated,
             "Default impl should also set truncated=false"
         );
+    }
+
+    #[test]
+    fn pick_value_returns_scalar_case_insensitive() {
+        use std::collections::BTreeMap;
+        let mut attrs = BTreeMap::new();
+        attrs.insert("gidNumber".to_string(), vec!["1234".to_string()]);
+        // Attr name lookup is case-insensitive.
+        assert_eq!(pick_value(&attrs, "gidnumber"), Some("1234".to_string()));
+        assert_eq!(pick_value(&attrs, "gidNumber"), Some("1234".to_string()));
+    }
+
+    #[test]
+    fn pick_value_trims_and_returns_none_when_absent_or_empty() {
+        use std::collections::BTreeMap;
+        let mut attrs = BTreeMap::new();
+        attrs.insert("gidNumber".to_string(), vec!["  42  ".to_string()]);
+        attrs.insert("blank".to_string(), vec!["   ".to_string()]);
+        assert_eq!(pick_value(&attrs, "gidNumber"), Some("42".to_string()));
+        // Absent attribute → None.
+        assert_eq!(pick_value(&attrs, "uidNumber"), None);
+        // Present but whitespace-only → None.
+        assert_eq!(pick_value(&attrs, "blank"), None);
     }
 }

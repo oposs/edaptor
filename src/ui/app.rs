@@ -412,6 +412,7 @@ fn handle_worker_response(
                         .map(|e| crate::ui::picker::Candidate {
                             dn: e.dn.clone(),
                             label: crate::ui::picker::candidate_label(&e.dn, &e.attrs),
+                            value: None,
                         })
                         .collect();
                     p.set_results(results);
@@ -2666,6 +2667,7 @@ mod tests {
                 widget: WidgetSpec::ReadOnlyText,
                 editor: TextState::new().with_value("x".to_string()),
                 relation: None,
+                lookup: None,
             }],
             baseline: Default::default(),
             mode: FormMode::Edit,
@@ -2972,6 +2974,7 @@ mod tests {
                 role: RelationRole::Holder,
                 scope,
             }),
+            lookup: None,
         };
         let mut app = bare_app(false);
         app.form = Some(EditForm {
@@ -3017,6 +3020,7 @@ mod tests {
         ve.picker.as_mut().unwrap().set_results(vec![Candidate {
             dn: "uid=a,ou=people".into(),
             label: "a".into(),
+            value: None,
         }]);
         app.overlay = Some(Overlay::ValueEditor(ve));
         // Space toggles the cursor row (a) into the selection.
@@ -3196,6 +3200,7 @@ mod tests {
             widget: WidgetSpec::ReadOnlyText,
             editor: TextState::new().with_value("ann".to_string()),
             relation: None,
+            lookup: None,
         };
 
         let desc_field = EditField {
@@ -3210,6 +3215,7 @@ mod tests {
             widget: WidgetSpec::ReadOnlyText,
             editor: TextState::new(),
             relation: None,
+            lookup: None,
         };
 
         let memberof_field = EditField {
@@ -3227,6 +3233,7 @@ mod tests {
                 role: crate::config::relation::RelationRole::BackRef,
                 scope: scope.clone(),
             }),
+            lookup: None,
         };
 
         let mut baseline = BTreeMap::new();
@@ -3266,6 +3273,7 @@ mod tests {
             widget: WidgetSpec::ReadOnlyText,
             editor: TextState::new().with_value("bob".to_string()),
             relation: None,
+            lookup: None,
         };
 
         let memberof_field = EditField {
@@ -3283,6 +3291,7 @@ mod tests {
                 role: RelationRole::BackRef,
                 scope,
             }),
+            lookup: None,
         };
 
         let mut baseline = BTreeMap::new();

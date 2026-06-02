@@ -55,6 +55,10 @@ pub struct EditField {
     pub editor: TextState<'static>,
     /// `Some` when this field is a membership relation (opens the picker).
     pub relation: Option<FieldRelation>,
+    /// `Some` when this field is a value-lookup target (`[profile.lookup.<attr>]`),
+    /// so Enter opens a single-select picker that writes the chosen entry's
+    /// `value_attr` scalar into the field.
+    pub lookup: Option<crate::config::LookupSpec>,
 }
 
 impl EditField {
@@ -147,6 +151,7 @@ impl ValueEditor {
             .map(|dn| Candidate {
                 dn: dn.clone(),
                 label: label_of(dn),
+                value: None,
             })
             .collect();
         ValueEditor {
@@ -348,6 +353,7 @@ pub fn build_edit_form(
                 widget: f.widget.clone(),
                 editor: TextState::new().with_value(seed),
                 relation,
+                lookup: None,
             }
         })
         .collect();
@@ -396,9 +402,29 @@ pub fn inject_password_fields(form: &mut EditForm, spec: &crate::config::Passwor
         widget: WidgetSpec::ReadOnlyText,
         editor: TextState::new(),
         relation: None,
+        lookup: None,
     };
     form.fields.push(mk(primary));
     form.fields.push(mk(confirm));
+}
+
+/// Tag fields whose attr name matches a `[profile.lookup.<attr>]` entry, so
+/// Enter opens a single-select value-lookup picker. Only editable fields are
+/// tagged (a read-only field offers no picker).
+pub fn tag_lookup_fields(
+    form: &mut EditForm,
+    lookups: &std::collections::BTreeMap<String, crate::config::LookupSpec>,
+) {
+    for field in &mut form.fields {
+        if let Some((_, spec)) = lookups
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case(&field.label))
+        {
+            if field.editable {
+                field.lookup = Some(spec.clone());
+            }
+        }
+    }
 }
 
 /// Port of the facade's editability rule: `memberOf` is server-maintained and
@@ -722,6 +748,7 @@ mod tests {
                 role: RelationRole::Holder,
                 scope: scope.clone(),
             }),
+            lookup: None,
         };
         // labels resolved via a closure (DN→label); here identity.
         let ve = ValueEditor::open_picker(0, &field, |dn| dn.to_string());
@@ -762,6 +789,7 @@ mod tests {
                 role: RelationRole::BackRef,
                 scope,
             }),
+            lookup: None,
         };
         let mut baseline = BTreeMap::new();
         baseline.insert("memberOf".to_string(), baseline_vals);
@@ -820,6 +848,7 @@ mod tests {
             widget: crate::ui::form::WidgetSpec::ReadOnlyText,
             editor: TextState::new(),
             relation: None,
+            lookup: None,
         };
         let mut form = EditForm {
             dn: "uid=alice,ou=people,dc=example,dc=org".into(),
@@ -851,5 +880,72 @@ mod tests {
             .all(|f| f.secret && f.editable && !f.multi));
         // The unrelated field survives.
         assert!(form.fields.iter().any(|f| f.label == "cn"));
+    }
+
+    #[test]
+    fn tag_lookup_fields_tags_matching_editable_field_only() {
+        let plain = |label: &str, editable: bool| EditField {
+            label: label.into(),
+            must: false,
+            editable,
+            multi: false,
+            secret: false,
+            ordered: false,
+            values: vec![],
+            kind: crate::schema::FieldKind::Text,
+            widget: crate::ui::form::WidgetSpec::ReadOnlyText,
+            editor: TextState::new(),
+            relation: None,
+            lookup: None,
+        };
+        let mut form = EditForm {
+            dn: "uid=alice,ou=people,dc=example,dc=org".into(),
+            // gidNumber (editable, matches), cn (no lookup), homeDir (read-only).
+            fields: vec![
+                plain("gidNumber", true),
+                plain("cn", true),
+                plain("homeDir", false),
+            ],
+            baseline: Default::default(),
+            mode: FormMode::Edit,
+        };
+        let mut lookups = std::collections::BTreeMap::new();
+        lookups.insert(
+            // Mixed-case key proves the match is case-insensitive.
+            "GIDNUMBER".to_string(),
+            crate::config::LookupSpec {
+                object_class: "posixGroup".into(),
+                search_base: String::new(),
+                value_attr: "gidNumber".into(),
+                label: "cn".into(),
+                search_attrs: vec!["cn".into()],
+            },
+        );
+        // A lookup for a read-only field must not tag it.
+        lookups.insert(
+            "homeDir".to_string(),
+            crate::config::LookupSpec {
+                object_class: "x".into(),
+                search_base: String::new(),
+                value_attr: "x".into(),
+                label: String::new(),
+                search_attrs: vec![],
+            },
+        );
+        tag_lookup_fields(&mut form, &lookups);
+        let f = |name: &str| form.fields.iter().find(|f| f.label == name).unwrap();
+        assert!(
+            f("gidNumber").lookup.is_some(),
+            "matching editable field is tagged"
+        );
+        assert_eq!(
+            f("gidNumber").lookup.as_ref().unwrap().value_attr,
+            "gidNumber"
+        );
+        assert!(f("cn").lookup.is_none(), "non-matching field stays None");
+        assert!(
+            f("homeDir").lookup.is_none(),
+            "read-only field is not tagged even with a matching lookup"
+        );
     }
 }
