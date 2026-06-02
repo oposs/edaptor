@@ -159,6 +159,7 @@ mod tests {
             search_attrs: vec![],
             defaults: Default::default(),
             password: None,
+            lookups: Default::default(),
         }
     }
 
