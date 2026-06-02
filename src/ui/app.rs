@@ -3354,6 +3354,50 @@ mod tests {
     }
 
     #[test]
+    fn lookup_space_types_into_search_and_f2_is_ignored() {
+        // The picker is shared with membership mode (Space toggles, F2 commits a
+        // DN set). In a single-select lookup picker neither applies: Space is a
+        // literal search char (group names may contain spaces) and F2 must not
+        // leak a DN into the scalar field.
+        use crate::ui::picker::Candidate;
+        let mut app = app_with_lookup_field();
+        let s = empty_structure();
+        open_value_editor(&mut app, &s);
+        if let Some(Overlay::ValueEditor(ve)) = app.overlay.as_mut() {
+            ve.picker.as_mut().unwrap().set_results(vec![Candidate {
+                dn: "cn=staff group,ou=groups,dc=test".into(),
+                label: "staff group".into(),
+                value: Some("5001".into()),
+            }]);
+        }
+        // Space → search box, not a selection toggle.
+        picker_editor_key(&mut app, key(KeyCode::Char(' ')));
+        match app.overlay.as_ref() {
+            Some(Overlay::ValueEditor(ve)) => {
+                assert_eq!(ve.search.value(), " ", "Space is typed into the search box");
+                assert!(
+                    ve.picker.as_ref().unwrap().selected.is_empty(),
+                    "Space must not toggle a selection in lookup mode"
+                );
+            }
+            _ => panic!("overlay must stay open after Space"),
+        }
+        // F2 → no-op for a lookup picker (membership-only commit).
+        picker_editor_key(&mut app, key(KeyCode::F(2)));
+        assert!(
+            app.overlay.is_some(),
+            "F2 is ignored for a lookup picker — overlay stays open"
+        );
+        let f = &app.form.as_ref().unwrap().fields[0];
+        assert_eq!(
+            f.editor.value(),
+            "",
+            "F2 must not write a DN into a scalar field"
+        );
+        assert!(f.values.is_empty(), "F2 must not populate values with a DN");
+    }
+
+    #[test]
     fn effective_search_attrs_falls_back_through_label_then_cn() {
         let mut spec = gid_lookup_spec();
         assert_eq!(effective_search_attrs(&spec), vec!["cn".to_string()]);
