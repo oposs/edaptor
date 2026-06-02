@@ -72,6 +72,8 @@ pub fn profiles_for_container(profiles: &[EntryProfile], container_dn: &str) -> 
 
 **Why first:** collapses the modal create popup into the pane-3 form so every later feature wires into one host. Pure refactor — no new template behaviour. After this phase the app behaves exactly as before from the user's view, but NEW renders in pane 3.
 
+**Parity verified (do not re-derive):** single-value field editing is identical in both handlers — direct char input via `field.editor.handle_key_event(key)` guarded by `field.editable && !field.multi` (pane-3 `edit_focused_field` app.rs:657; `create_form_key` app.rs:1125). Focus nav (Up/Down) and F2/F3 semantics also match. The only delta is Enter: the pane-3 handler calls `open_value_editor`, which is a **no-op on a single-value field** — and Task 0.2 forces every editable create field to `multi=false`, so create behaviour is preserved. The unit tests below set values via `set_field_value` (bypassing key routing); **Task 0.6's tmux smoke is the hard gate** that exercises real key routing — treat it as required, not optional.
+
 ### Task 0.1: Add `FormMode` to `EditForm`
 
 **Files:**
@@ -197,7 +199,10 @@ UiAction::NewEntry(i) => {
             profile.search_base.clone()
         };
         let model = empty_form_for_profile(read_flow.schema(), profile);
-        let mut form = build_edit_form(&model, read_flow.schema(), false, &app.relations);
+        // Pure-refactor parity: today's NewEntry builds with NO relations (`&[]`),
+        // so create has no pickers. Keep that exactly — enabling member pickers on
+        // create is a separate, out-of-scope behaviour change, not part of §5.0.
+        let mut form = build_edit_form(&model, read_flow.schema(), false, &[]);
         for field in &mut form.fields {
             if field.editable { field.multi = false; }
         }
@@ -1086,6 +1091,8 @@ fn allocate_number(worker: &WorkerHandle, base_dn: &str, attr: &str,
 ```
 
 > Confirm `SearchScope::Subtree` is the correct variant name (worker.rs ~36). Confirm `LdapEntry.attrs` shape (`Vec<(String, Vec<String>)>`) — mirror `read_group_members`'s access pattern exactly.
+>
+> **Server-sizelimit ceiling (known limitation):** `size_limit: None` removes only the *client* cap; slapd still enforces its own `sizelimit` (default ~500) unless the bind identity is rootdn / high-limit. In a directory with more `uidNumber`-bearing entries than that limit, the `(uidNumber=*)` subtree scan returns `truncated=true` and allocation refuses **every time**. Failing closed is correct (never duplicate), but it means auto-allocation effectively requires an admin/high-limit bind on large directories. Real fixes (paged scan, or a dedicated counter entry with compare-and-set) are a follow-up — do **not** silently widen the scan. Surface this in the error text: "…refusing to allocate (scan hit the server size limit — bind with a higher-limit identity or configure a counter)."
 
 - [ ] **Step 4-5: Run, pass, commit.**
 
@@ -1139,10 +1146,8 @@ let plan = plan_defaults(&profile.defaults, &edited.attrs);
 for res in plan {
     match res {
         Resolution::Fill { attr, value } => {
-            // only set when the field is still empty (plan already guarantees this)
-            edited.attrs.entry(attr).or_default().clear();
-            edited.attrs.get_mut(&attr_key(&edited.attrs, &attr)).map(|v| v.push(value.clone()));
-            // simpler: edited.attrs.insert(attr, vec![value]);
+            // plan_defaults already guarantees the field is empty; just set it.
+            edited.attrs.insert(attr, vec![value]);
         }
         Resolution::NeedsAutonumber { attr, min, max } => {
             match allocate_number(_worker, base_dn_of(app), &attr, min, max) {
@@ -1154,7 +1159,7 @@ for res in plan {
 }
 ```
 
-> Simplify the Fill arm to `edited.attrs.insert(attr, vec![value]);` (case is consistent because `plan_defaults` echoes the config attr name; `build_add_entry` and `validate` already compare case-insensitively). Resolve `base_dn` — `prepare_create` must receive `base_dn: &str` (thread it through from `handle_ui_action`, which already has it). Update the `prepare_create` signature and its call in `FormSave` to pass `base_dn`.
+> Case is consistent because `plan_defaults` echoes the config attr name and `build_add_entry`/`validate` compare case-insensitively. Resolve `base_dn`: `prepare_create` must receive `base_dn: &str` — thread it through from `handle_ui_action` (which already has it) and update the `FormSave` call site. The autonumber scan uses `base_dn` (whole-directory uniqueness), not `container`.
 
 - [ ] **Step 4-5: Run, pass, commit.**
 
