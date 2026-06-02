@@ -25,6 +25,10 @@ rich enough to onboard a real posix (and optionally Samba) user in one create fl
 
 In scope (all confirmed with the maintainer):
 
+0. **Unify create into pane 3 (foundational, built first).** Today NEW renders the
+   shared `EditForm` in a modal `Overlay::CreateForm` while editing renders the *same*
+   widget inline in pane 3. This collapses the two hosts into one: NEW becomes a pane-3
+   **create-mode** form (Save → Add). Everything below then wires into a single host.
 1. **Multi-objectClass profiles** — `object_class: String` → `object_classes: Vec<String>`.
 2. **Unified defaults** — one `[profile.defaults]` block whose values may be literals, `{attr}` templates, or `{next:MIN-MAX}` autonumber functions.
 3. **Inline password field** — a masked, confirm-twice field on the create/edit form; cleartext over TLS to the configured attribute; optional `sambaNTPassword`.
@@ -40,7 +44,8 @@ Explicitly **out of scope** (recorded for follow-up):
   **single-entry**. True UPG (allocate gid → ADD posixGroup → ADD user) is a future
   milestone.
 - **A standalone "Set password" action on existing entries** outside the form. Password
-  is set through the inline form field only (M5's `edaptor passwd <dn>` CLI remains for headless use).
+  is set through the inline form field (on both create **and** edit) — there is no separate
+  keybinding/menu action. M5's `edaptor passwd <dn>` CLI remains for headless use.
 
 ## 3. Decisions (and why)
 
@@ -56,6 +61,7 @@ Explicitly **out of scope** (recorded for follow-up):
 | D8 | The schema-generated `userPassword` field is **suppressed** when `[profile.password]` is declared; the synthetic field replaces it. | `userPassword` is a MAY on the person classes, so the generator already emits it — avoid a duplicate. |
 | D9 | Value-lookup picker **reuses** the membership picker infrastructure (single-select variant). | `PickerState`, `build_member_filter`, `service_picker_search`, the search intercept, `candidate_label` already exist; don't fork. |
 | D10 | F7 opens a **context-filtered profile chooser**. Filter = profiles whose `search_base` matches the current container at a DN-component boundary; 0 matches → offer all; exactly 1 → create directly (no chooser); >1 → chooser overlay. Placement still comes from the chosen profile's `search_base`. | Multi-template is the point of this milestone; F7→`NewEntry(0)` can only ever reach `profile[0]`. The `NewEntry(i)` plumbing already takes an index — only the selection UI is missing. Context filter keeps the list short and relevant; the all-profiles fallback guarantees F7 always works. |
+| D11 | **Create is hosted in pane 3, not a modal.** `Overlay::CreateForm` is removed; `app.form` carries a `FormMode { Edit, Create{ profile_idx, container } }`. `FormSave` branches on the mode (Create → Add path; Edit → today's diff→Modify). A late base-read must not clobber an unsaved create form. | The popup/inline split is the inconsistency the maintainer flagged; the widget is already shared (`app.rs:77`). One host means the password field, defaults, lookup picker, and dirty-guard each wire in **once** instead of twice. |
 
 ## 4. Config format (authoritative)
 
@@ -99,6 +105,39 @@ search_attrs = ["cn"]
 
 ## 5. Architecture
 
+### 5.0 Create-host unification (foundational — built first)
+
+Today the *same* `EditForm` widget has two hosts: pane 3 (`app.form`, editing an existing
+entry) and the modal `Overlay::CreateForm` (NEW). This phase removes the modal and makes
+NEW a pane-3 **create-mode** form. It is a pure refactor — **no new template features** —
+landed and verified before any of §5.1–§5.4 is wired in, so the rest of the milestone
+targets one host.
+
+- **Mode on the form.** `app.form` gains a `mode: FormMode`:
+  `Edit` (today's behaviour, has a `baseline` for the diff) or
+  `Create { profile_idx, container }` (empty baseline; `dn` is composed from the RDN field at save).
+  `Overlay::CreateForm`, `create_form_key`, and `render_create_form` are deleted; their
+  logic moves into the pane-3 form key handler / `render_form` / `FormSave`.
+- **Open.** `NewEntry(i)` builds the create-mode form (via `empty_form_for_profile` +
+  `build_edit_form`) and installs it as `app.form` (focus 0). Pane 3 titles it "New <profile>".
+  The tree selection is left where it was; the unsaved entry has no node yet.
+- **Save.** `FormSave` (`app.rs:868`) branches on `mode`:
+  `Edit` → today's `prepare_save`/`combined_save_overlay` → Modify;
+  `Create` → the create pipeline in §5.2 → `Confirm{ PendingAction::Create }` → Add.
+- **Clobber guard.** A late base-read installs into `app.form` only when
+  `current && app.overlay.is_none()` (`app.rs:506`). Add `&& !app.form.is_new()` so an
+  in-flight base-read from the prior selection cannot overwrite an unsaved create form.
+- **Cancel & dirty-guard.** Esc/F3 on a create-mode form discards it (`app.form = None`),
+  returning to the selected node's read view. The existing `GuardIntent`/`ResolveGuard`
+  dirty-guard now also protects create (navigating away from an unsaved/edited new entry
+  prompts save/discard/cancel) — for free, because it keys off `app.form` being dirty.
+- **Splice.** On Add success, the existing `PostWrite::Created` path splices the node into
+  the tree and selects it — unchanged.
+
+Multi-value handling is **unchanged** from today: create still edits one value per field
+inline (a second value is added post-create via the pane-3 value-editor popup). Unifying the
+host does not by itself lift that limitation; doing so is a follow-up.
+
 ### 5.1 New / changed modules
 
 | File | Change |
@@ -109,19 +148,18 @@ search_attrs = ["cn"]
 | `src/ui/picker.rs` | `build_member_filter(object_classes: &[String], …)` ANDs the classes: `(&(objectClass=a)(objectClass=b)…)`. `PickerState` gains a single-select / value-pick mode (or a thin sibling) for the lookup picker. |
 | `src/workflows/create.rs` | objectClass set `["top", oc1, oc2,…]` (ordered, deduped); `effective_attributes(&all_ocs)`. |
 | `src/samba/password.rs` | reuse `build_password_mods` / `nt_hash`; add a small create-time helper that returns **attribute values** (not ModOps) for an Add: `userPassword` (cleartext) and, when samba, `sambaNTPassword` + `sambaPwdLastSet`. |
-| `src/ui/edit_form.rs` | tag fields: password field (suppress schema `userPassword`, render masked-confirm) and lookup fields; carry `PasswordSpec`/`LookupSpec` onto `EditField`. |
-| `src/ui/app.rs` | `commit_create`: apply defaults (pure plan + worker autonumber scan) before `build_add_entry`; thread `worker` in. Password handling on commit (mask in preview, cleartext in Add). Lookup-picker open + selection handler. `allocate_number(worker, base_dn, attr, min, max)` synchronous scan with truncation refusal. F7 → context-filtered profile chooser (`Overlay::ChooseProfile`); pure `profiles_for_container(profiles, container_dn) -> Vec<usize>` matcher. |
-| `src/ui/view.rs` | render the masked-confirm password field; reuse the picker branch for the lookup picker; render the `ChooseProfile` select overlay. |
+| `src/ui/edit_form.rs` | `EditForm.mode: FormMode` (§5.0); tag fields: password field (suppress schema `userPassword`, render masked-confirm) and lookup fields; carry `PasswordSpec`/`LookupSpec` onto `EditField`. |
+| `src/ui/app.rs` | §5.0 unification (remove `Overlay::CreateForm`/`create_form_key`; `FormSave` mode-branch; clobber guard). The Create branch applies defaults (pure plan + worker autonumber scan) before `build_add_entry`. Password staging (mask in preview, cleartext in Add). Lookup-picker open + selection handler. `allocate_number(worker, base_dn, attr, min, max)` synchronous scan with truncation refusal. F7 → context-filtered profile chooser (`Overlay::ChooseProfile`); pure `profiles_for_container(profiles, container_dn) -> Vec<usize>` matcher. |
+| `src/ui/view.rs` | `render_form` titles + renders the create-mode form (replacing `render_create_form`); masked-confirm password field; reuse the picker branch for the lookup picker; render the `ChooseProfile` select overlay. |
 
-### 5.2 Defaults resolution flow (the heart)
+### 5.2 Defaults resolution + create-save flow (the heart)
+
+This is the **Create branch of `FormSave`** (§5.0), reached by F2 on a pane-3 create-mode form.
+At form open, only **literal** defaults are pre-filled (templates/autonumber reference values
+not yet typed).
 
 ```
-form open (empty_form_for_profile)
-  └─ pre-fill LITERAL defaults only (templates/autonumber need values not yet typed)
-
-operator edits fields …
-
-F2 → commit_create (now takes `worker`)
+F2 on a Create-mode form  →  create-save (has `worker`)
   1. edited = form.to_edit_entry()
   2. plan_defaults(profile.defaults, &edited)  [PURE]
         → Fill(attr,value)         (literal already applied, or template resolved now)
@@ -177,9 +215,10 @@ F7 (Leaf pane, writable)
            ↑↓ select · Enter → NewEntry(selected) · Esc cancels
 ```
 
-Placement is unchanged: `NewEntry(i)` uses `profile[i].search_base` as the container
-(falling back to the tree root), exactly as today. The chooser is a static in-memory
-select list — **not** the search picker — so it needs no worker round-trip.
+`NewEntry(i)` now installs a pane-3 **create-mode** form (§5.0), not the old modal.
+Placement is unchanged: it uses `profile[i].search_base` as the container (falling back to
+the tree root), exactly as today. The chooser itself is a small transient in-memory select
+overlay — **not** the search picker — so it needs no worker round-trip.
 
 ## 6. Testing
 
@@ -191,6 +230,12 @@ select list — **not** the search picker — so it needs no worker round-trip.
 - `build_add_entry`: multi-OC objectClass set (ordered, deduped, `top` first).
 - password attribute staging: cleartext value present; samba on/off; preview masking.
 - `profiles_for_container`: exact match, ancestor/descendant suffix match, component-boundary rejection (`ou=people2`), case-insensitivity, no-match → empty (caller falls back to all).
+
+**Create-host unification (§5.0):**
+- `EditForm` mode round-trips: a `Create`-mode form reports `is_new()`, has an empty baseline, and composes its `dn` from the RDN field at save.
+- `FormSave` branch selection (Edit→Modify path, Create→Add path) chosen by `mode`.
+- the clobber guard: a base-read matching a stale selection does **not** replace an in-flight create form.
+- behaviour parity with the old overlay: the existing create tests (DN composition, MUST fields, RDN supply) pass against the pane-3 path.
 
 **Gated live tests** (`tests/live_templates.rs`, `EDAPTOR_TEST_LDAP_URI`, base `dc=example,dc=org`):
 - autonumber allocates the next free uidNumber; a seeded gap is filled correctly.
@@ -205,7 +250,19 @@ select list — **not** the search picker — so it needs no worker round-trip.
 - Facade boundary: only `src/ui/*` may `use ratatui`/`use tui_*`.
 - Live tests gated by `EDAPTOR_TEST_LDAP_URI` (skip when unset).
 - Commit trailer: `Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>`.
-- Subagent-driven execution. **`app.rs`-heavy tasks (commit-time defaults wiring, the lookup picker) are the context risk** — scope each tightly or resolve in-session; the pure `defaults.rs`/`picker.rs`/`create.rs` work fans out cleanly.
+- Subagent-driven execution. **`app.rs`-heavy tasks are the context risk** — the §5.0
+  create-host unification (the structural refactor) and the lookup picker most of all;
+  scope each tightly or resolve in-session. The pure `defaults.rs`/`picker.rs`/`create.rs`
+  work fans out cleanly.
+
+**Build order (the §5.0 unification gates everything):**
+1. §5.0 create-host unification — pure refactor, lands green, parity tests pass.
+2. `object_classes` list (config + `relation`/`picker`/`create` blast radius).
+3. `defaults.rs` pure engine (parser, `plan_defaults`, `next_in_range`).
+4. Wire defaults + autonumber scan into the create-save branch.
+5. Inline password field (create + edit), masking, samba reuse.
+6. Value-lookup picker.
+7. Context-filtered profile chooser.
 
 ## 8. Open items / follow-ups (recorded, not in this milestone)
 
