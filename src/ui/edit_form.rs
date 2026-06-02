@@ -367,6 +367,40 @@ pub fn build_edit_form(
     }
 }
 
+/// The two synthetic form-field labels for a password spec: the primary (the
+/// configured LDAP attribute) and the confirmation field.
+pub fn password_field_labels(spec: &crate::config::PasswordSpec) -> (String, String) {
+    (
+        spec.ldap_attribute.clone(),
+        format!("{} (confirm)", spec.ldap_attribute),
+    )
+}
+
+/// Replace any schema-generated field for the password attribute with two masked
+/// password fields (the attribute + a confirmation). Call on a freshly built
+/// create/edit form when the profile declares `[profile.password]`. The schema
+/// password MAY field (if present) is removed first to avoid a duplicate (D8).
+pub fn inject_password_fields(form: &mut EditForm, spec: &crate::config::PasswordSpec) {
+    let (primary, confirm) = password_field_labels(spec);
+    form.fields
+        .retain(|f| !f.label.eq_ignore_ascii_case(&primary));
+    let mk = |label: String| EditField {
+        label,
+        must: false,
+        editable: true,
+        multi: false,
+        secret: true,
+        ordered: false,
+        values: Vec::new(),
+        kind: FieldKind::Text,
+        widget: WidgetSpec::ReadOnlyText,
+        editor: TextState::new(),
+        relation: None,
+    };
+    form.fields.push(mk(primary));
+    form.fields.push(mk(confirm));
+}
+
 /// Port of the facade's editability rule: `memberOf` is server-maintained and
 /// binary / boolean-checkbox kinds are not free-text, so none of them edit.
 fn field_is_editable(field: &FormField) -> bool {
@@ -768,5 +802,52 @@ mod tests {
 
         // And to_edit_entry already omits backref fields.
         assert!(!edited.attrs.contains_key("memberOf"));
+    }
+
+    #[test]
+    fn inject_password_replaces_schema_field_with_two_masked_fields() {
+        let plain = |label: &str| EditField {
+            label: label.into(),
+            must: false,
+            editable: true,
+            multi: false,
+            secret: false,
+            ordered: false,
+            values: vec![],
+            kind: crate::schema::FieldKind::Text,
+            widget: crate::ui::form::WidgetSpec::ReadOnlyText,
+            editor: TextState::new(),
+            relation: None,
+        };
+        let mut form = EditForm {
+            dn: "uid=alice,ou=people,dc=example,dc=org".into(),
+            fields: vec![plain("cn"), plain("userPassword")],
+            baseline: Default::default(),
+            mode: FormMode::Edit,
+        };
+        let spec = crate::config::PasswordSpec {
+            ldap_attribute: "userPassword".into(),
+            samba: false,
+        };
+        inject_password_fields(&mut form, &spec);
+        // Exactly one primary userPassword field (the schema one was removed).
+        let primaries: Vec<&EditField> = form
+            .fields
+            .iter()
+            .filter(|f| f.label.eq_ignore_ascii_case("userPassword"))
+            .collect();
+        assert_eq!(primaries.len(), 1);
+        assert!(form
+            .fields
+            .iter()
+            .any(|f| f.label == "userPassword (confirm)"));
+        // Both password fields are masked.
+        assert!(form
+            .fields
+            .iter()
+            .filter(|f| f.label.to_lowercase().contains("userpassword"))
+            .all(|f| f.secret && f.editable && !f.multi));
+        // The unrelated field survives.
+        assert!(form.fields.iter().any(|f| f.label == "cn"));
     }
 }

@@ -27,8 +27,6 @@ pub fn is_secure(server: &ServerConfig) -> bool {
 /// password. `userPassword` (or the configured attr) is sent cleartext — slapd
 /// hashes it over TLS and enforces ppolicy. When `samba`, also `sambaNTPassword`
 /// (NT hash) and `sambaPwdLastSet` (epoch seconds).
-// wired into the create/edit password path in Task 4.4/4.5
-#[allow(dead_code)]
 pub fn password_add_attrs(
     password: &str,
     ldap_attribute: &str,

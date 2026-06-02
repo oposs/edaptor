@@ -2037,6 +2037,51 @@ fn plan_create(
 }
 
 /// Validate a Create-mode pane-3 form and open the create LDIF confirm.
+/// Extract + validate the password from edited create/edit attrs. Removes BOTH
+/// the primary and confirm pseudo-attributes from `attrs` (confirm is never a real
+/// attribute). Returns `Ok(None)` when no password was entered, `Ok(Some(pw))` for
+/// a confirmed password, `Err` when the two entries disagree. Pure.
+fn stage_password(
+    spec: &crate::config::PasswordSpec,
+    attrs: &mut std::collections::BTreeMap<String, Vec<String>>,
+) -> Result<Option<String>, String> {
+    let (primary, confirm) = crate::ui::edit_form::password_field_labels(spec);
+    let take = |attrs: &std::collections::BTreeMap<String, Vec<String>>, label: &str| {
+        attrs
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case(label))
+            .and_then(|(_, v)| v.first().cloned())
+            .unwrap_or_default()
+            .trim()
+            .to_string()
+    };
+    let pw = take(attrs, &primary);
+    let cf = take(attrs, &confirm);
+    attrs.retain(|k, _| !k.eq_ignore_ascii_case(&primary) && !k.eq_ignore_ascii_case(&confirm));
+    if pw.is_empty() {
+        return Ok(None);
+    }
+    if pw != cf {
+        return Err("Passwords do not match.".to_string());
+    }
+    Ok(Some(pw))
+}
+
+/// A copy of `attrs` with the password-related attribute values masked, for the
+/// LDIF confirm preview (never show the cleartext or the NT hash). Pure.
+fn mask_password_attrs(
+    attrs: &std::collections::BTreeMap<String, Vec<String>>,
+    ldap_attribute: &str,
+) -> std::collections::BTreeMap<String, Vec<String>> {
+    let mut out = attrs.clone();
+    for key in [ldap_attribute, "sambaNTPassword", "sambaPwdLastSet"] {
+        if let Some(k) = out.keys().find(|k| k.eq_ignore_ascii_case(key)).cloned() {
+            out.insert(k, vec!["********".to_string()]);
+        }
+    }
+    out
+}
+
 /// Apply literal/template defaults to still-empty fields (pure); return the
 /// autonumber requests `(attr, min, max)` that still need a directory scan.
 fn apply_static_defaults(
@@ -2091,16 +2136,57 @@ fn prepare_create(
             }
         }
     }
+    // Strip the password + confirm pseudo-fields (validating they match) BEFORE
+    // building/validating the entry; the cleartext is injected into the real Add
+    // afterwards and masked in the preview.
+    let password = match &profile.password {
+        Some(spec) => match stage_password(spec, &mut edited.attrs) {
+            Ok(pw) => pw,
+            Err(text) => {
+                app.overlay = Some(Overlay::Error { text });
+                return;
+            }
+        },
+        None => None,
+    };
     match plan_create(read_flow.schema(), profile, &container, &edited) {
         CreatePrep::Confirm {
             dn,
-            attrs,
+            mut attrs,
             container,
             ldif,
         } => {
+            // Inject the password (cleartext + optional Samba hashes) into the real
+            // Add, and mask those values in the preview body.
+            let body = match (&profile.password, &password) {
+                (Some(spec), Some(cleartext)) => {
+                    let samba = spec.samba
+                        && attrs
+                            .get("objectClass")
+                            .map(|ocs| {
+                                ocs.iter()
+                                    .any(|o| o.eq_ignore_ascii_case("sambaSamAccount"))
+                            })
+                            .unwrap_or(false);
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_secs())
+                        .unwrap_or(0);
+                    for (k, v) in crate::samba::password::password_add_attrs(
+                        cleartext,
+                        &spec.ldap_attribute,
+                        samba,
+                        now,
+                    ) {
+                        attrs.insert(k, v);
+                    }
+                    render_add(&dn, &mask_password_attrs(&attrs, &spec.ldap_attribute))
+                }
+                _ => ldif,
+            };
             app.overlay = Some(Overlay::Confirm {
                 title: "Create this entry?".to_string(),
-                body: ldif,
+                body,
                 action: PendingAction::Create {
                     dn,
                     attrs,
@@ -2136,6 +2222,11 @@ fn build_new_entry_form(
         profile_idx,
         container,
     };
+    // When the profile declares a password, replace the schema password field
+    // with the masked password + confirm fields.
+    if let Some(spec) = &profile.password {
+        crate::ui::edit_form::inject_password_fields(&mut form, spec);
+    }
     form
 }
 
@@ -2996,6 +3087,54 @@ mod tests {
         ));
         revert_form(&mut app);
         assert!(app.form.is_none(), "create form discarded on cancel");
+    }
+
+    #[test]
+    fn stage_password_strips_fields_validates_match_and_empty() {
+        use crate::config::PasswordSpec;
+        use std::collections::BTreeMap;
+        let spec = PasswordSpec {
+            ldap_attribute: "userPassword".into(),
+            samba: false,
+        };
+        // matching pair → Some, both pseudo-fields stripped, other attrs kept
+        let mut attrs: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        attrs.insert("userPassword".into(), vec!["hunter2".into()]);
+        attrs.insert("userPassword (confirm)".into(), vec!["hunter2".into()]);
+        attrs.insert("cn".into(), vec!["Alice".into()]);
+        assert_eq!(
+            stage_password(&spec, &mut attrs).unwrap(),
+            Some("hunter2".to_string())
+        );
+        assert!(!attrs.contains_key("userPassword"));
+        assert!(!attrs.contains_key("userPassword (confirm)"));
+        assert!(attrs.contains_key("cn"));
+        // mismatch → Err
+        let mut a2: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        a2.insert("userPassword".into(), vec!["a".into()]);
+        a2.insert("userPassword (confirm)".into(), vec!["b".into()]);
+        assert!(stage_password(&spec, &mut a2).is_err());
+        // empty → None
+        let mut a3: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        a3.insert("userPassword".into(), vec!["".into()]);
+        a3.insert("userPassword (confirm)".into(), vec!["".into()]);
+        assert_eq!(stage_password(&spec, &mut a3).unwrap(), None);
+    }
+
+    #[test]
+    fn mask_password_attrs_masks_secret_values_only() {
+        use std::collections::BTreeMap;
+        let mut attrs: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        attrs.insert("userPassword".into(), vec!["hunter2".into()]);
+        attrs.insert("sambaNTPassword".into(), vec!["DEADBEEF".into()]);
+        attrs.insert("cn".into(), vec!["Alice".into()]);
+        let m = mask_password_attrs(&attrs, "userPassword");
+        assert_eq!(m.get("userPassword"), Some(&vec!["********".to_string()]));
+        assert_eq!(
+            m.get("sambaNTPassword"),
+            Some(&vec!["********".to_string()])
+        );
+        assert_eq!(m.get("cn"), Some(&vec!["Alice".to_string()]));
     }
 
     #[test]
