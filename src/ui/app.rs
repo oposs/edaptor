@@ -869,6 +869,10 @@ fn handle_action(
             let Some(form) = app.form.as_ref() else {
                 return;
             };
+            if form.is_new() {
+                prepare_create(app, worker, read_flow, profiles);
+                return;
+            }
             // Try the combined membership path first; fall back to the single-entry
             // path when no backref field actually changed. No guard intent here —
             // a plain F2 save has nothing to resume afterward.
@@ -2008,6 +2012,98 @@ fn build_tree_items(structure: &Structure) -> Vec<TreeItem<'static, String>> {
     vec![build(structure, structure.root_dn())]
 }
 
+/// Outcome of planning a create from a Create-mode form (pure).
+enum CreatePrep {
+    /// Ready to confirm: composed DN, attribute set, container, and LDIF preview.
+    Confirm {
+        dn: String,
+        attrs: BTreeMap<String, Vec<String>>,
+        container: String,
+        ldif: String,
+    },
+    /// A blocking problem (RDN missing, schema validation failure).
+    Error(String),
+}
+
+/// Pure: validate a Create-mode form's edited entry and produce the confirm data.
+fn plan_create(
+    schema: &SchemaModel,
+    profile: &EntryProfile,
+    container: &str,
+    edited: &EditEntry,
+) -> CreatePrep {
+    let rdn_value = edited
+        .attrs
+        .iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case(&profile.rdn_attr))
+        .and_then(|(_, v)| v.first().cloned())
+        .unwrap_or_default();
+    if rdn_value.trim().is_empty() {
+        return CreatePrep::Error("The RDN attribute must have a value.".to_string());
+    }
+    let (dn, attrs) = build_add_entry(profile, container, rdn_value.trim(), edited);
+    let oc_refs = [profile.object_class.as_str()];
+    let full = EditEntry {
+        dn: dn.clone(),
+        attrs: attrs.clone(),
+    };
+    let errors = validate(&full, schema, &oc_refs);
+    if !errors.is_empty() {
+        return CreatePrep::Error(format_validation_errors(&errors));
+    }
+    let ldif = render_add(&dn, &attrs);
+    CreatePrep::Confirm {
+        dn,
+        attrs,
+        container: container.to_string(),
+        ldif,
+    }
+}
+
+/// Validate a Create-mode pane-3 form and open the create LDIF confirm.
+fn prepare_create(
+    app: &mut App,
+    _worker: &WorkerHandle,
+    read_flow: &mut ReadFlow,
+    profiles: &[EntryProfile],
+) {
+    let Some(form) = app.form.as_ref() else {
+        return;
+    };
+    let (profile_idx, container) = match &form.mode {
+        FormMode::Create {
+            profile_idx,
+            container,
+        } => (*profile_idx, container.clone()),
+        FormMode::Edit => return,
+    };
+    let Some(profile) = profiles.get(profile_idx) else {
+        return;
+    };
+    let edited = form.to_edit_entry();
+    match plan_create(read_flow.schema(), profile, &container, &edited) {
+        CreatePrep::Confirm {
+            dn,
+            attrs,
+            container,
+            ldif,
+        } => {
+            app.overlay = Some(Overlay::Confirm {
+                title: "Create this entry?".to_string(),
+                body: ldif,
+                action: PendingAction::Create {
+                    dn,
+                    attrs,
+                    parent: container,
+                },
+            });
+        }
+        CreatePrep::Error(text) => {
+            app.overlay = Some(Overlay::Error { text });
+        }
+    }
+}
+
 /// Build an empty Create-mode pane-3 form for `profile` (index `profile_idx`),
 /// to be added under `container`. Editable fields are forced single-value so the
 /// mandatory attributes can be typed inline (a second value is added post-create
@@ -2807,5 +2903,44 @@ mod tests {
             ),
             "rename + membership change must be Blocked"
         );
+    }
+
+    #[test]
+    fn plan_create_builds_confirm_with_composed_dn() {
+        use std::collections::BTreeMap;
+        let mut attrs = BTreeMap::new();
+        attrs.insert("uid".to_string(), vec!["alice".to_string()]);
+        let edited = EditEntry {
+            dn: String::new(),
+            attrs,
+        };
+        let prep = plan_create(
+            &user_schema(),
+            &create_user_profile(),
+            "ou=people,dc=example,dc=org",
+            &edited,
+        );
+        match prep {
+            CreatePrep::Confirm { dn, .. } => {
+                assert_eq!(dn, "uid=alice,ou=people,dc=example,dc=org")
+            }
+            CreatePrep::Error(e) => panic!("unexpected error: {e}"),
+        }
+    }
+
+    #[test]
+    fn plan_create_errors_when_rdn_missing() {
+        use std::collections::BTreeMap;
+        let edited = EditEntry {
+            dn: String::new(),
+            attrs: BTreeMap::new(),
+        };
+        let prep = plan_create(
+            &user_schema(),
+            &create_user_profile(),
+            "ou=people,dc=example,dc=org",
+            &edited,
+        );
+        assert!(matches!(prep, CreatePrep::Error(_)));
     }
 }
