@@ -72,6 +72,9 @@ rdn_attr       = "uid"
 search_base    = "ou=people,dc=example,dc=com"
 show           = ["uid", "cn", "sn", "givenName", "mail", "uidNumber", "gidNumber", "homeDirectory"]
 search_attrs   = ["cn", "uid", "mail"]   # picker searches these attributes
+# How an entry of this profile is labelled in the membership picker. `{attr}` is
+# substituted by that attribute's value; literal text is kept. Defaults to cn.
+label          = "{cn} ({uid})"          # e.g. "Bob Baker (bob)"
 
 # Defaults fill EMPTY fields on create (operator-entered values are never
 # overwritten). Three value kinds:
@@ -108,6 +111,7 @@ object_classes = ["groupOfNames"]
 rdn_attr       = "cn"
 search_base    = "ou=groups,dc=example,dc=com"
 show           = ["cn", "description"]
+label          = "{cn}"                  # group label in the reverse (memberOf) picker
 
 # Membership relation: enables the symmetric group↔user membership picker.
 # Opening a group's `member` field shows a live searchable user picker;
