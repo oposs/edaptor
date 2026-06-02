@@ -2024,6 +2024,7 @@ fn build_tree_items(structure: &Structure) -> Vec<TreeItem<'static, String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ui::edit_form::FormMode;
 
     #[test]
     fn focus_cycles_tree_leaf_form() {
@@ -2156,6 +2157,7 @@ mod tests {
                 relation: None,
             }],
             baseline: Default::default(),
+            mode: FormMode::Edit,
         });
         app
     }
@@ -2433,6 +2435,7 @@ mod tests {
             dn: "cn=g1,ou=groups".into(),
             fields: vec![field],
             baseline: Default::default(),
+            mode: FormMode::Edit,
         });
         app
     }
@@ -2656,6 +2659,7 @@ mod tests {
             dn: "uid=ann,ou=people,dc=x".into(),
             fields: vec![uid_field, desc_field, memberof_field],
             baseline,
+            mode: FormMode::Edit,
         }
     }
 
@@ -2710,6 +2714,7 @@ mod tests {
             dn: "uid=ann,ou=people,dc=x".into(),
             fields: vec![uid_field, memberof_field],
             baseline,
+            mode: FormMode::Edit,
         }
     }
 

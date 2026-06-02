@@ -568,7 +568,7 @@ mod tests {
     use super::{centered, clamp_scroll, field_display_value, render_form, status_line};
     use crate::schema::FieldKind;
     use crate::ui::app::{App, Pane};
-    use crate::ui::edit_form::{EditField, EditForm};
+    use crate::ui::edit_form::{EditField, EditForm, FormMode};
     use crate::ui::form::WidgetSpec;
     use ratatui::backend::TestBackend;
     use ratatui::layout::Rect;
@@ -647,6 +647,7 @@ mod tests {
                 dn: "cn=test".to_string(),
                 fields: vec![field],
                 baseline: Default::default(),
+                mode: FormMode::Edit,
             }),
             form_focus: 0,
             form_scroll: 0,
@@ -815,6 +816,7 @@ mod tests {
                 relation: None,
             }],
             baseline,
+            mode: FormMode::Edit,
         });
         app
     }

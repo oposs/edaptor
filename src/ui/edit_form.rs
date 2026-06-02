@@ -179,6 +179,17 @@ impl ValueEditor {
     }
 }
 
+/// Whether the form edits an existing entry or composes a new one.
+pub enum FormMode {
+    /// Editing an entry already in the directory (diff against `baseline`).
+    Edit,
+    /// Composing a new entry of `profile_idx`, to be added under `container`.
+    Create {
+        profile_idx: usize,
+        container: String,
+    },
+}
+
 /// The editable form for one entry.
 pub struct EditForm {
     /// The entry's distinguished name.
@@ -188,9 +199,16 @@ pub struct EditForm {
     /// Immutable snapshot of the original server values (label → values), the
     /// reference the dirty check compares the current edits against.
     pub baseline: BTreeMap<String, Vec<String>>,
+    /// Edit an existing entry, or compose a new one (Create → Add on save).
+    pub mode: FormMode,
 }
 
 impl EditForm {
+    /// True when this form composes a not-yet-saved new entry.
+    pub fn is_new(&self) -> bool {
+        matches!(self.mode, FormMode::Create { .. })
+    }
+
     /// The entry as currently edited, in the shape the save path's
     /// [`crate::form::changeset::diff`] consumes.
     ///
@@ -345,6 +363,7 @@ pub fn build_edit_form(
         dn: model.title.clone(),
         fields,
         baseline,
+        mode: FormMode::Edit,
     }
 }
 
@@ -373,6 +392,26 @@ mod tests {
     use crate::ldap::worker::{LdapEntry, RawSubschema};
     use crate::ui::form::build_form_model;
     use std::collections::BTreeMap;
+
+    fn empty_schema() -> SchemaModel {
+        SchemaModel::from_raw(&crate::ldap::worker::RawSubschema {
+            object_classes: vec![],
+            attribute_types: vec![],
+            ldap_syntaxes: vec![],
+        })
+    }
+
+    #[test]
+    fn editform_mode_defaults_to_edit_and_reports_not_new() {
+        use crate::ui::form::FormModel;
+        let model = FormModel {
+            title: "cn=x,dc=example,dc=org".into(),
+            fields: vec![],
+        };
+        let form = build_edit_form(&model, &empty_schema(), false, &[]);
+        assert!(matches!(form.mode, FormMode::Edit));
+        assert!(!form.is_new());
+    }
 
     /// A `FormModel` for a group entry: objectClass=groupOfNames, with a
     /// multi-valued `member` field. The objectClass field must carry the value
@@ -686,6 +725,7 @@ mod tests {
             dn: "uid=ann,ou=people,dc=example,dc=org".to_string(),
             fields: vec![field],
             baseline,
+            mode: FormMode::Edit,
         }
     }
 
