@@ -35,6 +35,11 @@ use crate::workflows::create::{build_add_entry, empty_form_for_profile, profiles
 use crate::workflows::read_flow::{ReadFlow, ReadOutcome};
 use crate::workflows::structure::{Structure, StructureInput};
 
+/// Sentinel `picker_last_query` set when a picker opens so the first tick's empty
+/// search box (`""`) compares unequal and fires exactly one initial search. A NUL
+/// can never be typed into the search box, so `""` never matches it.
+const PICKER_INIT_QUERY: &str = "\u{0}";
+
 /// Which of the three panes currently has focus.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Pane {
@@ -410,8 +415,9 @@ fn handle_worker_response(
                 // Enter) and labels via the spec's `label` attr; membership
                 // pickers keep `value: None` and label via `cn`.
                 let lookup = ve.lookup.clone();
+                let label_template = ve.scope.as_ref().and_then(|s| s.label_template.clone());
                 if let Some(p) = ve.picker.as_mut() {
-                    let results = entries
+                    let results: Vec<crate::ui::picker::Candidate> = entries
                         .iter()
                         .map(|e| match &lookup {
                             Some(spec) => crate::ui::picker::Candidate {
@@ -421,11 +427,24 @@ fn handle_worker_response(
                             },
                             None => crate::ui::picker::Candidate {
                                 dn: e.dn.clone(),
-                                label: crate::ui::picker::candidate_label(&e.dn, &e.attrs),
+                                label: membership_candidate_label(
+                                    label_template.as_deref(),
+                                    &e.dn,
+                                    &e.attrs,
+                                ),
                                 value: None,
                             },
                         })
                         .collect();
+                    // Upgrade seeded selection labels (seeded from the structure
+                    // tree as bare `cn`) to the richer result label once results
+                    // arrive — so a saved member shows "Bob Baker (bob)" too.
+                    for sel in p.selected.iter_mut() {
+                        if let Some(r) = results.iter().find(|r| r.dn.eq_ignore_ascii_case(&sel.dn))
+                        {
+                            sel.label = r.label.clone();
+                        }
+                    }
                     p.set_results(results);
                     // Heuristic: if the result count hit the cap, the server may
                     // have more matching entries — signal the view to show a hint.
@@ -714,7 +733,7 @@ fn open_value_editor(app: &mut App, structure: &Structure) {
         };
         let ve = ValueEditor::open_lookup(focus, field, base);
         app.overlay = Some(Overlay::ValueEditor(ve));
-        app.picker_last_query.clear();
+        app.picker_last_query = PICKER_INIT_QUERY.to_string();
         app.picker_search_id = None;
     } else if field.relation.is_some() && field.multi && field.editable {
         // Picker mode: label DNs from the loaded structure (fallback = the DN).
@@ -726,7 +745,7 @@ fn open_value_editor(app: &mut App, structure: &Structure) {
         };
         let ve = ValueEditor::open_picker(focus, field, label_of);
         app.overlay = Some(Overlay::ValueEditor(ve));
-        app.picker_last_query.clear();
+        app.picker_last_query = PICKER_INIT_QUERY.to_string();
         app.picker_search_id = None;
     } else if field.multi && field.editable {
         let ve = ValueEditor::open(focus, field);
@@ -908,8 +927,10 @@ fn value_editor_key(app: &mut App, key: KeyEvent) {
 }
 
 /// When a picker is open and its search term changed, submit a fresh size-capped
-/// candidate search (stale ids are discarded in `handle_worker_response`). Empty
-/// term → clear results (selection-only view). Mirrors the leaf incremental search.
+/// candidate search (stale ids are discarded in `handle_worker_response`). An
+/// empty term still searches — `build_member_filter` produces an objectClass-only
+/// filter that loads up to `PICKER_SEARCH_CAP` candidates (so the picker is
+/// populated on open). Mirrors the leaf incremental search.
 fn service_picker_search(app: &mut App, worker: &WorkerHandle) {
     let Some(Overlay::ValueEditor(ve)) = app.overlay.as_ref() else {
         return;
@@ -948,23 +969,23 @@ fn service_picker_search(app: &mut App, worker: &WorkerHandle) {
                 &scope.search_attrs,
                 &query,
             );
-            (scope.base.clone(), filter, vec!["cn".to_string()])
+            // Request the label-template attrs (always including `cn`, the
+            // fallback label attr), deduped. An empty term yields an
+            // objectClass-only filter that loads up to PICKER_SEARCH_CAP.
+            let mut attrs = scope
+                .label_template
+                .as_deref()
+                .map(crate::config::label::template_attrs)
+                .unwrap_or_default();
+            attrs.push("cn".to_string());
+            dedupe_ci(&mut attrs);
+            (scope.base.clone(), filter, attrs)
         })
     };
     let Some((base, filter, attrs)) = params else {
         return;
     };
 
-    if query.is_empty() {
-        if let Some(Overlay::ValueEditor(ve)) = app.overlay.as_mut() {
-            if let Some(p) = ve.picker.as_mut() {
-                p.set_results(Vec::new());
-                p.truncated = false;
-            }
-        }
-        app.picker_search_id = None;
-        return;
-    }
     let id = next_id();
     app.picker_search_id = Some(id);
     let _ = worker.submit(Request::Search {
@@ -992,6 +1013,25 @@ fn candidate_label_for_lookup(
             if let Some(v) = vs.first() {
                 return v.clone();
             }
+        }
+    }
+    crate::ui::picker::candidate_label(dn, attrs)
+}
+
+/// A membership candidate's display label. With a `label_template` the template
+/// is rendered against the entry's attrs (e.g. `"Bob Baker (bob)"`); if that
+/// render is empty/blank (a missing field, or a present-but-whitespace one) it
+/// falls back to the generic `cn`/DN label so a row is never blank. Without a
+/// template it is the plain `cn`/DN fallback.
+fn membership_candidate_label(
+    label_template: Option<&[crate::config::label::LabelSeg]>,
+    dn: &str,
+    attrs: &std::collections::BTreeMap<String, Vec<String>>,
+) -> String {
+    if let Some(segs) = label_template {
+        let rendered = crate::config::label::render_label(segs, attrs);
+        if !rendered.trim().is_empty() {
+            return rendered;
         }
     }
     crate::ui::picker::candidate_label(dn, attrs)
@@ -3231,6 +3271,52 @@ mod tests {
             label: "cn".into(),
             search_attrs: vec!["cn".into()],
         }
+    }
+
+    #[test]
+    fn open_value_editor_arms_initial_search() {
+        // Opening a membership picker arms the sentinel so the first tick fires an
+        // (empty-box) search instead of waiting for the user to type.
+        let mut app = test_app_with_form_field_member();
+        app.form_focus = 0;
+        let s = empty_structure();
+        open_value_editor(&mut app, &s);
+        assert!(
+            matches!(&app.overlay, Some(Overlay::ValueEditor(ve)) if ve.picker.is_some()),
+            "membership picker installed"
+        );
+        assert_eq!(app.picker_last_query, "\u{0}");
+    }
+
+    #[test]
+    fn membership_candidate_label_template_blank_and_fallback() {
+        use crate::config::label::parse_label_template;
+        use std::collections::BTreeMap;
+        let dn = "uid=bob,ou=people,dc=test";
+        let tmpl = parse_label_template("{cn} ({uid})");
+
+        // Template → rendered.
+        let mut attrs = BTreeMap::new();
+        attrs.insert("cn".to_string(), vec!["Bob Baker".to_string()]);
+        attrs.insert("uid".to_string(), vec!["bob".to_string()]);
+        assert_eq!(
+            membership_candidate_label(Some(&tmpl), dn, &attrs),
+            "Bob Baker (bob)"
+        );
+
+        // Blank render (a present-but-whitespace template result) → cn fallback.
+        let mut blank = BTreeMap::new();
+        blank.insert("cn".to_string(), vec!["bobby".to_string()]);
+        let ws_tmpl = parse_label_template("{nope}");
+        assert_eq!(
+            membership_candidate_label(Some(&ws_tmpl), dn, &blank),
+            "bobby"
+        );
+
+        // No template → cn fallback; no cn → DN.
+        assert_eq!(membership_candidate_label(None, dn, &blank), "bobby");
+        let empty: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        assert_eq!(membership_candidate_label(None, dn, &empty), dn);
     }
 
     #[test]
