@@ -908,7 +908,14 @@ fn handle_action(
             }
             let edited = form.to_edit_entry();
             let object_classes = object_classes_of(form);
-            match prepare_save(read_flow.schema(), &original, &edited, &object_classes) {
+            match prepare_save(
+                read_flow.schema(),
+                &original,
+                &edited,
+                &object_classes,
+                &[],
+                &[],
+            ) {
                 PrepareSave::Ready { plan, dn, ldif } => {
                     app.overlay = Some(Overlay::Confirm {
                         title: "Apply these changes?".to_string(),
@@ -1223,7 +1230,14 @@ fn execute_pending(
             }
             let edited = form.to_edit_entry();
             let object_classes = object_classes_of(form);
-            match prepare_save(read_flow.schema(), &original, &edited, &object_classes) {
+            match prepare_save(
+                read_flow.schema(),
+                &original,
+                &edited,
+                &object_classes,
+                &[],
+                &[],
+            ) {
                 PrepareSave::Ready { plan, dn, .. } => {
                     app.status = "Saving…".to_string();
                     match intent {
@@ -1438,27 +1452,53 @@ enum PrepareSave {
     },
 }
 
+/// A copy of `cs` with the values of any `Add`/`Replace` touching a masked
+/// attribute replaced by `********`, for the confirm preview — never show a
+/// cleartext password or NT hash. `sambaPwdLastSet` is not secret and is left
+/// intact (it is not in `mask_attrs`). Pure.
+fn mask_changeset_secrets(cs: &ChangeSet, mask_attrs: &[String]) -> ChangeSet {
+    let is_masked = |attr: &str| mask_attrs.iter().any(|a| a.eq_ignore_ascii_case(attr));
+    let mut out = cs.clone();
+    for m in &mut out.mods {
+        match m {
+            ModOp::Replace { attr, values } | ModOp::Add { attr, values } if is_masked(attr) => {
+                *values = vec!["********".to_string()];
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
 /// Validate + diff the edited entry against the `original` (baseline) and, if
 /// there is a real change, return a ready [`SavePlan`] with an LDIF preview.
+///
+/// `password_mods` (REPLACE ops produced by the edit-password path) are folded
+/// into the changeset so one source of truth drives both the plan and the
+/// preview — a password-only edit (empty attribute diff) is still a change.
+/// `mask_attrs` lists the attributes whose values to mask in the preview LDIF.
 fn prepare_save(
     schema: &SchemaModel,
     original: &EditEntry,
     edited: &EditEntry,
     object_classes: &[String],
+    password_mods: &[ModOp],
+    mask_attrs: &[String],
 ) -> PrepareSave {
     let oc_refs: Vec<&str> = object_classes.iter().map(|s| s.as_str()).collect();
     let errors = validate(edited, schema, &oc_refs);
     if !errors.is_empty() {
         return PrepareSave::Invalid(errors);
     }
-    let cs = match diff(original, edited) {
+    let mut cs = match diff(original, edited) {
         Ok(cs) => cs,
         Err(e) => return PrepareSave::DiffError(e.to_string()),
     };
+    cs.mods.extend(password_mods.iter().cloned());
     if cs.is_empty() {
         return PrepareSave::NoChanges;
     }
-    let ldif = render_changeset(&cs);
+    let ldif = render_changeset(&mask_changeset_secrets(&cs, mask_attrs));
     PrepareSave::Ready {
         plan: plan_save(cs),
         dn: original.dn.clone(),
@@ -3244,6 +3284,82 @@ mod tests {
             Some(&vec!["********".to_string()])
         );
         assert_eq!(m.get("cn"), Some(&vec!["Alice".to_string()]));
+    }
+
+    #[test]
+    fn prepare_save_folds_password_mods_and_masks_preview() {
+        use std::collections::BTreeMap;
+        // No attribute diff (original == edited): a password-only edit is still a
+        // change. The real plan carries the cleartext + hash; the preview masks them.
+        let mut attrs: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        attrs.insert("uid".into(), vec!["alice".into()]);
+        let entry = EditEntry {
+            dn: "uid=alice,ou=people,dc=example,dc=org".into(),
+            attrs,
+        };
+        let pw_mods = vec![
+            ModOp::Replace {
+                attr: "userPassword".into(),
+                values: vec!["hunter2".into()],
+            },
+            ModOp::Replace {
+                attr: "sambaNTPassword".into(),
+                values: vec!["DEADBEEF".into()],
+            },
+        ];
+        let mask = vec!["userPassword".to_string(), "sambaNTPassword".to_string()];
+        match prepare_save(
+            &user_schema(),
+            &entry,
+            &entry,
+            &["testUser".to_string()],
+            &pw_mods,
+            &mask,
+        ) {
+            PrepareSave::Ready { plan, ldif, .. } => {
+                // Preview masks both secrets, never the cleartext or hash.
+                assert!(ldif.contains("********"), "preview must mask secrets");
+                assert!(!ldif.contains("hunter2"), "cleartext must not appear");
+                assert!(!ldif.contains("DEADBEEF"), "NT hash must not appear");
+                // The real plan carries the unmasked values.
+                match plan {
+                    SavePlan::Modify(mods) => {
+                        assert!(mods.contains(&ModOp::Replace {
+                            attr: "userPassword".into(),
+                            values: vec!["hunter2".into()],
+                        }));
+                        assert!(mods.contains(&ModOp::Replace {
+                            attr: "sambaNTPassword".into(),
+                            values: vec!["DEADBEEF".into()],
+                        }));
+                    }
+                    _ => panic!("expected Modify"),
+                }
+            }
+            _ => panic!("expected Ready"),
+        }
+    }
+
+    #[test]
+    fn prepare_save_no_password_no_diff_is_no_changes() {
+        use std::collections::BTreeMap;
+        let mut attrs: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        attrs.insert("uid".into(), vec!["alice".into()]);
+        let entry = EditEntry {
+            dn: "uid=alice,ou=people,dc=example,dc=org".into(),
+            attrs,
+        };
+        assert!(matches!(
+            prepare_save(
+                &user_schema(),
+                &entry,
+                &entry,
+                &["testUser".to_string()],
+                &[],
+                &[]
+            ),
+            PrepareSave::NoChanges
+        ));
     }
 
     #[test]
