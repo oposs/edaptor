@@ -1,0 +1,107 @@
+# edaptor — Project Handover
+
+**Date:** 2026-06-02
+**`main` HEAD:** `54d10be` (working tree clean)
+**Active worktree:** `/scratch/oetiker/claude-worktrees/ldapedit-feat-three-pane` on branch `feat-three-pane` — **now equal to `main`** (the membership picker was merged and `main` fast-forwarded). The branch/worktree are preserved for the next milestone.
+
+`edaptor` is a Rust **ratatui** TUI for administering an OpenLDAP directory (users, groups, group memberships). It derives the directory's structure from live schema introspection (`cn=subschema`) and generates edit forms from `objectClass` definitions; a TOML config declares connection settings plus *entry profiles* ("what a user/group means here").
+
+> **Note:** `README.md`'s "Status" / "Turbo Vision" wording is **stale** — the UI was migrated off turbo-vision to ratatui 0.30 (see milestones below). The authoritative design is [`docs/superpowers/specs/2026-05-29-edaptor-design.md`](superpowers/specs/2026-05-29-edaptor-design.md).
+
+---
+
+## Milestone status
+
+| Milestone | State |
+|---|---|
+| M1 Foundation (config, TLS, worker, bind, subschema) | ✅ on `main` |
+| M2 Schema model (typed MUST/MAY, syntax→FieldKind) | ✅ |
+| M3 TUI shell + generic read tier | ✅ |
+| M4 Generic **write** path (diff→ChangeSet→LDIF→Modify/Add/ModRdn/Delete) | ✅ |
+| M5 Samba lifecycle (NT hash, SID/RID, group-map, synced password) | ✅ headless + `edaptor passwd <dn>` CLI; not surfaced in the TUI |
+| 3-pane redesign | ✅ merged |
+| turbo-vision → **ratatui 0.30** migration | ✅ merged |
+| UI polish (white theme, double-border focus, per-pane footers, F7 create, status-line hints, `GuardIntent`/`ResolveGuard` dirty-guard) | ✅ merged |
+| **Relation membership picker** | ✅ **merged this session (`54d10be`)** |
+| M6 leftovers (paged-scale lists, result-code→human table polish, SASL EXTERNAL/GSSAPI auth, packaging) | ⏳ pending |
+| **Rich user templates (next milestone)** | ⏳ not started — see below |
+
+---
+
+## What just landed: the relation membership picker
+
+**Symmetric group↔user membership editing as a *picker mode* of the existing multi-value value-editor** — no separate dual-pane screen. Driven by one `[[relation]]` config block.
+
+- **Forward (group's `member`):** Enter on the `member` field opens a live, size-capped (≤20) searchable **user** picker; current members stay pinned; commit writes the group entry via the existing single-entry save.
+- **Reverse (user's `memberOf`):** Enter on `memberOf` opens a **group** picker; on save it **fans out** `member` MODIFYs across the affected groups (synchronously, with last-member pre-validation and a partial-failure report). `memberOf` itself is never written (overlay-maintained).
+
+**Spec:** [`docs/superpowers/specs/2026-06-01-relation-membership-picker-design.md`](superpowers/specs/2026-06-01-relation-membership-picker-design.md)
+**Plan:** [`docs/superpowers/plans/2026-06-01-relation-membership-picker.md`](superpowers/plans/2026-06-01-relation-membership-picker.md)
+
+### Where the code lives
+- `src/config/relation.rs` — `Relation` (`[[relation]]` TOML), `ResolvedRelation`/`CandidateScope`/`RelationRole`, `resolve_relations`, `holder_lookup`/`backref_lookup`. Pure.
+- `src/ui/picker.rs` — `PickerState` (selection always visible, toggle, cursor, `truncated`), `build_member_filter`/`escape_filter` (RFC 4515), `candidate_label`. Pure.
+- `src/config/mod.rs` — `Config.relations`; `EntryProfile.search_attrs` + `search_attributes()`.
+- `src/ldap/worker.rs` — `Request::Search.size_limit`; `run_search` returns partial entries on a size/time limit (`is_limit_rc`) instead of erroring.
+- `src/ui/edit_form.rs` — `FieldRelation` on `EditField`; `build_edit_form(…, relations)` tags fields; `ValueEditor` picker fields + `open_picker`; `EditForm::backref_labels`; `to_edit_entry` excludes BackRef fields.
+- `src/ui/app.rs` — `App.{relations,picker_search_id,picker_last_query}`; `picker_editor_key`; `service_picker_search`; the `Response::Entries` picker intercept; `plan_combined_save`/`combined_save_overlay`/`apply_combined_save`/`reload_form_sync`/`membership_fanout`/`would_empty`/`read_group_members`.
+- `src/ui/view.rs` — picker branch in `render_value_editor`.
+- `src/ldap/ldif.rs` — `render_changesets` (multi-entry LDIF preview).
+- `tests/live_membership.rs` — gated forward/reverse/last-member/size-cap tests.
+
+### Live wiring (it IS reachable in the running app)
+Enter on a field → `dispatch_key` → `open_value_editor(app, structure)` → picker mode for relation fields. `service_picker_search` runs each tick when a picker is open; results route via the `picker_search_id` intercept in `handle_worker_response`. Save: `FormSave`/`ResolveGuard{save:true}` → `combined_save_overlay` → Confirm → `apply_combined_save`. **Gated on config:** a field only becomes a picker if a `[[relation]]` is declared *and* the entry's objectClass matches; otherwise `member` opens the plain free-text editor. Example config block: `README.md` `## Configuration`.
+
+### Merge note (why this was non-trivial)
+The branch was cut at `41f90a1`; `main` then absorbed the UI-polish refactor, which **removed the `menu_defs` menu system** (profile-create is now **F7**) and **replaced `PendingAction::{Navigate,SaveThenNavigate}` with `GuardIntent` + `ResolveGuard{intent,save}`**. The merge (`54d10be`) re-integrated the picker onto that model: dropped `menu_defs`/`profile_count`; threaded an optional `then_intent: GuardIntent` through `PendingAction::CombinedSave` so a dirty-`memberOf` form that trips the focus/quit guard **saves, then resumes the pending intent on clean success**. Reviewed (opus) and approved; 207 tests green.
+
+---
+
+## Open items / known gaps
+
+1. **The membership apply-seam is inspection-verified, not run live.** The fan-out / last-member / partial-failure paths are exercised only by `tests/live_membership.rs` (gated) and the manual tmux smoke (plan task 5.5) — **neither has been run against a real directory.** Always-on unit tests cover the *planning* logic, not the live apply. Closing this = run the live tests + a manual smoke (see below).
+2. **README status section is stale** (says Turbo Vision / early development).
+3. **M5 Samba** is headless-only (`edaptor passwd <dn>` CLI); no in-TUI "Set Password"/Samba-enable action yet.
+
+---
+
+## Next milestone: rich user templates
+
+**Agreed next step** (recorded in project memory). Problem: `EntryProfile.object_class` is a **single `String`**, so a created "user" only gets `["top","inetOrgPerson"]` — not a real `posixAccount`/`shadowAccount` account (no `uidNumber`/`gidNumber`/`homeDirectory` fields even appear), and there's no password/default-value support. So no profile can express a sensible user template today.
+
+**Target shape** (already in the design spec §5): `object_classes = [...]` (a **list**) + a `[profile.password]` block. **Touch points:** `src/config/mod.rs` (`EntryProfile`), `src/workflows/create.rs` (currently `objectClass: ["top", profile.object_class]` ~line 43; create-form fields from `effective_attributes(&[single_oc])`), and the picker candidate filter. Run the full **brainstorm → spec → plan → subagent-driven** flow (this is config + create + tests, deserves a design pass).
+
+---
+
+## How to build / test / run
+
+```bash
+# Build + checks (must be green before any commit)
+cargo build --all-targets
+cargo test -p edaptor                       # 207 pass; live_* tests SKIP without the env var
+cargo clippy --all-targets -- -D warnings
+cargo fmt --check
+
+# Live / integration tests against a throwaway OpenLDAP (podman)
+scripts/test-ldap.sh start                  # prints the two env vars to export
+export EDAPTOR_TEST_LDAP_URI=ldap://localhost:1389
+export EDAPTOR_TEST_ADMIN_PW=adminpassword
+cargo test -p edaptor                        # now the live_* tests actually run
+scripts/test-ldap.sh stop
+
+# Run the TUI
+cargo run -- --config <path>                 # default config: ~/.config/edaptor/config.toml
+```
+
+For a manual membership smoke: point a config (with a `[[relation]]` block) at the test LDAP, open a group → Enter on `member` → type/Space/F2 → Save; then a user → Enter on `memberOf` → toggle a group → Save; try removing a group's last member (expect a clear block).
+
+---
+
+## Conventions (follow these)
+
+- **Facade boundary:** only `src/ui/*` may `use ratatui`/`use tui_*`. Verify: `! grep -rl "use ratatui\|use tui_" src | grep -v "^src/ui/"`.
+- **Strict TDD**, atomic commits; crate must compile after every commit; `cargo fmt` before commit.
+- **Live tests gated** by `EDAPTOR_TEST_LDAP_URI` (skip when unset) — mirror `tests/live_write.rs` / `tests/live_membership.rs`. DN base in tests is `dc=example,dc=org`.
+- **Worktrees** live under `/scratch/oetiker/claude-worktrees/` as `<project>-<branch>`.
+- **Commit trailer:** `Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>`.
+- **Execution style:** subagent-driven (fresh subagent per task + spec-then-quality review); see project memory `prefers-agent-fanout`. App.rs-heavy tasks can exhaust a subagent's context — scope tightly or resolve in-session.
