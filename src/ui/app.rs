@@ -442,6 +442,16 @@ fn handle_worker_response(
                 }
                 Some(PostWrite::Created { parent, input }) => {
                     app.status = "Created.".to_string();
+                    // The pane-3 create form has been committed — drop it so the
+                    // clobber guard no longer blocks reads and `reconcile` re-reads
+                    // the current tree selection into the form pane (the new entry
+                    // now appears in the leaf list).
+                    if app.form.as_ref().map(|f| f.is_new()).unwrap_or(false) {
+                        app.form = None;
+                        app.form_focus = 0;
+                        app.form_scroll = 0;
+                        app.last_seen_leaf = None;
+                    }
                     // A new child may turn a former leaf into a branch → rebuild
                     // the tree; always refresh the leaf rows.
                     if structure.add_child(&parent, input) {
@@ -623,6 +633,11 @@ fn dispatch_key(app: &mut App, key: KeyEvent, structure: &Structure) -> Option<U
                 // Enter on an editable multi-value field opens the value-editor
                 // popup; on a single field it is a no-op.
                 KeyCode::Enter => open_value_editor(app, structure),
+                // Esc cancels a create form (parity with the old modal's Esc); on
+                // an edit form Esc is a no-op (F3 reverts edits).
+                KeyCode::Esc if app.form.as_ref().map(|f| f.is_new()).unwrap_or(false) => {
+                    return Some(UiAction::FormCancel)
+                }
                 // Otherwise edit the focused single-value field inline.
                 _ => edit_focused_field(app, key),
             }
@@ -2889,5 +2904,27 @@ mod tests {
         ));
         revert_form(&mut app);
         assert!(app.form.is_none(), "create form discarded on cancel");
+    }
+
+    #[test]
+    fn esc_cancels_a_create_form_but_is_a_noop_on_an_edit_form() {
+        let s = empty_structure();
+        // A create form: Esc requests cancel.
+        let mut app = bare_app(false);
+        app.focus = Pane::Form;
+        app.form = Some(build_new_entry_form(
+            &user_schema(),
+            &create_user_profile(),
+            0,
+            "ou=people,dc=example,dc=org".to_string(),
+        ));
+        assert_eq!(
+            dispatch_key(&mut app, key(KeyCode::Esc), &s),
+            Some(UiAction::FormCancel)
+        );
+        // An edit form: Esc does not cancel (F3 reverts instead).
+        let mut app2 = with_form(bare_app(false), "cn=Alice,dc=example,dc=org");
+        app2.focus = Pane::Form;
+        assert_eq!(dispatch_key(&mut app2, key(KeyCode::Esc), &s), None);
     }
 }
