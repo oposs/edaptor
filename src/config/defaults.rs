@@ -122,6 +122,68 @@ pub fn next_in_range(existing: &[u64], min: u64, max: u64) -> Result<u64, String
     Ok(next)
 }
 
+/// Helper: is the attr currently empty (no non-blank value)?
+fn is_empty(current: &BTreeMap<String, Vec<String>>, attr: &str) -> bool {
+    current
+        .iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case(attr))
+        .map(|(_, v)| v.iter().all(|s| s.trim().is_empty()))
+        .unwrap_or(true)
+}
+
+/// Resolve a template against current field values; `None` if any `{field}` is empty.
+fn resolve_template(segs: &[Seg], current: &BTreeMap<String, Vec<String>>) -> Option<String> {
+    let mut out = String::new();
+    for seg in segs {
+        match seg {
+            Seg::Lit(s) => out.push_str(s),
+            Seg::Field(name) => {
+                let v = current
+                    .iter()
+                    .find(|(k, _)| k.eq_ignore_ascii_case(name))
+                    .and_then(|(_, v)| v.first())
+                    .map(|s| s.trim())
+                    .filter(|s| !s.is_empty())?;
+                out.push_str(v);
+            }
+        }
+    }
+    Some(out)
+}
+
+/// Plan which EMPTY fields to fill. Operator-entered values are never overwritten.
+pub fn plan_defaults(
+    d: &ProfileDefaults,
+    current: &BTreeMap<String, Vec<String>>,
+) -> Vec<Resolution> {
+    let mut out = Vec::new();
+    for (attr, dv) in &d.entries {
+        if !is_empty(current, attr) {
+            continue;
+        }
+        match dv {
+            DefaultValue::Literal(s) => out.push(Resolution::Fill {
+                attr: attr.clone(),
+                value: s.clone(),
+            }),
+            DefaultValue::Template(segs) => {
+                if let Some(v) = resolve_template(segs, current) {
+                    out.push(Resolution::Fill {
+                        attr: attr.clone(),
+                        value: v,
+                    });
+                }
+            }
+            DefaultValue::AutoNumber { min, max } => out.push(Resolution::NeedsAutonumber {
+                attr: attr.clone(),
+                min: *min,
+                max: *max,
+            }),
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -207,5 +269,83 @@ mod tests {
     #[test]
     fn next_in_range_exhausted_errors() {
         assert!(next_in_range(&[60000], 10000, 60000).is_err());
+    }
+
+    // Task 2.3 tests — plan_defaults
+
+    fn cur(pairs: &[(&str, &str)]) -> BTreeMap<String, Vec<String>> {
+        pairs
+            .iter()
+            .map(|(k, v)| {
+                (
+                    k.to_string(),
+                    if v.is_empty() {
+                        vec![]
+                    } else {
+                        vec![v.to_string()]
+                    },
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn fills_only_empty_fields() {
+        let mut d = ProfileDefaults::default();
+        d.entries.insert(
+            "loginShell".into(),
+            DefaultValue::Literal("/bin/bash".into()),
+        );
+        assert!(plan_defaults(&d, &cur(&[("loginShell", "/bin/zsh")])).is_empty());
+        assert_eq!(
+            plan_defaults(&d, &cur(&[("loginShell", "")])),
+            vec![Resolution::Fill {
+                attr: "loginShell".into(),
+                value: "/bin/bash".into()
+            }]
+        );
+    }
+
+    #[test]
+    fn resolves_template_against_current_values() {
+        let mut d = ProfileDefaults::default();
+        d.entries.insert(
+            "homeDirectory".into(),
+            parse_default_value("/home/{uid}").unwrap(),
+        );
+        assert_eq!(
+            plan_defaults(&d, &cur(&[("uid", "alice"), ("homeDirectory", "")])),
+            vec![Resolution::Fill {
+                attr: "homeDirectory".into(),
+                value: "/home/alice".into()
+            }]
+        );
+    }
+
+    #[test]
+    fn template_with_empty_source_yields_no_fill() {
+        let mut d = ProfileDefaults::default();
+        d.entries.insert(
+            "homeDirectory".into(),
+            parse_default_value("/home/{uid}").unwrap(),
+        );
+        assert!(plan_defaults(&d, &cur(&[("uid", ""), ("homeDirectory", "")])).is_empty());
+    }
+
+    #[test]
+    fn autonumber_surfaces_as_needs_autonumber() {
+        let mut d = ProfileDefaults::default();
+        d.entries.insert(
+            "uidNumber".into(),
+            parse_default_value("{next:10000-60000}").unwrap(),
+        );
+        assert_eq!(
+            plan_defaults(&d, &cur(&[("uidNumber", "")])),
+            vec![Resolution::NeedsAutonumber {
+                attr: "uidNumber".into(),
+                min: 10000,
+                max: 60000
+            }]
+        );
     }
 }
