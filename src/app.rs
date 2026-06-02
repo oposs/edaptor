@@ -8,16 +8,16 @@
 pub enum UiAction {
     /// Create a new entry under profile *i*.
     NewEntry(usize),
-    /// F7: choose which profile to create — a context-filtered chooser (or direct
-    /// when exactly one profile matches the current container).
+    /// Alt+N: choose which profile to create — a context-filtered chooser (or
+    /// direct when exactly one profile matches the current container).
     NewEntryChoose,
     /// Delete the entry with this DN (the one shown in the form pane).
     DeleteEntry(String),
-    /// Save the edit form (F2).
+    /// Save the edit form (Alt+S).
     FormSave,
-    /// Cancel/revert the edit form (F3).
+    /// Cancel/revert the edit form (Alt+C).
     FormCancel,
-    /// Re-run the eager structure scan (F5).
+    /// Re-run the eager structure scan (Alt+R).
     Refresh,
     /// Nothing actionable.
     None,

@@ -65,10 +65,10 @@ pub fn status_line(app: &App) -> String {
 /// live in the status line and follow focus.
 fn pane_hints(pane: Pane, read_only: bool) -> &'static str {
     match (pane, read_only) {
-        (Pane::Tree, _) => "↑↓ Move · ←→ Fold · F5 Refresh",
-        (Pane::Leaf, false) => "↑↓ Select · Type to search · F7 New · F8 Del",
+        (Pane::Tree, _) => "↑↓ Move · ←→ Fold · Alt+R Refresh",
+        (Pane::Leaf, false) => "↑↓ Select · Type to search · Alt+N New · Alt+D Del",
         (Pane::Leaf, true) => "↑↓ Select · Type to search",
-        (Pane::Form, false) => "↑↓ Field · ↵ Edit · F2 Save · F3 Cancel",
+        (Pane::Form, false) => "↑↓ Field · ↵ Edit · Alt+S Save · Alt+C Cancel",
         (Pane::Form, true) => "↑↓ Field",
     }
 }
@@ -382,16 +382,16 @@ fn render_value_editor(f: &mut Frame, ve: &ValueEditor, area: Rect) {
             .border_type(BorderType::Double)
             .title(format!(" {} ", ve.label))
             .title_bottom(match (ve.lookup.is_some(), picker.truncated) {
-                // Single-select value-lookup picker: Enter commits the chosen value.
+                // Single-select value-lookup picker: Alt+S commits the chosen value.
                 (true, true) => {
-                    " ↑↓ move · Enter select · Esc cancel · type to search · more match — narrow search "
+                    " ↑↓ move · Alt+S select · Alt+C cancel · type to search · more match — narrow search "
                 }
-                (true, false) => " ↑↓ move · Enter select · Esc cancel · type to search ",
-                // Membership multi-select picker: Space toggles, F2 commits the set.
+                (true, false) => " ↑↓ move · Alt+S select · Alt+C cancel · type to search ",
+                // Membership multi-select picker: Alt+Space toggles, Alt+S commits the set.
                 (false, true) => {
-                    " Space toggle · F2 save · Esc cancel · type to search · more match — narrow search "
+                    " ↑↓ move · Alt+Space toggle · Alt+S save · Alt+C cancel · type to search · more match — narrow search "
                 }
-                (false, false) => " Space toggle · F2 save · Esc cancel · type to search ",
+                (false, false) => " ↑↓ move · Alt+Space toggle · Alt+S save · Alt+C cancel · type to search ",
             })
             .border_style(
                 Style::default()
@@ -459,7 +459,7 @@ fn render_value_editor(f: &mut Frame, ve: &ValueEditor, area: Rect) {
         .borders(Borders::ALL)
         .border_type(BorderType::Double)
         .title(format!(" Edit {} ({kind}) ", ve.label))
-        .title_bottom(" Alt+↑↓ move  Alt+a add  Alt+d del  F2 save  Esc cancel ")
+        .title_bottom(" Alt+↑↓ move  Alt+a add  Alt+d del  Alt+S save  Alt+C cancel ")
         .border_style(
             Style::default()
                 .fg(Color::Cyan)
@@ -861,11 +861,11 @@ mod tests {
     #[test]
     fn status_line_shows_quit_and_focused_pane_hints() {
         // Key hints live in the status line and follow focus. The helper focuses
-        // the Tree pane, so its hints (F5 Refresh) show — not the Form's.
+        // the Tree pane, so its hints (Alt+R Refresh) show — not the Form's.
         let s = status_line(&status_app(false, ""));
         assert!(s.contains("Alt+X Quit"));
-        assert!(s.contains("F5 Refresh"));
-        assert!(!s.contains("F2 Save"));
+        assert!(s.contains("Alt+R Refresh"));
+        assert!(!s.contains("Alt+S Save"));
         assert!(!s.contains("[read-only]"));
     }
 
@@ -874,8 +874,8 @@ mod tests {
         let mut app = with_cn_form(status_app(false, ""), "cn=Alice,dc=example,dc=org", false);
         app.focus = Pane::Form;
         let s = status_line(&app);
-        assert!(s.contains("F2 Save"));
-        assert!(!s.contains("F5 Refresh"));
+        assert!(s.contains("Alt+S Save"));
+        assert!(!s.contains("Alt+R Refresh"));
     }
 
     #[test]
@@ -912,13 +912,13 @@ mod tests {
     fn pane_hints_drop_write_keys_in_read_only() {
         use super::pane_hints;
         // The Entries pane surfaces create/delete; read-only hides them.
-        assert!(pane_hints(Pane::Leaf, false).contains("F7 New"));
-        assert!(pane_hints(Pane::Leaf, false).contains("F8 Del"));
-        assert!(!pane_hints(Pane::Leaf, true).contains("F7 New"));
+        assert!(pane_hints(Pane::Leaf, false).contains("Alt+N New"));
+        assert!(pane_hints(Pane::Leaf, false).contains("Alt+D Del"));
+        assert!(!pane_hints(Pane::Leaf, true).contains("Alt+N New"));
         // The Form pane surfaces Save/Cancel; read-only hides them.
-        assert!(pane_hints(Pane::Form, false).contains("F2 Save"));
-        assert!(!pane_hints(Pane::Form, true).contains("F2 Save"));
+        assert!(pane_hints(Pane::Form, false).contains("Alt+S Save"));
+        assert!(!pane_hints(Pane::Form, true).contains("Alt+S Save"));
         // Refresh is allowed in read-only.
-        assert!(pane_hints(Pane::Tree, true).contains("F5 Refresh"));
+        assert!(pane_hints(Pane::Tree, true).contains("Alt+R Refresh"));
     }
 }

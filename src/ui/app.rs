@@ -78,7 +78,7 @@ pub enum Overlay {
         /// What to do once the guard is resolved.
         intent: GuardIntent,
     },
-    /// F7 profile chooser: pick which template to create. Each entry is the
+    /// Alt+N profile chooser: pick which template to create. Each entry is the
     /// profile's `(index, name)`; `sel` is the highlighted row. The name is carried
     /// here so the render layer (which lacks `profiles`) can show it.
     ChooseProfile {
@@ -128,7 +128,7 @@ pub enum PendingAction {
         /// The DN to delete.
         dn: String,
     },
-    /// Open a Create-mode form for the chosen profile (resolved from the F7
+    /// Open a Create-mode form for the chosen profile (resolved from the Alt+N
     /// profile chooser, which lacks the schema/profiles to build the form itself).
     OpenCreate {
         /// The chosen profile index.
@@ -153,7 +153,7 @@ pub enum PendingAction {
         fanout: Vec<(String, ModOp)>,
         /// A dirty-form guard intent to perform after a successful save (set when
         /// the combined save is reached via a Save-then-resume guard); `None` for
-        /// a plain F2 save.
+        /// a plain Alt+S save.
         then_intent: Option<GuardIntent>,
     },
 }
@@ -485,7 +485,7 @@ fn handle_worker_response(
                     // updated on a rename, so it would overwrite the rebind below
                     // with the stale old DN (spurious guard + dropped re-read). The
                     // structure is reflowed only on Created/Deleted; a rename's
-                    // leaf-label staleness self-heals on Refresh (F5).
+                    // leaf-label staleness self-heals on Refresh (Alt+R).
                     let target = nav.unwrap_or(reread_dn);
                     rebind_selection(app, &target);
                     let _ = read_flow.request_entry(worker, &target, None);
@@ -593,9 +593,9 @@ fn dispatch_key(app: &mut App, key: KeyEvent, structure: &Structure) -> Option<U
         }
         return None;
     }
-    // Focus cycle: F6 / Tab forward, Shift-Tab (BackTab) backward. Moving focus
-    // OFF a dirty form opens the guard, carrying the destination pane.
-    if matches!(key.code, KeyCode::F(6) | KeyCode::Tab | KeyCode::BackTab) {
+    // Focus cycle: Tab forward, Shift-Tab (BackTab) backward. Moving focus OFF a
+    // dirty form opens the guard, carrying the destination pane.
+    if matches!(key.code, KeyCode::Tab | KeyCode::BackTab) {
         let dest = if key.code == KeyCode::BackTab {
             prev_pane(app.focus)
         } else {
@@ -607,8 +607,8 @@ fn dispatch_key(app: &mut App, key: KeyEvent, structure: &Structure) -> Option<U
         app.focus = dest;
         return None;
     }
-    // Refresh is allowed even in read-only mode (it only re-reads).
-    if matches!(key.code, KeyCode::F(5)) {
+    // Refresh (Alt+R) is allowed even in read-only mode (it only re-reads).
+    if alt && matches!(key.code, KeyCode::Char('r') | KeyCode::Char('R')) {
         return Some(UiAction::Refresh);
     }
     // Bare `q` quits, but ONLY from the Tree pane — the search box and form need
@@ -621,14 +621,16 @@ fn dispatch_key(app: &mut App, key: KeyEvent, structure: &Structure) -> Option<U
     }
     // Save / Cancel / Create / Delete (writable mode only). Read-only mode
     // suppresses every write affordance (P4-T4). These keys are surfaced in the
-    // status-line hints (view::pane_hints); F7 creates under the first profile.
-    if !app.read_only {
+    // status-line hints (view::pane_hints); Alt+N creates via the profile chooser.
+    // Each arm is Alt-gated so a bare letter still falls through to text entry /
+    // type-to-search in the focused-pane match below.
+    if !app.read_only && alt {
         match key.code {
-            KeyCode::F(2) => return Some(UiAction::FormSave),
-            KeyCode::F(3) => return Some(UiAction::FormCancel),
-            KeyCode::F(7) => return Some(UiAction::NewEntryChoose),
-            // F8 deletes the entry currently shown in the form pane (spec §12).
-            KeyCode::F(8) => {
+            KeyCode::Char('s') | KeyCode::Char('S') => return Some(UiAction::FormSave),
+            KeyCode::Char('c') | KeyCode::Char('C') => return Some(UiAction::FormCancel),
+            KeyCode::Char('n') | KeyCode::Char('N') => return Some(UiAction::NewEntryChoose),
+            // Alt+D deletes the entry currently shown in the form pane (spec §12).
+            KeyCode::Char('d') | KeyCode::Char('D') => {
                 return app
                     .form
                     .as_ref()
@@ -687,7 +689,7 @@ fn dispatch_key(app: &mut App, key: KeyEvent, structure: &Structure) -> Option<U
                 // (which may be single-valued). Plain single fields: a no-op.
                 KeyCode::Enter => open_value_editor(app, structure),
                 // Esc cancels a create form (parity with the old modal's Esc); on
-                // an edit form Esc is a no-op (F3 reverts edits).
+                // an edit form Esc is a no-op (Alt+C reverts edits).
                 KeyCode::Esc if app.form.as_ref().map(|f| f.is_new()).unwrap_or(false) => {
                     return Some(UiAction::FormCancel)
                 }
@@ -755,28 +757,37 @@ fn open_value_editor(app: &mut App, structure: &Structure) {
 
 /// Key handling for the in-overlay picker. The two picker modes commit
 /// differently and the keys are gated on which is active:
-/// - Membership (`lookup.is_none()`): Space toggles the highlighted candidate
-///   (multi-select); F2 commits the selected DN set into the field; Enter is
-///   ignored.
-/// - Value-lookup (`lookup.is_some()`): single-select; Enter commits the
-///   highlighted candidate's scalar `value_attr` into the field; F2 is ignored
-///   and Space is a literal search character (group names may contain spaces).
+/// - Membership (`lookup.is_none()`): Alt+Space toggles the highlighted
+///   candidate (multi-select); Alt+S commits the selected DN set into the field.
+/// - Value-lookup (`lookup.is_some()`): single-select; Alt+S commits the
+///   highlighted candidate's scalar `value_attr` into the field; Alt+Space is a
+///   no-op (single-select has nothing to toggle).
 ///
-/// ↑↓ move the cursor; Esc / F3 cancel. Any other key edits the search box (the
-/// tick-based `service_picker_search` turns a changed query into a live search).
+/// In BOTH modes bare Space is a literal search character (group names may
+/// contain spaces). ↑↓ move the cursor; Alt+C / Esc cancel. Any other key edits
+/// the search box (the tick-based `service_picker_search` turns a changed query
+/// into a live search).
 fn picker_editor_key(app: &mut App, key: KeyEvent) {
+    let alt = key.modifiers.contains(KeyModifiers::ALT);
     match key.code {
-        KeyCode::Esc | KeyCode::F(3) => {
+        KeyCode::Esc => {
             app.overlay = None;
             app.picker_search_id = None;
             app.picker_last_query.clear();
         }
-        KeyCode::Enter => {
-            // Single-select value-lookup commit: write the chosen entry's scalar
-            // `value_attr` into the target field's inline editor. A single-value
-            // field saves from `editor`, NOT `values`. Membership pickers ignore
-            // Enter (their commit is F2) — gate strictly on `lookup.is_some()`.
+        KeyCode::Char('c') | KeyCode::Char('C') if alt => {
+            app.overlay = None;
+            app.picker_search_id = None;
+            app.picker_last_query.clear();
+        }
+        KeyCode::Char('s') | KeyCode::Char('S') if alt => {
+            // Alt+S commits, branching on mode. Value-lookup writes the chosen
+            // entry's scalar `value_attr` into the field; membership writes the
+            // selected DN set.
             if matches!(&app.overlay, Some(Overlay::ValueEditor(ve)) if ve.lookup.is_some()) {
+                // Single-select value-lookup commit: write the chosen entry's
+                // scalar `value_attr` into the target field's inline editor. A
+                // single-value field saves from `editor`, NOT `values`.
                 if let Some(Overlay::ValueEditor(ve)) = app.overlay.take() {
                     if let Some(picker) = &ve.picker {
                         let chosen = picker
@@ -803,24 +814,27 @@ fn picker_editor_key(app: &mut App, key: KeyEvent) {
                     app.picker_search_id = None;
                     app.picker_last_query.clear();
                 }
-            }
-        }
-        KeyCode::F(2) => {
-            // F2 is the MEMBERSHIP commit (writes the selected DN set). A lookup
-            // picker commits a scalar via Enter and never builds a DN selection, so
-            // ignore F2 there — never let a DN leak into a scalar value field.
-            if matches!(&app.overlay, Some(Overlay::ValueEditor(ve)) if ve.lookup.is_none()) {
-                if let Some(Overlay::ValueEditor(ve)) = app.overlay.take() {
-                    if let Some(picker) = &ve.picker {
-                        if let Some(field) =
-                            app.form.as_mut().and_then(|f| f.fields.get_mut(ve.field))
-                        {
-                            field.values = picker.selected_dns();
-                        }
+            } else if let Some(Overlay::ValueEditor(ve)) = app.overlay.take() {
+                // Membership commit: write the selected DN set into the field.
+                if let Some(picker) = &ve.picker {
+                    if let Some(field) = app.form.as_mut().and_then(|f| f.fields.get_mut(ve.field))
+                    {
+                        field.values = picker.selected_dns();
                     }
                 }
                 app.picker_search_id = None;
                 app.picker_last_query.clear();
+            }
+        }
+        KeyCode::Char(' ') if alt => {
+            // Alt+Space toggles a MEMBERSHIP selection. A lookup picker is
+            // single-select, so Alt+Space is a no-op there.
+            if let Some(Overlay::ValueEditor(ve)) = app.overlay.as_mut() {
+                if ve.lookup.is_none() {
+                    if let Some(p) = ve.picker.as_mut() {
+                        p.toggle_cursor();
+                    }
+                }
             }
         }
         KeyCode::Up => {
@@ -837,17 +851,6 @@ fn picker_editor_key(app: &mut App, key: KeyEvent) {
                 }
             }
         }
-        KeyCode::Char(' ') => {
-            // Space toggles a MEMBERSHIP selection. A lookup picker is single-select
-            // (commit via Enter), so Space is a literal search character there.
-            if let Some(Overlay::ValueEditor(ve)) = app.overlay.as_mut() {
-                if ve.lookup.is_some() {
-                    ve.search.handle_key_event(key);
-                } else if let Some(p) = ve.picker.as_mut() {
-                    p.toggle_cursor();
-                }
-            }
-        }
         _ => {
             if let Some(Overlay::ValueEditor(ve)) = app.overlay.as_mut() {
                 ve.search.handle_key_event(key);
@@ -857,8 +860,8 @@ fn picker_editor_key(app: &mut App, key: KeyEvent) {
 }
 
 /// Handle a key inside the multi-value popup (spike `popup_key`): nav (↑↓),
-/// reorder (Alt+↑↓), insert (Alt+a / Insert), delete (Alt+d), commit (F2,
-/// dropping empties), cancel (Esc / F3); any other key edits the selected row.
+/// reorder (Alt+↑↓), insert (Alt+a / Insert), delete (Alt+d), commit (Alt+S,
+/// dropping empties), cancel (Esc / Alt+C); any other key edits the selected row.
 fn value_editor_key(app: &mut App, key: KeyEvent) {
     // Picker mode has its own key map (search box + selection toggle).
     if matches!(&app.overlay, Some(Overlay::ValueEditor(ve)) if ve.picker.is_some()) {
@@ -867,10 +870,10 @@ fn value_editor_key(app: &mut App, key: KeyEvent) {
     }
     let alt = key.modifiers.contains(KeyModifiers::ALT);
     match (key.code, alt) {
-        (KeyCode::Esc, _) | (KeyCode::F(3), _) => {
+        (KeyCode::Esc, _) | (KeyCode::Char('c'), true) | (KeyCode::Char('C'), true) => {
             app.overlay = None;
         }
-        (KeyCode::F(2), _) => {
+        (KeyCode::Char('s'), true) | (KeyCode::Char('S'), true) => {
             // Commit: write the trimmed, non-empty values back into the field.
             if let Some(Overlay::ValueEditor(ve)) = app.overlay.take() {
                 let values = ve.committed_values();
@@ -1086,7 +1089,7 @@ fn handle_action(
             }
             // Try the combined membership path first; fall back to the single-entry
             // path when no backref field actually changed. No guard intent here —
-            // a plain F2 save has nothing to resume afterward.
+            // a plain Alt+S save has nothing to resume afterward.
             if let Some(ov) =
                 combined_save_overlay(form, read_flow.schema(), &app.relations, profiles, None)
             {
@@ -1132,7 +1135,7 @@ fn handle_action(
         UiAction::NewEntry(i) => open_create_form(app, read_flow, profiles, i, base_dn),
         UiAction::NewEntryChoose => {
             // Offer profiles whose search_base matches the current container;
-            // fall back to all profiles so F7 always works.
+            // fall back to all profiles so Alt+N always works.
             let mut matches = profiles_for_container(profiles, &app.current_branch);
             if matches.is_empty() {
                 matches = (0..profiles.len()).collect();
@@ -1212,7 +1215,7 @@ fn should_install_form(app: &App, title: &str) -> bool {
         && !app.form.as_ref().map(|f| f.is_new()).unwrap_or(false)
 }
 
-/// Revert every field to its baseline (F3 cancel): drop multi-value edits and
+/// Revert every field to its baseline (Alt+C cancel): drop multi-value edits and
 /// reseed each single-value editor from the original values. An unsaved create
 /// form has no baseline to revert to, so cancel simply discards it.
 fn revert_form(app: &mut App) {
@@ -1240,7 +1243,7 @@ fn revert_form(app: &mut App) {
 /// awaited DN and the current leaf row at it, so the post-save base-read passes
 /// the DN gate and `reconcile` does not fire a competing read of the old DN.
 /// Only the selected row's DN is rebound; the eager `Structure` is not updated on
-/// a rename, so the leaf label / tree fully re-sync on the next Refresh (F5).
+/// a rename, so the leaf label / tree fully re-sync on the next Refresh (Alt+R).
 fn rebind_selection(app: &mut App, dn: &str) {
     app.last_seen_leaf = Some(dn.to_string());
     if let Some(row) = app.rows.get_mut(app.leaf_sel) {
@@ -1261,7 +1264,7 @@ fn overlay_key(app: &mut App, key: KeyEvent) -> Option<PendingAction> {
                 }
                 None
             }
-            KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc | KeyCode::F(3) => {
+            KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
                 app.overlay = None;
                 None
             }
@@ -1282,9 +1285,11 @@ fn overlay_key(app: &mut App, key: KeyEvent) -> Option<PendingAction> {
     }
 }
 
-/// Handle a key in the F7 profile chooser: ↑↓ move the selection, Enter resolves
-/// to [`PendingAction::OpenCreate`] for the chosen profile, Esc/F3 dismisses.
+/// Handle a key in the Alt+N profile chooser: ↑↓ move the selection, Enter
+/// resolves to [`PendingAction::OpenCreate`] for the chosen profile, Esc / Alt+C
+/// dismisses.
 fn choose_profile_key(app: &mut App, key: KeyEvent) -> Option<PendingAction> {
+    let alt = key.modifiers.contains(KeyModifiers::ALT);
     let Some(Overlay::ChooseProfile { entries, sel }) = app.overlay.as_mut() else {
         return None;
     };
@@ -1302,7 +1307,11 @@ fn choose_profile_key(app: &mut App, key: KeyEvent) -> Option<PendingAction> {
             app.overlay = None;
             profile_idx.map(|profile_idx| PendingAction::OpenCreate { profile_idx })
         }
-        KeyCode::Esc | KeyCode::F(3) => {
+        KeyCode::Esc => {
+            app.overlay = None;
+            None
+        }
+        KeyCode::Char('c') | KeyCode::Char('C') if alt => {
             app.overlay = None;
             None
         }
@@ -1314,10 +1323,12 @@ fn choose_profile_key(app: &mut App, key: KeyEvent) -> Option<PendingAction> {
 /// the pure [`guard_decision`], and turns the outcome into a [`PendingAction`]
 /// that performs the pending [`GuardIntent`] (or, for Stay, keeps editing).
 fn guard_key(app: &mut App, key: KeyEvent) -> Option<PendingAction> {
+    // Plain letters and Alt-modified letters both resolve the guard (the modal
+    // shows [S]ave / [D]iscard / [C]ancel; Alt+S / Alt+C mirror the global keys).
     let choice = match key.code {
-        KeyCode::Char('s') | KeyCode::Char('S') | KeyCode::F(2) => GuardChoice::Save,
+        KeyCode::Char('s') | KeyCode::Char('S') => GuardChoice::Save,
         KeyCode::Char('d') | KeyCode::Char('D') => GuardChoice::Discard,
-        KeyCode::Char('c') | KeyCode::Char('C') | KeyCode::Esc | KeyCode::F(3) => GuardChoice::Stay,
+        KeyCode::Char('c') | KeyCode::Char('C') | KeyCode::Esc => GuardChoice::Stay,
         _ => return None, // ignore unrelated keys; the guard stays open
     };
     let intent = match &app.overlay {
@@ -1727,7 +1738,7 @@ fn prepare_save(
 /// fold in any password change when the loaded entry matches a password-profile,
 /// and return the resulting [`PrepareSave`]. `Err(text)` signals a confirm
 /// mismatch (the caller surfaces it as an Error overlay). `now_secs` is injected
-/// so the planning stays testable. Used by both the plain F2 save and the
+/// so the planning stays testable. Used by both the plain Alt+S save and the
 /// guard-resume save so password edits work from either entry point.
 fn prepare_edit_save(
     form: &EditForm,
@@ -2750,7 +2761,7 @@ fn open_create_form(
     // Focus the form pane so keystrokes edit the new entry's fields.
     app.focus = Pane::Form;
     app.status = format!(
-        "New {} — fill fields, F2 to create, Esc to cancel.",
+        "New {} — fill fields, Alt+S to create, Esc to cancel.",
         profile.name
     );
 }
@@ -2872,7 +2883,7 @@ mod tests {
         }
     }
 
-    /// Install a one-field form carrying `dn` so F8/delete has a target.
+    /// Install a one-field form carrying `dn` so Alt+D/delete has a target.
     fn with_form(mut app: App, dn: &str) -> App {
         use crate::schema::FieldKind;
         use crate::ui::edit_form::EditField;
@@ -2899,8 +2910,8 @@ mod tests {
         app
     }
 
-    fn fkey(n: u8) -> KeyEvent {
-        KeyEvent::new(KeyCode::F(n), KeyModifiers::NONE)
+    fn alt(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::ALT)
     }
 
     /// A minimal empty structure for tests that call `dispatch_key` (structure
@@ -2910,27 +2921,30 @@ mod tests {
     }
 
     #[test]
-    fn f5_refreshes_even_in_read_only() {
+    fn alt_r_refreshes_even_in_read_only() {
         let s = empty_structure();
         assert_eq!(
-            dispatch_key(&mut bare_app(true), fkey(5), &s),
+            dispatch_key(&mut bare_app(true), alt(KeyCode::Char('r')), &s),
             Some(UiAction::Refresh)
         );
         assert_eq!(
-            dispatch_key(&mut bare_app(false), fkey(5), &s),
+            dispatch_key(&mut bare_app(false), alt(KeyCode::Char('r')), &s),
             Some(UiAction::Refresh)
         );
     }
 
     #[test]
-    fn f7_opens_the_profile_chooser_when_writable_only() {
+    fn alt_n_opens_the_profile_chooser_when_writable_only() {
         let s = empty_structure();
         assert_eq!(
-            dispatch_key(&mut bare_app(false), fkey(7), &s),
+            dispatch_key(&mut bare_app(false), alt(KeyCode::Char('n')), &s),
             Some(UiAction::NewEntryChoose)
         );
         // Read-only mode suppresses create (P4-T4); the key falls through to nav.
-        assert_eq!(dispatch_key(&mut bare_app(true), fkey(7), &s), None);
+        assert_eq!(
+            dispatch_key(&mut bare_app(true), alt(KeyCode::Char('n')), &s),
+            None
+        );
     }
 
     #[test]
@@ -2966,20 +2980,23 @@ mod tests {
     }
 
     #[test]
-    fn f8_deletes_the_form_entry_when_writable() {
+    fn alt_d_deletes_the_form_entry_when_writable() {
         let s = empty_structure();
         let mut app = with_form(bare_app(false), "cn=Alice,dc=example,dc=org");
         assert_eq!(
-            dispatch_key(&mut app, fkey(8), &s),
+            dispatch_key(&mut app, alt(KeyCode::Char('d')), &s),
             Some(UiAction::DeleteEntry(
                 "cn=Alice,dc=example,dc=org".to_string()
             ))
         );
         // No form → nothing to delete.
-        assert_eq!(dispatch_key(&mut bare_app(false), fkey(8), &s), None);
+        assert_eq!(
+            dispatch_key(&mut bare_app(false), alt(KeyCode::Char('d')), &s),
+            None
+        );
         // Read-only suppresses delete.
         let mut ro = with_form(bare_app(true), "cn=Alice,dc=example,dc=org");
-        assert_eq!(dispatch_key(&mut ro, fkey(8), &s), None);
+        assert_eq!(dispatch_key(&mut ro, alt(KeyCode::Char('d')), &s), None);
     }
 
     #[test]
@@ -3241,7 +3258,7 @@ mod tests {
     }
 
     #[test]
-    fn picker_space_toggles_and_f2_commits_dns() {
+    fn picker_alt_space_toggles_and_alt_s_commits_dns() {
         use crate::ui::picker::Candidate;
         let mut app = test_app_with_form_field_member();
         let mut ve = make_picker_ve(0);
@@ -3251,10 +3268,10 @@ mod tests {
             value: None,
         }]);
         app.overlay = Some(Overlay::ValueEditor(ve));
-        // Space toggles the cursor row (a) into the selection.
-        value_editor_key(&mut app, key(KeyCode::Char(' ')));
-        // F2 commits the selected DNs into the field.
-        value_editor_key(&mut app, key(KeyCode::F(2)));
+        // Alt+Space toggles the cursor row (a) into the selection.
+        value_editor_key(&mut app, alt(KeyCode::Char(' ')));
+        // Alt+S commits the selected DNs into the field.
+        value_editor_key(&mut app, alt(KeyCode::Char('s')));
         let f = &app.form.as_ref().unwrap().fields[0];
         assert_eq!(f.values, vec!["uid=a,ou=people".to_string()]);
         assert!(app.overlay.is_none());
@@ -3399,7 +3416,7 @@ mod tests {
     }
 
     #[test]
-    fn lookup_enter_commits_scalar_to_field_editor() {
+    fn lookup_alt_s_commits_scalar_to_field_editor() {
         use crate::ui::picker::Candidate;
         let mut app = app_with_lookup_field();
         let s = empty_structure();
@@ -3412,8 +3429,8 @@ mod tests {
                 value: Some("5001".into()),
             }]);
         }
-        // Enter commits the chosen scalar into the field's inline editor.
-        picker_editor_key(&mut app, key(KeyCode::Enter));
+        // Alt+S commits the chosen scalar into the field's inline editor.
+        picker_editor_key(&mut app, alt(KeyCode::Char('s')));
         assert!(app.overlay.is_none(), "overlay closes on commit");
         let f = &app.form.as_ref().unwrap().fields[0];
         assert_eq!(f.editor.value(), "5001");
@@ -3422,7 +3439,7 @@ mod tests {
     }
 
     #[test]
-    fn lookup_enter_with_no_value_leaves_field_unchanged() {
+    fn lookup_alt_s_with_no_value_leaves_field_unchanged() {
         use crate::ui::picker::Candidate;
         let mut app = app_with_lookup_field();
         let s = empty_structure();
@@ -3434,7 +3451,7 @@ mod tests {
                 value: None, // candidate lacked value_attr
             }]);
         }
-        picker_editor_key(&mut app, key(KeyCode::Enter));
+        picker_editor_key(&mut app, alt(KeyCode::Char('s')));
         assert!(app.overlay.is_none());
         // No write happened — the editor stays empty.
         let f = &app.form.as_ref().unwrap().fields[0];
@@ -3442,11 +3459,11 @@ mod tests {
     }
 
     #[test]
-    fn lookup_space_types_into_search_and_f2_is_ignored() {
-        // The picker is shared with membership mode (Space toggles, F2 commits a
-        // DN set). In a single-select lookup picker neither applies: Space is a
-        // literal search char (group names may contain spaces) and F2 must not
-        // leak a DN into the scalar field.
+    fn lookup_bare_space_types_into_search_and_alt_space_is_ignored() {
+        // The picker is shared with membership mode (Alt+Space toggles, Alt+S
+        // commits a DN set). In a single-select lookup picker: bare Space is a
+        // literal search char (group names may contain spaces); Alt+Space is a
+        // no-op (single-select has nothing to toggle, and must not leak a DN).
         use crate::ui::picker::Candidate;
         let mut app = app_with_lookup_field();
         let s = empty_structure();
@@ -3458,31 +3475,45 @@ mod tests {
                 value: Some("5001".into()),
             }]);
         }
-        // Space → search box, not a selection toggle.
+        // Bare Space → search box, not a selection toggle.
         picker_editor_key(&mut app, key(KeyCode::Char(' ')));
         match app.overlay.as_ref() {
             Some(Overlay::ValueEditor(ve)) => {
-                assert_eq!(ve.search.value(), " ", "Space is typed into the search box");
+                assert_eq!(
+                    ve.search.value(),
+                    " ",
+                    "bare Space is typed into the search box"
+                );
                 assert!(
                     ve.picker.as_ref().unwrap().selected.is_empty(),
-                    "Space must not toggle a selection in lookup mode"
+                    "bare Space must not toggle a selection in lookup mode"
                 );
             }
             _ => panic!("overlay must stay open after Space"),
         }
-        // F2 → no-op for a lookup picker (membership-only commit).
-        picker_editor_key(&mut app, key(KeyCode::F(2)));
+        // Alt+Space → no-op for a lookup picker (single-select, nothing to toggle).
+        picker_editor_key(&mut app, alt(KeyCode::Char(' ')));
         assert!(
             app.overlay.is_some(),
-            "F2 is ignored for a lookup picker — overlay stays open"
+            "Alt+Space is ignored for a lookup picker — overlay stays open"
         );
+        match app.overlay.as_ref() {
+            Some(Overlay::ValueEditor(ve)) => assert!(
+                ve.picker.as_ref().unwrap().selected.is_empty(),
+                "Alt+Space must not toggle a selection in lookup mode"
+            ),
+            _ => panic!("overlay must stay open after Alt+Space"),
+        }
         let f = &app.form.as_ref().unwrap().fields[0];
         assert_eq!(
             f.editor.value(),
             "",
-            "F2 must not write a DN into a scalar field"
+            "Alt+Space must not write a DN into a scalar field"
         );
-        assert!(f.values.is_empty(), "F2 must not populate values with a DN");
+        assert!(
+            f.values.is_empty(),
+            "Alt+Space must not populate values with a DN"
+        );
     }
 
     #[test]
@@ -4437,7 +4468,7 @@ mod tests {
             dispatch_key(&mut app, key(KeyCode::Esc), &s),
             Some(UiAction::FormCancel)
         );
-        // An edit form: Esc does not cancel (F3 reverts instead).
+        // An edit form: Esc does not cancel (Alt+C reverts instead).
         let mut app2 = with_form(bare_app(false), "cn=Alice,dc=example,dc=org");
         app2.focus = Pane::Form;
         assert_eq!(dispatch_key(&mut app2, key(KeyCode::Esc), &s), None);
