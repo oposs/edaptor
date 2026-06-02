@@ -17,7 +17,7 @@ use tui_prompts::State;
 use tui_tree_widget::Tree;
 
 use crate::ui::app::{App, Overlay, Pane};
-use crate::ui::edit_form::{EditField, EditForm, ValueEditor};
+use crate::ui::edit_form::{EditField, ValueEditor};
 use crate::ui::form::WidgetSpec;
 
 /// The three-pane column split: branch tree | leaf list | edit form.
@@ -188,6 +188,7 @@ fn render_leaf(f: &mut Frame, app: &mut App, area: Rect) {
 fn render_form(f: &mut Frame, app: &mut App, area: Rect) {
     let focused = app.focus == Pane::Form;
     let title = match &app.form {
+        Some(form) if form.is_new() => "New entry".to_string(),
         Some(form) => format!("Entry — {}", form.dn),
         None => "Entry".to_string(),
     };
@@ -324,10 +325,6 @@ fn render_overlay(f: &mut Frame, app: &App) {
         ),
         Some(Overlay::ValueEditor(ve)) => {
             render_value_editor(f, ve, area);
-            return;
-        }
-        Some(Overlay::CreateForm { form, focus, .. }) => {
-            render_create_form(f, form, *focus, area);
             return;
         }
         None => return,
@@ -479,66 +476,6 @@ fn render_value_editor(f: &mut Frame, ve: &ValueEditor, area: Rect) {
     }
 }
 
-/// Draw the create-entry overlay: the editable form for a new entry, hosted in a
-/// centered modal (reuses [`field_display_value`] and the pane-3 row layout). The
-/// focused, editable single-value field carries the cursor. (P4-T2.)
-fn render_create_form(f: &mut Frame, form: &EditForm, focus: usize, area: Rect) {
-    let n = form.fields.len();
-    let avail = area.height.saturating_sub(2).max(7);
-    let h = (n as u16 + 4).clamp(7, avail).min(avail);
-    let w = 72.min(area.width.saturating_sub(4)).max(20);
-    let rect = centered(w, h, area);
-    f.render_widget(Clear, rect);
-
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Double)
-        .title(format!(" {} ", form.dn))
-        .title_bottom(" ↑↓ field   F2 create   Esc cancel ")
-        .border_style(
-            Style::default()
-                .fg(Color::Green)
-                .add_modifier(Modifier::BOLD),
-        );
-    let inner = block.inner(rect);
-    f.render_widget(block, rect);
-    if inner.height == 0 {
-        return;
-    }
-
-    let label_w = LABEL_WIDTH.min(inner.width);
-    let viewport = inner.height as usize;
-    let scroll = clamp_scroll(focus, 0, viewport, n);
-    for (row, idx) in (scroll..n).enumerate() {
-        if row >= viewport {
-            break;
-        }
-        let y = inner.y + row as u16;
-        let fld = &form.fields[idx];
-        let is_focused = idx == focus;
-
-        let label_style = if is_focused {
-            Style::default()
-                .fg(Color::Blue)
-                .add_modifier(Modifier::BOLD)
-        } else {
-            Style::default()
-        };
-        let star = if fld.must { "*" } else { " " };
-        f.render_widget(
-            Paragraph::new(format!("{star}{}", fld.label)).style(label_style),
-            Rect::new(inner.x, y, label_w, 1),
-        );
-
-        let val_rect = Rect::new(inner.x + label_w, y, inner.width.saturating_sub(label_w), 1);
-        f.render_widget(Paragraph::new(field_display_value(fld)), val_rect);
-        if is_focused && fld.editable && !fld.multi {
-            let col = (fld.editor.position() as u16).min(val_rect.width.saturating_sub(1));
-            f.set_cursor_position((val_rect.x + col, y));
-        }
-    }
-}
-
 /// Center a `w`×`h` rect within `area` (clamped to fit). (Spike `centered`,
 /// re-expressing the facade's `center_origin` math.)
 pub fn centered(w: u16, h: u16, area: Rect) -> Rect {
@@ -657,6 +594,28 @@ mod tests {
             picker_search_id: None,
             picker_last_query: String::new(),
         }
+    }
+
+    #[test]
+    fn render_form_titles_a_create_mode_form_as_new_entry() {
+        let mut app = app_with_value("");
+        if let Some(form) = app.form.as_mut() {
+            form.mode = FormMode::Create {
+                profile_idx: 0,
+                container: "ou=people,dc=example,dc=org".to_string(),
+            };
+        }
+        let w = 40;
+        let backend = TestBackend::new(w, 6);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| render_form(f, &mut app, Rect::new(0, 0, w, 6)))
+            .expect("render must not panic");
+        let top = row_text(terminal.backend().buffer(), 0, 0, w);
+        assert!(
+            top.contains("New entry"),
+            "create form titled 'New entry', got: {top:?}"
+        );
     }
 
     /// Collect the visible text of buffer row `y` over `[x0, x0+w)` as a String.

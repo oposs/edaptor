@@ -73,18 +73,6 @@ pub enum Overlay {
         /// What to do once the guard is resolved.
         intent: GuardIntent,
     },
-    /// The create-entry form: an editable form hosted in an overlay, reusing the
-    /// same [`EditForm`] widget as pane 3 (one editable-form impl, two hosts).
-    CreateForm {
-        /// The editable form for the new entry.
-        form: EditForm,
-        /// The focused field index within the create form.
-        focus: usize,
-        /// The profile index the new entry is created for.
-        profile: usize,
-        /// The container DN the entry will be added under.
-        container: String,
-    },
 }
 
 /// What a dirty-form [`Overlay::Guard`] should resume once the user resolves it.
@@ -343,7 +331,7 @@ fn event_loop(
             if let Event::Key(key) = event::read()? {
                 if key.kind != KeyEventKind::Release {
                     if app.overlay.is_some() {
-                        if let Some(action) = overlay_key(app, key, read_flow, profiles) {
+                        if let Some(action) = overlay_key(app, key) {
                             execute_pending(
                                 app,
                                 action,
@@ -1033,12 +1021,7 @@ fn rebind_selection(app: &mut App, dn: &str) {
 /// Handle a key while an overlay is open. Returns the action to run when the
 /// user confirms a [`Overlay::Confirm`] or resolves a [`Overlay::Guard`];
 /// otherwise dismisses / consumes the key.
-fn overlay_key(
-    app: &mut App,
-    key: KeyEvent,
-    read_flow: &mut ReadFlow,
-    profiles: &[EntryProfile],
-) -> Option<PendingAction> {
+fn overlay_key(app: &mut App, key: KeyEvent) -> Option<PendingAction> {
     match &app.overlay {
         Some(Overlay::Confirm { .. }) => match key.code {
             KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
@@ -1064,7 +1047,6 @@ fn overlay_key(
             None
         }
         Some(Overlay::Guard { .. }) => guard_key(app, key),
-        Some(Overlay::CreateForm { .. }) => create_form_key(app, key, read_flow, profiles),
         None => None,
     }
 }
@@ -1101,113 +1083,6 @@ fn guard_key(app: &mut App, key: KeyEvent) -> Option<PendingAction> {
         }),
         GuardOutcome::SaveThenProceed => Some(PendingAction::ResolveGuard { intent, save: true }),
     }
-}
-
-/// Handle a key inside the create-entry overlay: field nav (↑↓), inline edit of
-/// the focused single-value field, F2 commit (validate → LDIF confirm → Add),
-/// Esc/F3 cancel. Multi-value fields in create are edited after the entry exists.
-fn create_form_key(
-    app: &mut App,
-    key: KeyEvent,
-    read_flow: &mut ReadFlow,
-    profiles: &[EntryProfile],
-) -> Option<PendingAction> {
-    match key.code {
-        KeyCode::Esc | KeyCode::F(3) => {
-            app.overlay = None;
-            None
-        }
-        KeyCode::F(2) => commit_create(app, read_flow, profiles),
-        KeyCode::Up => {
-            if let Some(Overlay::CreateForm { focus, .. }) = app.overlay.as_mut() {
-                *focus = focus.saturating_sub(1);
-            }
-            None
-        }
-        KeyCode::Down => {
-            if let Some(Overlay::CreateForm { form, focus, .. }) = app.overlay.as_mut() {
-                *focus = next_index(*focus, form.fields.len());
-            }
-            None
-        }
-        _ => {
-            // Edit the focused, editable single-value field.
-            if let Some(Overlay::CreateForm { form, focus, .. }) = app.overlay.as_mut() {
-                if let Some(field) = form.fields.get_mut(*focus) {
-                    if field.editable && !field.multi {
-                        field.editor.handle_key_event(key);
-                    }
-                }
-            }
-            None
-        }
-    }
-}
-
-/// Validate the create form and, if it is complete, replace it with an LDIF
-/// confirm carrying the [`PendingAction::Create`]. Errors open an error overlay.
-fn commit_create(
-    app: &mut App,
-    read_flow: &mut ReadFlow,
-    profiles: &[EntryProfile],
-) -> Option<PendingAction> {
-    // Extract what we need, then drop the overlay borrow before re-assigning it.
-    let (edited, profile_idx, container) = match &app.overlay {
-        Some(Overlay::CreateForm {
-            form,
-            profile,
-            container,
-            ..
-        }) => (form.to_edit_entry(), *profile, container.clone()),
-        _ => return None,
-    };
-    let Some(profile) = profiles.get(profile_idx) else {
-        app.overlay = None;
-        return None;
-    };
-
-    // The RDN value must be present before we can compose the DN.
-    let rdn_value = edited
-        .attrs
-        .iter()
-        .find(|(k, _)| k.eq_ignore_ascii_case(&profile.rdn_attr))
-        .and_then(|(_, v)| v.first().cloned())
-        .unwrap_or_default();
-    if rdn_value.trim().is_empty() {
-        app.overlay = Some(Overlay::Error {
-            text: "The RDN attribute must have a value.".to_string(),
-        });
-        return None;
-    }
-
-    // Build the final entry first, THEN validate it — `build_add_entry` supplies
-    // the fixed objectClass set and ensures the RDN attribute is present, so
-    // validating the raw form here would spuriously fail the objectClass MUST.
-    let (dn, attrs) = build_add_entry(profile, &container, rdn_value.trim(), &edited);
-    let oc_refs = [profile.object_class.as_str()];
-    let full_entry = EditEntry {
-        dn: dn.clone(),
-        attrs: attrs.clone(),
-    };
-    let errors = validate(&full_entry, read_flow.schema(), &oc_refs);
-    if !errors.is_empty() {
-        app.overlay = Some(Overlay::Error {
-            text: format_validation_errors(&errors),
-        });
-        return None;
-    }
-
-    let ldif = render_add(&dn, &attrs);
-    app.overlay = Some(Overlay::Confirm {
-        title: "Create this entry?".to_string(),
-        body: ldif,
-        action: PendingAction::Create {
-            dn,
-            attrs,
-            parent: container,
-        },
-    });
-    None
 }
 
 /// Run a confirmed [`PendingAction`] (submits to the worker / navigates).
