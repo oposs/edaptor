@@ -1003,6 +1003,9 @@ fn revert_form(app: &mut App) {
         app.form_focus = 0;
         app.form_scroll = 0;
         app.status.clear();
+        // Forget the awaited DN so the next reconcile tick re-reads the currently
+        // selected leaf into the form pane (instead of leaving it blank).
+        app.last_seen_leaf = None;
         return;
     }
     if let Some(form) = app.form.as_mut() {
