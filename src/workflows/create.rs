@@ -9,6 +9,31 @@ use crate::form::changeset::EditEntry;
 use crate::schema::SchemaModel;
 use crate::ui::form::{FormField, FormModel, WidgetSpec};
 
+/// Indices of profiles whose `search_base` matches `container_dn` at a DN-component
+/// boundary: equal, or one is a proper suffix of the other (case-insensitive). So
+/// `ou=people,…` matches but `ou=people2,…` does not. Profiles with an empty
+/// `search_base` never match. Pure.
+pub fn profiles_for_container(profiles: &[EntryProfile], container_dn: &str) -> Vec<usize> {
+    profiles
+        .iter()
+        .enumerate()
+        .filter(|(_, p)| {
+            !p.search_base.is_empty() && dn_boundary_match(&p.search_base, container_dn)
+        })
+        .map(|(i, _)| i)
+        .collect()
+}
+
+/// True when `a` == `b` or one ends with `,<other>` (case-insensitive): a match at
+/// a DN-component boundary, so `ou=people2,dc=x` does NOT match `ou=people,dc=x`.
+fn dn_boundary_match(a: &str, b: &str) -> bool {
+    let (a, b) = (a.trim().to_lowercase(), b.trim().to_lowercase());
+    if a == b {
+        return true;
+    }
+    a.ends_with(&format!(",{b}")) || b.ends_with(&format!(",{a}"))
+}
+
 /// Compose the DN and attribute set for a new entry of `profile`'s object class.
 ///
 /// The DN is `<rdn_attr>=<rdn_value>,<container_dn>`. The attribute set is the
@@ -251,5 +276,48 @@ mod tests {
         let model = empty_form_for_profile(&schema(), &profile());
         let labels: Vec<&str> = model.fields.iter().map(|f| f.label.as_str()).collect();
         assert_eq!(&labels[..3], &["uid", "cn", "sn"]);
+    }
+
+    fn prof(base: &str) -> EntryProfile {
+        EntryProfile {
+            search_base: base.to_string(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn profiles_for_container_matches_exact_and_descendant() {
+        let ps = vec![
+            prof("ou=people,dc=example,dc=org"),
+            prof("ou=groups,dc=example,dc=org"),
+        ];
+        // Exact container → just that profile.
+        assert_eq!(
+            profiles_for_container(&ps, "ou=people,dc=example,dc=org"),
+            vec![0]
+        );
+        // A parent container offers all profiles whose search_base is under it.
+        assert_eq!(profiles_for_container(&ps, "dc=example,dc=org"), vec![0, 1]);
+    }
+
+    #[test]
+    fn profiles_for_container_rejects_non_boundary_prefix() {
+        let ps = vec![prof("ou=people,dc=example,dc=org")];
+        assert!(profiles_for_container(&ps, "ou=people2,dc=example,dc=org").is_empty());
+    }
+
+    #[test]
+    fn profiles_for_container_is_case_insensitive() {
+        let ps = vec![prof("OU=People,DC=Example,DC=Org")];
+        assert_eq!(
+            profiles_for_container(&ps, "ou=people,dc=example,dc=org"),
+            vec![0]
+        );
+    }
+
+    #[test]
+    fn profiles_for_container_empty_search_base_never_matches() {
+        let ps = vec![prof("")];
+        assert!(profiles_for_container(&ps, "dc=example,dc=org").is_empty());
     }
 }
