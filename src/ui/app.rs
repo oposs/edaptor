@@ -27,7 +27,7 @@ use crate::form::validate::{plan_save, validate, SavePlan, ValidationError};
 use crate::ldap::ldif::{render_add, render_changeset, render_changesets};
 use crate::ldap::worker::{Request, Response, SearchScope, StructureNodeRaw, WorkerHandle};
 use crate::schema::SchemaModel;
-use crate::ui::edit_form::{build_edit_form, value_set_eq, EditForm, ValueEditor};
+use crate::ui::edit_form::{build_edit_form, value_set_eq, EditForm, FormMode, ValueEditor};
 use crate::ui::form_state::{guard_decision, GuardChoice, GuardOutcome};
 use crate::ui::picker::PICKER_SEARCH_CAP;
 use crate::ui::view;
@@ -912,34 +912,21 @@ fn handle_action(
         }
         UiAction::FormCancel => revert_form(app),
         UiAction::NewEntry(i) => {
-            // Build an empty schema-driven form for the profile and host it in a
-            // create overlay (reuses the EditForm widget). Submission happens on
-            // F2 → validate → LDIF confirm → Add (see create_form_key).
             if let Some(profile) = profiles.get(i) {
                 let container = if profile.search_base.is_empty() {
                     structure.root_dn().to_string()
                 } else {
                     profile.search_base.clone()
                 };
-                let model = empty_form_for_profile(read_flow.schema(), profile);
-                let mut form = build_edit_form(&model, read_flow.schema(), false, &[]);
-                // Create takes ONE value per attribute typed inline — even for
-                // schema-multi-valued attributes (cn, sn on inetOrgPerson are the
-                // RDN + a MUST and are multi-valued; without this they would render
-                // as `‹0 set›` and be unfillable). Treating every editable field as
-                // single-value inline lets the mandatory attributes be entered; a
-                // second value is added afterwards via the pane-3 popup.
-                for field in &mut form.fields {
-                    if field.editable {
-                        field.multi = false;
-                    }
-                }
-                app.overlay = Some(Overlay::CreateForm {
-                    form,
-                    focus: 0,
-                    profile: i,
-                    container,
-                });
+                let form = build_new_entry_form(read_flow.schema(), profile, i, container);
+                app.form = Some(form);
+                app.form_focus = 0;
+                app.form_scroll = 0;
+                app.overlay = None;
+                app.status = format!(
+                    "New {} — fill fields, F2 to create, Esc to cancel.",
+                    profile.name
+                );
             }
         }
         UiAction::DeleteEntry(dn) => {
@@ -2021,6 +2008,31 @@ fn build_tree_items(structure: &Structure) -> Vec<TreeItem<'static, String>> {
     vec![build(structure, structure.root_dn())]
 }
 
+/// Build an empty Create-mode pane-3 form for `profile` (index `profile_idx`),
+/// to be added under `container`. Editable fields are forced single-value so the
+/// mandatory attributes can be typed inline (a second value is added post-create
+/// via the value-editor popup). No relations are attached on create (parity with
+/// the previous modal create path).
+fn build_new_entry_form(
+    schema: &SchemaModel,
+    profile: &EntryProfile,
+    profile_idx: usize,
+    container: String,
+) -> EditForm {
+    let model = empty_form_for_profile(schema, profile);
+    let mut form = build_edit_form(&model, schema, false, &[]);
+    for field in &mut form.fields {
+        if field.editable {
+            field.multi = false;
+        }
+    }
+    form.mode = FormMode::Create {
+        profile_idx,
+        container,
+    };
+    form
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2568,6 +2580,40 @@ mod tests {
             ldap_syntaxes: vec![],
         };
         SchemaModel::from_raw(&raw)
+    }
+
+    fn create_user_profile() -> EntryProfile {
+        EntryProfile {
+            name: "User".into(),
+            object_class: "testUser".into(),
+            rdn_attr: "uid".into(),
+            search_base: "ou=people,dc=example,dc=org".into(),
+            show: vec!["uid".into()],
+            search_attrs: vec![],
+        }
+    }
+
+    #[test]
+    fn build_new_entry_form_is_create_mode_and_single_value() {
+        let form = build_new_entry_form(
+            &user_schema(),
+            &create_user_profile(),
+            0,
+            "ou=people,dc=example,dc=org".to_string(),
+        );
+        assert!(form.is_new());
+        match &form.mode {
+            FormMode::Create {
+                profile_idx,
+                container,
+            } => {
+                assert_eq!(*profile_idx, 0);
+                assert_eq!(container, "ou=people,dc=example,dc=org");
+            }
+            _ => panic!("expected Create mode"),
+        }
+        // every editable field is forced single-value for inline create
+        assert!(form.fields.iter().all(|f| !(f.editable && f.multi)));
     }
 
     /// Resolved relations for the user schema: memberOf ↔ group.member.
