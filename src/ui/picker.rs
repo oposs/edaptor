@@ -89,19 +89,28 @@ pub fn pick_value(
 pub struct VisibleRow {
     pub candidate: Candidate,
     pub selected: bool,
+    /// True when this row's DN was already persisted (saved) on the entry when
+    /// the picker opened — lets the UI mark it (e.g. `*`), including a saved
+    /// member toggled off (`selected == false`, `saved == true`).
+    pub saved: bool,
 }
 
 /// Server-side size cap used for picker candidate searches. Shared between
 /// `service_picker_search` (where it is passed as `size_limit`) and the
 /// `handle_worker_response` intercept (where hitting this count means there may
 /// be more matching entries the server did not return).
-pub const PICKER_SEARCH_CAP: i32 = 20;
+pub const PICKER_SEARCH_CAP: i32 = 100;
 
 /// Picker state: the current selection (always shown) and the latest results.
 #[derive(Debug, Clone, Default)]
 pub struct PickerState {
     pub selected: Vec<Candidate>,
     pub results: Vec<Candidate>,
+    /// DNs that were already persisted (saved) on the entry when the picker
+    /// opened — seeded from the initial `selected`. Used to mark saved rows in
+    /// the UI; a saved member toggled off stays here (so it can show as "will
+    /// be removed").
+    pub saved: Vec<String>,
     pub cursor: usize,
     /// True when the last search returned exactly `PICKER_SEARCH_CAP` entries —
     /// a heuristic signal that the server may have more matching entries.
@@ -114,9 +123,11 @@ fn same_dn(a: &str, b: &str) -> bool {
 
 impl PickerState {
     pub fn new(selected: Vec<Candidate>) -> Self {
+        let saved = selected.iter().map(|c| c.dn.clone()).collect();
         PickerState {
             selected,
             results: Vec::new(),
+            saved,
             cursor: 0,
             truncated: false,
         }
@@ -126,10 +137,12 @@ impl PickerState {
     /// already selected (unmarked). This is why a selected entry never vanishes
     /// while filtering — selection is independent of the search results.
     pub fn visible(&self) -> Vec<VisibleRow> {
+        let is_saved = |dn: &str| self.saved.iter().any(|d| same_dn(d, dn));
         let mut rows: Vec<VisibleRow> = self
             .selected
             .iter()
             .map(|c| VisibleRow {
+                saved: is_saved(&c.dn),
                 candidate: c.clone(),
                 selected: true,
             })
@@ -137,8 +150,28 @@ impl PickerState {
         for r in &self.results {
             if !self.selected.iter().any(|s| same_dn(&s.dn, &r.dn)) {
                 rows.push(VisibleRow {
+                    saved: is_saved(&r.dn),
                     candidate: r.clone(),
                     selected: false,
+                });
+            }
+        }
+        // Saved members that are neither still selected nor in the current
+        // results (e.g. toggled off with no active search) still need a row so
+        // the UI can show them as "saved, will be removed". Synthesize from the
+        // DN — the friendly label is not retained in `saved`.
+        for dn in &self.saved {
+            let in_selected = self.selected.iter().any(|s| same_dn(&s.dn, dn));
+            let in_results = self.results.iter().any(|r| same_dn(&r.dn, dn));
+            if !in_selected && !in_results {
+                rows.push(VisibleRow {
+                    candidate: Candidate {
+                        dn: dn.clone(),
+                        label: dn.clone(),
+                        value: None,
+                    },
+                    selected: false,
+                    saved: true,
                 });
             }
         }
@@ -343,5 +376,50 @@ mod tests {
         assert_eq!(pick_value(&attrs, "uidNumber"), None);
         // Present but whitespace-only → None.
         assert_eq!(pick_value(&attrs, "blank"), None);
+    }
+
+    #[test]
+    fn picker_search_cap_is_100() {
+        assert_eq!(PICKER_SEARCH_CAP, 100);
+    }
+
+    #[test]
+    fn new_marks_seeded_selection_as_saved() {
+        let state = PickerState::new(vec![c("uid=bob,ou=people")]);
+        assert_eq!(state.saved, vec!["uid=bob,ou=people".to_string()]);
+    }
+
+    #[test]
+    fn visible_flags_saved_rows() {
+        // Open with bob saved (seeded selection); search adds carol (not saved).
+        let mut p = PickerState::new(vec![c("uid=bob,ou=people")]);
+        p.set_results(vec![c("uid=carol,ou=people")]);
+        let rows = p.visible();
+        let bob = rows
+            .iter()
+            .find(|r| r.candidate.dn == "uid=bob,ou=people")
+            .expect("bob row present");
+        assert!(bob.saved, "bob is a saved member");
+        assert!(bob.selected, "bob is selected");
+        let carol = rows
+            .iter()
+            .find(|r| r.candidate.dn == "uid=carol,ou=people")
+            .expect("carol row present");
+        assert!(!carol.saved, "carol was not saved at open");
+    }
+
+    #[test]
+    fn toggling_off_a_saved_member_keeps_saved_true() {
+        // Open with bob saved, then toggle bob off.
+        let mut p = PickerState::new(vec![c("uid=bob,ou=people")]);
+        p.cursor = 0; // bob
+        p.toggle_cursor();
+        let rows = p.visible();
+        let bob = rows
+            .iter()
+            .find(|r| r.candidate.dn == "uid=bob,ou=people")
+            .expect("bob row still present (from results or saved)");
+        assert!(!bob.selected, "bob is no longer selected");
+        assert!(bob.saved, "bob remains flagged as saved");
     }
 }
