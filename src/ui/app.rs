@@ -1660,6 +1660,8 @@ fn build_loaded_form(
             crate::ui::edit_form::tag_lookup_fields(&mut form, &profile.lookups);
         }
     }
+    // Final step: order fields after injection/tagging set secret/lookup/relation.
+    crate::ui::edit_form::order_fields(&mut form);
     form
 }
 
@@ -2735,6 +2737,8 @@ fn build_new_entry_form(
     // Tag value-lookup target fields (e.g. gidNumber) so Enter opens the picker.
     // Create is the primary use case, so the profile's lookups are known here.
     crate::ui::edit_form::tag_lookup_fields(&mut form, &profile.lookups);
+    // Final step: order fields after injection/tagging set secret/lookup/relation.
+    crate::ui::edit_form::order_fields(&mut form);
     form
 }
 

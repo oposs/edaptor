@@ -463,6 +463,30 @@ pub fn tag_lookup_fields(
     }
 }
 
+/// Reorder a built form's fields into: mandatory, then populated-or-special
+/// (non-empty value, password/secret, value-lookup, or membership relation),
+/// then the rest — each bucket alphabetical (case-insensitive) by label.
+pub fn order_fields(form: &mut EditForm) {
+    fn bucket(f: &EditField) -> u8 {
+        if f.must {
+            0
+        } else if !f.current_values().is_empty()
+            || f.secret
+            || f.lookup.is_some()
+            || f.relation.is_some()
+        {
+            1
+        } else {
+            2
+        }
+    }
+    form.fields.sort_by(|a, b| {
+        bucket(a)
+            .cmp(&bucket(b))
+            .then_with(|| a.label.to_lowercase().cmp(&b.label.to_lowercase()))
+    });
+}
+
 /// Port of the facade's editability rule: `memberOf` is server-maintained and
 /// binary / boolean-checkbox kinds are not free-text, so none of them edit.
 fn field_is_editable(field: &FormField) -> bool {
@@ -987,5 +1011,88 @@ mod tests {
             f("homeDir").lookup.is_none(),
             "read-only field is not tagged even with a matching lookup"
         );
+    }
+
+    #[test]
+    fn order_fields_buckets_mandatory_then_populated_special_then_rest() {
+        // label, must, secret, values — everything else default.
+        // Single editable fields drive `current_values()` from the editor, so seed
+        // the editor (not just `values`) to mirror how `build_edit_form` builds them.
+        let mk = |label: &str, must: bool, secret: bool, values: Vec<&str>| {
+            let seed = values.first().map(|s| s.to_string()).unwrap_or_default();
+            EditField {
+                label: label.into(),
+                must,
+                editable: true,
+                multi: false,
+                secret,
+                ordered: false,
+                values: values.into_iter().map(String::from).collect(),
+                kind: crate::schema::FieldKind::Text,
+                widget: crate::ui::form::WidgetSpec::ReadOnlyText,
+                editor: TextState::new().with_value(seed),
+                relation: None,
+                lookup: None,
+            }
+        };
+        let mut form = EditForm {
+            dn: "uid=alice,ou=people,dc=example,dc=org".into(),
+            fields: vec![
+                mk("sn", true, false, vec![]),           // bucket 0
+                mk("cn", true, false, vec![]),           // bucket 0
+                mk("mail", false, false, vec!["x"]),     // bucket 1 (populated)
+                mk("userPassword", false, true, vec![]), // bucket 1 (secret)
+                mk("displayName", false, false, vec![]), // bucket 2
+                mk("audio", false, false, vec![]),       // bucket 2
+            ],
+            baseline: Default::default(),
+            mode: FormMode::Edit,
+        };
+        order_fields(&mut form);
+        let labels: Vec<&str> = form.fields.iter().map(|f| f.label.as_str()).collect();
+        assert_eq!(
+            labels,
+            vec![
+                // bucket 0, alphabetical (case-insensitive)
+                "cn",
+                "sn", // bucket 1, alphabetical
+                "mail",
+                "userPassword", // bucket 2, alphabetical
+                "audio",
+                "displayName",
+            ]
+        );
+    }
+
+    #[test]
+    fn order_fields_populated_optional_sorts_ahead_of_empty_optional() {
+        let mk = |label: &str, values: Vec<&str>| {
+            let seed = values.first().map(|s| s.to_string()).unwrap_or_default();
+            EditField {
+                label: label.into(),
+                must: false,
+                editable: true,
+                multi: false,
+                secret: false,
+                ordered: false,
+                values: values.into_iter().map(String::from).collect(),
+                kind: crate::schema::FieldKind::Text,
+                widget: crate::ui::form::WidgetSpec::ReadOnlyText,
+                editor: TextState::new().with_value(seed),
+                relation: None,
+                lookup: None,
+            }
+        };
+        let mut form = EditForm {
+            dn: "uid=alice,ou=people,dc=example,dc=org".into(),
+            // "zoo" populated (bucket 1) must come before "aaa" empty (bucket 2),
+            // even though it loses alphabetically — bucket dominates.
+            fields: vec![mk("aaa", vec![]), mk("zoo", vec!["v"])],
+            baseline: Default::default(),
+            mode: FormMode::Edit,
+        };
+        order_fields(&mut form);
+        let labels: Vec<&str> = form.fields.iter().map(|f| f.label.as_str()).collect();
+        assert_eq!(labels, vec!["zoo", "aaa"]);
     }
 }
