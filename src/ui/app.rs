@@ -742,7 +742,7 @@ fn edit_focused_field(app: &mut App, key: KeyEvent) {
     }
 }
 
-/// Open the multi-value popup over the focused field. Relation fields open in
+/// Open the multi-value popup over the focused field. Picker-bound fields open in
 /// picker mode; plain multi-valued fields open in free-text mode.
 fn open_value_editor(app: &mut App, _structure: &Structure) {
     let focus = app.form_focus;
