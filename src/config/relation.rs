@@ -57,14 +57,26 @@ pub struct ResolvedRelation {
 }
 
 fn scope_of(p: &EntryProfile) -> CandidateScope {
+    let template = p
+        .label
+        .as_ref()
+        .map(|s| crate::config::label::parse_label_template(s));
+    // The picker's substring search matches on `search_attrs` AND every attribute
+    // shown in the label template, so a search covers all properties the operator
+    // can see in the candidate row.
+    let mut search_attrs = p.search_attributes();
+    if let Some(segs) = template.as_ref() {
+        for a in crate::config::label::template_attrs(segs) {
+            if !search_attrs.iter().any(|x| x.eq_ignore_ascii_case(&a)) {
+                search_attrs.push(a);
+            }
+        }
+    }
     CandidateScope {
         base: p.search_base.clone(),
         object_classes: p.object_classes.clone(),
-        search_attrs: p.search_attributes(),
-        label_template: p
-            .label
-            .as_ref()
-            .map(|s| crate::config::label::parse_label_template(s)),
+        search_attrs,
+        label_template: template,
     }
 }
 
@@ -256,8 +268,38 @@ mod tests {
             r[0].candidate_scope.label_template,
             Some(parse_label_template("{cn} ({uid})"))
         );
+        // The candidate search now also covers the label-template attributes
+        // (search_attrs `uid`/`cn` plus the template's `cn`/`uid`, deduped).
+        assert!(r[0].candidate_scope.search_attrs.iter().any(|a| a == "uid"));
+        assert!(r[0].candidate_scope.search_attrs.iter().any(|a| a == "cn"));
         // Holder profile has no label → None.
         assert!(r[0].holder_scope.label_template.is_none());
+    }
+
+    #[test]
+    fn scope_search_attrs_gain_label_template_attrs_not_already_listed() {
+        // search_attrs = [cn]; label adds displayName → the picker search now
+        // matches displayName too, even though it was not in search_attrs.
+        let mut user = profile("user", "inetOrgPerson", "ou=people,dc=x", &["cn"]);
+        user.label = Some("{cn} — {displayName}".to_string());
+        let profiles = vec![
+            profile("group", "groupOfNames", "ou=groups,dc=x", &["cn"]),
+            user,
+        ];
+        let rels = vec![Relation {
+            name: "m".into(),
+            holder: "group".into(),
+            holder_attr: "member".into(),
+            candidate: "user".into(),
+            back_attr: "memberOf".into(),
+        }];
+        let r = resolve_relations(&profiles, &rels);
+        let sa = &r[0].candidate_scope.search_attrs;
+        assert!(sa.iter().any(|a| a == "cn"));
+        assert!(
+            sa.iter().any(|a| a == "displayName"),
+            "label-template attr joins the search: {sa:?}"
+        );
     }
 
     #[test]

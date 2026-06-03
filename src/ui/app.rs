@@ -2418,11 +2418,15 @@ fn compute_rows(
     if let Some(node) = structure.get(branch) {
         rows.push((format!("‹self› {}", node.label), branch.to_string()));
     }
-    for leaf in structure.filter_leaves(branch, search) {
-        rows.push((
-            render_node_label(rules, &leaf.object_classes, &leaf.attrs, &leaf.label),
-            leaf.dn.clone(),
-        ));
+    // Match the incremental search against the RENDERED label (what the operator
+    // sees) — which contains every property used in the profile's label template —
+    // not just the structural cn. Get every leaf (empty query) and filter here.
+    let q = search.to_lowercase();
+    for leaf in structure.filter_leaves(branch, "") {
+        let label = render_node_label(rules, &leaf.object_classes, &leaf.attrs, &leaf.label);
+        if q.is_empty() || label.to_lowercase().contains(&q) {
+            rows.push((label, leaf.dn.clone()));
+        }
     }
     rows
 }
@@ -3317,6 +3321,23 @@ mod tests {
         assert_eq!(rows[0].0, "‹self› ou=users");
         // The leaf renders via its profile's template.
         assert_eq!(rows[1].0, "Jane (jane)");
+    }
+
+    #[test]
+    fn compute_rows_search_matches_template_properties() {
+        let s = structure();
+        let rules = vec![LabelRule {
+            object_classes: vec!["inetOrgPerson".into()],
+            template: crate::config::label::parse_label_template("{cn} ({uid})"),
+        }];
+        // Searching the uid (only visible inside the rendered "(jane)") matches,
+        // even though the structural label is "Jane".
+        let hit = compute_rows(&s, "ou=users,dc=example,dc=org", "jane", &rules);
+        assert_eq!(hit.len(), 2, "self row + the matched leaf");
+        assert_eq!(hit[1].0, "Jane (jane)");
+        // A term in neither the cn nor the uid still filters the leaf out.
+        let miss = compute_rows(&s, "ou=users,dc=example,dc=org", "zzz", &rules);
+        assert_eq!(miss.len(), 1, "only the self row");
     }
 
     #[test]
