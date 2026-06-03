@@ -8,6 +8,27 @@ NAME=edaptor-test-ldap
 # bitnamilegacy/openldap is the same image at its new vendor-assigned address.
 IMAGE=docker.io/bitnamilegacy/openldap:2.6.9
 
+PROVISION_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/ldap-provision" && pwd)"
+
+apply_ldif() {  # <bind-dn> <password> <file>
+  local bind_dn=$1 pw=$2 file=$3
+  podman cp "$file" "$NAME:/tmp/$(basename "$file")"
+  # -c: continue past entries that already exist (e.g. on a warm DB)
+  podman exec "$NAME" ldapadd -c -x -H ldap://localhost:1389 \
+    -D "$bind_dn" -w "$pw" -f "/tmp/$(basename "$file")"
+}
+
+provision() {
+  echo "Provisioning schemas + overlays (cn=config admin)..."
+  apply_ldif "cn=admin,cn=config" "configpassword" "$PROVISION_DIR/schema/samba.ldif"
+  apply_ldif "cn=admin,cn=config" "configpassword" "$PROVISION_DIR/schema/mail.ldif"
+  apply_ldif "cn=admin,cn=config" "configpassword" "$PROVISION_DIR/config/overlays.ldif"
+  echo "Loading directory data (data admin)..."
+  apply_ldif "cn=admin,dc=example,dc=org" "adminpassword" "$PROVISION_DIR/data/ppolicy.ldif"
+  apply_ldif "cn=admin,dc=example,dc=org" "adminpassword" "$PROVISION_DIR/data/base.ldif"
+  apply_ldif "cn=admin,dc=example,dc=org" "adminpassword" "$PROVISION_DIR/data/testdata.ldif"
+}
+
 case "${1:-start}" in
   start)
     # Make start idempotent: clear any leftover container from a prior run
@@ -18,14 +39,20 @@ case "${1:-start}" in
       -e LDAP_ROOT="dc=example,dc=org" \
       -e LDAP_ADMIN_USERNAME="admin" \
       -e LDAP_ADMIN_PASSWORD="adminpassword" \
+      -e LDAP_CONFIG_ADMIN_ENABLED="yes" \
+      -e LDAP_CONFIG_ADMIN_USERNAME="admin" \
+      -e LDAP_CONFIG_ADMIN_PASSWORD="configpassword" \
       "$IMAGE" >/dev/null
     echo "Waiting for LDAP to accept connections..."
     for _ in $(seq 1 30); do
       if podman exec "$NAME" ldapsearch -x -H ldap://localhost:1389 \
            -b "dc=example,dc=org" -s base >/dev/null 2>&1; then
         echo "Ready."
+        provision
+        echo "Provisioned. Connection hints:"
         echo "  export EDAPTOR_TEST_LDAP_URI=ldap://localhost:1389"
         echo "  export EDAPTOR_TEST_ADMIN_PW=adminpassword"
+        echo "  edaptor --config examples/demo-config.toml   # explore the seed data"
         exit 0
       fi
       sleep 1
