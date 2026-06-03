@@ -397,16 +397,16 @@ fn render_value_editor(f: &mut Frame, ve: &ValueEditor, area: Rect) {
             .border_type(BorderType::Double)
             .title(format!(" {} ", ve.label))
             .title_bottom(match (ve.lookup.is_some(), picker.truncated) {
-                // Single-select value-lookup picker: Alt+S commits the chosen value.
+                // Single-select value-lookup picker: Enter picks the highlighted row.
                 (true, true) => {
-                    " ↑↓ move · Alt+S select · Alt+C cancel · type to search · more match — narrow search "
+                    " ↑↓ move · Enter select · Alt+S save · Alt+C cancel · type to search · more match — narrow search "
                 }
-                (true, false) => " ↑↓ move · Alt+S select · Alt+C cancel · type to search ",
-                // Membership multi-select picker: Alt+Space toggles, Alt+S commits the set.
+                (true, false) => " ↑↓ move · Enter select · Alt+S save · Alt+C cancel · type to search ",
+                // Membership multi-select picker: Enter toggles a candidate in/out.
                 (false, true) => {
-                    " ↑↓ move · Alt+Space toggle · Alt+S save · Alt+C cancel · type to search · more match — narrow search "
+                    " ↑↓ move · Enter toggle · Alt+S save · Alt+C cancel · type to search · more match — narrow search "
                 }
-                (false, false) => " ↑↓ move · Alt+Space toggle · Alt+S save · Alt+C cancel · type to search ",
+                (false, false) => " ↑↓ move · Enter toggle · Alt+S save · Alt+C cancel · type to search ",
             })
             .border_style(
                 Style::default()
@@ -439,13 +439,18 @@ fn render_value_editor(f: &mut Frame, ve: &ValueEditor, area: Rect) {
             let y = list_area_y + i as u16;
             let selected_cursor = i == picker.cursor;
             let star = if row.saved { "*" } else { " " };
-            let check = if row.selected { "[x]" } else { "[ ]" };
+            // Single-select (value-lookup) pickers use radio markers; multi-select
+            // (membership) pickers use checkboxes.
+            let single = ve.lookup.is_some();
+            let check = match (single, row.selected) {
+                (true, true) => "(x)",
+                (true, false) => "( )",
+                (false, true) => "[x]",
+                (false, false) => "[ ]",
+            };
             let line = format!("{star}{check} {}", row.candidate.label);
             let style = if selected_cursor {
-                Style::default()
-                    .bg(Color::Blue)
-                    .fg(Color::White)
-                    .add_modifier(Modifier::BOLD)
+                selection_style(true).add_modifier(Modifier::BOLD)
             } else if row.selected {
                 Style::default().fg(Color::Green)
             } else {

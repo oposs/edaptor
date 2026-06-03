@@ -792,10 +792,19 @@ fn picker_editor_key(app: &mut App, key: KeyEvent) {
                 // single-value field saves from `editor`, NOT `values`.
                 if let Some(Overlay::ValueEditor(ve)) = app.overlay.take() {
                     if let Some(picker) = &ve.picker {
+                        // Commit the radio-selected row (set by Enter); if none was
+                        // explicitly picked, fall back to the highlighted row so a
+                        // quick ↑↓ + Alt+S still works.
                         let chosen = picker
-                            .visible()
-                            .get(picker.cursor)
-                            .and_then(|row| row.candidate.value.clone());
+                            .selected
+                            .first()
+                            .and_then(|c| c.value.clone())
+                            .or_else(|| {
+                                picker
+                                    .visible()
+                                    .get(picker.cursor)
+                                    .and_then(|row| row.candidate.value.clone())
+                            });
                         if let Some(v) = chosen {
                             if let Some(field) =
                                 app.form.as_mut().and_then(|f| f.fields.get_mut(ve.field))
@@ -828,12 +837,20 @@ fn picker_editor_key(app: &mut App, key: KeyEvent) {
                 app.picker_last_query.clear();
             }
         }
-        KeyCode::Char(' ') if alt => {
-            // Alt+Space toggles a MEMBERSHIP selection. A lookup picker is
-            // single-select, so Alt+Space is a no-op there.
+        KeyCode::Enter => {
+            // Enter "checks" the highlighted candidate: toggle it in/out of a
+            // membership selection (multi-select), or set it as the single radio
+            // selection for a value-lookup picker. (Alt+Space is avoided — it is a
+            // desktop hotkey.) Alt+S then commits.
             if let Some(Overlay::ValueEditor(ve)) = app.overlay.as_mut() {
-                if ve.lookup.is_none() {
-                    if let Some(p) = ve.picker.as_mut() {
+                let single = ve.lookup.is_some();
+                if let Some(p) = ve.picker.as_mut() {
+                    if single {
+                        let chosen = p.visible().get(p.cursor).map(|row| row.candidate.clone());
+                        if let Some(c) = chosen {
+                            p.selected = vec![c];
+                        }
+                    } else {
                         p.toggle_cursor();
                     }
                 }
@@ -3264,7 +3281,7 @@ mod tests {
     }
 
     #[test]
-    fn picker_alt_space_toggles_and_alt_s_commits_dns() {
+    fn picker_enter_toggles_and_alt_s_commits_dns() {
         use crate::ui::picker::Candidate;
         let mut app = test_app_with_form_field_member();
         let mut ve = make_picker_ve(0);
@@ -3274,8 +3291,8 @@ mod tests {
             value: None,
         }]);
         app.overlay = Some(Overlay::ValueEditor(ve));
-        // Alt+Space toggles the cursor row (a) into the selection.
-        value_editor_key(&mut app, alt(KeyCode::Char(' ')));
+        // Enter toggles the cursor row (a) into the selection.
+        value_editor_key(&mut app, key(KeyCode::Enter));
         // Alt+S commits the selected DNs into the field.
         value_editor_key(&mut app, alt(KeyCode::Char('s')));
         let f = &app.form.as_ref().unwrap().fields[0];
@@ -3442,6 +3459,41 @@ mod tests {
         assert_eq!(f.editor.value(), "5001");
         // A single-value field saves from `editor`, so current_values reflects it.
         assert_eq!(f.current_values(), vec!["5001".to_string()]);
+    }
+
+    #[test]
+    fn lookup_enter_radio_selects_then_alt_s_commits() {
+        use crate::ui::picker::Candidate;
+        let mut app = app_with_lookup_field();
+        let s = empty_structure();
+        open_value_editor(&mut app, &s);
+        if let Some(Overlay::ValueEditor(ve)) = app.overlay.as_mut() {
+            ve.picker.as_mut().unwrap().set_results(vec![
+                Candidate {
+                    dn: "cn=staff,ou=groups,dc=test".into(),
+                    label: "staff".into(),
+                    value: Some("5000".into()),
+                },
+                Candidate {
+                    dn: "cn=dev,ou=groups,dc=test".into(),
+                    label: "dev".into(),
+                    value: Some("5001".into()),
+                },
+            ]);
+        }
+        // Enter marks the highlighted (first) row as the single radio selection.
+        picker_editor_key(&mut app, key(KeyCode::Enter));
+        if let Some(Overlay::ValueEditor(ve)) = app.overlay.as_ref() {
+            let p = ve.picker.as_ref().unwrap();
+            assert_eq!(p.selected.len(), 1, "single-select holds exactly one");
+            assert_eq!(p.selected[0].value.as_deref(), Some("5000"));
+        } else {
+            panic!("picker overlay gone");
+        }
+        // Alt+S commits the radio-selected scalar, not just the highlighted row.
+        picker_editor_key(&mut app, alt(KeyCode::Char('s')));
+        assert!(app.overlay.is_none());
+        assert_eq!(app.form.as_ref().unwrap().fields[0].editor.value(), "5000");
     }
 
     #[test]
