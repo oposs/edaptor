@@ -5,10 +5,9 @@ objectClass: organizationalUnit
 ou: people
 description: User accounts
 
-dn: ou=groups,dc=example,dc=org
-objectClass: organizationalUnit
-ou: groups
-description: Groups
+# NOTE: ou=groups,dc=example,dc=org is auto-created by the Bitnami image's
+# default tree, so we do not add it here (it would collide on a fresh start).
+# Our generated group entries live under that auto-created OU.
 
 dn: ou=services,dc=example,dc=org
 objectClass: organizationalUnit
