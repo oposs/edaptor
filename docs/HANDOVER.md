@@ -1,12 +1,13 @@
 # edaptor — Project Handover
 
-**Date:** 2026-06-03
-**`main` HEAD:** `010f37c` (working tree clean; local-only — not pushed to `origin`)
-**Latest landed:** the **unified configurable picker** (`[profile.picker.<attr>]`) is **implemented and merged to `main`** — see below. Known follow-up: split the ~2850-line `src/ui/app.rs` god-file into focused modules (deferred, user-approved).
+**Date:** 2026-06-04
+**`main` HEAD:** `0d4c935` (working tree clean; local-only — not pushed to `origin`)
+**Latest landed:** the **`src/ui/app.rs` decomposition** is **done and merged to `main`** (`37385a0…75cfdc8`) — the ~2850-line god-file is now split into focused modules under `src/ui/app/` plus a domain layer (see project memory `edaptor-app-rs-decomposition`).
+**Current focus (in progress):** a **build system + documentation** effort, modelled on the `byonk` project. The design spec is **committed** (`0d4c935`) and awaiting the implementation plan; it includes a **TLS migration from `native-tls`/OpenSSL to rustls**. Nothing implemented yet — see "Build system & documentation" below.
 
 `edaptor` is a Rust **ratatui** TUI for administering an OpenLDAP directory (users, groups, group memberships). It derives the directory's structure from live schema introspection (`cn=subschema`) and generates edit forms from `objectClass` definitions; a TOML config declares connection settings plus *entry profiles* ("what a user/group means here").
 
-> **Note:** `README.md`'s "Status" / "Turbo Vision" wording is still **stale** — the UI was migrated off turbo-vision to ratatui 0.30. (A `## Local test server` section was added this session and the `## Configuration` example is current; only the top "Status" blurb lags.) The authoritative design is [`docs/superpowers/specs/2026-05-29-edaptor-design.md`](superpowers/specs/2026-05-29-edaptor-design.md).
+> **Note:** `README.md`'s "Status" / "Turbo Vision" wording is still **stale** — the UI was migrated off turbo-vision to ratatui 0.30. (A `## Local test server` section was added and the `## Configuration` example is current; only the top "Status" blurb lags.) This refresh is **slated as part of the build-system & docs work** (it includes README touch-ups). The authoritative design is [`docs/superpowers/specs/2026-05-29-edaptor-design.md`](superpowers/specs/2026-05-29-edaptor-design.md).
 
 ---
 
@@ -25,7 +26,9 @@
 | **Rich provisioned test server + seed data** | ✅ merged to `main` (`ba20f39`…`33cf887`) |
 | **Picker UX fixes** (scroll, search-matches-first, multi-value-editor scroll) | ✅ merged to `main` (`cfe6563`, `87e5533`) |
 | **Unified configurable picker** (replaces `[[relation]]` + `[profile.lookup]`) | ✅ **implemented + merged to `main`** (`010f37c`); one `[profile.picker.<attr>]` binding, gated live tests for all 4 shapes |
-| M6 leftovers (paged-scale lists, result-code→human table polish, SASL EXTERNAL/GSSAPI auth, packaging) | ⏳ pending |
+| **`src/ui/app.rs` decomposition** (god-file → `src/ui/app/` modules + domain layer + `Ctx`) | ✅ **merged to `main`** (`37385a0…75cfdc8`) |
+| **Build system + documentation** (Makefile, mise, mdBook docs, CI/docs/release workflows, **rustls migration**, MIT license) | 🟡 **specced** (`0d4c935`), plan + implementation pending — see below |
+| M6 leftovers (paged-scale lists, result-code→human table polish, SASL EXTERNAL/GSSAPI auth) | ⏳ pending (packaging now covered by the build-system effort) |
 
 ---
 
@@ -100,16 +103,45 @@ declares four: `member` (group, DN, multi), `gidNumber` (user, scalar, single),
 - `src/ui/view.rs` — `render_value_editor` single-vs-multi markers from binding cardinality (passed as `single: bool`).
 - `tests/live_membership.rs`, `tests/live_templates.rs` — gated live tests; `live_templates` adds the 4-shape picker coverage (one un-gated config-resolution check).
 
-**Known follow-up:** `src/ui/app.rs` is a ~2850-line (production) god-file. Split into focused modules under `src/ui/app/` (`worker_response`, `forms`, `save`, `picker_ui`) — deferred to its own branch by user decision; do it after this so the deletion churn is already behind us.
+**Known follow-up (now DONE):** the ~2850-line `src/ui/app.rs` god-file was split into focused modules under `src/ui/app/` plus a domain layer, with co-mutated orchestration state bundled into a `Ctx` struct — merged to `main` (`37385a0…75cfdc8`). See project memory `edaptor-app-rs-decomposition`.
+
+---
+
+## Build system & documentation (specced this session — NOT yet implemented)
+
+A `byonk`-modelled build/docs effort. **Spec committed** at
+[`specs/2026-06-04-build-system-and-docs-design.md`](superpowers/specs/2026-06-04-build-system-and-docs-design.md);
+implementation plan and code still **pending**. Decisions locked: name stays
+`edaptor` (repo `oposs/edaptor`, docs `/edaptor/`), **MIT license**, config
+reference is the docs centerpiece, TUI layouts shown as fenced ` ``` ` blocks
+(no captured screenshots), versioned GitHub Pages at `oposs.github.io/edaptor`,
+**no release container** (TUI client).
+
+Planned deliverables:
+- `Makefile` + `mise.toml` (rust + pinned mdbook/mdbook-mermaid).
+- mdBook docs under `docs/src/**` (Getting Started · **Configuration** · Concepts
+  · Usage · Reference); `docs/book.toml` + ported version-selector theme.
+- `examples/config.toml` (annotated reference; `demo-config.toml` already exists).
+- `.github/workflows/{ci,docs,release}.yml` + `.github/scripts/manage-doc-versions.sh`.
+- `CHANGES.md` (Keep-a-Changelog), `LICENSE` (MIT), README status/license refresh.
+
+**TLS migration (prerequisite, part of this effort):** swap `native-tls`/OpenSSL
+→ **rustls** (`ldap3` `tls-rustls-ring`; add `rustls` + `rustls-pemfile`; drop
+`native-tls`). Rewrite `src/ldap/tls.rs` `build_settings` to build a
+`rustls::ClientConfig` (custom-CA via `RootCertStore` + `set_config`;
+`verify=false` via `set_no_tls_verify`, with a self-installed `NoCertVerification`
+when a custom CA *and* `verify=false` coexist — confirmed against ldap3 source).
+Backend swap only — identical externally-visible semantics. This removes the
+static-musl OpenSSL problem entirely (no vendoring needed).
 
 ---
 
 ## Open items / known gaps
 
-1. **`main` is local-only** — not pushed to `origin` (`git@github.com:oposs/edaptor.git`). `feat-picker-polish` (an earlier branch) is fully contained in `main` and can be deleted.
-2. **README "Status" blurb** still says Turbo Vision / early development — needs a one-paragraph refresh.
+1. **`main` is local-only** — not pushed to `origin` (`git@github.com:oposs/edaptor.git`). The build-system effort wires up CI/docs/release workflows that only take effect once `main` is pushed and GitHub Pages is enabled.
+2. **Build system & docs not yet implemented** — spec is committed (`0d4c935`); the next step is `writing-plans` → implementation. Includes the rustls migration and the README "Status"/"Turbo Vision" refresh.
 3. **M5 Samba** has no standalone in-TUI "Set Password"/Samba-enable action on arbitrary entries (only inline on create/edit of password-profile entries, plus the `edaptor passwd <dn>` CLI).
-4. **M6 leftovers** pending (paged-scale lists, result-code polish, SASL auth, packaging).
+4. **M6 leftovers** pending (paged-scale lists, result-code polish, SASL auth). Packaging is now folded into the build-system effort.
 
 ---
 
@@ -118,7 +150,7 @@ declares four: `member` (group, DN, multi), `gidNumber` (user, scalar, single),
 ```bash
 # Build + checks (must be green before any commit)
 cargo build --all-targets
-cargo test -p edaptor                       # 308 lib tests; live_* tests SKIP without the env var
+cargo test -p edaptor                       # ~309 lib tests; live_* tests SKIP without the env var
 cargo clippy --all-targets -- -D warnings
 cargo fmt --check
 
