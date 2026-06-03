@@ -626,7 +626,7 @@ mod tests {
         let selected = vec![Candidate {
             dn: "uid=bob,ou=people,dc=example,dc=org".to_string(),
             label: "Bob Baker (bob)".to_string(),
-            value: None,
+            store_value: "uid=bob,ou=people,dc=example,dc=org".to_string(),
         }];
         crate::ui::edit_form::ValueEditor {
             field: 0,
@@ -636,7 +636,7 @@ mod tests {
             rows: Vec::new(),
             sel: 0,
             scroll: 0,
-            picker: Some(PickerState::new(selected)),
+            picker: Some(PickerState::new(selected, true)),
             search: TextState::new(),
             scope: None,
             role: None,
@@ -676,10 +676,10 @@ mod tests {
             .map(|i| Candidate {
                 dn: format!("uid=u{i:02},ou=people"),
                 label: format!("User{i:02}"),
-                value: None,
+                store_value: format!("uid=u{i:02},ou=people"),
             })
             .collect();
-        let mut ps = PickerState::new(vec![]);
+        let mut ps = PickerState::new(vec![], true);
         ps.set_results(results);
         ps.cursor = 39;
         let mut ve = crate::ui::edit_form::ValueEditor {

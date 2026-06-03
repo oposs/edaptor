@@ -435,7 +435,11 @@ fn handle_worker_response(
                             Some(spec) => crate::ui::picker::Candidate {
                                 dn: e.dn.clone(),
                                 label: candidate_label_for_lookup(spec, &e.dn, &e.attrs),
-                                value: crate::ui::picker::pick_value(&e.attrs, &spec.value_attr),
+                                store_value: crate::ui::picker::pick_value(
+                                    &e.attrs,
+                                    &spec.value_attr,
+                                )
+                                .unwrap_or_default(),
                             },
                             None => crate::ui::picker::Candidate {
                                 dn: e.dn.clone(),
@@ -444,7 +448,7 @@ fn handle_worker_response(
                                     &e.dn,
                                     &e.attrs,
                                 ),
-                                value: None,
+                                store_value: e.dn.clone(),
                             },
                         })
                         .collect();
@@ -452,7 +456,9 @@ fn handle_worker_response(
                     // tree as bare `cn`) to the richer result label once results
                     // arrive — so a saved member shows "Bob Baker (bob)" too.
                     for sel in p.selected.iter_mut() {
-                        if let Some(r) = results.iter().find(|r| r.dn.eq_ignore_ascii_case(&sel.dn))
+                        if let Some(r) = results
+                            .iter()
+                            .find(|r| r.store_value.eq_ignore_ascii_case(&sel.store_value))
                         {
                             sel.label = r.label.clone();
                         }
@@ -819,12 +825,12 @@ fn picker_editor_key(app: &mut App, key: KeyEvent) {
                         let chosen = picker
                             .selected
                             .first()
-                            .and_then(|c| c.value.clone())
+                            .and_then(|c| Some(c.store_value.clone()).filter(|s| !s.is_empty()))
                             .or_else(|| {
-                                picker
-                                    .visible()
-                                    .get(picker.cursor)
-                                    .and_then(|row| row.candidate.value.clone())
+                                picker.visible().get(picker.cursor).and_then(|row| {
+                                    Some(row.candidate.store_value.clone())
+                                        .filter(|s| !s.is_empty())
+                                })
                             });
                         if let Some(v) = chosen {
                             if let Some(field) =
@@ -3536,7 +3542,7 @@ mod tests {
             rows: vec![],
             sel: 0,
             scroll: 0,
-            picker: Some(crate::ui::picker::PickerState::new(vec![])),
+            picker: Some(crate::ui::picker::PickerState::new(vec![], true)),
             search: TextState::new(),
             scope: Some(scope),
             role: Some(RelationRole::Holder),
@@ -3557,7 +3563,7 @@ mod tests {
         ve.picker.as_mut().unwrap().set_results(vec![Candidate {
             dn: "uid=a,ou=people".into(),
             label: "a".into(),
-            value: None,
+            store_value: "uid=a,ou=people".into(),
         }]);
         app.overlay = Some(Overlay::ValueEditor(ve));
         // Enter toggles the cursor row (a) into the selection.
@@ -3718,7 +3724,7 @@ mod tests {
             ve.picker.as_mut().unwrap().set_results(vec![Candidate {
                 dn: "cn=staff,ou=groups,dc=test".into(),
                 label: "staff".into(),
-                value: Some("5001".into()),
+                store_value: "5001".into(),
             }]);
         }
         // Alt+S commits the chosen scalar into the field's inline editor.
@@ -3741,12 +3747,12 @@ mod tests {
                 Candidate {
                     dn: "cn=staff,ou=groups,dc=test".into(),
                     label: "staff".into(),
-                    value: Some("5000".into()),
+                    store_value: "5000".into(),
                 },
                 Candidate {
                     dn: "cn=dev,ou=groups,dc=test".into(),
                     label: "dev".into(),
-                    value: Some("5001".into()),
+                    store_value: "5001".into(),
                 },
             ]);
         }
@@ -3755,7 +3761,7 @@ mod tests {
         if let Some(Overlay::ValueEditor(ve)) = app.overlay.as_ref() {
             let p = ve.picker.as_ref().unwrap();
             assert_eq!(p.selected.len(), 1, "single-select holds exactly one");
-            assert_eq!(p.selected[0].value.as_deref(), Some("5000"));
+            assert_eq!(p.selected[0].store_value, "5000");
         } else {
             panic!("picker overlay gone");
         }
@@ -3775,7 +3781,7 @@ mod tests {
             ve.picker.as_mut().unwrap().set_results(vec![Candidate {
                 dn: "cn=staff,ou=groups,dc=test".into(),
                 label: "staff".into(),
-                value: None, // candidate lacked value_attr
+                store_value: String::new(), // candidate lacked value_attr
             }]);
         }
         picker_editor_key(&mut app, alt(KeyCode::Char('s')));
@@ -3799,7 +3805,7 @@ mod tests {
             ve.picker.as_mut().unwrap().set_results(vec![Candidate {
                 dn: "cn=staff group,ou=groups,dc=test".into(),
                 label: "staff group".into(),
-                value: Some("5001".into()),
+                store_value: "5001".into(),
             }]);
         }
         // Bare Space → search box, not a selection toggle.

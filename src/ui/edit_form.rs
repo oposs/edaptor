@@ -165,7 +165,7 @@ impl ValueEditor {
             .map(|dn| Candidate {
                 dn: dn.clone(),
                 label: label_of(dn),
-                value: None,
+                store_value: dn.clone(),
             })
             .collect();
         ValueEditor {
@@ -176,7 +176,7 @@ impl ValueEditor {
             rows: Vec::new(),
             sel: 0,
             scroll: 0,
-            picker: Some(PickerState::new(selected)),
+            picker: Some(PickerState::new(selected, true)),
             search: TextState::new(),
             scope: Some(rel.scope.clone()),
             role: Some(rel.role),
@@ -202,7 +202,7 @@ impl ValueEditor {
             rows: Vec::new(),
             sel: 0,
             scroll: 0,
-            picker: Some(PickerState::new(Vec::new())),
+            picker: Some(PickerState::new(Vec::new(), false)),
             search: TextState::new(),
             scope: None,
             role: None,

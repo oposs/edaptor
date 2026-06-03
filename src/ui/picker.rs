@@ -59,16 +59,16 @@ pub fn candidate_label(dn: &str, attrs: &BTreeMap<String, Vec<String>>) -> Strin
         .unwrap_or_else(|| dn.to_string())
 }
 
-/// One candidate entry: the DN that is stored, and the human label that is shown.
-/// For value-lookup pickers `value` also carries the scalar attribute (the
-/// `value_attr`) committed on Enter; membership pickers leave it `None`.
+/// One candidate: the real entry `dn` (fan-out target; also the key/store value
+/// when `store = dn`), the human `label` shown, and `store_value` — the scalar
+/// committed into the field and the identity key for dedupe/toggle/selection.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Candidate {
     pub dn: String,
     pub label: String,
-    /// The scalar to commit for a value-lookup pick (the chosen entry's
-    /// `value_attr`); `None` for membership candidates and when absent/empty.
-    pub value: Option<String>,
+    /// The value committed for this pick (the DN for `store = dn`, else the
+    /// chosen `store` attribute). Also the identity key.
+    pub store_value: String,
 }
 
 /// Pull the scalar `value_attr` from a candidate's attributes (first value).
@@ -89,9 +89,9 @@ pub fn pick_value(
 pub struct VisibleRow {
     pub candidate: Candidate,
     pub selected: bool,
-    /// True when this row's DN was already persisted (saved) on the entry when
-    /// the picker opened — lets the UI mark it (e.g. `*`), including a saved
-    /// member toggled off (`selected == false`, `saved == true`).
+    /// True when this row's store value was already persisted (saved) on the
+    /// entry when the picker opened — lets the UI mark it (e.g. `*`), including a
+    /// saved member toggled off (`selected == false`, `saved == true`).
     pub saved: bool,
 }
 
@@ -106,10 +106,10 @@ pub const PICKER_SEARCH_CAP: i32 = 100;
 pub struct PickerState {
     pub selected: Vec<Candidate>,
     pub results: Vec<Candidate>,
-    /// DNs that were already persisted (saved) on the entry when the picker
-    /// opened — seeded from the initial `selected`. Used to mark saved rows in
-    /// the UI; a saved member toggled off stays here (so it can show as "will
-    /// be removed").
+    /// Store values that were already persisted (saved) on the entry when the
+    /// picker opened — seeded from the initial `selected` (the DN for `store =
+    /// dn`). Used to mark saved rows in the UI; a saved member toggled off stays
+    /// here (so it can show as "will be removed").
     pub saved: Vec<String>,
     pub cursor: usize,
     /// First visible row index — the scroll offset for the candidate list, kept
@@ -123,15 +123,25 @@ pub struct PickerState {
     /// True when the last search returned exactly `PICKER_SEARCH_CAP` entries —
     /// a heuristic signal that the server may have more matching entries.
     pub truncated: bool,
+    /// True ⇒ keys (store values) compare case-insensitively (DN store); false ⇒
+    /// exact (scalar store). Set at construction from the binding's `StoreKey`.
+    pub key_ci: bool,
 }
 
-fn same_dn(a: &str, b: &str) -> bool {
-    a.eq_ignore_ascii_case(b)
+/// Compare two store-value keys. Case-insensitive for DN stores (`ci == true`),
+/// exact otherwise. A free function so closures in `visible()` can call it
+/// without borrowing `&self` while `self.saved`/`selected`/`results` are borrowed.
+fn same_key(ci: bool, a: &str, b: &str) -> bool {
+    if ci {
+        a.eq_ignore_ascii_case(b)
+    } else {
+        a == b
+    }
 }
 
 impl PickerState {
-    pub fn new(selected: Vec<Candidate>) -> Self {
-        let saved = selected.iter().map(|c| c.dn.clone()).collect();
+    pub fn new(selected: Vec<Candidate>, key_ci: bool) -> Self {
+        let saved = selected.iter().map(|c| c.store_value.clone()).collect();
         PickerState {
             selected,
             results: Vec::new(),
@@ -140,6 +150,7 @@ impl PickerState {
             scroll: 0,
             search_active: false,
             truncated: false,
+            key_ci,
         }
     }
 
@@ -157,24 +168,33 @@ impl PickerState {
     /// Either way, saved-but-removed members not otherwise shown are appended so
     /// the UI can render them as "will be removed".
     pub fn visible(&self) -> Vec<VisibleRow> {
-        let is_saved = |dn: &str| self.saved.iter().any(|d| same_dn(d, dn));
-        let is_selected = |dn: &str| self.selected.iter().any(|s| same_dn(&s.dn, dn));
-        let in_results = |dn: &str| self.results.iter().any(|r| same_dn(&r.dn, dn));
+        let ci = self.key_ci;
+        let is_saved = |sv: &str| self.saved.iter().any(|d| same_key(ci, d, sv));
+        let is_selected = |sv: &str| {
+            self.selected
+                .iter()
+                .any(|s| same_key(ci, &s.store_value, sv))
+        };
+        let in_results = |sv: &str| {
+            self.results
+                .iter()
+                .any(|r| same_key(ci, &r.store_value, sv))
+        };
         let mut rows: Vec<VisibleRow> = Vec::new();
         if self.search_active {
             // Results first (marked when also selected)...
             for r in &self.results {
                 rows.push(VisibleRow {
-                    saved: is_saved(&r.dn),
-                    selected: is_selected(&r.dn),
+                    saved: is_saved(&r.store_value),
+                    selected: is_selected(&r.store_value),
                     candidate: r.clone(),
                 });
             }
             // ...then selected members that did not match the search.
             for c in &self.selected {
-                if !in_results(&c.dn) {
+                if !in_results(&c.store_value) {
                     rows.push(VisibleRow {
-                        saved: is_saved(&c.dn),
+                        saved: is_saved(&c.store_value),
                         candidate: c.clone(),
                         selected: true,
                     });
@@ -184,15 +204,15 @@ impl PickerState {
             // Selected first, then results not already selected.
             for c in &self.selected {
                 rows.push(VisibleRow {
-                    saved: is_saved(&c.dn),
+                    saved: is_saved(&c.store_value),
                     candidate: c.clone(),
                     selected: true,
                 });
             }
             for r in &self.results {
-                if !is_selected(&r.dn) {
+                if !is_selected(&r.store_value) {
                     rows.push(VisibleRow {
-                        saved: is_saved(&r.dn),
+                        saved: is_saved(&r.store_value),
                         candidate: r.clone(),
                         selected: false,
                     });
@@ -202,16 +222,22 @@ impl PickerState {
         // Saved members that are neither still selected nor in the current
         // results (e.g. toggled off with no active search) still need a row so
         // the UI can show them as "saved, will be removed". Synthesize from the
-        // DN — the friendly label is not retained in `saved`.
-        for dn in &self.saved {
-            let in_selected = self.selected.iter().any(|s| same_dn(&s.dn, dn));
-            let in_results = self.results.iter().any(|r| same_dn(&r.dn, dn));
+        // saved store value — the friendly label is not retained in `saved`.
+        for sv in &self.saved {
+            let in_selected = self
+                .selected
+                .iter()
+                .any(|s| same_key(ci, &s.store_value, sv));
+            let in_results = self
+                .results
+                .iter()
+                .any(|r| same_key(ci, &r.store_value, sv));
             if !in_selected && !in_results {
                 rows.push(VisibleRow {
                     candidate: Candidate {
-                        dn: dn.clone(),
-                        label: dn.clone(),
-                        value: None,
+                        dn: sv.clone(),
+                        label: sv.clone(),
+                        store_value: sv.clone(),
                     },
                     selected: false,
                     saved: true,
@@ -245,8 +271,13 @@ impl PickerState {
         let Some(row) = rows.get(self.cursor) else {
             return;
         };
-        let dn = row.candidate.dn.clone();
-        if let Some(pos) = self.selected.iter().position(|s| same_dn(&s.dn, &dn)) {
+        let sv = row.candidate.store_value.clone();
+        let ci = self.key_ci;
+        if let Some(pos) = self
+            .selected
+            .iter()
+            .position(|s| same_key(ci, &s.store_value, &sv))
+        {
             self.selected.remove(pos);
         } else {
             self.selected.push(row.candidate.clone());
@@ -257,6 +288,15 @@ impl PickerState {
         }
     }
 
+    /// Store values of the current selection — what a direct-write commit writes.
+    pub fn selected_values(&self) -> Vec<String> {
+        self.selected
+            .iter()
+            .map(|c| c.store_value.clone())
+            .collect()
+    }
+
+    /// Real entry DNs of the current selection — fan-out targets (`store = dn`).
     pub fn selected_dns(&self) -> Vec<String> {
         self.selected.iter().map(|c| c.dn.clone()).collect()
     }
@@ -270,14 +310,68 @@ mod tests {
         Candidate {
             dn: dn.into(),
             label: dn.into(),
-            value: None,
+            store_value: dn.into(), // store = dn: store_value == dn
         }
+    }
+
+    #[test]
+    fn scalar_store_keys_by_value_exact() {
+        let mut p = PickerState::new(
+            vec![Candidate {
+                dn: "alice".into(),
+                label: "alice".into(),
+                store_value: "alice".into(),
+            }],
+            false, // key_ci = false (scalar, exact)
+        );
+        p.set_results(vec![Candidate {
+            dn: "uid=Alice,ou=people".into(),
+            label: "Alice".into(),
+            store_value: "Alice".into(),
+        }]);
+        let dns: Vec<_> = p
+            .visible()
+            .iter()
+            .map(|r| r.candidate.store_value.clone())
+            .collect();
+        assert_eq!(dns, vec!["alice".to_string(), "Alice".to_string()]); // distinct
+    }
+
+    #[test]
+    fn dn_store_keys_case_insensitively() {
+        let mut p = PickerState::new(vec![c("UID=Bob,OU=people")], true); // key_ci = true
+        p.set_results(vec![c("uid=bob,ou=people")]); // same DN, different case
+        assert_eq!(p.visible().len(), 1);
+    }
+
+    #[test]
+    fn selected_values_returns_store_values() {
+        let mut p = PickerState::new(vec![], false);
+        p.set_results(vec![
+            Candidate {
+                dn: "uid=a,o=x".into(),
+                label: "A".into(),
+                store_value: "1001".into(),
+            },
+            Candidate {
+                dn: "uid=b,o=x".into(),
+                label: "B".into(),
+                store_value: "1002".into(),
+            },
+        ]);
+        p.cursor = 0;
+        p.toggle_cursor();
+        p.cursor = 1;
+        p.toggle_cursor();
+        let mut vals = p.selected_values();
+        vals.sort();
+        assert_eq!(vals, vec!["1001".to_string(), "1002".to_string()]);
     }
 
     #[test]
     fn selected_stays_visible_when_results_exclude_it() {
         // Seed selection = [A]; a search returns only [B] (A does not match).
-        let mut p = PickerState::new(vec![c("A")]);
+        let mut p = PickerState::new(vec![c("A")], true);
         p.set_results(vec![c("B")]);
         let dns: Vec<_> = p.visible().iter().map(|r| r.candidate.dn.clone()).collect();
         assert_eq!(dns, vec!["A".to_string(), "B".to_string()]); // A still present
@@ -287,7 +381,7 @@ mod tests {
 
     #[test]
     fn results_already_selected_are_not_duplicated() {
-        let mut p = PickerState::new(vec![c("A")]);
+        let mut p = PickerState::new(vec![c("A")], true);
         p.set_results(vec![c("A"), c("B")]);
         let dns: Vec<_> = p.visible().iter().map(|r| r.candidate.dn.clone()).collect();
         assert_eq!(dns, vec!["A".to_string(), "B".to_string()]);
@@ -295,7 +389,7 @@ mod tests {
 
     #[test]
     fn toggle_adds_and_removes() {
-        let mut p = PickerState::new(vec![]);
+        let mut p = PickerState::new(vec![], true);
         p.set_results(vec![c("A"), c("B")]);
         p.cursor = 0; // A
         p.toggle_cursor();
@@ -308,7 +402,7 @@ mod tests {
 
     #[test]
     fn cursor_clamps() {
-        let mut p = PickerState::new(vec![c("A")]);
+        let mut p = PickerState::new(vec![c("A")], true);
         p.move_cursor(5);
         assert_eq!(p.cursor, 0); // only one visible row
         p.move_cursor(-5);
@@ -317,7 +411,7 @@ mod tests {
 
     #[test]
     fn move_cursor_advances_and_stops_at_last() {
-        let mut p = PickerState::new(vec![c("A")]);
+        let mut p = PickerState::new(vec![c("A")], true);
         p.set_results(vec![c("B"), c("C")]);
         p.move_cursor(1);
         assert_eq!(p.cursor, 1);
@@ -386,7 +480,7 @@ mod tests {
 
     #[test]
     fn truncated_defaults_false_and_is_settable() {
-        let mut p = PickerState::new(vec![c("A")]);
+        let mut p = PickerState::new(vec![c("A")], true);
         assert!(!p.truncated, "truncated should default to false");
         p.truncated = true;
         assert!(p.truncated, "truncated should be settable");
@@ -428,14 +522,14 @@ mod tests {
 
     #[test]
     fn new_marks_seeded_selection_as_saved() {
-        let state = PickerState::new(vec![c("uid=bob,ou=people")]);
+        let state = PickerState::new(vec![c("uid=bob,ou=people")], true);
         assert_eq!(state.saved, vec!["uid=bob,ou=people".to_string()]);
     }
 
     #[test]
     fn visible_flags_saved_rows() {
         // Open with bob saved (seeded selection); search adds carol (not saved).
-        let mut p = PickerState::new(vec![c("uid=bob,ou=people")]);
+        let mut p = PickerState::new(vec![c("uid=bob,ou=people")], true);
         p.set_results(vec![c("uid=carol,ou=people")]);
         let rows = p.visible();
         let bob = rows
@@ -456,7 +550,7 @@ mod tests {
         // Selected = [A, B]; a search returns [C, D] (neither selected) plus B
         // (which is selected). With search active, results lead and the
         // non-matching selected member (A) trails.
-        let mut p = PickerState::new(vec![c("A"), c("B")]);
+        let mut p = PickerState::new(vec![c("A"), c("B")], true);
         p.set_results(vec![c("C"), c("D"), c("B")]);
         p.search_active = true;
         let rows = p.visible();
@@ -493,7 +587,7 @@ mod tests {
     #[test]
     fn no_search_keeps_selected_first() {
         // Same data, search inactive → original order: selected lead.
-        let mut p = PickerState::new(vec![c("A"), c("B")]);
+        let mut p = PickerState::new(vec![c("A"), c("B")], true);
         p.set_results(vec![c("C"), c("D"), c("B")]);
         assert!(!p.search_active, "defaults inactive");
         let dns: Vec<_> = p.visible().iter().map(|r| r.candidate.dn.clone()).collect();
@@ -506,7 +600,7 @@ mod tests {
 
     #[test]
     fn set_results_resets_cursor_and_scroll_to_top() {
-        let mut p = PickerState::new(vec![]);
+        let mut p = PickerState::new(vec![], true);
         p.set_results(vec![c("A"), c("B"), c("C")]);
         p.cursor = 2;
         p.scroll = 1;
@@ -518,7 +612,7 @@ mod tests {
     #[test]
     fn toggling_off_a_saved_member_keeps_saved_true() {
         // Open with bob saved, then toggle bob off.
-        let mut p = PickerState::new(vec![c("uid=bob,ou=people")]);
+        let mut p = PickerState::new(vec![c("uid=bob,ou=people")], true);
         p.cursor = 0; // bob
         p.toggle_cursor();
         let rows = p.visible();
