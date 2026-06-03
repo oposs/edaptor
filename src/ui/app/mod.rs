@@ -38,25 +38,27 @@ mod save;
 mod structure_view;
 #[cfg(test)]
 mod test_support;
-pub use overlay::{GuardIntent, Overlay, PendingAction};
-pub(crate) use overlay::PostWrite;
-pub(crate) use structure_view::{
-    build_tree_items, compute_rows, label_rule_attrs, label_rules, structure_inputs, LabelRule,
-};
-pub(crate) use input::{dispatch_key, membership_candidate_label, overlay_key, service_picker_search};
 pub(crate) use action::{
     build_loaded_form, execute_pending, guard_if_dirty, handle_action, object_classes_of,
     perform_guard_intent, rebind_selection, reconcile, should_install_form,
 };
+#[cfg(test)]
+pub(crate) use create::build_new_entry_form;
+pub(crate) use create::{
+    now_unix_secs_or_zero, open_create_form, prepare_create, profile_for_entry, stage_edit_password,
+};
+pub(crate) use input::{
+    dispatch_key, membership_candidate_label, overlay_key, service_picker_search,
+};
+pub(crate) use overlay::PostWrite;
+pub use overlay::{GuardIntent, Overlay, PendingAction};
 pub(crate) use save::{
     allocate_number, apply_combined_save, combined_save_overlay, format_validation_errors,
     prepare_edit_save, submit_prepared, PrepareSave,
 };
-pub(crate) use create::{
-    now_unix_secs_or_zero, open_create_form, prepare_create, profile_for_entry, stage_edit_password,
+pub(crate) use structure_view::{
+    build_tree_items, compute_rows, label_rule_attrs, label_rules, structure_inputs, LabelRule,
 };
-#[cfg(test)]
-pub(crate) use create::build_new_entry_form;
 
 /// Which of the three panes currently has focus.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -490,7 +492,6 @@ fn handle_worker_response(
         },
     }
 }
-
 
 /// Monotonic correlation id for write requests, starting at a high base so write
 /// ids never collide with the read/browse ids (which start at 1).

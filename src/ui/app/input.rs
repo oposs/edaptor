@@ -20,7 +20,11 @@ const PICKER_INIT_QUERY: &str = "\u{0}";
 
 /// Translate a key into an `App` mutation (gated by the focused pane), returning
 /// a [`UiAction`] for the few keys the loop must service with the worker.
-pub(crate) fn dispatch_key(app: &mut App, key: KeyEvent, structure: &Structure) -> Option<UiAction> {
+pub(crate) fn dispatch_key(
+    app: &mut App,
+    key: KeyEvent,
+    structure: &Structure,
+) -> Option<UiAction> {
     let alt = key.modifiers.contains(KeyModifiers::ALT);
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
 
