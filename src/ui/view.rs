@@ -499,13 +499,16 @@ fn render_value_editor(f: &mut Frame, ve: &mut ValueEditor, area: Rect) {
     let inner = block.inner(rect);
     f.render_widget(block, rect);
 
-    for (i, row) in ve.rows.iter().enumerate() {
-        if i as u16 >= inner.height {
-            break;
-        }
-        let y = inner.y + i as u16;
-        let selected = i == ve.sel;
-        let marker = format!("{:>2} {} ", i + 1, if selected { "▶" } else { " " });
+    // Scroll the value list so the selected row stays on screen (sticky
+    // viewport, same as the picker and the form list) — without this a field
+    // with many values (e.g. a posixGroup's `memberUid`) cannot scroll.
+    let viewport = inner.height as usize;
+    ve.scroll = clamp_scroll(ve.sel, ve.scroll, viewport, ve.rows.len());
+    let scroll = ve.scroll;
+    for (idx, row) in ve.rows.iter().enumerate().skip(scroll).take(viewport) {
+        let y = inner.y + (idx - scroll) as u16;
+        let selected = idx == ve.sel;
+        let marker = format!("{:>2} {} ", idx + 1, if selected { "▶" } else { " " });
         f.render_widget(
             Paragraph::new(marker).style(Style::default().fg(if selected {
                 Color::Blue
@@ -632,6 +635,7 @@ mod tests {
             secret: false,
             rows: Vec::new(),
             sel: 0,
+            scroll: 0,
             picker: Some(PickerState::new(selected)),
             search: TextState::new(),
             scope: None,
@@ -685,6 +689,7 @@ mod tests {
             secret: false,
             rows: Vec::new(),
             sel: 0,
+            scroll: 0,
             picker: Some(ps),
             search: TextState::new(),
             scope: None,
@@ -707,6 +712,48 @@ mod tests {
         assert!(all.contains("User39"), "cursor row must be visible after scroll");
         assert!(
             !all.contains("User00"),
+            "early rows must scroll off screen, got:\n{all}"
+        );
+    }
+
+    #[test]
+    fn multivalue_editor_scrolls_to_keep_selected_visible() {
+        // A free-text multi-value field (e.g. memberUid) with 40 rows in a
+        // 20-row popup: the selected last row must stay visible (list scrolls),
+        // and the first rows must scroll off.
+        let rows: Vec<TextState<'static>> = (0..40)
+            .map(|i| TextState::new().with_value(format!("val{i:02}")))
+            .collect();
+        let mut ve = crate::ui::edit_form::ValueEditor {
+            field: 0,
+            label: "memberUid".to_string(),
+            ordered: false,
+            secret: false,
+            rows,
+            sel: 39,
+            scroll: 0,
+            picker: None,
+            search: TextState::new(),
+            scope: None,
+            role: None,
+            lookup: None,
+            base: String::new(),
+        };
+        let (w, h) = (60u16, 20u16);
+        let backend = TestBackend::new(w, h);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| render_value_editor(f, &mut ve, Rect::new(0, 0, w, h)))
+            .expect("multi-value editor render must not panic");
+        let buffer = terminal.backend().buffer();
+        let mut all = String::new();
+        for y in 0..h {
+            all.push_str(&row_text(buffer, 0, y, w));
+            all.push('\n');
+        }
+        assert!(all.contains("val39"), "selected row must be visible after scroll");
+        assert!(
+            !all.contains("val00"),
             "early rows must scroll off screen, got:\n{all}"
         );
     }

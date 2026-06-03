@@ -2914,6 +2914,7 @@ mod tests {
                 .map(|i| TextState::new().with_value(format!("v{i}")))
                 .collect(),
             sel: 0,
+            scroll: 0,
             picker: None,
             search: TextState::new(),
             scope: None,
@@ -3533,6 +3534,7 @@ mod tests {
             secret: false,
             rows: vec![],
             sel: 0,
+            scroll: 0,
             picker: Some(crate::ui::picker::PickerState::new(vec![])),
             search: TextState::new(),
             scope: Some(scope),

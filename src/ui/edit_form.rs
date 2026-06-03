@@ -102,6 +102,10 @@ pub struct ValueEditor {
     pub rows: Vec<TextState<'static>>,
     /// The selected row index (free-text mode only).
     pub sel: usize,
+    /// First visible row — scroll offset for the free-text value list, kept in
+    /// sync with `sel` by the renderer so the selected row stays on screen with
+    /// many values (e.g. a posixGroup's `memberUid`).
+    pub scroll: usize,
     /// `Some` in picker mode (relation fields); `None` for the free-text editor.
     pub picker: Option<PickerState>,
     /// The picker's incremental-search box (Unicode-correct edit engine).
@@ -134,6 +138,7 @@ impl ValueEditor {
             secret: field.secret,
             rows,
             sel: 0,
+            scroll: 0,
             picker: None,
             search: TextState::new(),
             scope: None,
@@ -170,6 +175,7 @@ impl ValueEditor {
             secret: field.secret,
             rows: Vec::new(),
             sel: 0,
+            scroll: 0,
             picker: Some(PickerState::new(selected)),
             search: TextState::new(),
             scope: Some(rel.scope.clone()),
@@ -195,6 +201,7 @@ impl ValueEditor {
             secret: field.secret,
             rows: Vec::new(),
             sel: 0,
+            scroll: 0,
             picker: Some(PickerState::new(Vec::new())),
             search: TextState::new(),
             scope: None,
