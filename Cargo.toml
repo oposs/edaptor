@@ -30,6 +30,10 @@ tempfile = "3"
 name = "edaptor"
 path = "src/main.rs"
 
+[[bin]]
+name = "gen-testdata"
+path = "src/bin/gen-testdata.rs"
+
 [lib]
 name = "edaptor"
 path = "src/lib.rs"
