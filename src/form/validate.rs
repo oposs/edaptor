@@ -143,6 +143,21 @@ pub fn plan_save(cs: ChangeSet) -> SavePlan {
     }
 }
 
+/// Format a list of [`ValidationError`]s as one multi-line message.
+pub fn format_validation_errors(errors: &[ValidationError]) -> String {
+    let mut out = String::from("Cannot save — please fix:");
+    for e in errors {
+        let line = match e {
+            ValidationError::MissingMust(a) => format!("missing required attribute: {a}"),
+            ValidationError::MultiValueOnSingle(a) => format!("attribute is single-valued: {a}"),
+            ValidationError::SyntaxInvalid { attr, reason } => format!("{attr}: {reason}"),
+        };
+        out.push_str("\n- ");
+        out.push_str(&line);
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -339,5 +354,16 @@ mod tests {
                 then_mods: vec![a_mod()],
             }
         );
+    }
+
+    #[test]
+    fn validation_errors_format_as_bullets() {
+        let errs = vec![
+            ValidationError::MissingMust("sn".into()),
+            ValidationError::MultiValueOnSingle("cn".into()),
+        ];
+        let out = format_validation_errors(&errs);
+        assert!(out.contains("missing required attribute: sn"));
+        assert!(out.contains("attribute is single-valued: cn"));
     }
 }
