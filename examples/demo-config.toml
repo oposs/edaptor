@@ -1,0 +1,60 @@
+# edaptor demo config — points at the rich podman test server started by
+# `scripts/test-ldap.sh start`. Bind password is `adminpassword`, exposed via
+# the EDAPTOR_TEST_ADMIN_PW env var the script tells you to export.
+
+[server]
+uri          = "ldap://localhost:1389"
+base_dn      = "dc=example,dc=org"
+start_tls    = false
+timeout_secs = 10
+
+[auth]
+method          = "simple"
+bind_dn         = "cn=admin,dc=example,dc=org"
+password_source = "env:EDAPTOR_TEST_ADMIN_PW"
+
+# Samba domain SID fallback; edaptor also discovers it from the
+# sambaDomainName=EXAMPLE entry in the directory.
+[samba]
+domain_sid           = "S-1-5-21-1234567890-987654321-1122334455"
+algorithmic_rid_base = 1000
+
+[[profile]]
+name           = "user"
+object_classes = ["inetOrgPerson", "posixAccount", "shadowAccount", "sambaSamAccount"]
+rdn_attr       = "uid"
+search_base    = "ou=people,dc=example,dc=org"
+show           = ["uid", "cn", "sn", "givenName", "mail", "ou", "uidNumber", "gidNumber", "homeDirectory"]
+search_attrs   = ["cn", "uid", "mail"]
+label          = "{cn} ({uid})"
+
+[profile.defaults]
+loginShell    = "/bin/bash"
+homeDirectory = "/home/{uid}"
+uidNumber     = "{next:10000-60000}"
+
+[profile.password]
+ldap_attribute = "userPassword"
+samba          = true
+
+[profile.lookup.gidNumber]
+object_class = "posixGroup"
+search_base  = "ou=groups,dc=example,dc=org"
+value_attr   = "gidNumber"
+label        = "cn"
+search_attrs = ["cn"]
+
+[[profile]]
+name           = "group"
+object_classes = ["groupOfNames"]
+rdn_attr       = "cn"
+search_base    = "ou=groups,dc=example,dc=org"
+show           = ["cn", "description"]
+label          = "{cn}"
+
+[[relation]]
+name        = "group-membership"
+holder      = "group"
+holder_attr = "member"
+candidate   = "user"
+back_attr   = "memberOf"
