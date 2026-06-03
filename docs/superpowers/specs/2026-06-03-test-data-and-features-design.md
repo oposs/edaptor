@@ -141,19 +141,27 @@ Per-user attributes (`uid=<first><lastinitial><n>` style, unique):
 - `sambaSID` (domain SID + algorithmic RID from `uidNumber`),
   `sambaNTPassword`, `sambaPwdLastSet`, `sambaAcctFlags`
 
-Groups (~25), under `ou=groups`:
+Groups (~25), under `ou=groups`. **Important schema constraint:** `groupOfNames`
+and `posixGroup` are *both STRUCTURAL* in the stock `nis`/RFC 2307 schema that
+Bitnami (and the role) load — an entry may have only one structural object
+class, so they **cannot** be combined on one entry. The faithful representation
+(matching what the role produces with the `nis` schema) is **separate** entries,
+which also cleanly exercises edaptor's two distinct group consumers:
 
-- **5 department groups** — each **dual-class `groupOfNames` + `posixGroup`**,
-  carrying `cn`, `gidNumber` (5000..5004), `member` (DNs of every user in that
-  department, so `groupOfNames` is valid), and `memberUid` (the matching uids,
-  so `posixGroup` membership is consistent). Dual-class is required so **both**
-  edaptor consumers are exercised: the `group-membership` relation (needs
-  `groupOfNames.member`) **and** `profile.lookup.gidNumber` (needs
-  `posixGroup.gidNumber`).
-- **~20 functional/role groups** — plain `groupOfNames` spanning multiple
-  departments (e.g. `cn=all-staff`, `cn=managers`, `cn=vpn-users`,
-  project teams), each with a deterministic member subset, so reverse
-  `memberOf` views are non-trivial.
+- **5 department membership groups** — `cn=<Dept>,ou=groups`, structural
+  `groupOfNames`, `member` = DNs of every user in that department. These are
+  what the `group` profile and the `group-membership` relation act on.
+- **5 department posix groups** — `cn=<dept>-unix,ou=groups`, structural
+  `posixGroup`, `gidNumber` (5000..5004), `memberUid` = the uids in that
+  department, plus `description`. These are what `profile.lookup.gidNumber`
+  picks from; each user's `gidNumber` equals their department's `posixGroup`
+  gid. (Distinct `cn`s — `cn` matching is case-insensitive, so the groupOfNames
+  `cn=Engineering` and posixGroup `cn=engineering-unix` must not collapse to the
+  same RDN.)
+- **~15 functional/role groups** — `cn=all-staff`, `cn=managers`,
+  `cn=vpn-users`, project teams, etc., structural `groupOfNames` spanning
+  multiple departments, each with a deterministic non-empty member subset, so
+  reverse `memberOf` views are non-trivial.
 
 Ordering inside the LDIF: OUs already exist (from `base.ldif`); emit all users
 first, then groups (so group `member` DNs resolve and `memberOf` populates).
@@ -191,15 +199,18 @@ scan is not truncated).
 ## Testing
 
 - **Generator unit tests** (in `gen-testdata.rs` or a sibling module):
-  - exactly `--users` user entries and `5 + N` group entries emitted;
+  - exactly `--users` user entries and the expected group count emitted
+    (5 membership + 5 posix + functional);
   - `uidNumber` and `sambaSID` are unique across all users;
-  - every user's `gidNumber` equals exactly one department group's `gidNumber`;
-  - every department group's `member` DNs all exist among emitted users.
+  - every user's `gidNumber` equals exactly one department posixGroup's
+    `gidNumber`;
+  - every membership group's `member` DNs all exist among emitted users.
 - **New gated `tests/live_seed.rs`** (skips cleanly without
   `EDAPTOR_TEST_LDAP_URI`):
   - `ou=people` subtree returns > 100 entries (exercises paged scan past the
     500 size limit at 600 users);
-  - at least 5 groups are dual-class and expose a `gidNumber`;
+  - at least 5 `posixGroup` entries expose a `gidNumber`, and at least 5
+    `groupOfNames` entries expose `member`;
   - the `sambaDomain` entry is discoverable and yields a `sambaSID`.
 - The existing `live_membership` / `live_samba` / `live_write` /
   `live_structure` / `live_templates` suites must still pass unchanged.
