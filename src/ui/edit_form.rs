@@ -18,6 +18,7 @@ use crate::form::changeset::{is_x_ordered, EditEntry};
 use crate::schema::{FieldKind, SchemaModel};
 use crate::ui::form::{FormField, FormModel, WidgetSpec};
 use crate::ui::picker::{Candidate, PickerState};
+use crate::workflows::create::password_field_labels;
 
 /// One field of the editable form.
 pub struct EditField {
@@ -321,15 +322,6 @@ pub fn build_edit_form(model: &FormModel, schema: &SchemaModel, read_only: bool)
         baseline,
         mode: FormMode::Edit,
     }
-}
-
-/// The two synthetic form-field labels for a password spec: the primary (the
-/// configured LDAP attribute) and the confirmation field.
-pub fn password_field_labels(spec: &crate::config::PasswordSpec) -> (String, String) {
-    (
-        spec.ldap_attribute.clone(),
-        format!("{} (confirm)", spec.ldap_attribute),
-    )
 }
 
 /// Replace any schema-generated field for the password attribute with two masked

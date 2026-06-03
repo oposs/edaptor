@@ -158,27 +158,8 @@ pub fn would_empty(current_members: &[String], member: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ldap::worker::RawSubschema;
+    use crate::workflows::test_fixtures::user_schema;
     use std::collections::BTreeMap;
-
-    /// Inlined copy of the domain-pure user schema fixture (see
-    /// `crate::ui::app::test_support::user_schema`). Built from `RawSubschema`,
-    /// pulls no UI type, so it lives here to keep the boundary clean.
-    fn user_schema() -> SchemaModel {
-        let raw = RawSubschema {
-            object_classes: vec![
-                // No SUP top so validate does not require objectClass in the entry.
-                "( 1.2.3.4 NAME 'testUser' STRUCTURAL MUST uid MAY ( description $ memberOf ) )".to_string(),
-            ],
-            attribute_types: vec![
-                "( 0.9.2342.19200300.100.1.1 NAME 'uid' SYNTAX 1.3.6.1.4.1.1466.115.121.1.15 SINGLE-VALUE )".to_string(),
-                "( 2.5.4.13 NAME 'description' SYNTAX 1.3.6.1.4.1.1466.115.121.1.15 )".to_string(),
-                "( 1.2.840.113556.1.2.102 NAME 'memberOf' SYNTAX 1.3.6.1.4.1.1466.115.121.1.15 )".to_string(),
-            ],
-            ldap_syntaxes: vec![],
-        };
-        SchemaModel::from_raw(&raw)
-    }
 
     #[test]
     fn compose_renamed_dn_replaces_rdn() {

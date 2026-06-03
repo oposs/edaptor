@@ -2,11 +2,15 @@
 #![cfg(test)]
 
 use super::*;
-use crate::ldap::worker::RawSubschema;
 use crate::ui::edit_form::FormMode;
 use crate::workflows::structure::StructureInput;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use std::collections::BTreeMap;
+
+// Domain-pure fixtures now live in the shared module; re-export them so existing
+// ui tests that `use crate::ui::app::test_support::*` keep compiling unchanged.
+pub(crate) use crate::workflows::test_fixtures::{
+    attr_map, bare_profile, create_user_profile, user_schema,
+};
 
 /// A bare App (no form) with the given read-only flag, for dispatch tests.
 pub(crate) fn bare_app(read_only: bool) -> App {
@@ -104,21 +108,6 @@ pub(crate) fn structure() -> Structure {
     )
 }
 
-pub(crate) fn bare_profile(name: &str) -> EntryProfile {
-    EntryProfile {
-        name: name.into(),
-        object_classes: vec![],
-        rdn_attr: String::new(),
-        search_base: String::new(),
-        show: vec![],
-        search_attrs: vec![],
-        defaults: Default::default(),
-        password: None,
-        pickers: Default::default(),
-        label: None,
-    }
-}
-
 pub(crate) fn rule(ocs: &[&str], tmpl: &str) -> LabelRule {
     LabelRule {
         object_classes: ocs.iter().map(|s| s.to_string()).collect(),
@@ -126,52 +115,6 @@ pub(crate) fn rule(ocs: &[&str], tmpl: &str) -> LabelRule {
     }
 }
 
-pub(crate) fn attr_map(pairs: &[(&str, &[&str])]) -> BTreeMap<String, Vec<String>> {
-    pairs
-        .iter()
-        .map(|(k, vs)| (k.to_string(), vs.iter().map(|s| s.to_string()).collect()))
-        .collect()
-}
-
 pub(crate) fn key(code: KeyCode) -> KeyEvent {
     KeyEvent::new(code, KeyModifiers::NONE)
-}
-
-/// Minimal schema for user (inetOrgPerson-like) with uid, description, memberOf.
-pub(crate) fn user_schema() -> SchemaModel {
-    let raw = RawSubschema {
-        object_classes: vec![
-            // No SUP top so validate does not require objectClass in the entry.
-            "( 1.2.3.4 NAME 'testUser' STRUCTURAL MUST uid MAY ( description $ memberOf ) )".to_string(),
-        ],
-        attribute_types: vec![
-            "( 0.9.2342.19200300.100.1.1 NAME 'uid' SYNTAX 1.3.6.1.4.1.1466.115.121.1.15 SINGLE-VALUE )".to_string(),
-            "( 2.5.4.13 NAME 'description' SYNTAX 1.3.6.1.4.1.1466.115.121.1.15 )".to_string(),
-            "( 1.2.840.113556.1.2.102 NAME 'memberOf' SYNTAX 1.3.6.1.4.1.1466.115.121.1.15 )".to_string(),
-        ],
-        ldap_syntaxes: vec![],
-    };
-    SchemaModel::from_raw(&raw)
-}
-
-pub(crate) fn create_user_profile() -> EntryProfile {
-    EntryProfile {
-        name: "User".into(),
-        object_classes: vec!["testUser".into()],
-        rdn_attr: "uid".into(),
-        search_base: "ou=people,dc=example,dc=org".into(),
-        show: vec!["uid".into()],
-        search_attrs: vec![],
-        defaults: Default::default(),
-        password: None,
-        pickers: Default::default(),
-        label: None,
-    }
-}
-
-pub(crate) fn pw_spec(samba: bool) -> crate::config::PasswordSpec {
-    crate::config::PasswordSpec {
-        ldap_attribute: "userPassword".into(),
-        samba,
-    }
 }
