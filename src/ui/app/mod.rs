@@ -38,6 +38,7 @@ mod save;
 mod structure_view;
 #[cfg(test)]
 mod test_support;
+mod value_editor;
 pub(crate) use action::{
     build_loaded_form, guard_if_dirty, object_classes_of, perform_guard_intent, rebind_selection,
     should_install_form,
@@ -45,15 +46,14 @@ pub(crate) use action::{
 #[cfg(test)]
 pub(crate) use create::build_new_entry_form;
 pub(crate) use create::{open_create_form, prepare_create};
-pub(crate) use input::{
-    dispatch_key, membership_candidate_label, overlay_key, service_picker_search,
-};
+pub(crate) use input::{dispatch_key, overlay_key};
 pub(crate) use overlay::PostWrite;
 pub use overlay::{GuardIntent, Overlay, PendingAction};
 pub(crate) use save::{allocate_number, combined_save_overlay, prepare_edit_save, submit_prepared};
 pub(crate) use structure_view::{
     build_tree_items, compute_rows, label_rule_attrs, label_rules, structure_inputs, LabelRule,
 };
+pub(crate) use value_editor::{membership_candidate_label, service_picker_search};
 
 /// Which of the three panes currently has focus.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
