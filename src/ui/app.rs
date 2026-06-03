@@ -20,9 +20,7 @@ use tui_prompts::{State, TextState};
 use tui_tree_widget::{TreeItem, TreeState};
 
 use crate::app::UiAction;
-use crate::config::relation::{
-    backref_lookup, resolve_pickers, resolve_relations, ResolvedRelation,
-};
+use crate::config::relation::{resolve_pickers, resolve_relations, ResolvedRelation};
 use crate::config::{Config, EntryProfile};
 use crate::form::changeset::{diff, ChangeSet, EditEntry, ModOp};
 use crate::form::validate::{plan_save, validate, SavePlan, ValidationError};
@@ -1083,9 +1081,7 @@ fn handle_action(
             // Try the combined membership path first; fall back to the single-entry
             // path when no backref field actually changed. No guard intent here —
             // a plain Alt+S save has nothing to resume afterward.
-            if let Some(ov) =
-                combined_save_overlay(form, read_flow.schema(), &app.relations, profiles, None)
-            {
+            if let Some(ov) = combined_save_overlay(form, read_flow.schema(), profiles, None) {
                 app.overlay = Some(ov);
                 return;
             }
@@ -1412,13 +1408,9 @@ fn execute_pending(
             }
             // A membership-bearing save runs synchronously through CombinedSave;
             // the pending guard intent rides along and is performed on success.
-            if let Some(ov) = combined_save_overlay(
-                form,
-                read_flow.schema(),
-                &app.relations,
-                profiles,
-                Some(intent.clone()),
-            ) {
+            if let Some(ov) =
+                combined_save_overlay(form, read_flow.schema(), profiles, Some(intent.clone()))
+            {
                 app.overlay = Some(ov);
                 return;
             }
@@ -1905,18 +1897,17 @@ enum CombinedPlan {
 fn plan_combined_save(
     form: &EditForm,
     schema: &SchemaModel,
-    relations: &[ResolvedRelation],
     profiles: &[EntryProfile],
     now_secs: u64,
 ) -> CombinedPlan {
-    let backref = form.backref_labels();
-    if backref.is_empty() {
+    let fanout = form.fanout_labels();
+    if fanout.is_empty() {
         return CombinedPlan::NoMembershipChange;
     }
 
-    // Did any backref field actually change its value set?
+    // Did any fan-out field actually change its value set?
     let changed = form.fields.iter().any(|f| {
-        if !backref.contains(&f.label) {
+        if !fanout.contains(&f.label) {
             return false;
         }
         let base = form.baseline.get(&f.label).cloned().unwrap_or_default();
@@ -1926,15 +1917,15 @@ fn plan_combined_save(
         return CombinedPlan::NoMembershipChange;
     }
 
-    // Own-entry: strip backref labels from both sides, validate + diff.
+    // Own-entry: strip fan-out labels from both sides, validate + diff.
     let object_classes = object_classes_of(form);
     let oc_refs: Vec<&str> = object_classes.iter().map(|s| s.as_str()).collect();
     let mut original = EditEntry {
         dn: form.dn.clone(),
         attrs: form.baseline.clone(),
     };
-    let mut edited = form.to_edit_entry(); // already omits backref fields
-    for l in &backref {
+    let mut edited = form.to_edit_entry(); // already omits fan-out fields
+    for l in &fanout {
         original.attrs.remove(l);
         edited.attrs.remove(l);
     }
@@ -1976,34 +1967,34 @@ fn plan_combined_save(
     }
     own_cs.mods.extend(password_mods);
 
-    // Fan-out: one set of Add/Delete MODIFYs per backref field that changed.
-    let mut fanout: Vec<(String, ModOp)> = Vec::new();
+    // Fan-out: one set of Add/Delete MODIFYs per fan-out field that changed.
+    let mut fanout_ops: Vec<(String, ModOp)> = Vec::new();
     let mut preview_sets: Vec<ChangeSet> = Vec::new();
     if !own_cs.is_empty() {
         // Mask the password values in the preview only; `own_mods` keeps the real
         // cleartext/hash for the apply.
         preview_sets.push(mask_changeset_secrets(&own_cs, &mask_attrs));
     }
-    for f in form.fields.iter().filter(|f| backref.contains(&f.label)) {
-        let Some(rel) = backref_lookup(relations, &object_classes, &f.label) else {
+    for f in form.fields.iter().filter(|f| fanout.contains(&f.label)) {
+        let Some(attr) = f.picker.as_ref().and_then(|b| b.fanout_attr.clone()) else {
             continue;
         };
         let base = form.baseline.get(&f.label).cloned().unwrap_or_default();
-        let ops = membership_fanout(&form.dn, &base, &f.current_values(), &rel.holder_attr);
+        let ops = membership_fanout(&form.dn, &base, &f.current_values(), &attr);
         for (gdn, op) in ops {
             preview_sets.push(ChangeSet {
                 dn: gdn.clone(),
                 modrdn: None,
                 mods: vec![op.clone()],
             });
-            fanout.push((gdn, op));
+            fanout_ops.push((gdn, op));
         }
     }
 
     CombinedPlan::Ready {
         entry_dn: form.dn.clone(),
         own_mods: own_cs.mods,
-        fanout,
+        fanout: fanout_ops,
         ldif: render_changesets(&preview_sets),
     }
 }
@@ -2015,11 +2006,10 @@ fn plan_combined_save(
 fn combined_save_overlay(
     form: &EditForm,
     schema: &SchemaModel,
-    relations: &[ResolvedRelation],
     profiles: &[EntryProfile],
     then_intent: Option<GuardIntent>,
 ) -> Option<Overlay> {
-    match plan_combined_save(form, schema, relations, profiles, now_unix_secs_or_zero()) {
+    match plan_combined_save(form, schema, profiles, now_unix_secs_or_zero()) {
         CombinedPlan::Ready {
             entry_dn,
             own_mods,
@@ -4196,30 +4186,6 @@ mod tests {
         assert!(form.fields.iter().all(|f| !(f.editable && f.multi)));
     }
 
-    /// Resolved relations for the user schema: memberOf ↔ group.member.
-    fn user_relations() -> Vec<ResolvedRelation> {
-        use crate::config::relation::CandidateScope;
-        vec![ResolvedRelation {
-            name: "group-membership".into(),
-            holder_oc: "groupOfNames".into(),
-            holder_attr: "member".into(),
-            candidate_oc: "testUser".into(),
-            back_attr: "memberOf".into(),
-            candidate_scope: CandidateScope {
-                base: "ou=people,dc=x".into(),
-                object_classes: vec!["testUser".into()],
-                search_attrs: vec!["uid".into()],
-                label_template: None,
-            },
-            holder_scope: CandidateScope {
-                base: "ou=groups,dc=x".into(),
-                object_classes: vec!["groupOfNames".into()],
-                search_attrs: vec!["cn".into()],
-                label_template: None,
-            },
-        }]
-    }
-
     /// Build a user EditForm with:
     /// - own change: description baseline→["old desc"], values→["new desc"]
     /// - memberOf change: baseline→[g1], values→[g2]
@@ -4281,7 +4247,13 @@ mod tests {
                 scope: scope.clone(),
             }),
             lookup: None,
-            picker: None,
+            picker: Some(crate::config::relation::PickerBinding {
+                attr: "memberOf".into(),
+                scope: scope.clone(),
+                store: crate::config::relation::StoreKey::Dn,
+                select: None,
+                fanout_attr: Some("member".into()),
+            }),
         };
 
         let mut baseline = BTreeMap::new();
@@ -4339,10 +4311,16 @@ mod tests {
             editor: TextState::new(),
             relation: Some(FieldRelation {
                 role: RelationRole::BackRef,
-                scope,
+                scope: scope.clone(),
             }),
             lookup: None,
-            picker: None,
+            picker: Some(crate::config::relation::PickerBinding {
+                attr: "memberOf".into(),
+                scope,
+                store: crate::config::relation::StoreKey::Dn,
+                select: None,
+                fanout_attr: Some("member".into()),
+            }),
         };
 
         let mut baseline = BTreeMap::new();
@@ -4362,8 +4340,7 @@ mod tests {
     fn plan_combined_save_splits_own_and_fanout() {
         let form = user_form_own_and_memberof_change();
         let schema = user_schema();
-        let relations = user_relations();
-        let plan = plan_combined_save(&form, &schema, &relations, &[], 0);
+        let plan = plan_combined_save(&form, &schema, &[], 0);
         let (own_mods, fanout, _entry_dn) = match plan {
             CombinedPlan::Ready {
                 own_mods,
@@ -4393,10 +4370,9 @@ mod tests {
     fn rename_plus_membership_is_blocked() {
         let form = user_form_rename_and_memberof_change();
         let schema = user_schema();
-        let relations = user_relations();
         assert!(
             matches!(
-                plan_combined_save(&form, &schema, &relations, &[], 0),
+                plan_combined_save(&form, &schema, &[], 0),
                 CombinedPlan::Blocked(_)
             ),
             "rename + membership change must be Blocked"
@@ -4438,13 +4414,7 @@ mod tests {
     fn combined_save_blank_password_does_not_clobber_or_leak() {
         let (form, profiles) = pw_user_form_with_memberof_change();
         // Password fields left blank by the operator.
-        match plan_combined_save(
-            &form,
-            &user_schema(),
-            &user_relations(),
-            &profiles,
-            1_700_000_000,
-        ) {
+        match plan_combined_save(&form, &user_schema(), &profiles, 1_700_000_000) {
             CombinedPlan::Ready { own_mods, ldif, .. } => {
                 assert!(
                     !own_mods_touch(&own_mods, "userPassword"),
@@ -4474,13 +4444,7 @@ mod tests {
                 f.editor = TextState::new().with_value("hunter2".to_string());
             }
         }
-        match plan_combined_save(
-            &form,
-            &user_schema(),
-            &user_relations(),
-            &profiles,
-            1_700_000_000,
-        ) {
+        match plan_combined_save(&form, &user_schema(), &profiles, 1_700_000_000) {
             CombinedPlan::Ready { own_mods, ldif, .. } => {
                 assert!(
                     own_mods.contains(&ModOp::Replace {

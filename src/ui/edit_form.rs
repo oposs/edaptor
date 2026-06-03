@@ -306,10 +306,17 @@ impl EditForm {
     /// The entry as currently edited, in the shape the save path's
     /// [`crate::form::changeset::diff`] consumes.
     ///
-    /// BackRef relation fields (e.g. `memberOf`) are excluded: their changes drive
-    /// the fan-out save path (Task 5.3), not the single-entry diff. The caller must
-    /// also strip the same labels from the `original` (baseline) side before
-    /// calling [`crate::form::changeset::diff`] to avoid spurious deletes.
+    /// Fields excluded from the own-entry diff (their changes drive the
+    /// per-candidate fan-out save instead, not the single-entry diff):
+    /// - fields whose picker binding sets `fanout_attr` (the unified path), and
+    /// - legacy BackRef relation fields (e.g. `memberOf`) — kept until the
+    ///   relation machinery is removed.
+    ///
+    /// The caller must strip the SAME labels from the `original` (baseline) side
+    /// before calling [`crate::form::changeset::diff`] to avoid spurious deletes.
+    /// (Today every fan-out field also carries a BackRef relation, so the
+    /// combined-save path's baseline strip via `backref_labels()` covers both;
+    /// once relations are removed that strip must switch to `fanout_labels()`.)
     ///
     /// All other fields are included — even those whose [`EditField::current_values`]
     /// is empty — so a cleared field diffs to a delete.
@@ -318,13 +325,19 @@ impl EditForm {
             .fields
             .iter()
             .filter(|f| {
-                !matches!(
+                let is_backref_relation = matches!(
                     &f.relation,
                     Some(FieldRelation {
                         role: RelationRole::BackRef,
                         ..
                     })
-                )
+                );
+                let is_fanout_picker = f
+                    .picker
+                    .as_ref()
+                    .and_then(|b| b.fanout_attr.as_ref())
+                    .is_some();
+                !is_backref_relation && !is_fanout_picker
             })
             .map(|f| (f.label.clone(), f.current_values()))
             .collect();
@@ -347,6 +360,21 @@ impl EditForm {
                         ..
                     })
                 )
+            })
+            .map(|f| f.label.clone())
+            .collect()
+    }
+
+    /// Labels of fields whose picker binding fans out (excluded from the own-entry
+    /// diff; their change drives the per-candidate fan-out save).
+    pub fn fanout_labels(&self) -> Vec<String> {
+        self.fields
+            .iter()
+            .filter(|f| {
+                f.picker
+                    .as_ref()
+                    .and_then(|b| b.fanout_attr.as_ref())
+                    .is_some()
             })
             .map(|f| f.label.clone())
             .collect()
@@ -601,6 +629,47 @@ mod tests {
             attribute_types: vec![],
             ldap_syntaxes: vec![],
         })
+    }
+
+    #[test]
+    fn fanout_labels_come_from_picker_binding() {
+        use crate::config::relation::{CandidateScope, PickerBinding, StoreKey};
+        let mk = |fanout: Option<String>| EditForm {
+            dn: "uid=bob,ou=people,dc=x".into(),
+            fields: vec![EditField {
+                label: "memberOf".into(),
+                must: false,
+                editable: true,
+                multi: true,
+                secret: false,
+                ordered: false,
+                values: vec![],
+                kind: FieldKind::DistinguishedName,
+                widget: WidgetSpec::ReadOnlyText,
+                editor: TextState::new(),
+                relation: None,
+                lookup: None,
+                picker: Some(PickerBinding {
+                    attr: "memberOf".into(),
+                    scope: CandidateScope {
+                        base: "".into(),
+                        object_classes: vec![],
+                        search_attrs: vec![],
+                        label_template: None,
+                    },
+                    store: StoreKey::Dn,
+                    select: None,
+                    fanout_attr: fanout,
+                }),
+            }],
+            baseline: Default::default(),
+            mode: FormMode::Edit,
+        };
+        let with_fanout = mk(Some("member".into()));
+        assert_eq!(with_fanout.fanout_labels(), vec!["memberOf".to_string()]);
+        // A picker field WITHOUT fanout_attr is NOT a fanout label.
+        let no_fanout = mk(None);
+        assert!(no_fanout.fanout_labels().is_empty());
     }
 
     #[test]
