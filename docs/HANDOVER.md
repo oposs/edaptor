@@ -1,12 +1,12 @@
 # edaptor — Project Handover
 
-**Date:** 2026-06-02
-**`main` HEAD:** `54d10be` (working tree clean)
-**Active worktree:** `/scratch/oetiker/claude-worktrees/ldapedit-feat-rich-templates` on branch `feat-rich-templates` (**37 commits ahead of `main`**, code HEAD `468c0b9` + this doc commit) — the **rich user templates** milestone, **all phases (0–6) complete**, final review done (see the execution-progress section below). 264 lib tests + 3 gated live `live_templates` tests green; full end-to-end tmux smoke passed (create a posix user with multi-OC, defaults, autonumber, lookup-gidNumber, and password — verified against a real slapd). Ready for finish-branch (merge/PR — user's call).
+**Date:** 2026-06-03
+**`main` HEAD:** `e722902` (working tree clean; local-only — not pushed to `origin`)
+**In-progress branch:** `feat-unified-picker` (off `main`) — **design only**: the *unified configurable picker* spec is committed; no implementation yet. See "In progress" below.
 
 `edaptor` is a Rust **ratatui** TUI for administering an OpenLDAP directory (users, groups, group memberships). It derives the directory's structure from live schema introspection (`cn=subschema`) and generates edit forms from `objectClass` definitions; a TOML config declares connection settings plus *entry profiles* ("what a user/group means here").
 
-> **Note:** `README.md`'s "Status" / "Turbo Vision" wording is **stale** — the UI was migrated off turbo-vision to ratatui 0.30 (see milestones below). The authoritative design is [`docs/superpowers/specs/2026-05-29-edaptor-design.md`](superpowers/specs/2026-05-29-edaptor-design.md).
+> **Note:** `README.md`'s "Status" / "Turbo Vision" wording is still **stale** — the UI was migrated off turbo-vision to ratatui 0.30. (A `## Local test server` section was added this session and the `## Configuration` example is current; only the top "Status" blurb lags.) The authoritative design is [`docs/superpowers/specs/2026-05-29-edaptor-design.md`](superpowers/specs/2026-05-29-edaptor-design.md).
 
 ---
 
@@ -18,72 +18,115 @@
 | M2 Schema model (typed MUST/MAY, syntax→FieldKind) | ✅ |
 | M3 TUI shell + generic read tier | ✅ |
 | M4 Generic **write** path (diff→ChangeSet→LDIF→Modify/Add/ModRdn/Delete) | ✅ |
-| M5 Samba lifecycle (NT hash, SID/RID, group-map, synced password) | ✅ headless + `edaptor passwd <dn>` CLI; not surfaced in the TUI |
-| 3-pane redesign | ✅ merged |
-| turbo-vision → **ratatui 0.30** migration | ✅ merged |
-| UI polish (white theme, double-border focus, per-pane footers, F7 create, status-line hints, `GuardIntent`/`ResolveGuard` dirty-guard) | ✅ merged |
-| **Relation membership picker** | ✅ merged (`54d10be`) |
+| M5 Samba lifecycle (NT hash, SID/RID, group-map, synced password) | ✅ headless + `edaptor passwd <dn>` CLI; password also set inline on create/edit of password-profile entries; no standalone in-TUI "Set Password" action |
+| 3-pane redesign · turbo-vision → **ratatui 0.30** · UI polish | ✅ merged |
+| **Relation membership picker** (`[[relation]]`, member↔memberOf) | ✅ merged |
+| **Rich user templates** (multi-OC profiles, defaults, autonumber, password, `[profile.lookup]` value-lookup, F7 chooser) | ✅ **merged to `main`** (`d98305b`) |
+| **Rich provisioned test server + seed data** | ✅ merged to `main` (`ba20f39`…`33cf887`) |
+| **Picker UX fixes** (scroll, search-matches-first, multi-value-editor scroll) | ✅ merged to `main` (`cfe6563`, `87e5533`) |
+| **Unified configurable picker** (replaces `[[relation]]` + `[profile.lookup]`) | 🚧 **design approved, spec written**; implementation pending on `feat-unified-picker` |
 | M6 leftovers (paged-scale lists, result-code→human table polish, SASL EXTERNAL/GSSAPI auth, packaging) | ⏳ pending |
-| **Rich user templates** (branch `feat-rich-templates`) | ✅ complete — all phases 0–6 done; gated live tests + full tmux smoke green; awaiting final review + merge |
 
 ---
 
-## Background: the relation membership picker (merged to `main`)
+## Local test server & seed data (this session — on `main`)
 
-**Symmetric group↔user membership editing as a *picker mode* of the existing multi-value value-editor** — no separate dual-pane screen. Driven by one `[[relation]]` config block.
+`scripts/test-ldap.sh start` now provisions a Bitnami OpenLDAP to match the
+`oposs.openldap` ansible role and seeds it with realistic data, so the TUI and
+the gated live tests run against a representative directory.
 
-- **Forward (group's `member`):** Enter on the `member` field opens a live, size-capped (≤20) searchable **user** picker; current members stay pinned; commit writes the group entry via the existing single-entry save.
-- **Reverse (user's `memberOf`):** Enter on `memberOf` opens a **group** picker; on save it **fans out** `member` MODIFYs across the affected groups (synchronously, with last-member pre-validation and a partial-failure report). `memberOf` itself is never written (overlay-maintained).
+- **Provisioning assets** — `scripts/ldap-provision/`: `schema/{samba,mail}.ldif`
+  (loaded via the `cn=config` admin), `config/overlays.ldif`
+  (memberof/refint/ppolicy on `{2}mdb`), `data/{ppolicy,base}.ldif`
+  (OUs, `sambaDomain`, service accounts), `data/testdata.ldif` (generated,
+  committed). `README.md` in that dir documents each file.
+- **Generator** — `src/testdata.rs` (pure, deterministic; reuses
+  `samba::{nthash,sid,account}`) + `src/bin/gen-testdata.rs`. Produces ~600
+  users / 5 departments / ~25 groups. A unit drift-guard
+  (`committed_ldif_matches_generator`) fails if the generator changes without
+  regenerating the committed LDIF (`cargo run --bin gen-testdata`).
+- **Demo config** — `examples/demo-config.toml` (base `dc=example,dc=org`, bind
+  `cn=admin`/`adminpassword` via `EDAPTOR_TEST_ADMIN_PW`). Shared user password
+  is `test123`.
+- **Gated assertions** — `tests/live_seed.rs` (people count, posixGroup
+  gidNumbers, sambaDomain discoverable).
 
-**Spec:** [`docs/superpowers/specs/2026-06-01-relation-membership-picker-design.md`](superpowers/specs/2026-06-01-relation-membership-picker-design.md)
-**Plan:** [`docs/superpowers/plans/2026-06-01-relation-membership-picker.md`](superpowers/plans/2026-06-01-relation-membership-picker.md)
+**Bitnami gotchas worth knowing (validated):** cn=config writes need
+`LDAP_CONFIG_ADMIN_*` (bind `cn=admin,cn=config`); overlay `.so`s live in
+`/opt/bitnami/openldap/lib/openldap` (NOT the default module path); Bitnami
+auto-creates `ou=groups`, so `base.ldif` deliberately omits it; `apply_ldif`
+tolerates only "Already exists (68)" and fails loud on anything else.
+
+**Spec/plan:** [`specs/2026-06-03-test-data-and-features-design.md`](superpowers/specs/2026-06-03-test-data-and-features-design.md) · [`plans/2026-06-03-test-data-and-features.md`](superpowers/plans/2026-06-03-test-data-and-features.md)
+
+---
+
+## Picker UX fixes (this session — on `main`)
+
+The membership/lookup picker popup and the multi-value free-text editor both
+rendered rows from index 0 with no scroll offset, so the cursor went off-screen
+past the fold. Both now use a sticky `scroll` offset synced to the cursor via
+`clamp_scroll` (`PickerState.scroll`, `ValueEditor.scroll`). The picker also now
+puts **search matches first** when a term is active (`PickerState.search_active`
+flips `visible()` ordering); with no term, selected members lead. Covered by
+unit + `TestBackend` render tests in `src/ui/picker.rs` and `src/ui/view.rs`.
+
+---
+
+## In progress: unified configurable picker (`feat-unified-picker`)
+
+**Design approved; spec committed; NOT implemented.** Collapses the three forked
+field-population mechanisms — `[[relation]]` (DN membership + memberOf fan-out)
+and `[profile.lookup.<attr>]` (single scalar) — plus the would-be multi-scalar
+case (`memberUid` storing `uid`) into **one** `[profile.picker.<attr>]` binding:
+
+- `candidate` (profile name → search scope), `store` (`"dn"` default, or an attr
+  name — also the identity key), `select` (`auto`|`single`|`multi`),
+  `fanout_attr` (synthetic back-ref like `memberOf` → writes `member` on each
+  picked group). One internal `PickerBinding`; `PickerState` keys by store value
+  instead of always-DN; one `open`/search/commit path. Clean cut (no back-compat
+  for `[[relation]]`/`lookup`); demo config + README rewritten; a `posixgroup`
+  profile added so `memberUid` becomes a multi-select user picker.
+
+**Spec:** [`specs/2026-06-03-unified-picker-design.md`](superpowers/specs/2026-06-03-unified-picker-design.md) (on the branch). **Next step:** writing-plans → implementation. **When it lands it supersedes the "Membership picker" architecture below** (`relation.rs`, `LookupSpec`).
+
+---
+
+## Architecture: the picker today (current `main`; to be unified)
+
+> The relation membership picker and value-lookup are the **current** `main`
+> code; the unified-picker branch will replace them. Kept here until that lands.
+
+**Relation membership picker** — symmetric group↔user editing as a *picker mode*
+of the multi-value value-editor, driven by one `[[relation]]` block. Forward
+(group `member`): Enter opens a searchable user picker; commit writes the group.
+Reverse (user `memberOf`): Enter opens a group picker; save **fans out** `member`
+MODIFYs across affected groups (last-member pre-validation; partial-failure
+report); `memberOf` itself is never written (overlay-maintained).
+
+**Value-lookup** (`[profile.lookup.<attr>]`, e.g. gidNumber-from-group):
+single-select picker; Enter writes the chosen entry's `value_attr` **scalar**
+(not a DN) into the field.
 
 ### Where the code lives
-- `src/config/relation.rs` — `Relation` (`[[relation]]` TOML), `ResolvedRelation`/`CandidateScope`/`RelationRole`, `resolve_relations`, `holder_lookup`/`backref_lookup`. Pure.
-- `src/ui/picker.rs` — `PickerState` (selection always visible, toggle, cursor, `truncated`), `build_member_filter`/`escape_filter` (RFC 4515), `candidate_label`. Pure.
-- `src/config/mod.rs` — `Config.relations`; `EntryProfile.search_attrs` + `search_attributes()`.
-- `src/ldap/worker.rs` — `Request::Search.size_limit`; `run_search` returns partial entries on a size/time limit (`is_limit_rc`) instead of erroring.
-- `src/ui/edit_form.rs` — `FieldRelation` on `EditField`; `build_edit_form(…, relations)` tags fields; `ValueEditor` picker fields + `open_picker`; `EditForm::backref_labels`; `to_edit_entry` excludes BackRef fields.
-- `src/ui/app.rs` — `App.{relations,picker_search_id,picker_last_query}`; `picker_editor_key`; `service_picker_search`; the `Response::Entries` picker intercept; `plan_combined_save`/`combined_save_overlay`/`apply_combined_save`/`reload_form_sync`/`membership_fanout`/`would_empty`/`read_group_members`.
-- `src/ui/view.rs` — picker branch in `render_value_editor`.
+- `src/config/relation.rs` — `Relation`, `ResolvedRelation`/`CandidateScope`/`RelationRole`, `resolve_relations`, `holder_lookup`/`backref_lookup`. Pure. (`CandidateScope` + label machinery survive the unification.)
+- `src/config/mod.rs` — `Config.relations`; `EntryProfile.{search_attrs, lookups, label}` + `search_attributes()`; `LookupSpec`.
+- `src/ui/picker.rs` — `PickerState` (selection always visible, toggle, cursor, `scroll`, `search_active`, `truncated`), `build_member_filter`/`escape_filter` (RFC 4515), `candidate_label`, `pick_value`, `Candidate{dn,label,value}`. Pure.
+- `src/ldap/worker.rs` — `Request::Search.size_limit`; `run_search` returns partial entries on a size/time limit (`is_limit_rc`).
+- `src/ui/edit_form.rs` — `FieldRelation` + `EditField.{relation,lookup}`; `build_edit_form(…, relations)` tags fields; `tag_lookup_fields`; `ValueEditor` (`open`/`open_picker`/`open_lookup`, `scroll`); `to_edit_entry` excludes BackRef fields.
+- `src/ui/app.rs` — `App.{relations,picker_search_id,picker_last_query}`; `picker_editor_key`; `service_picker_search`; the `Response::Entries` picker intercept; `plan_combined_save`/`combined_save_overlay`/`apply_combined_save`/`membership_fanout`/`would_empty`/`read_group_members`.
+- `src/ui/view.rs` — picker + multi-value-editor branches in `render_value_editor` (both scroll via `clamp_scroll`).
 - `src/ldap/ldif.rs` — `render_changesets` (multi-entry LDIF preview).
-- `tests/live_membership.rs` — gated forward/reverse/last-member/size-cap tests.
-
-### Live wiring (it IS reachable in the running app)
-Enter on a field → `dispatch_key` → `open_value_editor(app, structure)` → picker mode for relation fields. `service_picker_search` runs each tick when a picker is open; results route via the `picker_search_id` intercept in `handle_worker_response`. Save: `FormSave`/`ResolveGuard{save:true}` → `combined_save_overlay` → Confirm → `apply_combined_save`. **Gated on config:** a field only becomes a picker if a `[[relation]]` is declared *and* the entry's objectClass matches; otherwise `member` opens the plain free-text editor. Example config block: `README.md` `## Configuration`.
-
-### Merge note (why this was non-trivial)
-The branch was cut at `41f90a1`; `main` then absorbed the UI-polish refactor, which **removed the `menu_defs` menu system** (profile-create is now **F7**) and **replaced `PendingAction::{Navigate,SaveThenNavigate}` with `GuardIntent` + `ResolveGuard{intent,save}`**. The merge (`54d10be`) re-integrated the picker onto that model: dropped `menu_defs`/`profile_count`; threaded an optional `then_intent: GuardIntent` through `PendingAction::CombinedSave` so a dirty-`memberOf` form that trips the focus/quit guard **saves, then resumes the pending intent on clean success**. Reviewed (opus) and approved; 207 tests green.
+- `tests/live_membership.rs`, `tests/live_templates.rs`, `tests/live_seed.rs` — gated live tests.
 
 ---
 
 ## Open items / known gaps
 
-1. **Membership apply-seam:** the gated `tests/live_membership.rs` (fan-out / last-member / size-cap, 4 tests) **now run green against a real podman slapd** (run this session). The manual tmux smoke of the live apply is still not done.
-2. **README status section is stale** (says Turbo Vision / early development) — the `## Status` blurb still needs a refresh. The `## Configuration` example is now current (rewritten in Task 6.3 as a rich multi-profile example with `object_classes`, defaults, password, and lookup).
-3. **M5 Samba** is headless-only as a *CLI* (`edaptor passwd <dn>`); password setting is now surfaced in the TUI for create- and edit-of password-profile entries (Phase 4), but there is still no standalone in-TUI "Set Password"/Samba-enable action on arbitrary entries.
-
----
-
-## Current milestone: rich user templates — execution progress
-
-**Spec:** [`docs/superpowers/specs/2026-06-02-rich-user-templates-design.md`](superpowers/specs/2026-06-02-rich-user-templates-design.md) · **Plan:** [`docs/superpowers/plans/2026-06-02-rich-user-templates.md`](superpowers/plans/2026-06-02-rich-user-templates.md). Branch `feat-rich-templates`, 27 commits, HEAD `39a33cd`.
-
-**Done (all phases):**
-- **Phase 0** — create-host unification: NEW renders in the pane-3 `FormMode::Create` form (Save→Add); the modal `Overlay::CreateForm` is deleted. Key fns: `build_new_entry_form`, `plan_create`/`prepare_create`, `should_install_form`.
-- **Phase 1** — `EntryProfile.object_class: String` → `object_classes: Vec<String>` (BREAKING, no alias). `build_add_entry` emits `top`+all classes deduped; `build_member_filter` ANDs classes; create resolves MUST/MAY over all classes.
-- **Phase 2** — `src/config/defaults.rs` (pure): `parse_default_value` (literal / `{attr}` template / `{next:MIN-MAX}`), `next_in_range`, `plan_defaults`; `[profile.defaults]` parsed onto `EntryProfile`.
-- **Phase 3** — `Response::Entries.truncated`; `decide_allocation`/`allocate_number` (sync subtree scan, REFUSES on truncation); defaults + autonumber applied in `prepare_create`.
-- **Phase 4 (FULL: 4.1–4.6 + combined-path fix)** — `[profile.password]` (`PasswordSpec`); `password_add_attrs` (create) / `password_replace_mods` (edit, honors `ldap_attribute`+samba); `inject_password_fields` (masked attr + `(confirm)` fields, schema password suppressed); `stage_password` (create) / `stage_edit_password` (edit, strips pseudo-fields from baseline+edited so a blank field never clobbers); `prepare_save` folds password mods into the ChangeSet + masks the preview; `prepare_edit_save` shared by plain-F2 and guard-resume. **All 5 save entry points stage the password** — create, single-edit ×2, **combined membership ×2** (the combined path was a real clobber bug, found in review and fixed in `39a33cd`). `tests/live_templates.rs` (gated) verifies create-time password Add→re-bind green against real slapd.
-- **Phase 6** — context-filtered profile chooser on F7 (`profiles_for_container` DN-boundary match; 0→all, 1→direct, >1→`Overlay::ChooseProfile`).
-- **Phase 5** — value-lookup picker (gidNumber-from-group). A field declared in `[profile.lookup.<attr>]` opens a **single-select** picker; Enter writes the chosen entry's `value_attr` **scalar** (not a DN) into the field. Key pieces: `config::LookupSpec` + `EntryProfile.lookups`; pure `picker::pick_value` + `Candidate.value: Option<String>`; `edit_form::tag_lookup_fields` + `EditField.lookup` (wired at create **and** edit form-build sites; edit uses `lookups_profile_for_entry`); `ValueEditor` carries `lookup`; `open_value_editor` opens the picker for a **single-value** field (no `multi` requirement — the key trap); `service_picker_search` requests `[value_attr, label, …search_attrs]`; the `Response::Entries` intercept fills `Candidate.value` via `pick_value`; `picker_editor_key` binds **Enter** to commit the scalar to `field.editor`. Both `profile_for_entry`/`lookups_profile_for_entry` now share `profile_for_entry_where`.
-- **Task 3.4 + 5.3 + 4.6** — gated `tests/live_templates.rs`: create-time password Unix round-trip, autonumber+multi-OC create, and lookup→gidNumber. All 3 pass against the podman slapd (run this session).
-- **Task 6.3** — README `## Configuration` rewritten as a rich multi-profile example (multi-OC user + `[profile.defaults]`/`[profile.password]`/`[profile.lookup.gidNumber]` + group + relation). Full tmux smoke passed end-to-end.
-
-**Final review (done):** a holistic branch review confirmed create/edit save-path coherence (defaults + autonumber + password staging + lookup-written fields compose into one Add without clobbering) and caught one real UX defect — the value-editor picker is shared by membership (commit on F2) and value-lookup (commit on Enter), but the footer hint and key handling were hardcoded for membership. Fixed in `8b34c9e`: footer branches on `ve.lookup.is_some()` (`↑↓ move · Enter select`), F2 is gated to membership only (a DN can never leak into a scalar field), and Space is a literal search char in lookup mode. Covered by `lookup_space_types_into_search_and_f2_is_ignored`.
-
-**Remaining:**
-- finish-branch (merge/PR) — user's call. Nothing functional outstanding.
+1. **`main` is local-only** — not pushed to `origin` (`git@github.com:oposs/edaptor.git`). `feat-picker-polish` (an earlier branch) is fully contained in `main` and can be deleted.
+2. **README "Status" blurb** still says Turbo Vision / early development — needs a one-paragraph refresh.
+3. **M5 Samba** has no standalone in-TUI "Set Password"/Samba-enable action on arbitrary entries (only inline on create/edit of password-profile entries, plus the `edaptor passwd <dn>` CLI).
+4. **M6 leftovers** pending (paged-scale lists, result-code polish, SASL auth, packaging).
 
 ---
 
@@ -92,30 +135,30 @@ The branch was cut at `41f90a1`; `main` then absorbed the UI-polish refactor, wh
 ```bash
 # Build + checks (must be green before any commit)
 cargo build --all-targets
-cargo test -p edaptor                       # 249 pass; live_* tests SKIP without the env var
+cargo test -p edaptor                       # 308 lib tests; live_* tests SKIP without the env var
 cargo clippy --all-targets -- -D warnings
 cargo fmt --check
 
-# Live / integration tests against a throwaway OpenLDAP (podman)
-scripts/test-ldap.sh start                  # prints the two env vars to export
+# Live / integration tests against the provisioned OpenLDAP (podman)
+scripts/test-ldap.sh start                  # provisions schemas/overlays + seeds 600 users/25 groups
 export EDAPTOR_TEST_LDAP_URI=ldap://localhost:1389
 export EDAPTOR_TEST_ADMIN_PW=adminpassword
-cargo test -p edaptor                        # now the live_* tests actually run
+cargo test -p edaptor                        # now live_membership/templates/seed/structure/write run
 scripts/test-ldap.sh stop
 
-# Run the TUI
-cargo run -- --config <path>                 # default config: ~/.config/edaptor/config.toml
+# Explore the seed data in the TUI
+cargo run -- --config examples/demo-config.toml
 ```
 
-For a manual membership smoke: point a config (with a `[[relation]]` block) at the test LDAP, open a group → Enter on `member` → type/Space/F2 → Save; then a user → Enter on `memberOf` → toggle a group → Save; try removing a group's last member (expect a clear block).
+For a manual membership smoke: open a group → Enter on `member` → type to search → toggle → Alt+S; then a user → Enter on `memberOf` → toggle a group → Alt+S; try removing a group's last member (expect a clear block).
 
 ---
 
 ## Conventions (follow these)
 
 - **Facade boundary:** only `src/ui/*` may `use ratatui`/`use tui_*`. Verify: `! grep -rl "use ratatui\|use tui_" src | grep -v "^src/ui/"`.
-- **Strict TDD**, atomic commits; crate must compile after every commit; `cargo fmt` before commit.
+- **Strict TDD**, atomic commits; crate must compile after every commit; **run `cargo fmt` before commit** (a batch of this session's files were committed unformatted and fixed in `e722902` — don't repeat).
 - **Live tests gated** by `EDAPTOR_TEST_LDAP_URI` (skip when unset) — mirror `tests/live_write.rs` / `tests/live_membership.rs`. DN base in tests is `dc=example,dc=org`.
 - **Worktrees** live under `/scratch/oetiker/claude-worktrees/` as `<project>-<branch>`.
-- **Commit trailer:** `Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>`.
+- **Commit trailer:** `Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>`.
 - **Execution style:** subagent-driven (fresh subagent per task + spec-then-quality review); see project memory `prefers-agent-fanout`. App.rs-heavy tasks can exhaust a subagent's context — scope tightly or resolve in-session.
