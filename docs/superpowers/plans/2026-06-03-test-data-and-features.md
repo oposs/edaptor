@@ -649,10 +649,9 @@ objectClass: organizationalUnit
 ou: people
 description: User accounts
 
-dn: ou=groups,dc=example,dc=org
-objectClass: organizationalUnit
-ou: groups
-description: Groups
+# NOTE: ou=groups,dc=example,dc=org is auto-created by the Bitnami image's
+# default tree, so we do not add it here (it would collide on a fresh start).
+# Our generated group entries live under that auto-created OU.
 
 dn: ou=services,dc=example,dc=org
 objectClass: organizationalUnit
@@ -724,11 +723,21 @@ Immediately after the `NAME=edaptor-test-ldap` / `IMAGE=...` lines (top-level, b
 PROVISION_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/ldap-provision" && pwd)"
 
 apply_ldif() {  # <bind-dn> <password> <file>
-  local bind_dn=$1 pw=$2 file=$3
-  podman cp "$file" "$NAME:/tmp/$(basename "$file")"
-  # -c: continue past entries that already exist (e.g. on a warm DB)
-  podman exec "$NAME" ldapadd -c -x -H ldap://localhost:1389 \
-    -D "$bind_dn" -w "$pw" -f "/tmp/$(basename "$file")"
+  local bind_dn=$1 pw=$2 file=$3 base out
+  base=$(basename "$file")
+  podman cp "$file" "$NAME:/tmp/$base"
+  # -c keeps going past entries that already exist (idempotent re-runs, and the
+  # Bitnami default tree already owns e.g. ou=groups). ldapadd then exits
+  # non-zero, which under `set -e` would abort provisioning — so we capture the
+  # output and tolerate only "Already exists (68)"; any other ldap_add error
+  # is surfaced and fails loudly.
+  out=$(podman exec "$NAME" ldapadd -c -x -H ldap://localhost:1389 \
+    -D "$bind_dn" -w "$pw" -f "/tmp/$base" 2>&1) || true
+  echo "$out"
+  if echo "$out" | grep '^ldap_add:' | grep -qv 'Already exists (68)'; then
+    echo "ERROR: ldapadd reported a non-recoverable error for $base" >&2
+    return 1
+  fi
 }
 
 provision() {
