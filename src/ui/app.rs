@@ -779,7 +779,7 @@ fn open_value_editor(app: &mut App, structure: &Structure) {
         app.picker_last_query = PICKER_INIT_QUERY.to_string();
         app.picker_search_id = None;
     } else if field.multi && field.editable {
-        let ve = ValueEditor::open(focus, field);
+        let ve = ValueEditor::open_plain(focus, field);
         app.overlay = Some(Overlay::ValueEditor(ve));
     }
 }
@@ -2927,6 +2927,7 @@ mod tests {
             role: None,
             lookup: None,
             base: String::new(),
+            binding: None,
         };
         App {
             focus: Pane::Form,
@@ -3035,6 +3036,7 @@ mod tests {
                 editor: TextState::new().with_value("x".to_string()),
                 relation: None,
                 lookup: None,
+                picker: None,
             }],
             baseline: Default::default(),
             mode: FormMode::Edit,
@@ -3514,6 +3516,7 @@ mod tests {
                 scope,
             }),
             lookup: None,
+            picker: None,
         };
         let mut app = bare_app(false);
         app.form = Some(EditForm {
@@ -3548,6 +3551,7 @@ mod tests {
             role: Some(RelationRole::Holder),
             lookup: None,
             base: String::new(),
+            binding: None,
         }
     }
 
@@ -3682,6 +3686,7 @@ mod tests {
             editor: TextState::new(),
             relation: None,
             lookup: Some(gid_lookup_spec()),
+            picker: None,
         };
         let mut app = bare_app(false);
         app.form = Some(EditForm {
@@ -4156,6 +4161,7 @@ mod tests {
             editor: TextState::new().with_value("ann".to_string()),
             relation: None,
             lookup: None,
+            picker: None,
         };
 
         let desc_field = EditField {
@@ -4171,6 +4177,7 @@ mod tests {
             editor: TextState::new(),
             relation: None,
             lookup: None,
+            picker: None,
         };
 
         let memberof_field = EditField {
@@ -4189,6 +4196,7 @@ mod tests {
                 scope: scope.clone(),
             }),
             lookup: None,
+            picker: None,
         };
 
         let mut baseline = BTreeMap::new();
@@ -4230,6 +4238,7 @@ mod tests {
             editor: TextState::new().with_value("bob".to_string()),
             relation: None,
             lookup: None,
+            picker: None,
         };
 
         let memberof_field = EditField {
@@ -4248,6 +4257,7 @@ mod tests {
                 scope,
             }),
             lookup: None,
+            picker: None,
         };
 
         let mut baseline = BTreeMap::new();

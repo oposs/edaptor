@@ -593,6 +593,7 @@ mod tests {
             editor: TextState::new().with_value(value.to_string()),
             relation: None,
             lookup: None,
+            picker: None,
         }
     }
 
@@ -642,6 +643,7 @@ mod tests {
             role: None,
             lookup: None,
             base: String::new(),
+            binding: None,
         }
     }
 
@@ -696,6 +698,7 @@ mod tests {
             role: None,
             lookup: None,
             base: String::new(),
+            binding: None,
         };
         let (w, h) = (70u16, 20u16);
         let backend = TestBackend::new(w, h);
@@ -741,6 +744,7 @@ mod tests {
             role: None,
             lookup: None,
             base: String::new(),
+            binding: None,
         };
         let (w, h) = (60u16, 20u16);
         let backend = TestBackend::new(w, h);
@@ -789,6 +793,7 @@ mod tests {
             editor: TextState::new(),
             relation: None,
             lookup: None,
+            picker: None,
         };
         App {
             focus: Pane::Form,
@@ -998,6 +1003,7 @@ mod tests {
                 editor: TextState::new().with_value(value.to_string()),
                 relation: None,
                 lookup: None,
+                picker: None,
             }],
             baseline,
             mode: FormMode::Edit,

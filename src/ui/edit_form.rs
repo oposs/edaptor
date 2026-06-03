@@ -14,7 +14,8 @@ use std::collections::BTreeMap;
 use tui_prompts::{State, TextState};
 
 use crate::config::relation::{
-    backref_lookup, holder_lookup, CandidateScope, RelationRole, ResolvedRelation,
+    backref_lookup, holder_lookup, CandidateScope, PickerBinding, RelationRole, ResolvedRelation,
+    StoreKey,
 };
 use crate::form::changeset::{is_x_ordered, EditEntry};
 use crate::schema::{FieldKind, SchemaModel};
@@ -59,6 +60,9 @@ pub struct EditField {
     /// so Enter opens a single-select picker that writes the chosen entry's
     /// `value_attr` scalar into the field.
     pub lookup: Option<crate::config::LookupSpec>,
+    /// `Some` when this field is bound to a `[profile.picker.<attr>]` picker —
+    /// the unified replacement for `relation`/`lookup`.
+    pub picker: Option<crate::config::relation::PickerBinding>,
 }
 
 impl EditField {
@@ -121,11 +125,16 @@ pub struct ValueEditor {
     /// The resolved search base for a lookup picker (membership mode leaves this
     /// empty and uses `scope.base`).
     pub base: String,
+    /// The resolved picker binding driving this editor's search/commit (unified
+    /// path). `None` for the plain free-text multi-value editor. Boxed to keep
+    /// `ValueEditor` (and thus the `Overlay` enum) small.
+    pub binding: Option<Box<crate::config::relation::PickerBinding>>,
 }
 
 impl ValueEditor {
-    /// Open an editor over `field` (at `field_idx`), seeding one row per value.
-    pub fn open(field_idx: usize, field: &EditField) -> Self {
+    /// Open a plain free-text multi-value editor over `field` (at `field_idx`),
+    /// seeding one row per value. No picker.
+    pub fn open_plain(field_idx: usize, field: &EditField) -> Self {
         let rows = field
             .values
             .iter()
@@ -145,6 +154,7 @@ impl ValueEditor {
             role: None,
             lookup: None,
             base: String::new(),
+            binding: None,
         }
     }
 
@@ -182,6 +192,7 @@ impl ValueEditor {
             role: Some(rel.role),
             lookup: None,
             base: String::new(),
+            binding: None,
         }
     }
 
@@ -208,6 +219,41 @@ impl ValueEditor {
             role: None,
             lookup: Some(Box::new(spec.clone())),
             base,
+            binding: None,
+        }
+    }
+
+    /// Open the picker for a `[profile.picker.<attr>]`-bound field. Seeds the
+    /// selection from the field's current values (each becomes a `Candidate`
+    /// whose `store_value`/key is that value; `dn` equals the value, upgraded to
+    /// the real entry DN when a search result matches the store value). Key
+    /// comparison is case-insensitive iff `store = dn`.
+    pub fn open(field_idx: usize, field: &EditField, binding: &PickerBinding) -> Self {
+        let key_ci = matches!(binding.store, StoreKey::Dn);
+        let selected: Vec<Candidate> = field
+            .values
+            .iter()
+            .map(|v| Candidate {
+                dn: v.clone(),
+                label: v.clone(),
+                store_value: v.clone(),
+            })
+            .collect();
+        ValueEditor {
+            field: field_idx,
+            label: field.label.clone(),
+            ordered: field.ordered,
+            secret: field.secret,
+            rows: Vec::new(),
+            sel: 0,
+            scroll: 0,
+            picker: Some(PickerState::new(selected, key_ci)),
+            search: TextState::new(),
+            scope: None,
+            role: None,
+            lookup: None,
+            base: String::new(),
+            binding: Some(Box::new(binding.clone())),
         }
     }
 
@@ -397,6 +443,7 @@ pub fn build_edit_form(
                 editor: TextState::new().with_value(seed),
                 relation,
                 lookup: None,
+                picker: None,
             }
         })
         .collect();
@@ -446,6 +493,7 @@ pub fn inject_password_fields(form: &mut EditForm, spec: &crate::config::Passwor
         editor: TextState::new(),
         relation: None,
         lookup: None,
+        picker: None,
     };
     form.fields.push(mk(primary));
     form.fields.push(mk(confirm));
@@ -470,6 +518,32 @@ pub fn tag_lookup_fields(
     }
 }
 
+/// Tag each field whose attribute matches a resolved `[profile.picker.<attr>]`
+/// binding for the entry's object classes. Fan-out fields (`fanout_attr` set) are
+/// forced editable — their value is never written to the field itself, it fans
+/// out. Non-fan-out fields keep their normal editable state and are tagged only
+/// when already editable.
+pub fn tag_picker_fields(
+    form: &mut EditForm,
+    pickers: &[crate::config::relation::ResolvedPicker],
+    object_classes: &[String],
+    read_only: bool,
+) {
+    for field in &mut form.fields {
+        let Some(binding) =
+            crate::config::relation::picker_for(pickers, object_classes, &field.label)
+        else {
+            continue;
+        };
+        if binding.fanout_attr.is_some() {
+            field.editable = !read_only; // override operational read-only, but honor global read-only
+            field.picker = Some(binding.clone());
+        } else if field.editable {
+            field.picker = Some(binding.clone());
+        }
+    }
+}
+
 /// Reorder a built form's fields into: mandatory, then populated-or-special
 /// (non-empty value, password/secret, value-lookup, or membership relation),
 /// then the rest — each bucket alphabetical (case-insensitive) by label.
@@ -481,6 +555,7 @@ pub fn order_fields(form: &mut EditForm) {
             || f.secret
             || f.lookup.is_some()
             || f.relation.is_some()
+            || f.picker.is_some()
         {
             1
         } else {
@@ -707,7 +782,7 @@ mod tests {
         let model = build_form_model(&schema(), &["demoPerson"], &entry(), &[]);
         let form = build_edit_form(&model, &schema(), false, &[]);
         let mail_idx = form.fields.iter().position(|f| f.label == "mail").unwrap();
-        let mut ve = ValueEditor::open(mail_idx, &form.fields[mail_idx]);
+        let mut ve = ValueEditor::open_plain(mail_idx, &form.fields[mail_idx]);
         assert_eq!(ve.rows.len(), 2); // a@x.org, a@y.org
         assert_eq!(ve.label, "mail");
         // Add a blank row and a whitespace row; commit drops both.
@@ -821,6 +896,7 @@ mod tests {
                 scope: scope.clone(),
             }),
             lookup: None,
+            picker: None,
         };
         // labels resolved via a closure (DN→label); here identity.
         let ve = ValueEditor::open_picker(0, &field, |dn| dn.to_string());
@@ -863,6 +939,7 @@ mod tests {
                 scope,
             }),
             lookup: None,
+            picker: None,
         };
         let mut baseline = BTreeMap::new();
         baseline.insert("memberOf".to_string(), baseline_vals);
@@ -922,6 +999,7 @@ mod tests {
             editor: TextState::new(),
             relation: None,
             lookup: None,
+            picker: None,
         };
         let mut form = EditForm {
             dn: "uid=alice,ou=people,dc=example,dc=org".into(),
@@ -970,6 +1048,7 @@ mod tests {
             editor: TextState::new(),
             relation: None,
             lookup: None,
+            picker: None,
         };
         let mut form = EditForm {
             dn: "uid=alice,ou=people,dc=example,dc=org".into(),
@@ -1042,6 +1121,7 @@ mod tests {
                 editor: TextState::new().with_value(seed),
                 relation: None,
                 lookup: None,
+                picker: None,
             }
         };
         let mut form = EditForm {
@@ -1090,6 +1170,7 @@ mod tests {
                 editor: TextState::new().with_value(seed),
                 relation: None,
                 lookup: None,
+                picker: None,
             }
         };
         let mut form = EditForm {
@@ -1103,5 +1184,117 @@ mod tests {
         order_fields(&mut form);
         let labels: Vec<&str> = form.fields.iter().map(|f| f.label.as_str()).collect();
         assert_eq!(labels, vec!["zoo", "aaa"]);
+    }
+
+    #[test]
+    fn tag_picker_fields_tags_by_binding_and_forces_fanout_editable() {
+        use crate::config::relation::{CandidateScope, PickerBinding, ResolvedPicker, StoreKey};
+        let mut form = EditForm {
+            dn: "uid=bob,ou=people,dc=x".into(),
+            fields: vec![EditField {
+                label: "memberOf".into(),
+                must: false,
+                editable: false, // operational, read-only by default
+                multi: true,
+                secret: false,
+                ordered: false,
+                values: vec!["cn=admins,ou=groups,dc=x".into()],
+                kind: FieldKind::DistinguishedName,
+                widget: WidgetSpec::ReadOnlyText,
+                editor: TextState::new(),
+                relation: None,
+                lookup: None,
+                picker: None,
+            }],
+            baseline: Default::default(),
+            mode: FormMode::Edit,
+        };
+        let pickers = vec![ResolvedPicker {
+            owner_object_classes: vec!["inetOrgPerson".into()],
+            binding: PickerBinding {
+                attr: "memberOf".into(),
+                scope: CandidateScope {
+                    base: "ou=groups,dc=x".into(),
+                    object_classes: vec!["groupOfNames".into()],
+                    search_attrs: vec!["cn".into()],
+                    label_template: None,
+                },
+                store: StoreKey::Dn,
+                select: None,
+                fanout_attr: Some("member".into()),
+            },
+        }];
+        tag_picker_fields(&mut form, &pickers, &["inetOrgPerson".to_string()], false);
+        let f = &form.fields[0];
+        assert!(f.picker.is_some(), "memberOf gets a picker binding");
+        assert!(
+            f.editable,
+            "fan-out field forced editable despite operational read-only"
+        );
+
+        // global read-only mode must not force fan-out fields editable
+        let mut form2 = EditForm {
+            dn: "uid=bob,ou=people,dc=x".into(),
+            fields: vec![EditField {
+                label: "memberOf".into(),
+                must: false,
+                editable: false,
+                multi: true,
+                secret: false,
+                ordered: false,
+                values: vec!["cn=admins,ou=groups,dc=x".into()],
+                kind: FieldKind::DistinguishedName,
+                widget: WidgetSpec::ReadOnlyText,
+                editor: TextState::new(),
+                relation: None,
+                lookup: None,
+                picker: None,
+            }],
+            baseline: Default::default(),
+            mode: FormMode::Edit,
+        };
+        tag_picker_fields(&mut form2, &pickers, &["inetOrgPerson".to_string()], true);
+        assert!(
+            !form2.fields[0].editable,
+            "fan-out field stays read-only when global read_only=true"
+        );
+    }
+
+    #[test]
+    fn value_editor_open_seeds_from_field_values_with_store_value_key() {
+        use crate::config::relation::{CandidateScope, PickerBinding, StoreKey};
+        let field = EditField {
+            label: "gidNumber".into(),
+            must: false,
+            editable: true,
+            multi: false,
+            secret: false,
+            ordered: false,
+            values: vec!["1001".into()],
+            kind: FieldKind::Text,
+            widget: WidgetSpec::ReadOnlyText,
+            editor: TextState::new().with_value("1001"),
+            relation: None,
+            lookup: None,
+            picker: None,
+        };
+        let binding = PickerBinding {
+            attr: "gidNumber".into(),
+            scope: CandidateScope {
+                base: "ou=groups,dc=x".into(),
+                object_classes: vec!["posixGroup".into()],
+                search_attrs: vec!["cn".into()],
+                label_template: None,
+            },
+            store: StoreKey::Attr("gidNumber".into()),
+            select: Some(crate::config::relation::Cardinality::Single),
+            fanout_attr: None,
+        };
+        let ve = ValueEditor::open(0, &field, &binding);
+        let p = ve.picker.as_ref().expect("picker present");
+        assert_eq!(p.selected.len(), 1);
+        assert_eq!(p.selected[0].store_value, "1001");
+        assert!(!p.key_ci, "scalar store → exact key compare");
+        assert_eq!(ve.binding.as_ref().unwrap().attr, "gidNumber");
     }
 }
