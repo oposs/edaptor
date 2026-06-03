@@ -17,6 +17,7 @@ on GitHub Pages, cross-compiled releases).
 | TUI illustrations | Fenced ` ``` ` ASCII blocks — **no captured screenshots** |
 | Docs hosting | Versioned GitHub Pages at `https://oposs.github.io/edaptor/` |
 | Release container | **Dropped** (edaptor is a TUI client, not a server) |
+| TLS backend | **Migrate to rustls** (`tls-rustls-ring`), drop `native-tls`/OpenSSL |
 
 ## Goal
 
@@ -32,8 +33,9 @@ release binaries).
   is a client TUI). The release workflow stops at archived binaries.
 - No automated screenshot/sample-image generation pipeline. TUI layouts are
   hand-written as fenced code blocks.
-- No code changes to the TLS stack. We keep `native-tls` and add only a
-  `vendored` cargo feature for static release builds.
+- No behavioural change to TLS: the rustls migration must preserve the exact
+  current semantics (custom CA, `verify=false`, StartTLS, connect timeout). It is
+  a backend swap, not a feature change.
 
 ## Components
 
@@ -156,27 +158,51 @@ Ported from byonk with `byonk` → `edaptor` and the Pages URL set to
 1. **version** — compute next semver from the latest `v*` tag, bump
    `Cargo.toml`, roll `CHANGES.md` `Unreleased` into a dated section, commit + tag.
 2. **build-binaries** — matrix: `x86_64`/`aarch64-unknown-linux-musl` (via
-   `cross`), `x86_64`/`aarch64-apple-darwin`, `x86_64-pc-windows-msvc`. Built
-   **`--features vendored`** so OpenSSL links statically on musl. Each archive
-   bundles the binary + `README.md` + `LICENSE` + `examples/`.
+   `cross`), `x86_64`/`aarch64-apple-darwin`, `x86_64-pc-windows-msvc`. Plain
+   `cargo`/`cross build --release` — rustls links cleanly on musl with no OpenSSL,
+   so **no special build flags**. Each archive bundles the binary + `README.md` +
+   `LICENSE` + `examples/`.
 3. **create-release** — extract the version's `CHANGES.md` section as notes,
    attach all archives.
 4. **build-docs / deploy-docs** — build the tagged docs and publish them under
    `site/edaptor/<tag>`, then re-run cull/update-json/generate-redirect.
 
-### 8. `Cargo.toml`
+### 8. TLS migration to rustls (`Cargo.toml` + `src/ldap/tls.rs`)
+
+Replace the `native-tls`/OpenSSL backend with rustls so static musl release
+builds need no OpenSSL and no vendoring.
+
+`Cargo.toml`:
 
 - Add `license = "MIT"`.
-- Add a feature:
+- `ldap3 = { version = "0.12", default-features = false, features = ["sync", "tls-rustls-ring"] }`
+- Remove the `native-tls` dependency.
+- Add `rustls = "0.23"` and `rustls-pemfile = "2"` (version-aligned with the
+  rustls `ldap3 0.12` re-exports, so the `ClientConfig` types match).
 
-  ```toml
-  [features]
-  vendored = ["native-tls/vendored"]
-  ```
+`src/ldap/tls.rs` — rewrite `build_settings` to produce the same
+`LdapConnSettings`, preserving every current behaviour:
 
-  `native-tls` is already a direct dependency; `native-tls/vendored` vendors and
-  statically links OpenSSL on the musl targets and is a no-op on macOS/Windows
-  (Security.framework / SChannel). No source changes required.
+- **Connect timeout** and **StartTLS** — unchanged (`set_conn_timeout`,
+  `set_starttls`).
+- **Custom CA** (`tls.ca_cert`): parse the PEM with `rustls-pemfile` into
+  `CertificateDer`s, load them into a `RootCertStore`, build a
+  `ClientConfig::builder().with_root_certificates(store).with_no_client_auth()`,
+  and attach via `settings.set_config(Arc::new(config))`.
+- **`verify = false`**: in the common (no custom CA) case, call
+  `settings.set_no_tls_verify(true)` — ldap3 then installs its own
+  `NoCertVerification` on the default config. **Edge case confirmed in ldap3
+  source:** ldap3 only applies that shortcut on its *default* config path, so
+  when a custom CA *and* `verify = false` are both set, we must install the
+  no-cert verifier into our own `ClientConfig` (`config.dangerous()
+  .set_certificate_verifier(...)`). ~5 extra lines, branch documented in code.
+- **Tests**: the 4 existing `build_settings` unit tests port directly (they only
+  assert Ok/Err on missing/garbage CA files and StartTLS+no-verify); the
+  garbage-CA test's error message changes from "parsing CA cert" to the
+  rustls-pemfile parse failure — assertion updated accordingly.
+
+This is a backend swap with identical externally-visible semantics; the module
+doc comment is updated from "native-tls backend" to "rustls backend".
 
 ### 9. `CHANGES.md`
 
@@ -196,15 +222,20 @@ this layout.
 - `cargo fmt --check`, `cargo clippy -- -D warnings`, `cargo test` all green
   locally (live tests SKIP without a server).
 - `make docs` builds the book locally (mdBook + mermaid from mise).
-- `cargo build --release --features vendored` succeeds locally (sanity-checks the
-  vendored OpenSSL path before relying on it in CI).
+- After the rustls migration: `cargo build` + `cargo test` green (no `native-tls`
+  / OpenSSL in the dependency tree — verify with `cargo tree -i openssl-sys`
+  returning nothing). A gated live TLS smoke test against the podman server (or
+  manual `ldaps://` connect) confirms the custom-CA path still works.
 - Workflows are validated by structure review against the working byonk
   originals; first real deploy/release happens when the user pushes/dispatches.
 
 ## Risks & mitigations
 
-- **musl + OpenSSL**: mitigated by the `vendored` feature; verified with a local
-  `--features vendored` build.
+- **musl + OpenSSL**: eliminated by migrating to rustls — there is no OpenSSL in
+  the tree, so static musl builds need no vendoring or system libraries.
+- **rustls behaviour drift**: the migration is verified against the documented
+  semantics (custom CA, `verify=false`, StartTLS) plus a live `ldaps://` smoke
+  check, so the backend swap cannot silently change TLS behaviour.
 - **No git tags yet**: the release version step defaults to `v0.0.0` → first
   release computes `0.0.1`/`0.1.0`/`1.0.0` from the chosen bump type. `Cargo.toml`
   currently says `0.1.0`; the workflow overwrites it from the tag math, so the
