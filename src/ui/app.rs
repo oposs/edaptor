@@ -20,7 +20,9 @@ use tui_prompts::{State, TextState};
 use tui_tree_widget::{TreeItem, TreeState};
 
 use crate::app::UiAction;
-use crate::config::relation::{backref_lookup, resolve_relations, ResolvedRelation};
+use crate::config::relation::{
+    backref_lookup, resolve_pickers, resolve_relations, ResolvedRelation,
+};
 use crate::config::{Config, EntryProfile};
 use crate::form::changeset::{diff, ChangeSet, EditEntry, ModOp};
 use crate::form::validate::{plan_save, validate, SavePlan, ValidationError};
@@ -228,6 +230,9 @@ pub struct App {
     pub status: String,
     /// Resolved membership relations (built once from config).
     pub relations: Vec<ResolvedRelation>,
+    /// Resolved picker bindings (built once from config profiles). Supersedes
+    /// `relations`/`lookups` for field population.
+    pub pickers: Vec<crate::config::relation::ResolvedPicker>,
     /// Compiled column-2 label rules (built once from `config.profiles`).
     pub label_rules: Vec<LabelRule>,
     /// Correlation id of the latest in-flight picker search (stale ids ignored).
@@ -242,6 +247,7 @@ pub fn run(config: Config, password: String) -> Result<()> {
     let read_only = config.is_read_only();
     let profiles = config.profiles.clone();
     let relations = resolve_relations(&config.profiles, &config.relations);
+    let pickers = resolve_pickers(&config.profiles);
     // Compile the per-profile column-2 label rules and the attrs the scan must fetch.
     let rules = label_rules(&profiles);
     let scan_attrs = label_rule_attrs(&rules);
@@ -304,6 +310,7 @@ pub fn run(config: Config, password: String) -> Result<()> {
         overlay: None,
         status: String::new(),
         relations,
+        pickers,
         label_rules: rules,
         picker_search_id: None,
         picker_last_query: String::new(),
@@ -420,47 +427,46 @@ fn handle_worker_response(
         // Intercept picker search results before the read-flow routing.
         Response::Entries { id, entries, .. } if app.picker_search_id == Some(*id) => {
             if let Some(Overlay::ValueEditor(ve)) = app.overlay.as_mut() {
-                // A lookup picker carries the scalar `value_attr` (committed on
-                // Enter) and labels via the spec's `label` attr; membership
-                // pickers keep `value: None` and label via `cn`.
-                let lookup = ve.lookup.clone();
-                let label_template = ve.scope.as_ref().and_then(|s| s.label_template.clone());
                 // Whether these results answer an active search term — drives the
                 // picker row ordering (matches-first vs selected-first).
                 let searching = !ve.search.value().trim().is_empty();
-                if let Some(p) = ve.picker.as_mut() {
+                let binding = ve.binding.as_deref().cloned();
+                if let (Some(binding), Some(p)) = (binding, ve.picker.as_mut()) {
+                    let label_template = binding.scope.label_template.clone();
                     let results: Vec<crate::ui::picker::Candidate> = entries
                         .iter()
-                        .map(|e| match &lookup {
-                            Some(spec) => crate::ui::picker::Candidate {
-                                dn: e.dn.clone(),
-                                label: candidate_label_for_lookup(spec, &e.dn, &e.attrs),
-                                store_value: crate::ui::picker::pick_value(
-                                    &e.attrs,
-                                    &spec.value_attr,
-                                )
-                                .unwrap_or_default(),
-                            },
-                            None => crate::ui::picker::Candidate {
+                        .filter_map(|e| {
+                            let store_value = match &binding.store {
+                                crate::config::relation::StoreKey::Dn => e.dn.clone(),
+                                crate::config::relation::StoreKey::Attr(a) => {
+                                    crate::ui::picker::pick_value(&e.attrs, a)?
+                                }
+                            };
+                            Some(crate::ui::picker::Candidate {
                                 dn: e.dn.clone(),
                                 label: membership_candidate_label(
                                     label_template.as_deref(),
                                     &e.dn,
                                     &e.attrs,
                                 ),
-                                store_value: e.dn.clone(),
-                            },
+                                store_value,
+                            })
                         })
                         .collect();
-                    // Upgrade seeded selection labels (seeded from the structure
-                    // tree as bare `cn`) to the richer result label once results
-                    // arrive — so a saved member shows "Bob Baker (bob)" too.
+                    // Upgrade seeded selection labels (and real DNs for scalar
+                    // stores) by matching on the STORE VALUE, not the DN. So a
+                    // saved member shows "Bob Baker (bob)" once results arrive.
+                    let ci = p.key_ci;
                     for sel in p.selected.iter_mut() {
-                        if let Some(r) = results
-                            .iter()
-                            .find(|r| r.store_value.eq_ignore_ascii_case(&sel.store_value))
-                        {
+                        if let Some(r) = results.iter().find(|r| {
+                            if ci {
+                                r.store_value.eq_ignore_ascii_case(&sel.store_value)
+                            } else {
+                                r.store_value == sel.store_value
+                            }
+                        }) {
                             sel.label = r.label.clone();
+                            sel.dn = r.dn.clone();
                         }
                     }
                     p.set_results(results);
@@ -582,6 +588,7 @@ fn handle_worker_response(
                         read_flow.schema(),
                         app.read_only,
                         &app.relations,
+                        &app.pickers,
                         profiles,
                     ));
                     app.form_focus = 0;
@@ -745,7 +752,7 @@ fn edit_focused_field(app: &mut App, key: KeyEvent) {
 
 /// Open the multi-value popup over the focused field. Relation fields open in
 /// picker mode; plain multi-valued fields open in free-text mode.
-fn open_value_editor(app: &mut App, structure: &Structure) {
+fn open_value_editor(app: &mut App, _structure: &Structure) {
     let focus = app.form_focus;
     let Some(form) = app.form.as_ref() else {
         return;
@@ -753,28 +760,11 @@ fn open_value_editor(app: &mut App, structure: &Structure) {
     let Some(field) = form.fields.get(focus) else {
         return;
     };
-    if let Some(spec) = field.lookup.as_ref().filter(|_| field.editable) {
-        // Value-lookup picker: single-select, fires WITHOUT requiring `multi` (a
-        // scalar lookup field like gidNumber is single-valued). Resolve the base
-        // from the spec, falling back to the directory root when empty.
-        let base = if spec.search_base.is_empty() {
-            structure.root_dn().to_string()
-        } else {
-            spec.search_base.clone()
-        };
-        let ve = ValueEditor::open_lookup(focus, field, base);
-        app.overlay = Some(Overlay::ValueEditor(ve));
-        app.picker_last_query = PICKER_INIT_QUERY.to_string();
-        app.picker_search_id = None;
-    } else if field.relation.is_some() && field.multi && field.editable {
-        // Picker mode: label DNs from the loaded structure (fallback = the DN).
-        let label_of = |dn: &str| {
-            structure
-                .get(dn)
-                .map(|n| n.label.clone())
-                .unwrap_or_else(|| dn.to_string())
-        };
-        let ve = ValueEditor::open_picker(focus, field, label_of);
+
+    if let Some(binding) = field.picker.clone().filter(|_| field.editable) {
+        // Unified picker: open from the resolved binding. Labels and real DNs are
+        // upgraded from search results in the `Response::Entries` intercept.
+        let ve = ValueEditor::open(focus, field, &binding);
         app.overlay = Some(Overlay::ValueEditor(ve));
         app.picker_last_query = PICKER_INIT_QUERY.to_string();
         app.picker_search_id = None;
@@ -810,54 +800,44 @@ fn picker_editor_key(app: &mut App, key: KeyEvent) {
             app.picker_last_query.clear();
         }
         KeyCode::Char('s') | KeyCode::Char('S') if alt => {
-            // Alt+S commits, branching on mode. Value-lookup writes the chosen
-            // entry's scalar `value_attr` into the field; membership writes the
-            // selected DN set.
-            if matches!(&app.overlay, Some(Overlay::ValueEditor(ve)) if ve.lookup.is_some()) {
-                // Single-select value-lookup commit: write the chosen entry's
-                // scalar `value_attr` into the target field's inline editor. A
-                // single-value field saves from `editor`, NOT `values`.
-                if let Some(Overlay::ValueEditor(ve)) = app.overlay.take() {
-                    if let Some(picker) = &ve.picker {
-                        // Commit the radio-selected row (set by Enter); if none was
-                        // explicitly picked, fall back to the highlighted row so a
-                        // quick ↑↓ + Alt+S still works.
-                        let chosen = picker
-                            .selected
-                            .first()
-                            .and_then(|c| Some(c.store_value.clone()).filter(|s| !s.is_empty()))
-                            .or_else(|| {
-                                picker.visible().get(picker.cursor).and_then(|row| {
-                                    Some(row.candidate.store_value.clone())
-                                        .filter(|s| !s.is_empty())
-                                })
-                            });
-                        if let Some(v) = chosen {
-                            if let Some(field) =
-                                app.form.as_mut().and_then(|f| f.fields.get_mut(ve.field))
-                            {
-                                // Mirror the scalar into BOTH `editor` (read by a
-                                // single-value field's `current_values`) and `values`
-                                // (read by a multi-value field's), so the picked value
-                                // is seen regardless of the field's arity. Note this
-                                // REPLACES any existing `values` with the single pick —
-                                // it does not append. That is correct here: a
-                                // value-lookup's `value_attr` is scalar, so the field
-                                // holds exactly one value, never a growing list.
-                                field.editor = TextState::new().with_value(v.clone());
-                                field.values = vec![v];
-                            }
-                        }
-                    }
-                    app.picker_search_id = None;
-                    app.picker_last_query.clear();
-                }
-            } else if let Some(Overlay::ValueEditor(ve)) = app.overlay.take() {
-                // Membership commit: write the selected DN set into the field.
-                if let Some(picker) = &ve.picker {
+            // Alt+S commits the selection into the field, driven by the binding's
+            // cardinality. A single-select commit writes the chosen scalar into the
+            // inline editor (a single-value field saves from `editor`, NOT `values`);
+            // a multi-select commit writes the selected store-value set.
+            if let Some(Overlay::ValueEditor(ve)) = app.overlay.take() {
+                if let (Some(binding), Some(picker)) = (ve.binding.as_deref(), ve.picker.as_ref()) {
+                    let single = matches!(
+                        binding.select,
+                        Some(crate::config::relation::Cardinality::Single)
+                    ) || (binding.select.is_none()
+                        && app
+                            .form
+                            .as_ref()
+                            .and_then(|f| f.fields.get(ve.field))
+                            .map(|f| !f.multi)
+                            .unwrap_or(false));
+                    let values = picker.selected_values();
                     if let Some(field) = app.form.as_mut().and_then(|f| f.fields.get_mut(ve.field))
                     {
-                        field.values = picker.selected_dns();
+                        if single {
+                            // Commit the radio-selected row (set by Enter); if none was
+                            // explicitly picked, fall back to the highlighted row so a
+                            // quick ↑↓ + Alt+S still commits without requiring Enter.
+                            let v = values
+                                .into_iter()
+                                .next()
+                                .or_else(|| {
+                                    picker
+                                        .visible()
+                                        .get(picker.cursor)
+                                        .map(|row| row.candidate.store_value.clone())
+                                })
+                                .unwrap_or_default();
+                            field.editor = TextState::new().with_value(v.clone());
+                            field.values = if v.is_empty() { vec![] } else { vec![v] };
+                        } else {
+                            field.values = values;
+                        }
                     }
                 }
                 app.picker_search_id = None;
@@ -869,8 +849,28 @@ fn picker_editor_key(app: &mut App, key: KeyEvent) {
             // membership selection (multi-select), or set it as the single radio
             // selection for a value-lookup picker. (Alt+Space is avoided — it is a
             // desktop hotkey.) Alt+S then commits.
+            // Read the field arity into a local FIRST so we can mutably borrow the
+            // overlay (which also borrows `app`) without a second `app.form` borrow.
+            let field_single = app
+                .overlay
+                .as_ref()
+                .and_then(|o| match o {
+                    Overlay::ValueEditor(ve) => Some(ve.field),
+                    _ => None,
+                })
+                .and_then(|fi| {
+                    app.form
+                        .as_ref()
+                        .and_then(|f| f.fields.get(fi))
+                        .map(|f| !f.multi)
+                })
+                .unwrap_or(false);
             if let Some(Overlay::ValueEditor(ve)) = app.overlay.as_mut() {
-                let single = ve.lookup.is_some();
+                let single = match ve.binding.as_deref().and_then(|b| b.select) {
+                    Some(crate::config::relation::Cardinality::Single) => true,
+                    Some(crate::config::relation::Cardinality::Multi) => false,
+                    None => field_single,
+                };
                 if let Some(p) = ve.picker.as_mut() {
                     if single {
                         let chosen = p.visible().get(p.cursor).map(|row| row.candidate.clone());
@@ -984,87 +984,46 @@ fn service_picker_search(app: &mut App, worker: &WorkerHandle) {
     let Some(Overlay::ValueEditor(ve)) = app.overlay.as_ref() else {
         return;
     };
+    let Some(binding) = ve.binding.as_deref() else {
+        return;
+    };
     if ve.picker.is_none() {
         return;
     }
+
     let query = ve.search.value().to_string();
     if query == app.picker_last_query {
         return;
     }
     app.picker_last_query = query.clone();
 
-    // Resolve the search parameters from whichever picker mode is active. A
-    // value-lookup picker carries a `LookupSpec` (and no `CandidateScope`), so it
-    // must be handled BEFORE the membership `scope` guard or it never searches.
-    let params = if let Some(spec) = ve.lookup.as_ref() {
-        let search_attrs = effective_search_attrs(spec);
-        let filter = crate::ui::picker::build_member_filter(
-            std::slice::from_ref(&spec.object_class),
-            &search_attrs,
-            &query,
-        );
-        // Request the scalar to store, the display label, and the search attrs.
-        let mut attrs = vec![spec.value_attr.clone()];
-        if !spec.label.is_empty() {
-            attrs.push(spec.label.clone());
-        }
-        attrs.extend(spec.search_attrs.iter().cloned());
-        dedupe_ci(&mut attrs);
-        Some((ve.base.clone(), filter, attrs))
-    } else {
-        ve.scope.as_ref().map(|scope| {
-            let filter = crate::ui::picker::build_member_filter(
-                &scope.object_classes,
-                &scope.search_attrs,
-                &query,
-            );
-            // Request the label-template attrs (always including `cn`, the
-            // fallback label attr), deduped. An empty term yields an
-            // objectClass-only filter that loads up to PICKER_SEARCH_CAP.
-            let mut attrs = scope
-                .label_template
-                .as_deref()
-                .map(crate::config::label::template_attrs)
-                .unwrap_or_default();
-            attrs.push("cn".to_string());
-            dedupe_ci(&mut attrs);
-            (scope.base.clone(), filter, attrs)
-        })
-    };
-    let Some((base, filter, attrs)) = params else {
-        return;
-    };
+    let scope = &binding.scope;
+    let filter =
+        crate::ui::picker::build_member_filter(&scope.object_classes, &scope.search_attrs, &query);
+    // Request the label-template attrs (always including `cn`, the fallback label
+    // attr) plus the scalar store attr when storing one. An empty term yields an
+    // objectClass-only filter that loads up to PICKER_SEARCH_CAP.
+    let mut attrs: Vec<String> = scope
+        .label_template
+        .as_deref()
+        .map(crate::config::label::template_attrs)
+        .unwrap_or_default();
+    attrs.push("cn".to_string());
+    if let crate::config::relation::StoreKey::Attr(a) = &binding.store {
+        attrs.push(a.clone());
+    }
+    dedupe_ci(&mut attrs);
 
     let id = next_id();
     app.picker_search_id = Some(id);
     let _ = worker.submit(Request::Search {
         id,
-        base,
+        base: scope.base.clone(),
         scope: SearchScope::Subtree,
         filter,
         attrs,
         size_limit: Some(PICKER_SEARCH_CAP),
     });
-}
-
-/// A lookup candidate's display label: the spec's `label` attribute's first
-/// value when configured and present, else the generic `cn`/DN fallback.
-fn candidate_label_for_lookup(
-    spec: &crate::config::LookupSpec,
-    dn: &str,
-    attrs: &std::collections::BTreeMap<String, Vec<String>>,
-) -> String {
-    if !spec.label.is_empty() {
-        if let Some((_, vs)) = attrs
-            .iter()
-            .find(|(k, _)| k.eq_ignore_ascii_case(&spec.label))
-        {
-            if let Some(v) = vs.first() {
-                return v.clone();
-            }
-        }
-    }
-    crate::ui::picker::candidate_label(dn, attrs)
 }
 
 /// A membership candidate's display label. With a `label_template` the template
@@ -1084,18 +1043,6 @@ fn membership_candidate_label(
         }
     }
     crate::ui::picker::candidate_label(dn, attrs)
-}
-
-/// Effective substring-search attributes for a value-lookup: the spec's
-/// `search_attrs` if any, else its `label` (when set), else `["cn"]`.
-fn effective_search_attrs(spec: &crate::config::LookupSpec) -> Vec<String> {
-    if !spec.search_attrs.is_empty() {
-        spec.search_attrs.clone()
-    } else if !spec.label.is_empty() {
-        vec![spec.label.clone()]
-    } else {
-        vec!["cn".to_string()]
-    }
 }
 
 /// Case-insensitively dedupe a list of attribute names in place, keeping first
@@ -1695,6 +1642,7 @@ fn build_loaded_form(
     schema: &SchemaModel,
     read_only: bool,
     relations: &[ResolvedRelation],
+    pickers: &[crate::config::relation::ResolvedPicker],
     profiles: &[EntryProfile],
 ) -> EditForm {
     let mut form = build_edit_form(model, schema, read_only, relations);
@@ -1710,6 +1658,9 @@ fn build_loaded_form(
             crate::ui::edit_form::tag_lookup_fields(&mut form, &profile.lookups);
         }
     }
+    // Tag picker-bound fields so Enter opens the unified picker overlay.
+    let ocs = object_classes_of(&form);
+    crate::ui::edit_form::tag_picker_fields(&mut form, pickers, &ocs, read_only);
     // Final step: order fields after injection/tagging set secret/lookup/relation.
     crate::ui::edit_form::order_fields(&mut form);
     form
@@ -2119,6 +2070,7 @@ fn reload_form_sync(
                 read_flow.schema(),
                 app.read_only,
                 &app.relations,
+                &app.pickers,
                 profiles,
             ));
             app.form_focus = 0;
@@ -2838,6 +2790,7 @@ fn prepare_create(
 fn build_new_entry_form(
     schema: &SchemaModel,
     profile: &EntryProfile,
+    pickers: &[crate::config::relation::ResolvedPicker],
     profile_idx: usize,
     container: String,
 ) -> EditForm {
@@ -2860,6 +2813,9 @@ fn build_new_entry_form(
     // Tag value-lookup target fields (e.g. gidNumber) so Enter opens the picker.
     // Create is the primary use case, so the profile's lookups are known here.
     crate::ui::edit_form::tag_lookup_fields(&mut form, &profile.lookups);
+    // Tag picker-bound fields so Enter opens the unified picker overlay.
+    let ocs = object_classes_of(&form);
+    crate::ui::edit_form::tag_picker_fields(&mut form, pickers, &ocs, false);
     // Final step: order fields after injection/tagging set secret/lookup/relation.
     crate::ui::edit_form::order_fields(&mut form);
     form
@@ -2882,7 +2838,7 @@ fn open_create_form(
     } else {
         profile.search_base.clone()
     };
-    let form = build_new_entry_form(read_flow.schema(), profile, i, container);
+    let form = build_new_entry_form(read_flow.schema(), profile, &app.pickers, i, container);
     app.form = Some(form);
     app.form_focus = 0;
     app.form_scroll = 0;
@@ -2947,6 +2903,7 @@ mod tests {
             overlay: Some(Overlay::ValueEditor(ve)),
             status: String::new(),
             relations: vec![],
+            pickers: vec![],
             label_rules: vec![],
             picker_search_id: None,
             picker_last_query: String::new(),
@@ -3010,6 +2967,7 @@ mod tests {
             overlay: None,
             status: String::new(),
             relations: vec![],
+            pickers: vec![],
             label_rules: vec![],
             picker_search_id: None,
             picker_last_query: String::new(),
@@ -3488,18 +3446,28 @@ mod tests {
 
     // ── 4.4 helpers ────────────────────────────────────────────────────────────
 
+    /// A multi-select, DN-stored `member` picker binding (the membership case).
+    fn member_dn_binding() -> crate::config::relation::PickerBinding {
+        use crate::config::relation::{CandidateScope, Cardinality, PickerBinding, StoreKey};
+        PickerBinding {
+            attr: "member".into(),
+            scope: CandidateScope {
+                base: "ou=people".into(),
+                object_classes: vec!["inetOrgPerson".into()],
+                search_attrs: vec!["uid".into()],
+                label_template: None,
+            },
+            store: StoreKey::Dn,
+            select: Some(Cardinality::Multi),
+            fanout_attr: None,
+        }
+    }
+
     /// App with a one-field `member` form (index 0) and no overlay.
     fn test_app_with_form_field_member() -> App {
-        use crate::config::relation::{CandidateScope, RelationRole};
         use crate::schema::FieldKind;
-        use crate::ui::edit_form::{EditField, FieldRelation};
+        use crate::ui::edit_form::EditField;
         use crate::ui::form::WidgetSpec;
-        let scope = CandidateScope {
-            base: "ou=people".into(),
-            object_classes: vec!["inetOrgPerson".into()],
-            search_attrs: vec!["uid".into()],
-            label_template: None,
-        };
         let field = EditField {
             label: "member".into(),
             must: false,
@@ -3511,12 +3479,9 @@ mod tests {
             kind: FieldKind::Text,
             widget: WidgetSpec::ReadOnlyText,
             editor: TextState::new(),
-            relation: Some(FieldRelation {
-                role: RelationRole::Holder,
-                scope,
-            }),
+            relation: None,
             lookup: None,
-            picker: None,
+            picker: Some(member_dn_binding()),
         };
         let mut app = bare_app(false);
         app.form = Some(EditForm {
@@ -3528,15 +3493,9 @@ mod tests {
         app
     }
 
-    /// A ValueEditor in picker mode over field `idx`, empty selection.
+    /// A ValueEditor in picker mode over field `idx`, empty selection, bound to a
+    /// multi-select DN-stored `member` picker.
     fn make_picker_ve(idx: usize) -> ValueEditor {
-        use crate::config::relation::{CandidateScope, RelationRole};
-        let scope = CandidateScope {
-            base: "ou=people".into(),
-            object_classes: vec!["inetOrgPerson".into()],
-            search_attrs: vec!["uid".into()],
-            label_template: None,
-        };
         ValueEditor {
             field: idx,
             label: "member".into(),
@@ -3547,11 +3506,11 @@ mod tests {
             scroll: 0,
             picker: Some(crate::ui::picker::PickerState::new(vec![], true)),
             search: TextState::new(),
-            scope: Some(scope),
-            role: Some(RelationRole::Holder),
+            scope: None,
+            role: None,
             lookup: None,
             base: String::new(),
-            binding: None,
+            binding: Some(Box::new(member_dn_binding())),
         }
     }
 
@@ -3581,7 +3540,8 @@ mod tests {
 
     // ── 5.2 value-lookup picker ──────────────────────────────────────────────
 
-    /// A spec for a `gidNumber` lookup over `posixGroup` (empty base → root).
+    /// A legacy `[profile.lookup.*]` spec for `gidNumber` over `posixGroup` (still
+    /// exercised by the `tag_lookup_fields` dual-path tests).
     fn gid_lookup_spec() -> crate::config::LookupSpec {
         crate::config::LookupSpec {
             object_class: "posixGroup".into(),
@@ -3589,6 +3549,24 @@ mod tests {
             value_attr: "gidNumber".into(),
             label: "cn".into(),
             search_attrs: vec!["cn".into()],
+        }
+    }
+
+    /// A single-select picker binding for `gidNumber`: store the candidate's
+    /// scalar `gidNumber` attribute, search posixGroups under `ou=groups,dc=test`.
+    fn gid_picker_binding() -> crate::config::relation::PickerBinding {
+        use crate::config::relation::{CandidateScope, Cardinality, PickerBinding, StoreKey};
+        PickerBinding {
+            attr: "gidNumber".into(),
+            scope: CandidateScope {
+                base: "ou=groups,dc=test".into(),
+                object_classes: vec!["posixGroup".into()],
+                search_attrs: vec!["cn".into()],
+                label_template: None,
+            },
+            store: StoreKey::Attr("gidNumber".into()),
+            select: Some(Cardinality::Single),
+            fanout_attr: None,
         }
     }
 
@@ -3638,35 +3616,6 @@ mod tests {
         assert_eq!(membership_candidate_label(None, dn, &empty), dn);
     }
 
-    #[test]
-    fn candidate_label_for_lookup_prefers_label_then_falls_back_to_cn_then_dn() {
-        use std::collections::BTreeMap;
-        let dn = "cn=admins,ou=groups,dc=example,dc=org";
-
-        // (a) label attr set AND present → returns that value (case-insensitive
-        //     attr match, first value).
-        let mut spec = gid_lookup_spec();
-        spec.label = "displayName".into();
-        let mut attrs = BTreeMap::new();
-        attrs.insert("DisplayName".to_string(), vec!["Admins".to_string()]);
-        attrs.insert("cn".to_string(), vec!["admins".to_string()]);
-        assert_eq!(candidate_label_for_lookup(&spec, dn, &attrs), "Admins");
-
-        // (b) label attr set but ABSENT → falls back to candidate_label, i.e. the
-        //     `cn` first value.
-        let mut only_cn = BTreeMap::new();
-        only_cn.insert("cn".to_string(), vec!["admins".to_string()]);
-        assert_eq!(candidate_label_for_lookup(&spec, dn, &only_cn), "admins");
-
-        // (c) label empty → cn/DN fallback. With cn present → cn; with neither
-        //     label nor cn → the raw DN.
-        let mut nolabel = gid_lookup_spec();
-        nolabel.label = String::new();
-        assert_eq!(candidate_label_for_lookup(&nolabel, dn, &only_cn), "admins");
-        let empty: BTreeMap<String, Vec<String>> = BTreeMap::new();
-        assert_eq!(candidate_label_for_lookup(&nolabel, dn, &empty), dn);
-    }
-
     /// App with a single-value (`multi=false`) `gidNumber` field already tagged
     /// with a lookup spec, focused (index 0), no overlay.
     fn app_with_lookup_field() -> App {
@@ -3685,8 +3634,8 @@ mod tests {
             widget: WidgetSpec::ReadOnlyText,
             editor: TextState::new(),
             relation: None,
-            lookup: Some(gid_lookup_spec()),
-            picker: None,
+            lookup: None,
+            picker: Some(gid_picker_binding()),
         };
         let mut app = bare_app(false);
         app.form = Some(EditForm {
@@ -3701,16 +3650,23 @@ mod tests {
 
     #[test]
     fn open_value_editor_opens_picker_for_single_value_lookup_field() {
-        // Trap 1: a scalar (multi=false) lookup field must still open a picker.
+        // Trap 1: a scalar (multi=false) picker-bound field must still open a picker.
         let mut app = app_with_lookup_field();
         let s = empty_structure(); // root = dc=test
         open_value_editor(&mut app, &s);
         match &app.overlay {
             Some(Overlay::ValueEditor(ve)) => {
-                assert!(ve.lookup.is_some(), "lookup picker installed");
+                let binding = ve.binding.as_deref().expect("binding installed");
+                assert!(
+                    matches!(
+                        binding.select,
+                        Some(crate::config::relation::Cardinality::Single)
+                    ),
+                    "single-select binding"
+                );
                 assert!(ve.picker.is_some(), "picker state present");
-                // Empty search_base → resolved to the directory root.
-                assert_eq!(ve.base, "dc=test");
+                // Search runs under the binding's scope base.
+                assert_eq!(binding.scope.base, "ou=groups,dc=test");
                 // Single-select has no pre-pinned selection.
                 assert!(ve.picker.as_ref().unwrap().selected.is_empty());
             }
@@ -3732,12 +3688,47 @@ mod tests {
                 store_value: "5001".into(),
             }]);
         }
-        // Alt+S commits the chosen scalar into the field's inline editor.
+        // Bare Alt+S commits the highlighted row without a preceding Enter — the
+        // cursor-fallback path.
         picker_editor_key(&mut app, alt(KeyCode::Char('s')));
         assert!(app.overlay.is_none(), "overlay closes on commit");
         let f = &app.form.as_ref().unwrap().fields[0];
         assert_eq!(f.editor.value(), "5001");
         // A single-value field saves from `editor`, so current_values reflects it.
+        assert_eq!(f.current_values(), vec!["5001".to_string()]);
+    }
+
+    #[test]
+    fn single_select_enter_then_alt_s_also_commits() {
+        // Prove that Enter-then-Alt+S works: Enter radio-selects a row explicitly,
+        // then Alt+S commits it (via the `selected_values()` path, not the cursor
+        // fallback).
+        use crate::ui::picker::Candidate;
+        let mut app = app_with_lookup_field();
+        let s = empty_structure();
+        open_value_editor(&mut app, &s);
+        if let Some(Overlay::ValueEditor(ve)) = app.overlay.as_mut() {
+            ve.picker.as_mut().unwrap().set_results(vec![Candidate {
+                dn: "cn=staff,ou=groups,dc=test".into(),
+                label: "staff".into(),
+                store_value: "5001".into(),
+            }]);
+        }
+        // Enter radio-selects the highlighted row explicitly.
+        picker_editor_key(&mut app, key(KeyCode::Enter));
+        // Confirm the radio selection is in place before Alt+S.
+        if let Some(Overlay::ValueEditor(ve)) = app.overlay.as_ref() {
+            let p = ve.picker.as_ref().unwrap();
+            assert_eq!(p.selected.len(), 1, "Enter radio-selects exactly one row");
+            assert_eq!(p.selected[0].store_value, "5001");
+        } else {
+            panic!("picker overlay gone after Enter");
+        }
+        // Alt+S now commits via selected_values(), not the cursor fallback.
+        picker_editor_key(&mut app, alt(KeyCode::Char('s')));
+        assert!(app.overlay.is_none(), "overlay closes on commit");
+        let f = &app.form.as_ref().unwrap().fields[0];
+        assert_eq!(f.editor.value(), "5001");
         assert_eq!(f.current_values(), vec!["5001".to_string()]);
     }
 
@@ -3789,11 +3780,117 @@ mod tests {
                 store_value: String::new(), // candidate lacked value_attr
             }]);
         }
+        // Bare Alt+S falls back to the highlighted cursor row; its store_value is
+        // empty, so no write happens.
         picker_editor_key(&mut app, alt(KeyCode::Char('s')));
         assert!(app.overlay.is_none());
         // No write happened — the editor stays empty.
         let f = &app.form.as_ref().unwrap().fields[0];
         assert_eq!(f.editor.value(), "");
+        assert!(f.values.is_empty(), "empty value commits nothing");
+    }
+
+    #[test]
+    fn select_auto_derives_cardinality_from_field_arity() {
+        // When a picker binding carries `select: None`, the Enter handler derives
+        // cardinality from the field's own arity (multi=true → toggle, multi=false
+        // → radio/replace). This test verifies both sub-cases.
+
+        // --- Sub-case A: multi=true field + select:None → toggle semantics ---
+        {
+            use crate::ui::picker::Candidate;
+            let mut app = test_app_with_form_field_member(); // multi=true
+            let mut ve = make_picker_ve(0);
+            // Override the binding to select: None so auto-derivation kicks in.
+            if let Some(b) = ve.binding.as_mut() {
+                b.select = None;
+            }
+            ve.picker.as_mut().unwrap().set_results(vec![Candidate {
+                dn: "uid=a,ou=people".into(),
+                label: "a".into(),
+                store_value: "uid=a,ou=people".into(),
+            }]);
+            app.overlay = Some(Overlay::ValueEditor(ve));
+            // First Enter toggles the cursor row INTO the selection.
+            picker_editor_key(&mut app, key(KeyCode::Enter));
+            if let Some(Overlay::ValueEditor(ve)) = app.overlay.as_ref() {
+                assert_eq!(
+                    ve.picker.as_ref().unwrap().selected.len(),
+                    1,
+                    "multi/auto: first Enter toggles candidate in"
+                );
+            } else {
+                panic!("overlay gone after first Enter");
+            }
+            // Second Enter toggles the same row back OUT.
+            picker_editor_key(&mut app, key(KeyCode::Enter));
+            if let Some(Overlay::ValueEditor(ve)) = app.overlay.as_ref() {
+                assert!(
+                    ve.picker.as_ref().unwrap().selected.is_empty(),
+                    "multi/auto: second Enter toggles candidate back out"
+                );
+            } else {
+                panic!("overlay gone after second Enter");
+            }
+        }
+
+        // --- Sub-case B: multi=false field + select:None → radio/replace semantics ---
+        {
+            use crate::ui::picker::Candidate;
+            let mut app = app_with_lookup_field(); // multi=false
+            let s = empty_structure();
+            open_value_editor(&mut app, &s);
+            // Override the binding to select: None so auto-derivation kicks in.
+            if let Some(Overlay::ValueEditor(ve)) = app.overlay.as_mut() {
+                if let Some(b) = ve.binding.as_mut() {
+                    b.select = None;
+                }
+                ve.picker.as_mut().unwrap().set_results(vec![
+                    Candidate {
+                        dn: "cn=row0,ou=groups,dc=test".into(),
+                        label: "row0".into(),
+                        store_value: "1000".into(),
+                    },
+                    Candidate {
+                        dn: "cn=row1,ou=groups,dc=test".into(),
+                        label: "row1".into(),
+                        store_value: "2000".into(),
+                    },
+                ]);
+            }
+            // Enter on cursor row 0 → radio-selects row0 (len 1).
+            picker_editor_key(&mut app, key(KeyCode::Enter));
+            if let Some(Overlay::ValueEditor(ve)) = app.overlay.as_ref() {
+                let p = ve.picker.as_ref().unwrap();
+                assert_eq!(
+                    p.selected.len(),
+                    1,
+                    "single/auto: Enter radio-selects one row"
+                );
+                assert_eq!(p.selected[0].store_value, "1000");
+            } else {
+                panic!("overlay gone after first Enter");
+            }
+            // Move cursor to row 1, Enter again → REPLACES selection (still len 1).
+            if let Some(Overlay::ValueEditor(ve)) = app.overlay.as_mut() {
+                ve.picker.as_mut().unwrap().cursor = 1;
+            }
+            picker_editor_key(&mut app, key(KeyCode::Enter));
+            if let Some(Overlay::ValueEditor(ve)) = app.overlay.as_ref() {
+                let p = ve.picker.as_ref().unwrap();
+                assert_eq!(
+                    p.selected.len(),
+                    1,
+                    "single/auto: second Enter replaces, not appends"
+                );
+                assert_eq!(
+                    p.selected[0].store_value, "2000",
+                    "single/auto: second Enter selects the new row"
+                );
+            } else {
+                panic!("overlay gone after second Enter");
+            }
+        }
     }
 
     #[test]
@@ -3855,20 +3952,6 @@ mod tests {
     }
 
     #[test]
-    fn effective_search_attrs_falls_back_through_label_then_cn() {
-        let mut spec = gid_lookup_spec();
-        assert_eq!(effective_search_attrs(&spec), vec!["cn".to_string()]);
-        spec.search_attrs.clear();
-        spec.label = "displayName".into();
-        assert_eq!(
-            effective_search_attrs(&spec),
-            vec!["displayName".to_string()]
-        );
-        spec.label.clear();
-        assert_eq!(effective_search_attrs(&spec), vec!["cn".to_string()]);
-    }
-
-    #[test]
     fn dedupe_ci_drops_empties_and_case_dups() {
         let mut attrs = vec![
             "gidNumber".to_string(),
@@ -3892,6 +3975,7 @@ mod tests {
         let form = build_new_entry_form(
             &user_schema(),
             &profile,
+            &[],
             0,
             "ou=people,dc=example,dc=org".to_string(),
         );
@@ -3969,7 +4053,7 @@ mod tests {
                 },
             ],
         };
-        let form = build_loaded_form(&model, &user_schema(), false, &[], &[profile]);
+        let form = build_loaded_form(&model, &user_schema(), false, &[], &[], &[profile]);
         let f = form
             .fields
             .iter()
@@ -4093,6 +4177,7 @@ mod tests {
         let form = build_new_entry_form(
             &user_schema(),
             &create_user_profile(),
+            &[],
             0,
             "ou=people,dc=example,dc=org".to_string(),
         );
@@ -4464,6 +4549,7 @@ mod tests {
         app.form = Some(build_new_entry_form(
             &user_schema(),
             &create_user_profile(),
+            &[],
             0,
             "ou=people,dc=example,dc=org".to_string(),
         ));
@@ -4492,6 +4578,7 @@ mod tests {
         app.form = Some(build_new_entry_form(
             &user_schema(),
             &create_user_profile(),
+            &[],
             0,
             "ou=people,dc=example,dc=org".to_string(),
         ));
@@ -4805,6 +4892,7 @@ mod tests {
         app.form = Some(build_new_entry_form(
             &user_schema(),
             &create_user_profile(),
+            &[],
             0,
             "ou=people,dc=example,dc=org".to_string(),
         ));
