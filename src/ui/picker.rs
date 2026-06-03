@@ -112,6 +112,14 @@ pub struct PickerState {
     /// be removed").
     pub saved: Vec<String>,
     pub cursor: usize,
+    /// First visible row index — the scroll offset for the candidate list, kept
+    /// in sync with `cursor` by the renderer (via `clamp_scroll`) so the cursor
+    /// is always on screen even with hundreds of candidates.
+    pub scroll: usize,
+    /// True while an incremental search term is active. Flips `visible()` so the
+    /// fresh search matches lead and the already-selected members trail (easier
+    /// to act on a search result); with no term, selected members lead.
+    pub search_active: bool,
     /// True when the last search returned exactly `PICKER_SEARCH_CAP` entries —
     /// a heuristic signal that the server may have more matching entries.
     pub truncated: bool,
@@ -129,31 +137,66 @@ impl PickerState {
             results: Vec::new(),
             saved,
             cursor: 0,
+            scroll: 0,
+            search_active: false,
             truncated: false,
         }
     }
 
-    /// Visible rows: every selected candidate (marked), then each result not
-    /// already selected (unmarked). This is why a selected entry never vanishes
-    /// while filtering — selection is independent of the search results.
+    /// Visible rows. Ordering depends on whether a search is active:
+    ///
+    /// - **No search term** (`search_active == false`): every selected candidate
+    ///   first (marked), then each result not already selected. A selected entry
+    ///   never vanishes — selection is independent of the results.
+    /// - **Search active** (`search_active == true`): the fresh search results
+    ///   lead (each marked if it is also selected), then the selected members
+    ///   that did NOT match the term trail at the end. This keeps the matches
+    ///   you are searching for at the top instead of buried below the existing
+    ///   selection.
+    ///
+    /// Either way, saved-but-removed members not otherwise shown are appended so
+    /// the UI can render them as "will be removed".
     pub fn visible(&self) -> Vec<VisibleRow> {
         let is_saved = |dn: &str| self.saved.iter().any(|d| same_dn(d, dn));
-        let mut rows: Vec<VisibleRow> = self
-            .selected
-            .iter()
-            .map(|c| VisibleRow {
-                saved: is_saved(&c.dn),
-                candidate: c.clone(),
-                selected: true,
-            })
-            .collect();
-        for r in &self.results {
-            if !self.selected.iter().any(|s| same_dn(&s.dn, &r.dn)) {
+        let is_selected = |dn: &str| self.selected.iter().any(|s| same_dn(&s.dn, dn));
+        let in_results = |dn: &str| self.results.iter().any(|r| same_dn(&r.dn, dn));
+        let mut rows: Vec<VisibleRow> = Vec::new();
+        if self.search_active {
+            // Results first (marked when also selected)...
+            for r in &self.results {
                 rows.push(VisibleRow {
                     saved: is_saved(&r.dn),
+                    selected: is_selected(&r.dn),
                     candidate: r.clone(),
-                    selected: false,
                 });
+            }
+            // ...then selected members that did not match the search.
+            for c in &self.selected {
+                if !in_results(&c.dn) {
+                    rows.push(VisibleRow {
+                        saved: is_saved(&c.dn),
+                        candidate: c.clone(),
+                        selected: true,
+                    });
+                }
+            }
+        } else {
+            // Selected first, then results not already selected.
+            for c in &self.selected {
+                rows.push(VisibleRow {
+                    saved: is_saved(&c.dn),
+                    candidate: c.clone(),
+                    selected: true,
+                });
+            }
+            for r in &self.results {
+                if !is_selected(&r.dn) {
+                    rows.push(VisibleRow {
+                        saved: is_saved(&r.dn),
+                        candidate: r.clone(),
+                        selected: false,
+                    });
+                }
             }
         }
         // Saved members that are neither still selected nor in the current
@@ -180,10 +223,10 @@ impl PickerState {
 
     pub fn set_results(&mut self, results: Vec<Candidate>) {
         self.results = results;
-        let n = self.visible().len();
-        if self.cursor >= n {
-            self.cursor = n.saturating_sub(1);
-        }
+        // A new result set replaces the list — return to the top so the cursor
+        // lands on the first row (the first match when a search is active).
+        self.cursor = 0;
+        self.scroll = 0;
     }
 
     pub fn move_cursor(&mut self, delta: i32) {
@@ -406,6 +449,46 @@ mod tests {
             .find(|r| r.candidate.dn == "uid=carol,ou=people")
             .expect("carol row present");
         assert!(!carol.saved, "carol was not saved at open");
+    }
+
+    #[test]
+    fn search_active_puts_matches_first_and_selected_after() {
+        // Selected = [A, B]; a search returns [C, D] (neither selected) plus B
+        // (which is selected). With search active, results lead and the
+        // non-matching selected member (A) trails.
+        let mut p = PickerState::new(vec![c("A"), c("B")]);
+        p.set_results(vec![c("C"), c("D"), c("B")]);
+        p.search_active = true;
+        let rows = p.visible();
+        let dns: Vec<_> = rows.iter().map(|r| r.candidate.dn.clone()).collect();
+        assert_eq!(dns, vec!["C", "D", "B", "A"], "results first, then unmatched selected");
+        // B appears in the results block but is marked selected (no duplicate).
+        let b = rows.iter().filter(|r| r.candidate.dn == "B").count();
+        assert_eq!(b, 1, "B not duplicated");
+        assert!(rows.iter().find(|r| r.candidate.dn == "B").unwrap().selected);
+        assert!(rows.iter().find(|r| r.candidate.dn == "A").unwrap().selected);
+        assert!(!rows.iter().find(|r| r.candidate.dn == "C").unwrap().selected);
+    }
+
+    #[test]
+    fn no_search_keeps_selected_first() {
+        // Same data, search inactive → original order: selected lead.
+        let mut p = PickerState::new(vec![c("A"), c("B")]);
+        p.set_results(vec![c("C"), c("D"), c("B")]);
+        assert!(!p.search_active, "defaults inactive");
+        let dns: Vec<_> = p.visible().iter().map(|r| r.candidate.dn.clone()).collect();
+        assert_eq!(dns, vec!["A", "B", "C", "D"], "selected first, then unselected results");
+    }
+
+    #[test]
+    fn set_results_resets_cursor_and_scroll_to_top() {
+        let mut p = PickerState::new(vec![]);
+        p.set_results(vec![c("A"), c("B"), c("C")]);
+        p.cursor = 2;
+        p.scroll = 1;
+        p.set_results(vec![c("X"), c("Y")]);
+        assert_eq!(p.cursor, 0, "cursor returns to top on new results");
+        assert_eq!(p.scroll, 0, "scroll returns to top on new results");
     }
 
     #[test]

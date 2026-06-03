@@ -320,8 +320,15 @@ fn secret_len(fld: &EditField) -> usize {
 /// Confirm shows the body (e.g. the LDIF preview) with a Yes/No hint; Error
 /// shows the message; ValueEditor is the multi-value popup. Keys are captured by
 /// `app::overlay_key` while one is open.
-fn render_overlay(f: &mut Frame, app: &App) {
+fn render_overlay(f: &mut Frame, app: &mut App) {
     let area = f.area();
+    // The value editor renders directly and needs &mut (it syncs the picker's
+    // scroll offset to the cursor during render), so handle it before the
+    // read-only match below.
+    if let Some(Overlay::ValueEditor(ve)) = app.overlay.as_mut() {
+        render_value_editor(f, ve, area);
+        return;
+    }
     let (title, body, hint, border) = match app.overlay.as_ref() {
         Some(Overlay::Confirm { title, body, .. }) => {
             (title.clone(), body.clone(), " [Y]es   [N]o ", Color::Yellow)
@@ -338,10 +345,7 @@ fn render_overlay(f: &mut Frame, app: &App) {
             " [S]ave   [D]iscard   [C]ancel ",
             Color::Yellow,
         ),
-        Some(Overlay::ValueEditor(ve)) => {
-            render_value_editor(f, ve, area);
-            return;
-        }
+        Some(Overlay::ValueEditor(_)) => return, // handled above (needs &mut)
         Some(Overlay::ChooseProfile { entries, sel }) => {
             let body = entries
                 .iter()
@@ -387,16 +391,23 @@ fn render_overlay(f: &mut Frame, app: &App) {
 /// Draw the multi-value popup editor: one inline row per value with a selection
 /// marker, the ordered/set hint in the title, and secret rows masked. (Spike
 /// `render_popup`; values rendered via `Paragraph`, never byte-sliced.)
-fn render_value_editor(f: &mut Frame, ve: &ValueEditor, area: Rect) {
+fn render_value_editor(f: &mut Frame, ve: &mut ValueEditor, area: Rect) {
+    // Capture the immutable bits needed below before borrowing the picker
+    // mutably (disjoint fields, but reading them through `ve` after the mut
+    // borrow would conflict).
+    let single = ve.lookup.is_some();
+    let label = ve.label.clone();
+    let search_value = ve.search.value().to_string();
+    let search_position = ve.search.position();
     // Picker mode: searchable candidate list with always-visible selection.
-    if let Some(picker) = &ve.picker {
+    if let Some(picker) = ve.picker.as_mut() {
         let rect = centered(70, 20, area);
         f.render_widget(Clear, rect);
         let block = Block::default()
             .borders(Borders::ALL)
             .border_type(BorderType::Double)
-            .title(format!(" {} ", ve.label))
-            .title_bottom(match (ve.lookup.is_some(), picker.truncated) {
+            .title(format!(" {} ", label))
+            .title_bottom(match (single, picker.truncated) {
                 // Single-select value-lookup picker: Enter picks the highlighted row.
                 (true, true) => {
                     " ↑↓ move · Enter select · Alt+S save · Alt+C cancel · type to search · more match — narrow search "
@@ -419,29 +430,29 @@ fn render_value_editor(f: &mut Frame, ve: &ValueEditor, area: Rect) {
             return;
         }
         // First row: search box.
-        let search_text = format!("Search: {}", ve.search.value());
+        let search_text = format!("Search: {}", search_value);
         f.render_widget(
             Paragraph::new(search_text).style(Style::default().fg(Color::Blue)),
             Rect::new(inner.x, inner.y, inner.width, 1),
         );
         // Show terminal cursor at the insertion point within the search box.
         let prefix_width = "Search: ".len() as u16;
-        let col = (ve.search.position() as u16).min(inner.width.saturating_sub(prefix_width + 1));
+        let col = (search_position as u16).min(inner.width.saturating_sub(prefix_width + 1));
         f.set_cursor_position((inner.x + prefix_width + col, inner.y));
-        // Remaining rows: visible candidates.
+        // Remaining rows: visible candidates, scrolled so the cursor stays on
+        // screen (sticky viewport, same as the form list).
         let rows = picker.visible();
         let list_area_y = inner.y + 1;
         let list_height = inner.height.saturating_sub(1);
-        for (i, row) in rows.iter().enumerate() {
-            if i as u16 >= list_height {
-                break;
-            }
-            let y = list_area_y + i as u16;
-            let selected_cursor = i == picker.cursor;
+        let viewport = list_height as usize;
+        picker.scroll = clamp_scroll(picker.cursor, picker.scroll, viewport, rows.len());
+        let scroll = picker.scroll;
+        for (vis, row) in rows.iter().enumerate().skip(scroll).take(viewport) {
+            let y = list_area_y + (vis - scroll) as u16;
+            let selected_cursor = vis == picker.cursor;
             let star = if row.saved { "*" } else { " " };
             // Single-select (value-lookup) pickers use radio markers; multi-select
             // (membership) pickers use checkboxes.
-            let single = ve.lookup.is_some();
             let check = match (single, row.selected) {
                 (true, true) => "(x)",
                 (true, false) => "( )",
@@ -632,12 +643,12 @@ mod tests {
 
     #[test]
     fn picker_marks_saved_row_with_star() {
-        let ve = picker_value_editor_with_saved();
+        let mut ve = picker_value_editor_with_saved();
         let (w, h) = (70u16, 20u16);
         let backend = TestBackend::new(w, h);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal
-            .draw(|f| render_value_editor(f, &ve, Rect::new(0, 0, w, h)))
+            .draw(|f| render_value_editor(f, &mut ve, Rect::new(0, 0, w, h)))
             .expect("picker render must not panic");
         let buffer = terminal.backend().buffer();
         // The saved candidate row carries the leading `*[x]` marker somewhere.
@@ -650,6 +661,54 @@ mod tests {
             }
         }
         assert!(found, "saved selected row must render `*[x] ...`");
+    }
+
+    #[test]
+    fn picker_scrolls_to_keep_cursor_visible() {
+        use crate::ui::picker::{Candidate, PickerState};
+        // 40 candidates, popup is only 20 rows tall — the cursor at the end must
+        // remain on screen (the list scrolls) and the first rows must scroll off.
+        let results: Vec<Candidate> = (0..40)
+            .map(|i| Candidate {
+                dn: format!("uid=u{i:02},ou=people"),
+                label: format!("User{i:02}"),
+                value: None,
+            })
+            .collect();
+        let mut ps = PickerState::new(vec![]);
+        ps.set_results(results);
+        ps.cursor = 39;
+        let mut ve = crate::ui::edit_form::ValueEditor {
+            field: 0,
+            label: "member".to_string(),
+            ordered: false,
+            secret: false,
+            rows: Vec::new(),
+            sel: 0,
+            picker: Some(ps),
+            search: TextState::new(),
+            scope: None,
+            role: None,
+            lookup: None,
+            base: String::new(),
+        };
+        let (w, h) = (70u16, 20u16);
+        let backend = TestBackend::new(w, h);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| render_value_editor(f, &mut ve, Rect::new(0, 0, w, h)))
+            .expect("picker render must not panic");
+        let buffer = terminal.backend().buffer();
+        let mut all = String::new();
+        for y in 0..h {
+            all.push_str(&row_text(buffer, 0, y, w));
+            all.push('\n');
+        }
+        assert!(all.contains("User39"), "cursor row must be visible after scroll");
+        assert!(
+            !all.contains("User00"),
+            "early rows must scroll off screen, got:\n{all}"
+        );
     }
 
     #[test]

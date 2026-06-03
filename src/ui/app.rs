@@ -425,6 +425,9 @@ fn handle_worker_response(
                 // pickers keep `value: None` and label via `cn`.
                 let lookup = ve.lookup.clone();
                 let label_template = ve.scope.as_ref().and_then(|s| s.label_template.clone());
+                // Whether these results answer an active search term — drives the
+                // picker row ordering (matches-first vs selected-first).
+                let searching = !ve.search.value().trim().is_empty();
                 if let Some(p) = ve.picker.as_mut() {
                     let results: Vec<crate::ui::picker::Candidate> = entries
                         .iter()
@@ -455,6 +458,7 @@ fn handle_worker_response(
                         }
                     }
                     p.set_results(results);
+                    p.search_active = searching;
                     // Heuristic: if the result count hit the cap, the server may
                     // have more matching entries — signal the view to show a hint.
                     p.truncated = entries.len() as i32 >= PICKER_SEARCH_CAP;
