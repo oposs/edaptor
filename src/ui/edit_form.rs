@@ -13,22 +13,11 @@ use std::collections::BTreeMap;
 
 use tui_prompts::{State, TextState};
 
-use crate::config::relation::{
-    backref_lookup, holder_lookup, CandidateScope, PickerBinding, RelationRole, ResolvedRelation,
-    StoreKey,
-};
+use crate::config::relation::{PickerBinding, StoreKey};
 use crate::form::changeset::{is_x_ordered, EditEntry};
 use crate::schema::{FieldKind, SchemaModel};
 use crate::ui::form::{FormField, FormModel, WidgetSpec};
 use crate::ui::picker::{Candidate, PickerState};
-
-/// Relation metadata attached to a picker-enabled field.
-#[derive(Clone)]
-pub struct FieldRelation {
-    pub role: RelationRole,
-    /// Scope for the candidate search opened from THIS field.
-    pub scope: CandidateScope,
-}
 
 /// One field of the editable form.
 pub struct EditField {
@@ -54,14 +43,7 @@ pub struct EditField {
     /// Inline single-value edit state, seeded from `values[0]`. The Unicode-correct
     /// edit engine (tui-prompts); rendering is done by hand so the pane owns its bg.
     pub editor: TextState<'static>,
-    /// `Some` when this field is a membership relation (opens the picker).
-    pub relation: Option<FieldRelation>,
-    /// `Some` when this field is a value-lookup target (`[profile.lookup.<attr>]`),
-    /// so Enter opens a single-select picker that writes the chosen entry's
-    /// `value_attr` scalar into the field.
-    pub lookup: Option<crate::config::LookupSpec>,
-    /// `Some` when this field is bound to a `[profile.picker.<attr>]` picker —
-    /// the unified replacement for `relation`/`lookup`.
+    /// `Some` when this field is bound to a `[profile.picker.<attr>]` picker.
     pub picker: Option<crate::config::relation::PickerBinding>,
 }
 
@@ -110,21 +92,10 @@ pub struct ValueEditor {
     /// sync with `sel` by the renderer so the selected row stays on screen with
     /// many values (e.g. a posixGroup's `memberUid`).
     pub scroll: usize,
-    /// `Some` in picker mode (relation fields); `None` for the free-text editor.
+    /// `Some` in picker mode; `None` for the free-text editor.
     pub picker: Option<PickerState>,
     /// The picker's incremental-search box (Unicode-correct edit engine).
     pub search: TextState<'static>,
-    /// Candidate search scope (membership picker mode only).
-    pub scope: Option<CandidateScope>,
-    /// The relation role being edited (membership picker mode only).
-    pub role: Option<RelationRole>,
-    /// `Some` in value-lookup picker mode: the spec driving the single-select
-    /// search and the scalar committed on Enter. Boxed to keep `ValueEditor`
-    /// (and thus the `Overlay` enum) small.
-    pub lookup: Option<Box<crate::config::LookupSpec>>,
-    /// The resolved search base for a lookup picker (membership mode leaves this
-    /// empty and uses `scope.base`).
-    pub base: String,
     /// The resolved picker binding driving this editor's search/commit (unified
     /// path). `None` for the plain free-text multi-value editor. Boxed to keep
     /// `ValueEditor` (and thus the `Overlay` enum) small.
@@ -150,75 +121,6 @@ impl ValueEditor {
             scroll: 0,
             picker: None,
             search: TextState::new(),
-            scope: None,
-            role: None,
-            lookup: None,
-            base: String::new(),
-            binding: None,
-        }
-    }
-
-    /// Open in PICKER mode over a relation `field`. `label_of` resolves a DN to a
-    /// display label (caller passes a lookup over the loaded structure).
-    pub fn open_picker(
-        field_idx: usize,
-        field: &EditField,
-        label_of: impl Fn(&str) -> String,
-    ) -> Self {
-        let rel = field
-            .relation
-            .as_ref()
-            .expect("open_picker on a relation field");
-        let selected: Vec<Candidate> = field
-            .values
-            .iter()
-            .map(|dn| Candidate {
-                dn: dn.clone(),
-                label: label_of(dn),
-                store_value: dn.clone(),
-            })
-            .collect();
-        ValueEditor {
-            field: field_idx,
-            label: field.label.clone(),
-            ordered: field.ordered,
-            secret: field.secret,
-            rows: Vec::new(),
-            sel: 0,
-            scroll: 0,
-            picker: Some(PickerState::new(selected, true)),
-            search: TextState::new(),
-            scope: Some(rel.scope.clone()),
-            role: Some(rel.role),
-            lookup: None,
-            base: String::new(),
-            binding: None,
-        }
-    }
-
-    /// Open in single-select VALUE-LOOKUP picker mode over `field`. `base` is the
-    /// already-resolved search base (the spec's `search_base`, or the directory
-    /// root when empty). Selection starts empty — a single-select pick has no
-    /// pre-pinned candidate; Enter commits the chosen entry's `value_attr`.
-    pub fn open_lookup(field_idx: usize, field: &EditField, base: String) -> Self {
-        let spec = field
-            .lookup
-            .as_ref()
-            .expect("open_lookup on a lookup field");
-        ValueEditor {
-            field: field_idx,
-            label: field.label.clone(),
-            ordered: field.ordered,
-            secret: field.secret,
-            rows: Vec::new(),
-            sel: 0,
-            scroll: 0,
-            picker: Some(PickerState::new(Vec::new(), false)),
-            search: TextState::new(),
-            scope: None,
-            role: None,
-            lookup: Some(Box::new(spec.clone())),
-            base,
             binding: None,
         }
     }
@@ -249,10 +151,6 @@ impl ValueEditor {
             scroll: 0,
             picker: Some(PickerState::new(selected, key_ci)),
             search: TextState::new(),
-            scope: None,
-            role: None,
-            lookup: None,
-            base: String::new(),
             binding: Some(Box::new(binding.clone())),
         }
     }
@@ -307,16 +205,12 @@ impl EditForm {
     /// [`crate::form::changeset::diff`] consumes.
     ///
     /// Fields excluded from the own-entry diff (their changes drive the
-    /// per-candidate fan-out save instead, not the single-entry diff):
-    /// - fields whose picker binding sets `fanout_attr` (the unified path), and
-    /// - legacy BackRef relation fields (e.g. `memberOf`) — kept until the
-    ///   relation machinery is removed.
+    /// per-candidate fan-out save instead, not the single-entry diff): fields
+    /// whose picker binding sets `fanout_attr` (e.g. `memberOf`).
     ///
     /// The caller must strip the SAME labels from the `original` (baseline) side
-    /// before calling [`crate::form::changeset::diff`] to avoid spurious deletes.
-    /// (Today every fan-out field also carries a BackRef relation, so the
-    /// combined-save path's baseline strip via `backref_labels()` covers both;
-    /// once relations are removed that strip must switch to `fanout_labels()`.)
+    /// before calling [`crate::form::changeset::diff`] to avoid spurious deletes
+    /// (via [`fanout_labels`](EditForm::fanout_labels)).
     ///
     /// All other fields are included — even those whose [`EditField::current_values`]
     /// is empty — so a cleared field diffs to a delete.
@@ -325,19 +219,10 @@ impl EditForm {
             .fields
             .iter()
             .filter(|f| {
-                let is_backref_relation = matches!(
-                    &f.relation,
-                    Some(FieldRelation {
-                        role: RelationRole::BackRef,
-                        ..
-                    })
-                );
-                let is_fanout_picker = f
-                    .picker
+                f.picker
                     .as_ref()
                     .and_then(|b| b.fanout_attr.as_ref())
-                    .is_some();
-                !is_backref_relation && !is_fanout_picker
+                    .is_none()
             })
             .map(|f| (f.label.clone(), f.current_values()))
             .collect();
@@ -345,24 +230,6 @@ impl EditForm {
             dn: self.dn.clone(),
             attrs,
         }
-    }
-
-    /// Labels of BackRef relation fields (excluded from the own-entry diff; their
-    /// change drives the fan-out save). Used to strip them from the baseline too.
-    pub fn backref_labels(&self) -> Vec<String> {
-        self.fields
-            .iter()
-            .filter(|f| {
-                matches!(
-                    &f.relation,
-                    Some(FieldRelation {
-                        role: RelationRole::BackRef,
-                        ..
-                    })
-                )
-            })
-            .map(|f| f.label.clone())
-            .collect()
     }
 
     /// Labels of fields whose picker binding fans out (excluded from the own-entry
@@ -411,52 +278,19 @@ pub(crate) fn value_set_eq(a: &[String], b: &[String]) -> bool {
 /// - `multi`    = the attribute is not single-valued in the schema;
 /// - `editable` = not global-read-only AND the field kind is editable
 ///   (binary / boolean-checkbox / and normally `memberOf` stay static —
-///   [`field_is_editable`]; but a configured BackRef relation overrides this
-///   to enable picker editing);
+///   [`field_is_editable`]). Picker fields are tagged separately by
+///   [`tag_picker_fields`] at the call seams, which may override editability.
 /// - `secret`   = a password attribute ([`is_secret_attr`]);
 /// - `ordered`  = an X-ORDERED config attribute ([`is_x_ordered`]).
 ///
 /// P1 uses the result purely for display. The single-value `editor` is seeded
 /// from `values[0]` so P2's editing has its starting point.
-pub fn build_edit_form(
-    model: &FormModel,
-    schema: &SchemaModel,
-    read_only: bool,
-    relations: &[ResolvedRelation],
-) -> EditForm {
-    // Derive the entry's objectClasses from the `objectClass` field values.
-    // These drive `holder_lookup` / `backref_lookup` to attach picker metadata.
-    let object_classes: Vec<String> = model
-        .fields
-        .iter()
-        .find(|f| f.label.eq_ignore_ascii_case("objectClass"))
-        .map(|f| f.values.clone())
-        .unwrap_or_default();
-
+pub fn build_edit_form(model: &FormModel, schema: &SchemaModel, read_only: bool) -> EditForm {
     let fields: Vec<EditField> = model
         .fields
         .iter()
         .map(|f| {
-            let relation = holder_lookup(relations, &object_classes, &f.label)
-                .map(|r| FieldRelation {
-                    role: RelationRole::Holder,
-                    scope: r.candidate_scope.clone(),
-                })
-                .or_else(|| {
-                    backref_lookup(relations, &object_classes, &f.label).map(|r| FieldRelation {
-                        role: RelationRole::BackRef,
-                        scope: r.holder_scope.clone(),
-                    })
-                });
-            // BackRef fields (e.g. memberOf) are normally non-editable; the picker
-            // makes them editable. (P5 wires the fan-out save.)
-            let editable = match &relation {
-                Some(FieldRelation {
-                    role: RelationRole::BackRef,
-                    ..
-                }) => !read_only,
-                _ => !read_only && field_is_editable(f),
-            };
+            let editable = !read_only && field_is_editable(f);
             let seed = f.values.first().cloned().unwrap_or_default();
             EditField {
                 label: f.label.clone(),
@@ -469,8 +303,6 @@ pub fn build_edit_form(
                 kind: f.kind,
                 widget: f.widget.clone(),
                 editor: TextState::new().with_value(seed),
-                relation,
-                lookup: None,
                 picker: None,
             }
         })
@@ -519,31 +351,10 @@ pub fn inject_password_fields(form: &mut EditForm, spec: &crate::config::Passwor
         kind: FieldKind::Text,
         widget: WidgetSpec::ReadOnlyText,
         editor: TextState::new(),
-        relation: None,
-        lookup: None,
         picker: None,
     };
     form.fields.push(mk(primary));
     form.fields.push(mk(confirm));
-}
-
-/// Tag fields whose attr name matches a `[profile.lookup.<attr>]` entry, so
-/// Enter opens a single-select value-lookup picker. Only editable fields are
-/// tagged (a read-only field offers no picker).
-pub fn tag_lookup_fields(
-    form: &mut EditForm,
-    lookups: &std::collections::BTreeMap<String, crate::config::LookupSpec>,
-) {
-    for field in &mut form.fields {
-        if let Some((_, spec)) = lookups
-            .iter()
-            .find(|(k, _)| k.eq_ignore_ascii_case(&field.label))
-        {
-            if field.editable {
-                field.lookup = Some(spec.clone());
-            }
-        }
-    }
 }
 
 /// Tag each field whose attribute matches a resolved `[profile.picker.<attr>]`
@@ -573,18 +384,13 @@ pub fn tag_picker_fields(
 }
 
 /// Reorder a built form's fields into: mandatory, then populated-or-special
-/// (non-empty value, password/secret, value-lookup, or membership relation),
+/// (non-empty value, secret/password, or picker-bound),
 /// then the rest — each bucket alphabetical (case-insensitive) by label.
 pub fn order_fields(form: &mut EditForm) {
     fn bucket(f: &EditField) -> u8 {
         if f.must {
             0
-        } else if !f.current_values().is_empty()
-            || f.secret
-            || f.lookup.is_some()
-            || f.relation.is_some()
-            || f.picker.is_some()
-        {
+        } else if !f.current_values().is_empty() || f.secret || f.picker.is_some() {
             1
         } else {
             2
@@ -647,8 +453,6 @@ mod tests {
                 kind: FieldKind::DistinguishedName,
                 widget: WidgetSpec::ReadOnlyText,
                 editor: TextState::new(),
-                relation: None,
-                lookup: None,
                 picker: Some(PickerBinding {
                     attr: "memberOf".into(),
                     scope: CandidateScope {
@@ -667,9 +471,14 @@ mod tests {
         };
         let with_fanout = mk(Some("member".into()));
         assert_eq!(with_fanout.fanout_labels(), vec!["memberOf".to_string()]);
-        // A picker field WITHOUT fanout_attr is NOT a fanout label.
+        // A fan-out field is excluded from the own-entry diff (its change drives
+        // the per-candidate fan-out save instead).
+        assert!(!with_fanout.to_edit_entry().attrs.contains_key("memberOf"));
+        // A picker field WITHOUT fanout_attr is NOT a fanout label and IS included
+        // in the own-entry diff.
         let no_fanout = mk(None);
         assert!(no_fanout.fanout_labels().is_empty());
+        assert!(no_fanout.to_edit_entry().attrs.contains_key("memberOf"));
     }
 
     #[test]
@@ -679,119 +488,9 @@ mod tests {
             title: "cn=x,dc=example,dc=org".into(),
             fields: vec![],
         };
-        let form = build_edit_form(&model, &empty_schema(), false, &[]);
+        let form = build_edit_form(&model, &empty_schema(), false);
         assert!(matches!(form.mode, FormMode::Edit));
         assert!(!form.is_new());
-    }
-
-    /// A `FormModel` for a group entry: objectClass=groupOfNames, with a
-    /// multi-valued `member` field. The objectClass field must carry the value
-    /// so `build_edit_form`'s objectClass lookup works.
-    fn group_model_with_member() -> crate::ui::form::FormModel {
-        use crate::schema::FieldKind;
-        use crate::ui::form::{FormField, FormModel, WidgetSpec};
-        FormModel {
-            title: "cn=testgroup,ou=groups,dc=example,dc=org".to_string(),
-            fields: vec![
-                FormField {
-                    label: "objectClass".to_string(),
-                    kind: FieldKind::Text,
-                    is_must: true,
-                    values: vec!["top".to_string(), "groupOfNames".to_string()],
-                    widget: WidgetSpec::ReadOnlyText,
-                },
-                FormField {
-                    label: "cn".to_string(),
-                    kind: FieldKind::Text,
-                    is_must: true,
-                    values: vec!["testgroup".to_string()],
-                    widget: WidgetSpec::ReadOnlyText,
-                },
-                FormField {
-                    label: "member".to_string(),
-                    kind: FieldKind::DistinguishedName,
-                    is_must: false,
-                    values: vec![],
-                    widget: WidgetSpec::ReadOnlyDn,
-                },
-            ],
-        }
-    }
-
-    /// A minimal `SchemaModel` that knows `objectClass` (single), `cn` (single),
-    /// and `member` (multi-valued — no SINGLE-VALUE → picker-ready).
-    fn schema_with_member() -> SchemaModel {
-        let raw = RawSubschema {
-            object_classes: vec![
-                "( 2.5.6.0 NAME 'top' ABSTRACT MUST objectClass )".to_string(),
-                "( 2.5.6.9 NAME 'groupOfNames' SUP top STRUCTURAL \
-                  MUST ( cn $ member ) )"
-                    .to_string(),
-            ],
-            attribute_types: vec![
-                "( 2.5.4.0 NAME 'objectClass' SYNTAX 1.3.6.1.4.1.1466.115.121.1.15 )".to_string(),
-                "( 2.5.4.3 NAME 'cn' SYNTAX 1.3.6.1.4.1.1466.115.121.1.15 SINGLE-VALUE )"
-                    .to_string(),
-                "( 2.5.4.31 NAME 'member' SUP distinguishedName )".to_string(),
-            ],
-            ldap_syntaxes: vec![],
-        };
-        SchemaModel::from_raw(&raw)
-    }
-
-    #[test]
-    fn member_field_on_group_gets_holder_relation() {
-        use crate::config::relation::{resolve_relations, Relation};
-        use crate::config::EntryProfile;
-        let profiles = vec![
-            EntryProfile {
-                name: "group".into(),
-                object_classes: vec!["groupOfNames".into()],
-                rdn_attr: "cn".into(),
-                search_base: "ou=groups".into(),
-                show: vec![],
-                search_attrs: vec!["cn".into()],
-                defaults: Default::default(),
-                password: None,
-                lookups: Default::default(),
-                pickers: Default::default(),
-                label: None,
-            },
-            EntryProfile {
-                name: "user".into(),
-                object_classes: vec!["inetOrgPerson".into()],
-                rdn_attr: "uid".into(),
-                search_base: "ou=people".into(),
-                show: vec![],
-                search_attrs: vec!["uid".into()],
-                defaults: Default::default(),
-                password: None,
-                lookups: Default::default(),
-                pickers: Default::default(),
-                label: None,
-            },
-        ];
-        let rels = resolve_relations(
-            &profiles,
-            &[Relation {
-                name: "m".into(),
-                holder: "group".into(),
-                holder_attr: "member".into(),
-                candidate: "user".into(),
-                back_attr: "memberOf".into(),
-            }],
-        );
-        // A form for a group entry: objectClass=groupOfNames, fields include `member`.
-        let model = group_model_with_member();
-        let form = build_edit_form(&model, &schema_with_member(), false, &rels);
-        let f = form.fields.iter().find(|f| f.label == "member").unwrap();
-        let rel = f.relation.as_ref().expect("member is a relation field");
-        assert!(matches!(
-            rel.role,
-            crate::config::relation::RelationRole::Holder
-        ));
-        assert_eq!(rel.scope.object_classes, vec!["inetOrgPerson".to_string()]);
-        // searches users
     }
 
     fn schema() -> SchemaModel {
@@ -836,7 +535,7 @@ mod tests {
     #[test]
     fn flags_are_set_from_schema_and_rules() {
         let model = build_form_model(&schema(), &["demoPerson"], &entry(), &[]);
-        let form = build_edit_form(&model, &schema(), false, &[]);
+        let form = build_edit_form(&model, &schema(), false);
         let field = |name: &str| form.fields.iter().find(|f| f.label == name).unwrap();
 
         assert!(!field("cn").multi, "cn is single-valued");
@@ -849,7 +548,7 @@ mod tests {
     #[test]
     fn value_editor_open_and_commit_drops_empties() {
         let model = build_form_model(&schema(), &["demoPerson"], &entry(), &[]);
-        let form = build_edit_form(&model, &schema(), false, &[]);
+        let form = build_edit_form(&model, &schema(), false);
         let mail_idx = form.fields.iter().position(|f| f.label == "mail").unwrap();
         let mut ve = ValueEditor::open_plain(mail_idx, &form.fields[mail_idx]);
         assert_eq!(ve.rows.len(), 2); // a@x.org, a@y.org
@@ -866,7 +565,7 @@ mod tests {
     #[test]
     fn read_only_mode_disables_all_editing() {
         let model = build_form_model(&schema(), &["demoPerson"], &entry(), &[]);
-        let form = build_edit_form(&model, &schema(), true, &[]);
+        let form = build_edit_form(&model, &schema(), true);
         assert!(form.fields.iter().all(|f| !f.editable));
         assert_eq!(form.dn, "cn=Alice,dc=example,dc=org");
     }
@@ -874,7 +573,7 @@ mod tests {
     /// Build a writable form over the standard demo entry.
     fn writable_form() -> EditForm {
         let model = build_form_model(&schema(), &["demoPerson"], &entry(), &[]);
-        build_edit_form(&model, &schema(), false, &[])
+        build_edit_form(&model, &schema(), false)
     }
 
     fn field_index(form: &EditForm, name: &str) -> usize {
@@ -941,119 +640,6 @@ mod tests {
     }
 
     #[test]
-    fn open_picker_seeds_selection_from_field_values() {
-        use crate::config::relation::{CandidateScope, RelationRole};
-        let scope = CandidateScope {
-            base: "ou=people".into(),
-            object_classes: vec!["inetOrgPerson".into()],
-            search_attrs: vec!["uid".into()],
-            label_template: None,
-        };
-        let field = EditField {
-            label: "member".into(),
-            must: false,
-            editable: true,
-            multi: true,
-            secret: false,
-            ordered: false,
-            values: vec!["uid=a,ou=people".into(), "uid=b,ou=people".into()],
-            kind: crate::schema::FieldKind::Text,
-            widget: crate::ui::form::WidgetSpec::ReadOnlyText,
-            editor: TextState::new(),
-            relation: Some(FieldRelation {
-                role: RelationRole::Holder,
-                scope: scope.clone(),
-            }),
-            lookup: None,
-            picker: None,
-        };
-        // labels resolved via a closure (DN→label); here identity.
-        let ve = ValueEditor::open_picker(0, &field, |dn| dn.to_string());
-        let picker = ve.picker.expect("picker mode");
-        assert_eq!(
-            picker.selected_dns(),
-            vec!["uid=a,ou=people".to_string(), "uid=b,ou=people".to_string()]
-        );
-        assert_eq!(
-            ve.scope.unwrap().object_classes,
-            vec!["inetOrgPerson".to_string()]
-        );
-    }
-
-    /// Build a minimal user-form with a BackRef `memberOf` field. The field has
-    /// `multi: true`, `values = edited`, and the form `baseline` has the original
-    /// memberOf values. Used to prove that a memberOf-only change produces zero
-    /// own-entry mods once backref labels are stripped from both sides.
-    fn user_form_with_memberof(baseline_vals: Vec<String>, edited_vals: Vec<String>) -> EditForm {
-        use crate::config::relation::{CandidateScope, RelationRole};
-        let scope = CandidateScope {
-            base: "ou=groups".into(),
-            object_classes: vec!["groupOfNames".into()],
-            search_attrs: vec!["cn".into()],
-            label_template: None,
-        };
-        let field = EditField {
-            label: "memberOf".into(),
-            must: false,
-            editable: true,
-            multi: true,
-            secret: false,
-            ordered: false,
-            values: edited_vals,
-            kind: crate::schema::FieldKind::Text,
-            widget: crate::ui::form::WidgetSpec::ReadOnlyText,
-            editor: TextState::new(),
-            relation: Some(FieldRelation {
-                role: RelationRole::BackRef,
-                scope,
-            }),
-            lookup: None,
-            picker: None,
-        };
-        let mut baseline = BTreeMap::new();
-        baseline.insert("memberOf".to_string(), baseline_vals);
-        EditForm {
-            dn: "uid=ann,ou=people,dc=example,dc=org".to_string(),
-            fields: vec![field],
-            baseline,
-            mode: FormMode::Edit,
-        }
-    }
-
-    #[test]
-    fn backref_field_excluded_from_own_entry_diff() {
-        use crate::form::changeset::{diff, EditEntry};
-        // Build a user form with a BackRef `memberOf` field whose selection changed.
-        let form = user_form_with_memberof(
-            /* baseline */ vec!["cn=g1,ou=groups".into()],
-            /* edited    */ vec!["cn=g2,ou=groups".into()],
-        );
-        let labels = form.backref_labels();
-        assert_eq!(labels, vec!["memberOf".to_string()]);
-
-        // Own-entry diff with backref labels stripped from BOTH sides → no mods.
-        let mut original = EditEntry {
-            dn: form.dn.clone(),
-            attrs: form.baseline.clone(),
-        };
-        let mut edited = form.to_edit_entry();
-        // Defensive: remove backref labels from both sides (to_edit_entry already
-        // omits them, but the caller pattern is illustrated here for clarity).
-        for l in &labels {
-            original.attrs.remove(l);
-            edited.attrs.remove(l);
-        }
-        let cs = diff(&original, &edited).unwrap();
-        assert!(
-            cs.mods.is_empty(),
-            "memberOf-only change must produce zero own-entry mods"
-        );
-
-        // And to_edit_entry already omits backref fields.
-        assert!(!edited.attrs.contains_key("memberOf"));
-    }
-
-    #[test]
     fn inject_password_replaces_schema_field_with_two_masked_fields() {
         let plain = |label: &str| EditField {
             label: label.into(),
@@ -1066,8 +652,6 @@ mod tests {
             kind: crate::schema::FieldKind::Text,
             widget: crate::ui::form::WidgetSpec::ReadOnlyText,
             editor: TextState::new(),
-            relation: None,
-            lookup: None,
             picker: None,
         };
         let mut form = EditForm {
@@ -1103,74 +687,6 @@ mod tests {
     }
 
     #[test]
-    fn tag_lookup_fields_tags_matching_editable_field_only() {
-        let plain = |label: &str, editable: bool| EditField {
-            label: label.into(),
-            must: false,
-            editable,
-            multi: false,
-            secret: false,
-            ordered: false,
-            values: vec![],
-            kind: crate::schema::FieldKind::Text,
-            widget: crate::ui::form::WidgetSpec::ReadOnlyText,
-            editor: TextState::new(),
-            relation: None,
-            lookup: None,
-            picker: None,
-        };
-        let mut form = EditForm {
-            dn: "uid=alice,ou=people,dc=example,dc=org".into(),
-            // gidNumber (editable, matches), cn (no lookup), homeDir (read-only).
-            fields: vec![
-                plain("gidNumber", true),
-                plain("cn", true),
-                plain("homeDir", false),
-            ],
-            baseline: Default::default(),
-            mode: FormMode::Edit,
-        };
-        let mut lookups = std::collections::BTreeMap::new();
-        lookups.insert(
-            // Mixed-case key proves the match is case-insensitive.
-            "GIDNUMBER".to_string(),
-            crate::config::LookupSpec {
-                object_class: "posixGroup".into(),
-                search_base: String::new(),
-                value_attr: "gidNumber".into(),
-                label: "cn".into(),
-                search_attrs: vec!["cn".into()],
-            },
-        );
-        // A lookup for a read-only field must not tag it.
-        lookups.insert(
-            "homeDir".to_string(),
-            crate::config::LookupSpec {
-                object_class: "x".into(),
-                search_base: String::new(),
-                value_attr: "x".into(),
-                label: String::new(),
-                search_attrs: vec![],
-            },
-        );
-        tag_lookup_fields(&mut form, &lookups);
-        let f = |name: &str| form.fields.iter().find(|f| f.label == name).unwrap();
-        assert!(
-            f("gidNumber").lookup.is_some(),
-            "matching editable field is tagged"
-        );
-        assert_eq!(
-            f("gidNumber").lookup.as_ref().unwrap().value_attr,
-            "gidNumber"
-        );
-        assert!(f("cn").lookup.is_none(), "non-matching field stays None");
-        assert!(
-            f("homeDir").lookup.is_none(),
-            "read-only field is not tagged even with a matching lookup"
-        );
-    }
-
-    #[test]
     fn order_fields_buckets_mandatory_then_populated_special_then_rest() {
         // label, must, secret, values — everything else default.
         // Single editable fields drive `current_values()` from the editor, so seed
@@ -1188,8 +704,6 @@ mod tests {
                 kind: crate::schema::FieldKind::Text,
                 widget: crate::ui::form::WidgetSpec::ReadOnlyText,
                 editor: TextState::new().with_value(seed),
-                relation: None,
-                lookup: None,
                 picker: None,
             }
         };
@@ -1237,8 +751,6 @@ mod tests {
                 kind: crate::schema::FieldKind::Text,
                 widget: crate::ui::form::WidgetSpec::ReadOnlyText,
                 editor: TextState::new().with_value(seed),
-                relation: None,
-                lookup: None,
                 picker: None,
             }
         };
@@ -1271,8 +783,6 @@ mod tests {
                 kind: FieldKind::DistinguishedName,
                 widget: WidgetSpec::ReadOnlyText,
                 editor: TextState::new(),
-                relation: None,
-                lookup: None,
                 picker: None,
             }],
             baseline: Default::default(),
@@ -1315,8 +825,6 @@ mod tests {
                 kind: FieldKind::DistinguishedName,
                 widget: WidgetSpec::ReadOnlyText,
                 editor: TextState::new(),
-                relation: None,
-                lookup: None,
                 picker: None,
             }],
             baseline: Default::default(),
@@ -1343,8 +851,6 @@ mod tests {
             kind: FieldKind::Text,
             widget: WidgetSpec::ReadOnlyText,
             editor: TextState::new().with_value("1001"),
-            relation: None,
-            lookup: None,
             picker: None,
         };
         let binding = PickerBinding {

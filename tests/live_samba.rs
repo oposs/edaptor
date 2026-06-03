@@ -45,7 +45,6 @@ fn admin_config(uri: String) -> (Config, String) {
         },
         profiles: Vec::new(),
         samba: Default::default(),
-        relations: Vec::new(),
     };
     let password =
         std::env::var("EDAPTOR_TEST_ADMIN_PW").unwrap_or_else(|_| "adminpassword".to_string());
@@ -71,7 +70,6 @@ fn user_config(uri: String, bind_dn: &str, password: &str) -> (Config, String) {
         },
         profiles: Vec::new(),
         samba: Default::default(),
-        relations: Vec::new(),
     };
     (config, password.to_string())
 }

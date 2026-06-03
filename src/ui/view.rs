@@ -325,8 +325,24 @@ fn render_overlay(f: &mut Frame, app: &mut App) {
     // The value editor renders directly and needs &mut (it syncs the picker's
     // scroll offset to the cursor during render), so handle it before the
     // read-only match below.
+    // Whether this picker is single-select: from the binding's cardinality, with
+    // an `auto` fall-back to the field's schema arity (mirrors the commit path in
+    // `app::overlay_key`). Computed via immutable borrows before the `&mut` render.
+    let single = match app.overlay.as_ref() {
+        Some(Overlay::ValueEditor(ve)) => match ve.binding.as_deref().and_then(|b| b.select) {
+            Some(crate::config::relation::Cardinality::Single) => true,
+            Some(crate::config::relation::Cardinality::Multi) => false,
+            None => app
+                .form
+                .as_ref()
+                .and_then(|fm| fm.fields.get(ve.field))
+                .map(|f| !f.multi)
+                .unwrap_or(false),
+        },
+        _ => false,
+    };
     if let Some(Overlay::ValueEditor(ve)) = app.overlay.as_mut() {
-        render_value_editor(f, ve, area);
+        render_value_editor(f, ve, single, area);
         return;
     }
     let (title, body, hint, border) = match app.overlay.as_ref() {
@@ -391,11 +407,10 @@ fn render_overlay(f: &mut Frame, app: &mut App) {
 /// Draw the multi-value popup editor: one inline row per value with a selection
 /// marker, the ordered/set hint in the title, and secret rows masked. (Spike
 /// `render_popup`; values rendered via `Paragraph`, never byte-sliced.)
-fn render_value_editor(f: &mut Frame, ve: &mut ValueEditor, area: Rect) {
+fn render_value_editor(f: &mut Frame, ve: &mut ValueEditor, single: bool, area: Rect) {
     // Capture the immutable bits needed below before borrowing the picker
     // mutably (disjoint fields, but reading them through `ve` after the mut
     // borrow would conflict).
-    let single = ve.lookup.is_some();
     let label = ve.label.clone();
     let search_value = ve.search.value().to_string();
     let search_position = ve.search.position();
@@ -408,7 +423,7 @@ fn render_value_editor(f: &mut Frame, ve: &mut ValueEditor, area: Rect) {
             .border_type(BorderType::Double)
             .title(format!(" {} ", label))
             .title_bottom(match (single, picker.truncated) {
-                // Single-select value-lookup picker: Enter picks the highlighted row.
+                // Single-select picker: Enter radio-selects the highlighted row.
                 (true, true) => {
                     " ↑↓ move · Enter select · Alt+S save · Alt+C cancel · type to search · more match — narrow search "
                 }
@@ -451,8 +466,7 @@ fn render_value_editor(f: &mut Frame, ve: &mut ValueEditor, area: Rect) {
             let y = list_area_y + (vis - scroll) as u16;
             let selected_cursor = vis == picker.cursor;
             let star = if row.saved { "*" } else { " " };
-            // Single-select (value-lookup) pickers use radio markers; multi-select
-            // (membership) pickers use checkboxes.
+            // Single-select pickers use radio markers; multi-select pickers use checkboxes.
             let check = match (single, row.selected) {
                 (true, true) => "(x)",
                 (true, false) => "( )",
@@ -591,8 +605,6 @@ mod tests {
             kind: FieldKind::Text,
             widget: WidgetSpec::ReadOnlyText,
             editor: TextState::new().with_value(value.to_string()),
-            relation: None,
-            lookup: None,
             picker: None,
         }
     }
@@ -639,10 +651,6 @@ mod tests {
             scroll: 0,
             picker: Some(PickerState::new(selected, true)),
             search: TextState::new(),
-            scope: None,
-            role: None,
-            lookup: None,
-            base: String::new(),
             binding: None,
         }
     }
@@ -654,7 +662,7 @@ mod tests {
         let backend = TestBackend::new(w, h);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal
-            .draw(|f| render_value_editor(f, &mut ve, Rect::new(0, 0, w, h)))
+            .draw(|f| render_value_editor(f, &mut ve, false, Rect::new(0, 0, w, h)))
             .expect("picker render must not panic");
         let buffer = terminal.backend().buffer();
         // The saved candidate row carries the leading `*[x]` marker somewhere.
@@ -694,17 +702,13 @@ mod tests {
             scroll: 0,
             picker: Some(ps),
             search: TextState::new(),
-            scope: None,
-            role: None,
-            lookup: None,
-            base: String::new(),
             binding: None,
         };
         let (w, h) = (70u16, 20u16);
         let backend = TestBackend::new(w, h);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal
-            .draw(|f| render_value_editor(f, &mut ve, Rect::new(0, 0, w, h)))
+            .draw(|f| render_value_editor(f, &mut ve, false, Rect::new(0, 0, w, h)))
             .expect("picker render must not panic");
         let buffer = terminal.backend().buffer();
         let mut all = String::new();
@@ -740,17 +744,13 @@ mod tests {
             scroll: 0,
             picker: None,
             search: TextState::new(),
-            scope: None,
-            role: None,
-            lookup: None,
-            base: String::new(),
             binding: None,
         };
         let (w, h) = (60u16, 20u16);
         let backend = TestBackend::new(w, h);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal
-            .draw(|f| render_value_editor(f, &mut ve, Rect::new(0, 0, w, h)))
+            .draw(|f| render_value_editor(f, &mut ve, false, Rect::new(0, 0, w, h)))
             .expect("multi-value editor render must not panic");
         let buffer = terminal.backend().buffer();
         let mut all = String::new();
@@ -791,8 +791,6 @@ mod tests {
             kind: FieldKind::Text,
             widget: WidgetSpec::ReadOnlyText,
             editor: TextState::new(),
-            relation: None,
-            lookup: None,
             picker: None,
         };
         App {
@@ -817,7 +815,6 @@ mod tests {
             form_scroll: 0,
             overlay: None,
             status: String::new(),
-            relations: vec![],
             pickers: vec![],
             label_rules: vec![],
             picker_search_id: None,
@@ -975,7 +972,6 @@ mod tests {
             form_scroll: 0,
             overlay: None,
             status: status.to_string(),
-            relations: vec![],
             pickers: vec![],
             label_rules: vec![],
             picker_search_id: None,
@@ -1003,8 +999,6 @@ mod tests {
                 kind: FieldKind::Text,
                 widget: WidgetSpec::ReadOnlyText,
                 editor: TextState::new().with_value(value.to_string()),
-                relation: None,
-                lookup: None,
                 picker: None,
             }],
             baseline,
@@ -1075,5 +1069,77 @@ mod tests {
         assert!(!pane_hints(Pane::Form, true).contains("Alt+S Save"));
         // Refresh is allowed in read-only.
         assert!(pane_hints(Pane::Tree, true).contains("Alt+R Refresh"));
+    }
+
+    /// A single-select picker must render radio markers `(x)` / `( )` rather than
+    /// the multi-select checkbox markers `[x]` / `[ ]`.
+    #[test]
+    fn render_value_editor_single_select_uses_radio_markers() {
+        use crate::ui::picker::{Candidate, PickerState};
+
+        // One selected candidate and one unselected candidate.
+        let selected = vec![Candidate {
+            dn: "uid=alice,ou=people,dc=example,dc=org".to_string(),
+            label: "Alice Adams (alice)".to_string(),
+            store_value: "uid=alice,ou=people,dc=example,dc=org".to_string(),
+        }];
+        let unselected = Candidate {
+            dn: "uid=bob,ou=people,dc=example,dc=org".to_string(),
+            label: "Bob Baker (bob)".to_string(),
+            store_value: "uid=bob,ou=people,dc=example,dc=org".to_string(),
+        };
+        let mut ps = PickerState::new(selected, true);
+        ps.set_results(vec![
+            Candidate {
+                dn: "uid=alice,ou=people,dc=example,dc=org".to_string(),
+                label: "Alice Adams (alice)".to_string(),
+                store_value: "uid=alice,ou=people,dc=example,dc=org".to_string(),
+            },
+            unselected,
+        ]);
+        let mut ve = crate::ui::edit_form::ValueEditor {
+            field: 0,
+            label: "gidNumber".to_string(),
+            ordered: false,
+            secret: false,
+            rows: Vec::new(),
+            sel: 0,
+            scroll: 0,
+            picker: Some(ps),
+            search: TextState::new(),
+            binding: None,
+        };
+        let (w, h) = (70u16, 20u16);
+        let backend = TestBackend::new(w, h);
+        let mut terminal = Terminal::new(backend).unwrap();
+        // single = true → radio marker path
+        terminal
+            .draw(|f| render_value_editor(f, &mut ve, true, Rect::new(0, 0, w, h)))
+            .expect("single-select picker render must not panic");
+        let buffer = terminal.backend().buffer();
+        let mut all = String::new();
+        for y in 0..h {
+            all.push_str(&row_text(buffer, 0, y, w));
+            all.push('\n');
+        }
+        // Selected row: radio marker (x), not checkbox [x]
+        assert!(
+            all.contains("(x) Alice Adams (alice)"),
+            "selected row must use radio marker `(x)`, got:\n{all}"
+        );
+        // Unselected row: radio marker ( ), not checkbox [ ]
+        assert!(
+            all.contains("( ) Bob Baker (bob)"),
+            "unselected row must use radio marker `( )`, got:\n{all}"
+        );
+        // Multi-select markers must NOT appear
+        assert!(
+            !all.contains("[x]"),
+            "checkbox marker `[x]` must not appear in single-select mode, got:\n{all}"
+        );
+        assert!(
+            !all.contains("[ ]"),
+            "checkbox marker `[ ]` must not appear in single-select mode, got:\n{all}"
+        );
     }
 }

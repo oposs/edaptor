@@ -20,7 +20,7 @@ use tui_prompts::{State, TextState};
 use tui_tree_widget::{TreeItem, TreeState};
 
 use crate::app::UiAction;
-use crate::config::relation::{resolve_pickers, resolve_relations, ResolvedRelation};
+use crate::config::relation::resolve_pickers;
 use crate::config::{Config, EntryProfile};
 use crate::form::changeset::{diff, ChangeSet, EditEntry, ModOp};
 use crate::form::validate::{plan_save, validate, SavePlan, ValidationError};
@@ -226,10 +226,8 @@ pub struct App {
     pub overlay: Option<Overlay>,
     /// Transient status / error text.
     pub status: String,
-    /// Resolved membership relations (built once from config).
-    pub relations: Vec<ResolvedRelation>,
-    /// Resolved picker bindings (built once from config profiles). Supersedes
-    /// `relations`/`lookups` for field population.
+    /// Resolved picker bindings (built once from config profiles). Drives field
+    /// population.
     pub pickers: Vec<crate::config::relation::ResolvedPicker>,
     /// Compiled column-2 label rules (built once from `config.profiles`).
     pub label_rules: Vec<LabelRule>,
@@ -244,7 +242,6 @@ pub fn run(config: Config, password: String) -> Result<()> {
     let base_dn = config.server.base_dn.clone();
     let read_only = config.is_read_only();
     let profiles = config.profiles.clone();
-    let relations = resolve_relations(&config.profiles, &config.relations);
     let pickers = resolve_pickers(&config.profiles);
     // Compile the per-profile column-2 label rules and the attrs the scan must fetch.
     let rules = label_rules(&profiles);
@@ -307,7 +304,6 @@ pub fn run(config: Config, password: String) -> Result<()> {
         form_scroll: 0,
         overlay: None,
         status: String::new(),
-        relations,
         pickers,
         label_rules: rules,
         picker_search_id: None,
@@ -585,7 +581,6 @@ fn handle_worker_response(
                         &model,
                         read_flow.schema(),
                         app.read_only,
-                        &app.relations,
                         &app.pickers,
                         profiles,
                     ));
@@ -718,9 +713,8 @@ fn dispatch_key(app: &mut App, key: KeyEvent, structure: &Structure) -> Option<U
                     app.form_focus = (app.form_focus + 10).min(n.saturating_sub(1))
                 }
                 // Enter opens the value-editor popup: free-text rows for a plain
-                // multi-value field, a picker for a relation field, or a
-                // single-select value-lookup picker for a `lookup`-tagged field
-                // (which may be single-valued). Plain single fields: a no-op.
+                // multi-value field, or a picker for a picker-bound field
+                // (single- or multi-select). Plain single fields: a no-op.
                 KeyCode::Enter => open_value_editor(app, structure),
                 // Esc cancels a create form (parity with the old modal's Esc); on
                 // an edit form Esc is a no-op (Alt+C reverts edits).
@@ -773,12 +767,13 @@ fn open_value_editor(app: &mut App, _structure: &Structure) {
 }
 
 /// Key handling for the in-overlay picker. The two picker modes commit
-/// differently and the keys are gated on which is active:
-/// - Membership (`lookup.is_none()`): Alt+Space toggles the highlighted
-///   candidate (multi-select); Alt+S commits the selected DN set into the field.
-/// - Value-lookup (`lookup.is_some()`): single-select; Alt+S commits the
-///   highlighted candidate's scalar `value_attr` into the field; Alt+Space is a
-///   no-op (single-select has nothing to toggle).
+/// differently based on arity (driven by the binding's `select` field, or the
+/// field's schema arity when `auto`):
+/// - Multi-select: Alt+Space or Enter toggles the highlighted candidate;
+///   Alt+S commits the selected store-value set into the field.
+/// - Single-select: Enter radio-selects the highlighted candidate; Alt+S
+///   commits that candidate's scalar value into the field; Alt+Space is a
+///   no-op (nothing to toggle in single-select mode).
 ///
 /// In BOTH modes bare Space is a literal search character (group names may
 /// contain spaces). ↑↓ move the cursor; Alt+C / Esc cancel. Any other key edits
@@ -1633,27 +1628,20 @@ fn build_loaded_form(
     model: &crate::ui::form::FormModel,
     schema: &SchemaModel,
     read_only: bool,
-    relations: &[ResolvedRelation],
     pickers: &[crate::config::relation::ResolvedPicker],
     profiles: &[EntryProfile],
 ) -> EditForm {
-    let mut form = build_edit_form(model, schema, read_only, relations);
+    let mut form = build_edit_form(model, schema, read_only);
     if !read_only {
         let ocs = object_classes_of(&form);
         if let Some(spec) = profile_for_entry(profiles, &ocs).and_then(|p| p.password.as_ref()) {
             crate::ui::edit_form::inject_password_fields(&mut form, spec);
         }
-        // Tag value-lookup fields so Enter opens the picker on edit, too. Resolved
-        // via a lookups-keyed profile match (NOT `profile_for_entry`, which keys on
-        // a password spec and would miss a lookups-only profile).
-        if let Some(profile) = lookups_profile_for_entry(profiles, &ocs) {
-            crate::ui::edit_form::tag_lookup_fields(&mut form, &profile.lookups);
-        }
     }
     // Tag picker-bound fields so Enter opens the unified picker overlay.
     let ocs = object_classes_of(&form);
     crate::ui::edit_form::tag_picker_fields(&mut form, pickers, &ocs, read_only);
-    // Final step: order fields after injection/tagging set secret/lookup/relation.
+    // Final step: order fields after injection/tagging set secret/picker flags.
     crate::ui::edit_form::order_fields(&mut form);
     form
 }
@@ -1743,14 +1731,14 @@ fn prepare_edit_save(
     profiles: &[EntryProfile],
     now_secs: u64,
 ) -> Result<PrepareSave, String> {
-    // Strip backref labels from the baseline so `diff` does not emit a spurious
-    // Delete for server-maintained attrs.
-    let backref_lbls = form.backref_labels();
+    // Strip fan-out labels from the baseline so `diff` does not emit a spurious
+    // Delete for attrs whose changes drive the per-candidate fan-out save.
+    let fanout_lbls = form.fanout_labels();
     let mut original = EditEntry {
         dn: form.dn.clone(),
         attrs: form.baseline.clone(),
     };
-    for l in &backref_lbls {
+    for l in &fanout_lbls {
         original.attrs.remove(l);
     }
     let mut edited = form.to_edit_entry();
@@ -2059,7 +2047,6 @@ fn reload_form_sync(
                 &model,
                 read_flow.schema(),
                 app.read_only,
-                &app.relations,
                 &app.pickers,
                 profiles,
             ));
@@ -2585,16 +2572,6 @@ fn profile_for_entry<'a>(
     profile_for_entry_where(profiles, entry_ocs, |p| p.password.is_some())
 }
 
-/// Like [`profile_for_entry`] but keyed on `lookups` (NOT `password`): the first
-/// matching profile that declares at least one `[profile.lookup.<attr>]`. Thin
-/// wrapper over [`profile_for_entry_where`]. Pure.
-fn lookups_profile_for_entry<'a>(
-    profiles: &'a [EntryProfile],
-    entry_ocs: &[String],
-) -> Option<&'a EntryProfile> {
-    profile_for_entry_where(profiles, entry_ocs, |p| !p.lookups.is_empty())
-}
-
 /// Edit-path password mods: the same `(attr, values)` pairs as create
 /// (`password_add_attrs`), mapped to REPLACE ops so the new credential overwrites
 /// the old within one atomic MODIFY. Honors `ldap_attribute` and Samba. Pure.
@@ -2785,7 +2762,7 @@ fn build_new_entry_form(
     container: String,
 ) -> EditForm {
     let model = empty_form_for_profile(schema, profile);
-    let mut form = build_edit_form(&model, schema, false, &[]);
+    let mut form = build_edit_form(&model, schema, false);
     for field in &mut form.fields {
         if field.editable {
             field.multi = false;
@@ -2800,13 +2777,10 @@ fn build_new_entry_form(
     if let Some(spec) = &profile.password {
         crate::ui::edit_form::inject_password_fields(&mut form, spec);
     }
-    // Tag value-lookup target fields (e.g. gidNumber) so Enter opens the picker.
-    // Create is the primary use case, so the profile's lookups are known here.
-    crate::ui::edit_form::tag_lookup_fields(&mut form, &profile.lookups);
     // Tag picker-bound fields so Enter opens the unified picker overlay.
     let ocs = object_classes_of(&form);
     crate::ui::edit_form::tag_picker_fields(&mut form, pickers, &ocs, false);
-    // Final step: order fields after injection/tagging set secret/lookup/relation.
+    // Final step: order fields after injection/tagging set secret/picker flags.
     crate::ui::edit_form::order_fields(&mut form);
     form
 }
@@ -2869,10 +2843,6 @@ mod tests {
             scroll: 0,
             picker: None,
             search: TextState::new(),
-            scope: None,
-            role: None,
-            lookup: None,
-            base: String::new(),
             binding: None,
         };
         App {
@@ -2892,7 +2862,6 @@ mod tests {
             form_scroll: 0,
             overlay: Some(Overlay::ValueEditor(ve)),
             status: String::new(),
-            relations: vec![],
             pickers: vec![],
             label_rules: vec![],
             picker_search_id: None,
@@ -2956,7 +2925,6 @@ mod tests {
             form_scroll: 0,
             overlay: None,
             status: String::new(),
-            relations: vec![],
             pickers: vec![],
             label_rules: vec![],
             picker_search_id: None,
@@ -2982,8 +2950,6 @@ mod tests {
                 kind: FieldKind::Text,
                 widget: WidgetSpec::ReadOnlyText,
                 editor: TextState::new().with_value("x".to_string()),
-                relation: None,
-                lookup: None,
                 picker: None,
             }],
             baseline: Default::default(),
@@ -3321,7 +3287,6 @@ mod tests {
             search_attrs: vec![],
             defaults: Default::default(),
             password: None,
-            lookups: Default::default(),
             pickers: Default::default(),
             label: None,
         }
@@ -3469,8 +3434,6 @@ mod tests {
             kind: FieldKind::Text,
             widget: WidgetSpec::ReadOnlyText,
             editor: TextState::new(),
-            relation: None,
-            lookup: None,
             picker: Some(member_dn_binding()),
         };
         let mut app = bare_app(false);
@@ -3496,10 +3459,6 @@ mod tests {
             scroll: 0,
             picker: Some(crate::ui::picker::PickerState::new(vec![], true)),
             search: TextState::new(),
-            scope: None,
-            role: None,
-            lookup: None,
-            base: String::new(),
             binding: Some(Box::new(member_dn_binding())),
         }
     }
@@ -3529,18 +3488,6 @@ mod tests {
     }
 
     // ── 5.2 value-lookup picker ──────────────────────────────────────────────
-
-    /// A legacy `[profile.lookup.*]` spec for `gidNumber` over `posixGroup` (still
-    /// exercised by the `tag_lookup_fields` dual-path tests).
-    fn gid_lookup_spec() -> crate::config::LookupSpec {
-        crate::config::LookupSpec {
-            object_class: "posixGroup".into(),
-            search_base: String::new(),
-            value_attr: "gidNumber".into(),
-            label: "cn".into(),
-            search_attrs: vec!["cn".into()],
-        }
-    }
 
     /// A single-select picker binding for `gidNumber`: store the candidate's
     /// scalar `gidNumber` attribute, search posixGroups under `ou=groups,dc=test`.
@@ -3623,8 +3570,6 @@ mod tests {
             kind: FieldKind::Text,
             widget: WidgetSpec::ReadOnlyText,
             editor: TextState::new(),
-            relation: None,
-            lookup: None,
             picker: Some(gid_picker_binding()),
         };
         let mut app = bare_app(false);
@@ -3955,113 +3900,6 @@ mod tests {
     }
 
     #[test]
-    fn build_new_entry_form_tags_lookup_fields() {
-        // The create path is the primary use case: the gidNumber field must come
-        // out tagged so Enter opens the picker.
-        let mut profile = create_user_profile();
-        profile
-            .lookups
-            .insert("description".into(), gid_lookup_spec());
-        let form = build_new_entry_form(
-            &user_schema(),
-            &profile,
-            &[],
-            0,
-            "ou=people,dc=example,dc=org".to_string(),
-        );
-        let f = form
-            .fields
-            .iter()
-            .find(|f| f.label == "description")
-            .expect("description field present");
-        assert!(f.lookup.is_some(), "create path tagged the lookup field");
-    }
-
-    #[test]
-    fn lookups_profile_for_entry_requires_oc_subset_and_lookup_spec() {
-        // A profile that declares a `[profile.lookup.*]` and whose object classes
-        // are all present in the entry → matches. Mirrors
-        // `profile_for_entry_requires_oc_subset_and_password_spec`.
-        let mut lk_user = create_user_profile();
-        lk_user.object_classes = vec!["inetOrgPerson".into(), "posixAccount".into()];
-        lk_user
-            .lookups
-            .insert("gidNumber".into(), gid_lookup_spec());
-        // A profile with no lookups must never match.
-        let mut plain = create_user_profile();
-        plain.object_classes = vec!["inetOrgPerson".into()];
-        plain.lookups = Default::default();
-        let profiles = vec![plain, lk_user];
-
-        let ocs = vec![
-            "top".to_string(),
-            "inetOrgPerson".to_string(),
-            "posixAccount".to_string(),
-        ];
-        let m = lookups_profile_for_entry(&profiles, &ocs).expect("lookups profile matches");
-        assert!(!m.lookups.is_empty());
-        assert_eq!(m.object_classes.len(), 2);
-        // Entry missing posixAccount: the 2-OC profile no longer matches, and the
-        // plain profile has no lookups → None.
-        assert!(lookups_profile_for_entry(&profiles, &["inetOrgPerson".to_string()]).is_none());
-        // No profile declares lookups → None even on a full OC match.
-        let no_lookups = vec![plain_profile_no_lookups()];
-        assert!(lookups_profile_for_entry(&no_lookups, &ocs).is_none());
-    }
-
-    #[test]
-    fn build_loaded_form_tags_lookup_fields() {
-        // The edit path resolves the lookups profile via objectClass and tags the
-        // matching field so Enter opens the picker on edit, too. Mirrors
-        // `build_new_entry_form_tags_lookup_fields` for the load seam.
-        let mut profile = create_user_profile();
-        profile.object_classes = vec!["testUser".into()];
-        profile
-            .lookups
-            .insert("description".into(), gid_lookup_spec());
-        // No password block → the password injection branch is skipped.
-        profile.password = None;
-
-        // A loaded entry that is an instance of the profile (objectClass=testUser)
-        // and carries the `description` attribute the lookup is keyed on.
-        let model = crate::ui::form::FormModel {
-            title: "uid=ann,ou=people,dc=example,dc=org".into(),
-            fields: vec![
-                crate::ui::form::FormField {
-                    label: "objectClass".into(),
-                    kind: FieldKind::Text,
-                    is_must: true,
-                    values: vec!["testUser".into()],
-                    widget: WidgetSpec::ReadOnlyText,
-                },
-                crate::ui::form::FormField {
-                    label: "description".into(),
-                    kind: FieldKind::Text,
-                    is_must: false,
-                    values: vec!["existing".into()],
-                    widget: WidgetSpec::ReadOnlyText,
-                },
-            ],
-        };
-        let form = build_loaded_form(&model, &user_schema(), false, &[], &[], &[profile]);
-        let f = form
-            .fields
-            .iter()
-            .find(|f| f.label == "description")
-            .expect("description field present");
-        assert!(f.lookup.is_some(), "edit path tagged the lookup field");
-    }
-
-    /// A profile with object classes but no `[profile.lookup.*]` and no password.
-    fn plain_profile_no_lookups() -> EntryProfile {
-        let mut p = create_user_profile();
-        p.object_classes = vec!["inetOrgPerson".into(), "posixAccount".into()];
-        p.lookups = Default::default();
-        p.password = None;
-        p
-    }
-
-    #[test]
     fn fanout_adds_and_removes_per_group() {
         let out = membership_fanout(
             "uid=ann,ou=people",
@@ -4126,7 +3964,7 @@ mod tests {
 
     use crate::ldap::worker::RawSubschema;
     use crate::schema::FieldKind;
-    use crate::ui::edit_form::{EditField, FieldRelation};
+    use crate::ui::edit_form::EditField;
     use crate::ui::form::WidgetSpec;
 
     /// Minimal schema for user (inetOrgPerson-like) with uid, description, memberOf.
@@ -4156,7 +3994,6 @@ mod tests {
             search_attrs: vec![],
             defaults: Default::default(),
             password: None,
-            lookups: Default::default(),
             pickers: Default::default(),
             label: None,
         }
@@ -4210,8 +4047,6 @@ mod tests {
             kind: FieldKind::Text,
             widget: WidgetSpec::ReadOnlyText,
             editor: TextState::new().with_value("ann".to_string()),
-            relation: None,
-            lookup: None,
             picker: None,
         };
 
@@ -4226,8 +4061,6 @@ mod tests {
             kind: FieldKind::Text,
             widget: WidgetSpec::ReadOnlyText,
             editor: TextState::new(),
-            relation: None,
-            lookup: None,
             picker: None,
         };
 
@@ -4242,11 +4075,6 @@ mod tests {
             kind: FieldKind::Text,
             widget: WidgetSpec::ReadOnlyText,
             editor: TextState::new(),
-            relation: Some(FieldRelation {
-                role: crate::config::relation::RelationRole::BackRef,
-                scope: scope.clone(),
-            }),
-            lookup: None,
             picker: Some(crate::config::relation::PickerBinding {
                 attr: "memberOf".into(),
                 scope: scope.clone(),
@@ -4272,7 +4100,7 @@ mod tests {
 
     /// Build a user EditForm where the RDN attr (uid) is changed AND memberOf changes.
     fn user_form_rename_and_memberof_change() -> EditForm {
-        use crate::config::relation::{CandidateScope, RelationRole};
+        use crate::config::relation::CandidateScope;
 
         let scope = CandidateScope {
             base: "ou=groups,dc=x".into(),
@@ -4293,8 +4121,6 @@ mod tests {
             kind: FieldKind::Text,
             widget: WidgetSpec::ReadOnlyText,
             editor: TextState::new().with_value("bob".to_string()),
-            relation: None,
-            lookup: None,
             picker: None,
         };
 
@@ -4309,11 +4135,6 @@ mod tests {
             kind: FieldKind::Text,
             widget: WidgetSpec::ReadOnlyText,
             editor: TextState::new(),
-            relation: Some(FieldRelation {
-                role: RelationRole::BackRef,
-                scope: scope.clone(),
-            }),
-            lookup: None,
             picker: Some(crate::config::relation::PickerBinding {
                 attr: "memberOf".into(),
                 scope,

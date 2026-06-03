@@ -5,7 +5,6 @@ pub mod label;
 pub mod password;
 pub mod relation;
 pub use password::PasswordSource;
-use relation::Relation;
 
 use crate::config::defaults::ProfileDefaults;
 use anyhow::{Context, Result};
@@ -25,9 +24,6 @@ pub struct Config {
     /// is discovered in the directory (spec §9). Absent `[samba]` table is fine.
     #[serde(default)]
     pub samba: SambaConfig,
-    /// Membership relations (`[[relation]]`); empty when absent.
-    #[serde(default, rename = "relation")]
-    pub relations: Vec<Relation>,
 }
 
 /// Fallback Samba domain settings (spec §9). The live `sambaDomain` entry takes
@@ -69,26 +65,6 @@ pub struct PasswordSpec {
 
 fn default_pw_attr() -> String {
     "userPassword".to_string()
-}
-
-/// Value-lookup specification for a profile attribute. Describes how to resolve a
-/// numeric attribute (e.g. `gidNumber`) to a human-readable label by searching
-/// LDAP for entries of the given object class.
-#[derive(Debug, Deserialize, Clone)]
-pub struct LookupSpec {
-    /// Object class of the entries to search (e.g. `"posixGroup"`).
-    pub object_class: String,
-    /// Search base for the lookup query. Defaults to the server base DN when empty.
-    #[serde(default)]
-    pub search_base: String,
-    /// Attribute that holds the value to store (e.g. `"gidNumber"`).
-    pub value_attr: String,
-    /// Attribute whose value is used as the human-readable label (e.g. `"cn"`).
-    #[serde(default)]
-    pub label: String,
-    /// Attributes the picker substring-search matches on.
-    #[serde(default)]
-    pub search_attrs: Vec<String>,
 }
 
 fn default_store() -> String {
@@ -144,14 +120,8 @@ pub struct EntryProfile {
     /// will show an inline password field with the given attribute and Samba settings.
     #[serde(default)]
     pub password: Option<PasswordSpec>,
-    /// Per-attribute value-lookup specs (`[profile.lookup.<attr>]`). When present
-    /// for an attribute, the edit form offers a picker that resolves the stored
-    /// value to a human-readable label via an LDAP search.
-    #[serde(default, rename = "lookup")]
-    pub lookups: std::collections::BTreeMap<String, LookupSpec>,
     /// Per-attribute picker bindings (`[profile.picker.<attr>]`). Each declares how
-    /// the named attribute's field is populated from a candidate search. Supersedes
-    /// `[[relation]]` and `[profile.lookup.*]`.
+    /// the named attribute's field is populated from a candidate search.
     #[serde(default, rename = "picker")]
     pub pickers: std::collections::BTreeMap<String, PickerSpec>,
     /// Optional display-label template (`label = "{cn} ({uid})"`). When set, the
@@ -483,7 +453,6 @@ mod tests {
             search_attrs: vec![],
             defaults: Default::default(),
             password: None,
-            lookups: Default::default(),
             pickers: Default::default(),
             label: None,
         };
@@ -594,38 +563,6 @@ mod tests {
     }
 
     #[test]
-    fn parses_profile_lookup_block() {
-        let toml = r#"
-            [server]
-            uri = "ldap://x"
-            base_dn = "dc=example,dc=org"
-            [auth]
-            bind_dn = "cn=admin,dc=example,dc=org"
-            [[profile]]
-            name = "user"
-            object_classes = ["inetOrgPerson", "posixAccount"]
-            rdn_attr = "uid"
-            [profile.lookup.gidNumber]
-            object_class = "posixGroup"
-            search_base = "ou=groups,dc=example,dc=org"
-            value_attr = "gidNumber"
-            label = "cn"
-            search_attrs = ["cn"]
-        "#;
-        let cfg: Config = toml::from_str(toml).unwrap();
-        let lookups = &cfg.profiles[0].lookups;
-        assert_eq!(lookups.len(), 1);
-        let spec = lookups
-            .get("gidNumber")
-            .expect("gidNumber lookup should exist");
-        assert_eq!(spec.object_class, "posixGroup");
-        assert_eq!(spec.search_base, "ou=groups,dc=example,dc=org");
-        assert_eq!(spec.value_attr, "gidNumber");
-        assert_eq!(spec.label, "cn");
-        assert_eq!(spec.search_attrs, vec!["cn"]);
-    }
-
-    #[test]
     fn parses_profile_label_template() {
         let toml = r#"
             [server]
@@ -658,23 +595,6 @@ mod tests {
         "#;
         let cfg: Config = toml::from_str(toml).unwrap();
         assert!(cfg.profiles[0].label.is_none());
-    }
-
-    #[test]
-    fn profile_without_lookup_block_has_empty_map() {
-        let toml = r#"
-            [server]
-            uri = "ldap://x"
-            base_dn = "dc=example,dc=org"
-            [auth]
-            bind_dn = "cn=admin,dc=example,dc=org"
-            [[profile]]
-            name = "user"
-            object_classes = ["inetOrgPerson"]
-            rdn_attr = "uid"
-        "#;
-        let cfg: Config = toml::from_str(toml).unwrap();
-        assert!(cfg.profiles[0].lookups.is_empty());
     }
 
     #[test]
