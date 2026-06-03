@@ -41,6 +41,98 @@ pub struct CandidateScope {
     pub label_template: Option<Vec<crate::config::label::LabelSeg>>,
 }
 
+/// Picker cardinality: how many candidates may be selected.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Cardinality {
+    Single,
+    Multi,
+}
+
+/// What a pick stores into the field — and the identity key for dedupe/toggle.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StoreKey {
+    /// Store the candidate's DN; key compared case-insensitively.
+    Dn,
+    /// Store this scalar attribute of the candidate; key compared exactly.
+    Attr(String),
+}
+
+/// A `[profile.picker.<attr>]` binding resolved against the profile list.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PickerBinding {
+    /// The attribute this binds (e.g. `memberUid`).
+    pub attr: String,
+    /// Resolved candidate search scope (from the `candidate` profile).
+    pub scope: CandidateScope,
+    /// What each pick contributes, and the identity key.
+    pub store: StoreKey,
+    /// Cardinality; `None` = derive from the field's schema arity (`select = "auto"`).
+    pub select: Option<Cardinality>,
+    /// `Some` ⇒ synthetic back-ref: write this attr on each picked candidate's
+    /// entry (this entry's DN), and do not write the field to the server.
+    pub fanout_attr: Option<String>,
+}
+
+/// A resolved picker bound to its owning profile's object classes (for entry
+/// matching) — the picker analogue of `ResolvedRelation`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedPicker {
+    /// Object classes of the profile that DECLARES this picker (the field owner).
+    pub owner_object_classes: Vec<String>,
+    pub binding: PickerBinding,
+}
+
+/// Resolve every `[profile.picker.*]` across all profiles. A picker whose
+/// `candidate` names an unknown profile is dropped (caller may warn).
+pub fn resolve_pickers(profiles: &[EntryProfile]) -> Vec<ResolvedPicker> {
+    let find = |name: &str| profiles.iter().find(|p| p.name == name);
+    let mut out = Vec::new();
+    for owner in profiles {
+        for (attr, spec) in &owner.pickers {
+            let Some(cand) = find(&spec.candidate) else {
+                continue; // unknown candidate profile → drop
+            };
+            let store = if spec.store.eq_ignore_ascii_case("dn") {
+                StoreKey::Dn
+            } else {
+                StoreKey::Attr(spec.store.clone())
+            };
+            let select = match spec.select.to_ascii_lowercase().as_str() {
+                "single" => Some(Cardinality::Single),
+                "multi" => Some(Cardinality::Multi),
+                _ => None, // "auto" (or anything else) → derive from schema arity
+            };
+            out.push(ResolvedPicker {
+                owner_object_classes: owner.object_classes.clone(),
+                binding: PickerBinding {
+                    attr: attr.clone(),
+                    scope: scope_of(cand),
+                    store,
+                    select,
+                    fanout_attr: spec.fanout_attr.clone(),
+                },
+            });
+        }
+    }
+    out
+}
+
+/// The picker binding for `(entry object classes, attr)`, if any: the entry must
+/// carry one of the picker's owner object classes and the attr must match.
+pub fn picker_for<'a>(
+    pickers: &'a [ResolvedPicker],
+    ocs: &[String],
+    attr: &str,
+) -> Option<&'a PickerBinding> {
+    pickers
+        .iter()
+        .find(|p| {
+            p.binding.attr.eq_ignore_ascii_case(attr)
+                && p.owner_object_classes.iter().any(|oc| has_oc(ocs, oc))
+        })
+        .map(|p| &p.binding)
+}
+
 /// A relation resolved against the configured profiles: the concrete objectClass
 /// for each end plus the search scope used from each direction.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -314,5 +406,133 @@ mod tests {
             back_attr: "memberOf".into(),
         }];
         assert!(resolve_relations(&profiles, &rels).is_empty()); // `group` profile missing
+    }
+
+    #[test]
+    fn resolves_picker_dn_store_defaults() {
+        use crate::config::PickerSpec;
+        let mut group = profile("group", "groupOfNames", "ou=groups,dc=x", &["cn"]);
+        group.pickers.insert(
+            "member".to_string(),
+            PickerSpec {
+                candidate: "user".into(),
+                store: "dn".into(),
+                select: "auto".into(),
+                fanout_attr: None,
+            },
+        );
+        let user = profile("user", "inetOrgPerson", "ou=people,dc=x", &["uid", "cn"]);
+        let resolved = resolve_pickers(&[group, user]);
+        assert_eq!(resolved.len(), 1);
+        let b = &resolved[0].binding;
+        assert_eq!(b.attr, "member");
+        assert_eq!(b.scope.base, "ou=people,dc=x"); // candidate = user
+        assert_eq!(b.store, StoreKey::Dn);
+        assert_eq!(b.select, None); // "auto"
+        assert_eq!(b.fanout_attr, None);
+        assert_eq!(
+            resolved[0].owner_object_classes,
+            vec!["groupOfNames".to_string()]
+        );
+    }
+
+    #[test]
+    fn resolves_picker_scalar_store_and_select() {
+        use crate::config::PickerSpec;
+        let mut user = profile("user", "inetOrgPerson", "ou=people,dc=x", &["uid"]);
+        user.pickers.insert(
+            "gidNumber".to_string(),
+            PickerSpec {
+                candidate: "posixgroup".into(),
+                store: "gidNumber".into(),
+                select: "single".into(),
+                fanout_attr: None,
+            },
+        );
+        let pg = profile("posixgroup", "posixGroup", "ou=groups,dc=x", &["cn"]);
+        let resolved = resolve_pickers(&[user, pg]);
+        let b = &resolved[0].binding;
+        assert_eq!(b.store, StoreKey::Attr("gidNumber".to_string()));
+        assert_eq!(b.select, Some(Cardinality::Single));
+    }
+
+    #[test]
+    fn resolves_picker_fanout() {
+        use crate::config::PickerSpec;
+        let mut user = profile("user", "inetOrgPerson", "ou=people,dc=x", &["uid"]);
+        user.pickers.insert(
+            "memberOf".to_string(),
+            PickerSpec {
+                candidate: "group".into(),
+                store: "dn".into(),
+                select: "multi".into(),
+                fanout_attr: Some("member".into()),
+            },
+        );
+        let group = profile("group", "groupOfNames", "ou=groups,dc=x", &["cn"]);
+        let resolved = resolve_pickers(&[user, group]);
+        let b = &resolved[0].binding;
+        assert_eq!(b.fanout_attr.as_deref(), Some("member"));
+        assert_eq!(b.select, Some(Cardinality::Multi));
+        assert_eq!(b.scope.base, "ou=groups,dc=x"); // candidate = group
+    }
+
+    #[test]
+    fn unknown_picker_candidate_is_dropped() {
+        use crate::config::PickerSpec;
+        let mut group = profile("group", "groupOfNames", "ou=groups,dc=x", &["cn"]);
+        group.pickers.insert(
+            "member".to_string(),
+            PickerSpec {
+                candidate: "nope".into(),
+                store: "dn".into(),
+                select: "auto".into(),
+                fanout_attr: None,
+            },
+        );
+        assert!(resolve_pickers(&[group]).is_empty());
+    }
+
+    #[test]
+    fn picker_for_matches_owner_oc_and_attr() {
+        use crate::config::PickerSpec;
+        let mut group = profile("group", "groupOfNames", "ou=groups,dc=x", &["cn"]);
+        group.pickers.insert(
+            "member".to_string(),
+            PickerSpec {
+                candidate: "user".into(),
+                store: "dn".into(),
+                select: "auto".into(),
+                fanout_attr: None,
+            },
+        );
+        let user = profile("user", "inetOrgPerson", "ou=people,dc=x", &["uid"]);
+        let resolved = resolve_pickers(&[group, user]);
+        let ocs = vec!["top".to_string(), "groupOfNames".to_string()];
+        assert!(picker_for(&resolved, &ocs, "member").is_some());
+        assert!(picker_for(&resolved, &["inetOrgPerson".to_string()], "member").is_none());
+        assert!(picker_for(&resolved, &ocs, "owner").is_none());
+        // attr + object-class matching are case-insensitive.
+        assert!(picker_for(&resolved, &ocs, "MEMBER").is_some());
+        assert!(picker_for(&resolved, &["GROUPOFNAMES".to_string()], "member").is_some());
+    }
+
+    #[test]
+    fn resolve_pickers_store_and_select_are_case_insensitive() {
+        use crate::config::PickerSpec;
+        let mut group = profile("group", "groupOfNames", "ou=groups,dc=x", &["cn"]);
+        group.pickers.insert(
+            "member".to_string(),
+            PickerSpec {
+                candidate: "user".into(),
+                store: "DN".into(),      // upper-case sentinel
+                select: "Single".into(), // capitalized cardinality
+                fanout_attr: None,
+            },
+        );
+        let user = profile("user", "inetOrgPerson", "ou=people,dc=x", &["uid"]);
+        let resolved = resolve_pickers(&[group, user]);
+        assert_eq!(resolved[0].binding.store, StoreKey::Dn);
+        assert_eq!(resolved[0].binding.select, Some(Cardinality::Single));
     }
 }
