@@ -91,6 +91,34 @@ pub struct LookupSpec {
     pub search_attrs: Vec<String>,
 }
 
+fn default_store() -> String {
+    "dn".to_string()
+}
+
+fn default_select() -> String {
+    "auto".to_string()
+}
+
+/// Raw `[profile.picker.<attr>]` binding: how an attribute's field is populated
+/// from a live candidate search. Resolves (against the profile list) to a
+/// [`crate::config::relation::PickerBinding`].
+#[derive(Debug, Deserialize, Clone, PartialEq, Eq)]
+pub struct PickerSpec {
+    /// `[[profile]]` name supplying the candidate search scope.
+    pub candidate: String,
+    /// What to store per pick: the sentinel `"dn"` (default) or an attribute name.
+    #[serde(default = "default_store")]
+    pub store: String,
+    /// Cardinality: `"auto"` (from the attribute's schema arity), `"single"`, `"multi"`.
+    #[serde(default = "default_select")]
+    pub select: String,
+    /// Present ⇒ synthetic back-ref: the field is not written to the server; this
+    /// entry's DN is added/removed in `fanout_attr` on each picked candidate
+    /// (e.g. `memberOf` → write `member` on each picked group).
+    #[serde(default)]
+    pub fanout_attr: Option<String>,
+}
+
 /// A minimal entry profile (M3 slice). Richer metadata (password/membership/
 /// Samba/labels/search_attributes) arrives in M4.
 #[derive(Debug, Deserialize, Default, Clone)]
@@ -121,6 +149,11 @@ pub struct EntryProfile {
     /// value to a human-readable label via an LDAP search.
     #[serde(default, rename = "lookup")]
     pub lookups: std::collections::BTreeMap<String, LookupSpec>,
+    /// Per-attribute picker bindings (`[profile.picker.<attr>]`). Each declares how
+    /// the named attribute's field is populated from a candidate search. Supersedes
+    /// `[[relation]]` and `[profile.lookup.*]`.
+    #[serde(default, rename = "picker")]
+    pub pickers: std::collections::BTreeMap<String, PickerSpec>,
     /// Optional display-label template (`label = "{cn} ({uid})"`). When set, the
     /// membership picker renders entries of this profile via the template; `None`
     /// keeps the default behavior. The raw string is parsed into segments in
@@ -451,6 +484,7 @@ mod tests {
             defaults: Default::default(),
             password: None,
             lookups: Default::default(),
+            pickers: Default::default(),
             label: None,
         };
         assert_eq!(
@@ -641,5 +675,47 @@ mod tests {
         "#;
         let cfg: Config = toml::from_str(toml).unwrap();
         assert!(cfg.profiles[0].lookups.is_empty());
+    }
+
+    #[test]
+    fn parses_profile_picker_block() {
+        let cfg: Config = toml::from_str(
+            r#"
+        [server]
+        uri = "ldaps://x"
+        base_dn = "dc=x"
+        [auth]
+        [[profile]]
+        name = "group"
+        object_classes = ["groupOfNames"]
+        [profile.picker.member]
+        candidate = "user"
+        [profile.picker.memberOf]
+        candidate = "group"
+        store = "dn"
+        fanout_attr = "member"
+        [profile.picker.gidNumber]
+        candidate = "posixgroup"
+        store = "gidNumber"
+        select = "single"
+        "#,
+        )
+        .unwrap();
+        let p = &cfg.profiles[0];
+        let member = p.pickers.get("member").expect("member picker");
+        assert_eq!(member.candidate, "user");
+        assert_eq!(member.store, "dn");
+        assert_eq!(member.select, "auto");
+        assert_eq!(member.fanout_attr, None);
+        let mof = p.pickers.get("memberOf").expect("memberOf picker");
+        assert_eq!(mof.fanout_attr.as_deref(), Some("member"));
+        assert_eq!(mof.candidate, "group");
+        assert_eq!(mof.store, "dn");
+        assert_eq!(mof.select, "auto");
+        let gid = p.pickers.get("gidNumber").expect("gidNumber picker");
+        assert_eq!(gid.store, "gidNumber");
+        assert_eq!(gid.select, "single");
+        assert_eq!(gid.candidate, "posixgroup");
+        assert_eq!(gid.fanout_attr, None);
     }
 }

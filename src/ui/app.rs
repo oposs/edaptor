@@ -3366,6 +3366,7 @@ mod tests {
             defaults: Default::default(),
             password: None,
             lookups: Default::default(),
+            pickers: Default::default(),
             label: None,
         }
     }
@@ -4071,6 +4072,7 @@ mod tests {
             defaults: Default::default(),
             password: None,
             lookups: Default::default(),
+            pickers: Default::default(),
             label: None,
         }
     }
