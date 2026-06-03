@@ -12,7 +12,7 @@ password policy) and seeds it with realistic data.
 | `schema/mail.ldif`  | `cn=admin,cn=config` | Mail schema (`olcSchemaConfig` form of the role's `mail.schema`) |
 | `config/overlays.ldif` | `cn=admin,cn=config` | `memberof` + `refint` + `ppolicy` modules/overlays on `{2}mdb` |
 | `data/ppolicy.ldif` | `cn=admin,dc=example,dc=org` | `ou=policies` + default/serviceaccounts policies |
-| `data/base.ldif` | `cn=admin,dc=example,dc=org` | `ou=people/groups/services`, `sambaDomain`, service accounts |
+| `data/base.ldif` | `cn=admin,dc=example,dc=org` | `ou=people`/`ou=services`, `sambaDomain`, service accounts (`ou=groups` is auto-created by the Bitnami image, so it is not added here) |
 | `data/testdata.ldif` | `cn=admin,dc=example,dc=org` | 600 users / 25 groups (generated) |
 
 **Module path note:** on the Bitnami image the overlay `.so`s live in

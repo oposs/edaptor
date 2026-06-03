@@ -336,4 +336,19 @@ mod tests {
         assert!(a.contains("objectClass: sambaSamAccount"));
         assert!(a.contains("objectClass: posixGroup"));
     }
+
+    /// Drift guard: the committed `testdata.ldif` (loaded by the test server)
+    /// must equal fresh default generator output. If this fails, the generator
+    /// changed without regenerating the file — run `cargo run --bin gen-testdata`.
+    #[test]
+    fn committed_ldif_matches_generator() {
+        let committed = include_str!("../scripts/ldap-provision/data/testdata.ldif");
+        let opts = GenOpts::default();
+        let fresh = to_ldif(&generate(&opts), &opts);
+        assert_eq!(
+            committed, fresh,
+            "scripts/ldap-provision/data/testdata.ldif is stale — \
+             run `cargo run --bin gen-testdata` to regenerate"
+        );
+    }
 }

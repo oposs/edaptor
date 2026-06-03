@@ -11,20 +11,33 @@ IMAGE=docker.io/bitnamilegacy/openldap:2.6.9
 PROVISION_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/ldap-provision" && pwd)"
 
 apply_ldif() {  # <bind-dn> <password> <file>
-  local bind_dn=$1 pw=$2 file=$3 base out
+  local bind_dn=$1 pw=$2 file=$3 base out rc
   base=$(basename "$file")
   podman cp "$file" "$NAME:/tmp/$base"
   # -c keeps going past entries that already exist (idempotent re-runs, and the
   # Bitnami default tree already owns e.g. ou=groups). ldapadd then exits
   # non-zero, which under `set -e` would abort provisioning — so we capture the
-  # output and tolerate only "Already exists (68)"; any other ldap_add error
-  # is surfaced and fails loudly.
-  out=$(podman exec "$NAME" ldapadd -c -x -H ldap://localhost:1389 \
-    -D "$bind_dn" -w "$pw" -f "/tmp/$base" 2>&1) || true
+  # output + exit code and tolerate ONLY the benign "Already exists (68)".
+  if out=$(podman exec "$NAME" ldapadd -c -x -H ldap://localhost:1389 \
+       -D "$bind_dn" -w "$pw" -f "/tmp/$base" 2>&1); then
+    rc=0
+  else
+    rc=$?
+  fi
   echo "$out"
-  if echo "$out" | grep '^ldap_add:' | grep -qv 'Already exists (68)'; then
-    echo "ERROR: ldapadd reported a non-recoverable error for $base" >&2
-    return 1
+  if [ "$rc" -ne 0 ]; then
+    # Any tool error line (ldap_add/ldap_bind/ldap_modify/ldapadd:, etc.) that
+    # is NOT "Already exists (68)" is fatal — this also catches bind/connection
+    # failures, which produce ldap_bind:/ldapadd: lines (not ldap_add:).
+    if echo "$out" | grep -E '^(ldap_|ldapadd:)' | grep -qvF 'Already exists (68)'; then
+      echo "ERROR: ldapadd failed for $base (see output above)" >&2
+      return 1
+    fi
+    # Non-zero exit with no recognizable error line at all is also fatal.
+    if ! echo "$out" | grep -qF 'Already exists (68)'; then
+      echo "ERROR: ldapadd failed for $base with no recoverable error (rc=$rc)" >&2
+      return 1
+    fi
   fi
 }
 
