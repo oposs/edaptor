@@ -336,79 +336,81 @@ fn reload_form_sync(
 /// pre-validate last-member on every removal, abort the whole batch if any would
 /// empty a group, then apply own-entry mods + each fan-out MODIFY, collecting a
 /// partial-failure report, and finally re-read the edited entry (synchronous).
-#[allow(clippy::too_many_arguments)] // synchronous combined-save dispatcher; each arg is needed
-pub(crate) fn apply_combined_save(
-    app: &mut App,
-    worker: &WorkerHandle,
-    read_flow: &mut ReadFlow,
-    profiles: &[EntryProfile],
-    entry_dn: &str,
-    own_mods: Vec<ModOp>,
-    fanout: Vec<(String, ModOp)>,
-    then_intent: Option<GuardIntent>,
-) {
-    // 1. Pre-validate: for each Delete, Base-read the group's current holder_attr
-    //    values; block the whole batch if any removal would empty a group.
-    //    A read failure is treated conservatively — also blocked.
-    let mut blocked: Vec<String> = Vec::new();
-    for (gdn, op) in &fanout {
-        if let ModOp::Delete { attr, values } = op {
-            match read_group_members(worker, gdn, attr) {
-                None => {
-                    blocked.push(format!("{gdn}: could not verify members"));
-                }
-                Some(members) => {
-                    if let Some(member) = values.first() {
-                        if would_empty(&members, member) {
-                            blocked.push(format!("{gdn}: would remove last member"));
+impl super::Ctx<'_> {
+    pub(crate) fn apply_combined_save(
+        &mut self,
+        profiles: &[EntryProfile],
+        entry_dn: &str,
+        own_mods: Vec<ModOp>,
+        fanout: Vec<(String, ModOp)>,
+        then_intent: Option<GuardIntent>,
+    ) {
+        let app = &mut *self.app;
+        let worker = self.worker;
+        let read_flow = &mut *self.read_flow;
+        // 1. Pre-validate: for each Delete, Base-read the group's current holder_attr
+        //    values; block the whole batch if any removal would empty a group.
+        //    A read failure is treated conservatively — also blocked.
+        let mut blocked: Vec<String> = Vec::new();
+        for (gdn, op) in &fanout {
+            if let ModOp::Delete { attr, values } = op {
+                match read_group_members(worker, gdn, attr) {
+                    None => {
+                        blocked.push(format!("{gdn}: could not verify members"));
+                    }
+                    Some(members) => {
+                        if let Some(member) = values.first() {
+                            if would_empty(&members, member) {
+                                blocked.push(format!("{gdn}: would remove last member"));
+                            }
                         }
                     }
                 }
             }
         }
-    }
-    if !blocked.is_empty() {
-        // No write happened — leave form and user's edits intact, no re-read.
-        app.overlay = Some(Overlay::Error {
-            text: format!(
-                "Cannot save — membership change blocked:\n- {}",
-                blocked.join("\n- ")
-            ),
-        });
-        return;
-    }
-
-    // 2. Apply own-entry mods, then each fan-out MODIFY; collect failures.
-    let mut failures: Vec<String> = Vec::new();
-    if !own_mods.is_empty() {
-        if let Some(msg) = apply_one_modify(worker, entry_dn, own_mods) {
-            failures.push(format!("{entry_dn}: {msg}"));
+        if !blocked.is_empty() {
+            // No write happened — leave form and user's edits intact, no re-read.
+            app.overlay = Some(Overlay::Error {
+                text: format!(
+                    "Cannot save — membership change blocked:\n- {}",
+                    blocked.join("\n- ")
+                ),
+            });
+            return;
         }
-    }
-    for (gdn, op) in fanout {
-        if let Some(msg) = apply_one_modify(worker, &gdn, vec![op]) {
-            failures.push(format!("{gdn}: {msg}"));
-        }
-    }
 
-    // 3. Re-read the entry synchronously so the form reflects the directory
-    // state immediately (before setting status/overlay). This avoids the
-    // async install gate clearing the partial-failure message on the next
-    // poll iteration.
-    reload_form_sync(app, worker, read_flow, profiles, entry_dn);
-
-    if failures.is_empty() {
-        app.status = "Saved.".to_string();
-        // Resume the pending guard intent (focus change / navigation / quit) only
-        // on a clean save; on partial failure keep the user on the entry with the
-        // error visible.
-        if let Some(intent) = then_intent {
-            perform_guard_intent(app, worker, read_flow, intent);
+        // 2. Apply own-entry mods, then each fan-out MODIFY; collect failures.
+        let mut failures: Vec<String> = Vec::new();
+        if !own_mods.is_empty() {
+            if let Some(msg) = apply_one_modify(worker, entry_dn, own_mods) {
+                failures.push(format!("{entry_dn}: {msg}"));
+            }
         }
-    } else {
-        app.overlay = Some(Overlay::Error {
-            text: format!("Saved with errors:\n- {}", failures.join("\n- ")),
-        });
+        for (gdn, op) in fanout {
+            if let Some(msg) = apply_one_modify(worker, &gdn, vec![op]) {
+                failures.push(format!("{gdn}: {msg}"));
+            }
+        }
+
+        // 3. Re-read the entry synchronously so the form reflects the directory
+        // state immediately (before setting status/overlay). This avoids the
+        // async install gate clearing the partial-failure message on the next
+        // poll iteration.
+        reload_form_sync(app, worker, read_flow, profiles, entry_dn);
+
+        if failures.is_empty() {
+            app.status = "Saved.".to_string();
+            // Resume the pending guard intent (focus change / navigation / quit) only
+            // on a clean save; on partial failure keep the user on the entry with the
+            // error visible.
+            if let Some(intent) = then_intent {
+                perform_guard_intent(app, worker, read_flow, intent);
+            }
+        } else {
+            app.overlay = Some(Overlay::Error {
+                text: format!("Saved with errors:\n- {}", failures.join("\n- ")),
+            });
+        }
     }
 }
 

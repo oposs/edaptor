@@ -2,13 +2,10 @@
 //! that need the worker or schema, runs confirmed [`PendingAction`]s, and drives
 //! the reconcile / guard-intent navigation between leaf selections.
 
-use std::collections::HashMap;
-
 use tui_prompts::{State, TextState};
 
 use crate::app::UiAction;
 use crate::config::EntryProfile;
-use crate::form::changeset::ModOp;
 use crate::ldap::worker::{Request, Response, WorkerHandle};
 use crate::schema::SchemaModel;
 use crate::ui::edit_form::{build_edit_form, EditForm};
@@ -21,8 +18,8 @@ use super::structure_view::{
     build_tree_items, compute_rows, label_rule_attrs, structure_input_from_attrs, structure_inputs,
 };
 use super::{
-    apply_combined_save, combined_save_overlay, next_id, open_create_form, prepare_create,
-    prepare_edit_save, submit_prepared, App,
+    combined_save_overlay, next_id, open_create_form, prepare_create, prepare_edit_save,
+    submit_prepared, App,
 };
 use crate::form::validate::format_validation_errors;
 use crate::workflows::create::{now_unix_secs_or_zero, profile_for_entry};
@@ -31,98 +28,101 @@ use crate::workflows::save::PrepareSave;
 /// Service a [`UiAction`] that needs the worker / schema. Save and cancel build
 /// confirm overlays; create opens an editable overlay; delete opens a confirm;
 /// refresh re-runs the eager scan synchronously and rebuilds the panes.
-pub(crate) fn handle_action(
-    app: &mut App,
-    action: UiAction,
-    worker: &WorkerHandle,
-    read_flow: &mut ReadFlow,
-    structure: &mut Structure,
-    profiles: &[EntryProfile],
-    base_dn: &str,
-) {
-    match action {
-        UiAction::FormSave => {
-            let Some(form) = app.form.as_ref() else {
-                return;
-            };
-            if form.is_new() {
-                prepare_create(app, worker, read_flow, profiles, base_dn);
-                return;
-            }
-            // Try the combined membership path first; fall back to the single-entry
-            // path when no backref field actually changed. No guard intent here —
-            // a plain Alt+S save has nothing to resume afterward.
-            if let Some(ov) = combined_save_overlay(form, read_flow.schema(), profiles, None) {
-                app.overlay = Some(ov);
-                return;
-            }
-            // Normal single-entry save (folds in any password change when the
-            // entry matches a password-profile).
-            let prep = match prepare_edit_save(
-                form,
-                read_flow.schema(),
-                profiles,
-                now_unix_secs_or_zero(),
-            ) {
-                Ok(p) => p,
-                Err(text) => {
-                    app.overlay = Some(Overlay::Error { text });
+impl super::Ctx<'_> {
+    pub(crate) fn handle_action(
+        &mut self,
+        action: UiAction,
+        structure: &mut Structure,
+        profiles: &[EntryProfile],
+        base_dn: &str,
+    ) {
+        let app = &mut *self.app;
+        let worker = self.worker;
+        let read_flow = &mut *self.read_flow;
+        match action {
+            UiAction::FormSave => {
+                let Some(form) = app.form.as_ref() else {
+                    return;
+                };
+                if form.is_new() {
+                    prepare_create(app, worker, read_flow, profiles, base_dn);
                     return;
                 }
-            };
-            match prep {
-                PrepareSave::Ready { plan, dn, ldif } => {
+                // Try the combined membership path first; fall back to the single-entry
+                // path when no backref field actually changed. No guard intent here —
+                // a plain Alt+S save has nothing to resume afterward.
+                if let Some(ov) = combined_save_overlay(form, read_flow.schema(), profiles, None) {
+                    app.overlay = Some(ov);
+                    return;
+                }
+                // Normal single-entry save (folds in any password change when the
+                // entry matches a password-profile).
+                let prep = match prepare_edit_save(
+                    form,
+                    read_flow.schema(),
+                    profiles,
+                    now_unix_secs_or_zero(),
+                ) {
+                    Ok(p) => p,
+                    Err(text) => {
+                        app.overlay = Some(Overlay::Error { text });
+                        return;
+                    }
+                };
+                match prep {
+                    PrepareSave::Ready { plan, dn, ldif } => {
+                        app.overlay = Some(Overlay::Confirm {
+                            title: "Apply these changes?".to_string(),
+                            body: ldif,
+                            action: PendingAction::Save {
+                                plan,
+                                dn,
+                                nav: None,
+                            },
+                        });
+                    }
+                    PrepareSave::NoChanges => app.status = "No changes.".to_string(),
+                    PrepareSave::Invalid(errs) => {
+                        app.overlay = Some(Overlay::Error {
+                            text: format_validation_errors(&errs),
+                        })
+                    }
+                    PrepareSave::DiffError(e) => app.overlay = Some(Overlay::Error { text: e }),
+                }
+            }
+            UiAction::FormCancel => revert_form(app),
+            UiAction::NewEntry(i) => open_create_form(app, read_flow, profiles, i, base_dn),
+            UiAction::NewEntryChoose => {
+                // Offer profiles whose search_base matches the current container;
+                // fall back to all profiles so Alt+N always works.
+                let mut matches = profiles_for_container(profiles, &app.current_branch);
+                if matches.is_empty() {
+                    matches = (0..profiles.len()).collect();
+                }
+                match matches.len() {
+                    0 => {}
+                    1 => open_create_form(app, read_flow, profiles, matches[0], base_dn),
+                    _ => {
+                        let entries = matches
+                            .iter()
+                            .map(|&i| (i, profiles[i].name.clone()))
+                            .collect();
+                        app.overlay = Some(Overlay::ChooseProfile { entries, sel: 0 })
+                    }
+                }
+            }
+            UiAction::DeleteEntry(dn) => {
+                if !dn.is_empty() {
                     app.overlay = Some(Overlay::Confirm {
-                        title: "Apply these changes?".to_string(),
-                        body: ldif,
-                        action: PendingAction::Save {
-                            plan,
-                            dn,
-                            nav: None,
-                        },
+                        title: "Delete this entry?".to_string(),
+                        body: dn.clone(),
+                        action: PendingAction::Delete { dn },
                     });
                 }
-                PrepareSave::NoChanges => app.status = "No changes.".to_string(),
-                PrepareSave::Invalid(errs) => {
-                    app.overlay = Some(Overlay::Error {
-                        text: format_validation_errors(&errs),
-                    })
-                }
-                PrepareSave::DiffError(e) => app.overlay = Some(Overlay::Error { text: e }),
             }
+            UiAction::Refresh => refresh_structure(app, worker, structure, base_dn),
+            UiAction::None => {}
         }
-        UiAction::FormCancel => revert_form(app),
-        UiAction::NewEntry(i) => open_create_form(app, read_flow, profiles, i, base_dn),
-        UiAction::NewEntryChoose => {
-            // Offer profiles whose search_base matches the current container;
-            // fall back to all profiles so Alt+N always works.
-            let mut matches = profiles_for_container(profiles, &app.current_branch);
-            if matches.is_empty() {
-                matches = (0..profiles.len()).collect();
-            }
-            match matches.len() {
-                0 => {}
-                1 => open_create_form(app, read_flow, profiles, matches[0], base_dn),
-                _ => {
-                    let entries = matches
-                        .iter()
-                        .map(|&i| (i, profiles[i].name.clone()))
-                        .collect();
-                    app.overlay = Some(Overlay::ChooseProfile { entries, sel: 0 })
-                }
-            }
-        }
-        UiAction::DeleteEntry(dn) => {
-            if !dn.is_empty() {
-                app.overlay = Some(Overlay::Confirm {
-                    title: "Delete this entry?".to_string(),
-                    body: dn.clone(),
-                    action: PendingAction::Delete { dn },
-                });
-            }
-        }
-        UiAction::Refresh => refresh_structure(app, worker, structure, base_dn),
-        UiAction::None => {}
     }
 }
 
@@ -218,143 +218,144 @@ pub(crate) fn rebind_selection(app: &mut App, dn: &str) {
 }
 
 /// Run a confirmed [`PendingAction`] (submits to the worker / navigates).
-#[allow(clippy::too_many_arguments)] // central write dispatcher; each arg is needed
-pub(crate) fn execute_pending(
-    app: &mut App,
-    action: PendingAction,
-    worker: &WorkerHandle,
-    read_flow: &mut ReadFlow,
-    profiles: &[EntryProfile],
-    base_dn: &str,
-    post: &mut HashMap<u64, PostWrite>,
-    pending_followups: &mut HashMap<u64, (String, Vec<ModOp>, Option<String>)>,
-) {
-    match action {
-        PendingAction::Save { plan, dn, nav } => {
-            submit_prepared(plan, &dn, nav, false, worker, post, pending_followups);
-            app.status = "Saving…".to_string();
-        }
-        PendingAction::Create { dn, attrs, parent } => {
-            let id = next_id();
-            let input = structure_input_from_attrs(&dn, &attrs);
-            let _ = worker.submit(Request::Add { id, dn, attrs });
-            post.insert(id, PostWrite::Created { parent, input });
-            app.status = "Creating…".to_string();
-        }
-        PendingAction::Delete { dn } => {
-            let id = next_id();
-            let _ = worker.submit(Request::Delete { id, dn: dn.clone() });
-            post.insert(id, PostWrite::Deleted { dn });
-            app.status = "Deleting…".to_string();
-        }
-        PendingAction::OpenCreate { profile_idx } => {
-            open_create_form(app, read_flow, profiles, profile_idx, base_dn);
-        }
-        PendingAction::ResolveGuard {
-            intent,
-            save: false,
-        } => {
-            // Discard: drop the edits and perform the intent now.
-            perform_guard_intent(app, worker, read_flow, intent);
-        }
-        PendingAction::ResolveGuard { intent, save: true } => {
-            // Save, then perform the intent. Navigation defers to the write's
-            // WriteOk (the re-read must target the post-save DN); a focus change
-            // applies immediately; a quit defers to the WriteOk so it isn't lost.
-            let Some(form) = app.form.as_ref() else {
+impl super::Ctx<'_> {
+    pub(crate) fn execute_pending(
+        &mut self,
+        action: PendingAction,
+        profiles: &[EntryProfile],
+        base_dn: &str,
+    ) {
+        let app = &mut *self.app;
+        let worker = self.worker;
+        let read_flow = &mut *self.read_flow;
+        let post = &mut *self.post;
+        let pending_followups = &mut *self.pending_followups;
+        match action {
+            PendingAction::Save { plan, dn, nav } => {
+                submit_prepared(plan, &dn, nav, false, worker, post, pending_followups);
+                app.status = "Saving…".to_string();
+            }
+            PendingAction::Create { dn, attrs, parent } => {
+                let id = next_id();
+                let input = structure_input_from_attrs(&dn, &attrs);
+                let _ = worker.submit(Request::Add { id, dn, attrs });
+                post.insert(id, PostWrite::Created { parent, input });
+                app.status = "Creating…".to_string();
+            }
+            PendingAction::Delete { dn } => {
+                let id = next_id();
+                let _ = worker.submit(Request::Delete { id, dn: dn.clone() });
+                post.insert(id, PostWrite::Deleted { dn });
+                app.status = "Deleting…".to_string();
+            }
+            PendingAction::OpenCreate { profile_idx } => {
+                open_create_form(app, read_flow, profiles, profile_idx, base_dn);
+            }
+            PendingAction::ResolveGuard {
+                intent,
+                save: false,
+            } => {
+                // Discard: drop the edits and perform the intent now.
                 perform_guard_intent(app, worker, read_flow, intent);
-                return;
-            };
-            // A create form has no diff baseline: route "Save" to the create
-            // confirm (an Add). The pending guard intent is dropped — the user
-            // confirms the create, then navigates explicitly (full
-            // save-then-resume for create is out of scope here).
-            if form.is_new() {
-                prepare_create(app, worker, read_flow, profiles, base_dn);
-                return;
             }
-            // A membership-bearing save runs synchronously through CombinedSave;
-            // the pending guard intent rides along and is performed on success.
-            if let Some(ov) =
-                combined_save_overlay(form, read_flow.schema(), profiles, Some(intent.clone()))
-            {
-                app.overlay = Some(ov);
-                return;
-            }
-            // Normal single-entry save (folds in any password change).
-            let prep = match prepare_edit_save(
-                form,
-                read_flow.schema(),
-                profiles,
-                now_unix_secs_or_zero(),
-            ) {
-                Ok(p) => p,
-                Err(text) => {
-                    app.overlay = Some(Overlay::Error { text });
+            PendingAction::ResolveGuard { intent, save: true } => {
+                // Save, then perform the intent. Navigation defers to the write's
+                // WriteOk (the re-read must target the post-save DN); a focus change
+                // applies immediately; a quit defers to the WriteOk so it isn't lost.
+                let Some(form) = app.form.as_ref() else {
+                    perform_guard_intent(app, worker, read_flow, intent);
+                    return;
+                };
+                // A create form has no diff baseline: route "Save" to the create
+                // confirm (an Add). The pending guard intent is dropped — the user
+                // confirms the create, then navigates explicitly (full
+                // save-then-resume for create is out of scope here).
+                if form.is_new() {
+                    prepare_create(app, worker, read_flow, profiles, base_dn);
                     return;
                 }
-            };
-            match prep {
-                PrepareSave::Ready { plan, dn, .. } => {
-                    app.status = "Saving…".to_string();
-                    match intent {
-                        GuardIntent::Nav(target) => {
-                            // Advance the awaited DN ONLY now that we commit, so a
-                            // later failure cannot silence the dirty guard.
-                            app.last_seen_leaf = target.clone();
-                            submit_prepared(
-                                plan,
-                                &dn,
-                                target,
-                                false,
-                                worker,
-                                post,
-                                pending_followups,
-                            );
-                        }
-                        GuardIntent::Focus(pane) => {
-                            submit_prepared(
-                                plan,
-                                &dn,
-                                None,
-                                false,
-                                worker,
-                                post,
-                                pending_followups,
-                            );
-                            app.focus = pane;
-                        }
-                        GuardIntent::Quit => {
-                            submit_prepared(plan, &dn, None, true, worker, post, pending_followups);
+                // A membership-bearing save runs synchronously through CombinedSave;
+                // the pending guard intent rides along and is performed on success.
+                if let Some(ov) =
+                    combined_save_overlay(form, read_flow.schema(), profiles, Some(intent.clone()))
+                {
+                    app.overlay = Some(ov);
+                    return;
+                }
+                // Normal single-entry save (folds in any password change).
+                let prep = match prepare_edit_save(
+                    form,
+                    read_flow.schema(),
+                    profiles,
+                    now_unix_secs_or_zero(),
+                ) {
+                    Ok(p) => p,
+                    Err(text) => {
+                        app.overlay = Some(Overlay::Error { text });
+                        return;
+                    }
+                };
+                match prep {
+                    PrepareSave::Ready { plan, dn, .. } => {
+                        app.status = "Saving…".to_string();
+                        match intent {
+                            GuardIntent::Nav(target) => {
+                                // Advance the awaited DN ONLY now that we commit, so a
+                                // later failure cannot silence the dirty guard.
+                                app.last_seen_leaf = target.clone();
+                                submit_prepared(
+                                    plan,
+                                    &dn,
+                                    target,
+                                    false,
+                                    worker,
+                                    post,
+                                    pending_followups,
+                                );
+                            }
+                            GuardIntent::Focus(pane) => {
+                                submit_prepared(
+                                    plan,
+                                    &dn,
+                                    None,
+                                    false,
+                                    worker,
+                                    post,
+                                    pending_followups,
+                                );
+                                app.focus = pane;
+                            }
+                            GuardIntent::Quit => {
+                                submit_prepared(
+                                    plan,
+                                    &dn,
+                                    None,
+                                    true,
+                                    worker,
+                                    post,
+                                    pending_followups,
+                                );
+                            }
                         }
                     }
+                    // Nothing to save after all → just perform the intent.
+                    PrepareSave::NoChanges => perform_guard_intent(app, worker, read_flow, intent),
+                    PrepareSave::Invalid(errs) => {
+                        app.overlay = Some(Overlay::Error {
+                            text: format_validation_errors(&errs),
+                        })
+                    }
+                    PrepareSave::DiffError(e) => app.overlay = Some(Overlay::Error { text: e }),
                 }
-                // Nothing to save after all → just perform the intent.
-                PrepareSave::NoChanges => perform_guard_intent(app, worker, read_flow, intent),
-                PrepareSave::Invalid(errs) => {
-                    app.overlay = Some(Overlay::Error {
-                        text: format_validation_errors(&errs),
-                    })
-                }
-                PrepareSave::DiffError(e) => app.overlay = Some(Overlay::Error { text: e }),
             }
-        }
-        PendingAction::CombinedSave {
-            entry_dn,
-            own_mods,
-            fanout,
-            then_intent,
-        } => {
-            apply_combined_save(
-                app,
-                worker,
-                read_flow,
-                profiles,
-                &entry_dn,
+            PendingAction::CombinedSave {
+                entry_dn,
                 own_mods,
                 fanout,
                 then_intent,
-            );
+            } => {
+                self.apply_combined_save(profiles, &entry_dn, own_mods, fanout, then_intent);
+            }
         }
     }
 }
@@ -403,47 +404,47 @@ fn navigate_to(
 /// Reconcile UI deltas each tick: a tree-selection branch switch, a search
 /// filter change, and a leaf-selection change (which fires a base-read whose
 /// result fills the form). No dirty guard yet (that is P4).
-pub(crate) fn reconcile(
-    app: &mut App,
-    structure: &Structure,
-    worker: &WorkerHandle,
-    read_flow: &mut ReadFlow,
-) {
-    let search = app.search.value().to_string();
+impl super::Ctx<'_> {
+    pub(crate) fn reconcile(&mut self, structure: &Structure) {
+        let app = &mut *self.app;
+        let worker = self.worker;
+        let read_flow = &mut *self.read_flow;
+        let search = app.search.value().to_string();
 
-    // 1) Tree selection changed → switch the leaf pane to that branch.
-    if let Some(sel) = app.tree_state.selected().last().cloned() {
-        if sel != app.current_branch && structure.get(&sel).is_some() {
-            app.current_branch = sel;
+        // 1) Tree selection changed → switch the leaf pane to that branch.
+        if let Some(sel) = app.tree_state.selected().last().cloned() {
+            if sel != app.current_branch && structure.get(&sel).is_some() {
+                app.current_branch = sel;
+                app.rows = compute_rows(structure, &app.current_branch, &search, &app.label_rules);
+                app.leaf_sel = 0;
+                app.last_seen_leaf = None;
+            }
+        }
+
+        // 2) Search string changed → recompute the rows, keep the selection in range.
+        if search != app.last_search {
+            app.last_search = search.clone();
             app.rows = compute_rows(structure, &app.current_branch, &search, &app.label_rules);
-            app.leaf_sel = 0;
-            app.last_seen_leaf = None;
+            if app.leaf_sel >= app.rows.len() {
+                app.leaf_sel = app.rows.len().saturating_sub(1);
+            }
         }
-    }
 
-    // 2) Search string changed → recompute the rows, keep the selection in range.
-    if search != app.last_search {
-        app.last_search = search.clone();
-        app.rows = compute_rows(structure, &app.current_branch, &search, &app.label_rules);
-        if app.leaf_sel >= app.rows.len() {
-            app.leaf_sel = app.rows.len().saturating_sub(1);
+        // 3) Selected leaf DN changed → dirty guard, then base-read it into the form
+        //    (or clear it). A dirty form opens the Save/Discard/Stay guard instead of
+        //    navigating; the guard carries the target and resolves in `guard_key`.
+        let sel_dn = app.rows.get(app.leaf_sel).map(|(_, dn)| dn.clone());
+        if sel_dn != app.last_seen_leaf {
+            let dirty = app.form.as_ref().map(|f| f.is_dirty()).unwrap_or(false);
+            if dirty {
+                // Do NOT advance last_seen yet — the guard remembers the target.
+                app.overlay = Some(Overlay::Guard {
+                    intent: GuardIntent::Nav(sel_dn),
+                });
+                return;
+            }
+            navigate_to(app, worker, read_flow, sel_dn);
         }
-    }
-
-    // 3) Selected leaf DN changed → dirty guard, then base-read it into the form
-    //    (or clear it). A dirty form opens the Save/Discard/Stay guard instead of
-    //    navigating; the guard carries the target and resolves in `guard_key`.
-    let sel_dn = app.rows.get(app.leaf_sel).map(|(_, dn)| dn.clone());
-    if sel_dn != app.last_seen_leaf {
-        let dirty = app.form.as_ref().map(|f| f.is_dirty()).unwrap_or(false);
-        if dirty {
-            // Do NOT advance last_seen yet — the guard remembers the target.
-            app.overlay = Some(Overlay::Guard {
-                intent: GuardIntent::Nav(sel_dn),
-            });
-            return;
-        }
-        navigate_to(app, worker, read_flow, sel_dn);
     }
 }
 
