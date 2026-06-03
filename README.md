@@ -41,6 +41,21 @@ and executed in milestones.
 - **Full Samba lifecycle:** client-side NT-hash, synced Unix+Samba passwords,
   SID discovered from the directory's `sambaDomain` entry.
 
+## Local test server
+
+`scripts/test-ldap.sh start` launches a podman OpenLDAP that mirrors the
+`oposs.openldap` role — Samba + mail schemas, the memberOf/refint/ppolicy
+overlays, password policies — and seeds it with ~600 users across 5 departments
+and ~25 groups (see `scripts/ldap-provision/`). Point edaptor at it with:
+
+```bash
+scripts/test-ldap.sh start
+export EDAPTOR_TEST_ADMIN_PW=adminpassword
+edaptor --config examples/demo-config.toml
+```
+
+All generated users share the password `test123`.
+
 ## Configuration
 
 A single TOML file (`--config <path>`, default `~/.config/edaptor/config.toml`).
