@@ -430,6 +430,37 @@ mod tests {
     }
 
     #[test]
+    fn demo_config_parses_with_pickers() {
+        let toml = include_str!("../../examples/demo-config.toml");
+        let cfg: Config = toml::from_str(toml).expect("demo config parses");
+        let pickers = crate::config::relation::resolve_pickers(&cfg.profiles);
+        // member (group) + memberOf, gidNumber (user) + memberUid (posixgroup) = 4.
+        assert_eq!(pickers.len(), 4);
+        // Spot-check the fan-out and scalar-store bindings resolved correctly.
+        let mof = pickers
+            .iter()
+            .find(|p| p.binding.attr == "memberOf")
+            .expect("memberOf picker");
+        assert_eq!(mof.binding.fanout_attr.as_deref(), Some("member"));
+        let gid = pickers
+            .iter()
+            .find(|p| p.binding.attr == "gidNumber")
+            .expect("gidNumber picker");
+        assert_eq!(
+            gid.binding.store,
+            crate::config::relation::StoreKey::Attr("gidNumber".to_string())
+        );
+        let muid = pickers
+            .iter()
+            .find(|p| p.binding.attr == "memberUid")
+            .expect("memberUid picker");
+        assert_eq!(
+            muid.binding.store,
+            crate::config::relation::StoreKey::Attr("uid".to_string())
+        );
+    }
+
+    #[test]
     fn bound_writable_is_not_read_only() {
         let toml = r#"
             [server]

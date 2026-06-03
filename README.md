@@ -73,13 +73,13 @@ bind_dn         = "cn=ldapmanager,dc=example,dc=com"
 # Password is NEVER stored here. Supported sources: "prompt", "env:VAR", "command:cmd"
 password_source = "prompt"
 
-# Entry profiles: what a "user" and a "group" mean in this directory.
+# Entry profiles: what a "user", "group", and "posixgroup" mean in this directory.
 # `search_attrs` sets which attributes the picker substring-search matches.
 # Falls back to `show`, then to `["cn"]` when omitted.
 #
 # This "user" is a full posix (+optional Samba) account template: multiple
 # object classes, defaulted/templated/auto-numbered fields, an inline password
-# field, and a value-lookup that pulls gidNumber from a chosen group.
+# field, and picker bindings that pull values from or fan out to other profiles.
 [[profile]]
 name           = "user"
 object_classes = ["inetOrgPerson", "posixAccount", "shadowAccount"]
@@ -111,14 +111,31 @@ uidNumber     = "{next:10000-60000}"
 ldap_attribute = "userPassword"   # default; omit to use userPassword
 samba          = false
 
-# Value-lookup: Enter on `gidNumber` opens a single-select picker over posixGroups;
-# selecting one writes that group's `gidNumber` scalar into the field (not its DN).
-[profile.lookup.gidNumber]
-object_class = "posixGroup"
-search_base  = "ou=groups,dc=example,dc=com"
-value_attr   = "gidNumber"             # the scalar written into the field
-label        = "cn"                     # how candidates are labelled in the picker
-search_attrs = ["cn"]                   # attributes the picker substring-search matches
+# Picker bindings: `[profile.picker.<attr>]` declares how an attribute's field
+# is populated from a live candidate search. The four configuration knobs are:
+#
+#   candidate   (required) — a [[profile]] `name` supplying the candidate search scope.
+#   store       (default "dn") — what to write per pick: "dn" stores the candidate's DN;
+#                 any other value is treated as an attribute name whose scalar is stored.
+#   select      (default "auto") — cardinality: "auto" derives from the attribute's schema
+#                 arity; "single" or "multi" override it.
+#   fanout_attr (optional) — when set, the field is NOT written to the server; instead,
+#                 this entry's DN is added/removed in `fanout_attr` on each picked candidate
+#                 (e.g. a user's `memberOf` fan-out writes `member` on each picked group).
+
+# gidNumber: single-select picker over posixGroups; stores the chosen group's gidNumber
+# scalar into the field (not its DN).
+[profile.picker.gidNumber]
+candidate = "posixgroup"
+store     = "gidNumber"
+select    = "single"
+
+# memberOf: synthetic back-ref — ticking a group writes `member` on it.
+# The memberOf attribute itself is overlay-maintained; edaptor never writes it directly.
+[profile.picker.memberOf]
+candidate   = "group"
+store       = "dn"
+fanout_attr = "member"
 
 [[profile]]
 name           = "group"
@@ -126,18 +143,24 @@ object_classes = ["groupOfNames"]
 rdn_attr       = "cn"
 search_base    = "ou=groups,dc=example,dc=com"
 show           = ["cn", "description"]
-label          = "{cn}"                  # group label in the reverse (memberOf) picker
+label          = "{cn}"
 
-# Membership relation: enables the symmetric group↔user membership picker.
-# Opening a group's `member` field shows a live searchable user picker;
-# opening a user's `memberOf` field fans out the changes to each affected group.
-# `holder` and `candidate` reference [[profile]] `name`s above.
-[[relation]]
-name        = "group-membership"
-holder      = "group"       # profile whose entry owns the link attribute
-holder_attr = "member"      # the writable attribute on the holder (e.g. groupOfNames.member)
-candidate   = "user"        # profile that scopes the picker's candidate search
-back_attr   = "memberOf"    # virtual back-reference field shown on the candidate side
+# member: multi-select DN picker over users (cardinality from schema, typically multi).
+[profile.picker.member]
+candidate = "user"
+
+[[profile]]
+name           = "posixgroup"
+object_classes = ["posixGroup"]
+rdn_attr       = "cn"
+search_base    = "ou=groups,dc=example,dc=com"
+show           = ["cn", "gidNumber", "memberUid", "description"]
+label          = "{cn}"
+
+# memberUid: multi-select picker; stores each picked user's `uid` scalar (not DN).
+[profile.picker.memberUid]
+candidate = "user"
+store     = "uid"
 ```
 
 ## License

@@ -37,12 +37,18 @@ uidNumber     = "{next:10000-60000}"
 ldap_attribute = "userPassword"
 samba          = true
 
-[profile.lookup.gidNumber]
-object_class = "posixGroup"
-search_base  = "ou=groups,dc=example,dc=org"
-value_attr   = "gidNumber"
-label        = "cn"
-search_attrs = ["cn"]
+# gidNumber resolves a posixGroup and stores that group's gidNumber scalar.
+[profile.picker.gidNumber]
+candidate = "posixgroup"
+store     = "gidNumber"
+select    = "single"
+
+# memberOf is a synthetic back-ref: ticking a group writes `member` on it
+# (the memberOf attribute itself is overlay-maintained, never written directly).
+[profile.picker.memberOf]
+candidate   = "group"
+store       = "dn"
+fanout_attr = "member"
 
 [[profile]]
 name           = "group"
@@ -52,9 +58,19 @@ search_base    = "ou=groups,dc=example,dc=org"
 show           = ["cn", "description"]
 label          = "{cn}"
 
-[[relation]]
-name        = "group-membership"
-holder      = "group"
-holder_attr = "member"
-candidate   = "user"
-back_attr   = "memberOf"
+# member is a multi-select DN picker over users.
+[profile.picker.member]
+candidate = "user"
+
+[[profile]]
+name           = "posixgroup"
+object_classes = ["posixGroup"]
+rdn_attr       = "cn"
+search_base    = "ou=groups,dc=example,dc=org"
+show           = ["cn", "gidNumber", "memberUid", "description"]
+label          = "{cn}"
+
+# memberUid stores each picked user's `uid` (a multi-select user picker).
+[profile.picker.memberUid]
+candidate = "user"
+store     = "uid"
