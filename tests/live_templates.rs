@@ -21,9 +21,11 @@
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
+use edaptor::config::relation::{resolve_pickers, StoreKey};
 use edaptor::config::{AuthConfig, AuthMethod, Config, PasswordSource, ServerConfig, TlsConfig};
 use edaptor::ldap::worker::{Request, Response, SearchScope, WorkerHandle};
 use edaptor::samba::password::password_add_attrs;
+use edaptor::ui::picker::{build_member_filter, pick_value};
 
 /// Admin config + bind password for the test directory.
 fn admin_config(uri: String) -> (Config, String) {
@@ -461,4 +463,418 @@ fn lookup_pick_value_yields_gidnumber() {
         Some(Response::WriteOk { .. }) => {}
         other => panic!("cleanup DELETE failed: {}", describe(&other)),
     }
+}
+
+// ---------------------------------------------------------------------------
+// Task 9 — unified picker store-value shapes (live, gated)
+// ---------------------------------------------------------------------------
+
+/// Delete a DN, ignoring errors (idempotent cleanup helper for the picker tests).
+fn cleanup_entry(worker: &WorkerHandle, id: u64, dn: &str) {
+    let _ = worker.submit(Request::Delete {
+        id,
+        dn: dn.to_string(),
+    });
+    let _ = poll_for_id(worker, id, Duration::from_secs(5));
+}
+
+/// Test 1 — member binding: candidate search over `ou=people` using the resolved
+/// `member` picker scope yields real user DNs as store values.
+///
+/// The `member` binding (group profile, candidate=user, store=dn) builds an
+/// objectClass-AND filter for the four inetOrgPerson/posixAccount/… classes.
+/// An empty search term returns objectClass-only filter, so it matches every
+/// seeded user. Asserts: hits are non-empty; each hit's DN is its own store value;
+/// every DN ends with `ou=people,dc=example,dc=org`.
+#[test]
+fn picker_member_candidate_search_yields_user_dns() {
+    let uri = match std::env::var("EDAPTOR_TEST_LDAP_URI") {
+        Ok(u) => u,
+        Err(_) => {
+            eprintln!(
+                "SKIP picker_member_candidate_search_yields_user_dns: set EDAPTOR_TEST_LDAP_URI to run"
+            );
+            return;
+        }
+    };
+
+    let (config, password) = admin_config(uri);
+    let worker = WorkerHandle::spawn(config, password).expect("spawn admin worker");
+
+    // Load the demo-config pickers so we work from the real binding definitions.
+    let cfg: edaptor::config::Config = toml::from_str(include_str!("../examples/demo-config.toml"))
+        .expect("demo-config.toml parses");
+    let pickers = resolve_pickers(&cfg.profiles);
+
+    // The `member` picker: owner = group profile, candidate = user.
+    let member_picker = pickers
+        .iter()
+        .find(|p| p.binding.attr == "member")
+        .expect("member picker must be in demo config");
+    let binding = &member_picker.binding;
+
+    // Empty search term → objectClass-only filter (no term branch).
+    let filter = build_member_filter(
+        &binding.scope.object_classes,
+        &binding.scope.search_attrs,
+        "",
+    );
+
+    worker
+        .submit(Request::Search {
+            id: 410,
+            base: binding.scope.base.clone(),
+            scope: SearchScope::Subtree,
+            filter,
+            attrs: vec!["uid".to_string()],
+            size_limit: Some(10),
+        })
+        .expect("submit member candidate search");
+
+    let entries = match poll_for_id(&worker, 410, Duration::from_secs(10)) {
+        Some(Response::Entries { entries, .. }) => entries,
+        other => panic!("member candidate search failed: {}", describe(&other)),
+    };
+
+    assert!(
+        !entries.is_empty(),
+        "member picker search should return at least one user candidate from ou=people"
+    );
+
+    // For store = Dn, the store value is the entry's own DN (assert once, not per-entry).
+    assert_eq!(
+        binding.store,
+        StoreKey::Dn,
+        "member binding must have StoreKey::Dn"
+    );
+
+    for entry in &entries {
+        let dn_lc = entry.dn.to_lowercase();
+        assert!(
+            dn_lc.contains("ou=people,dc=example,dc=org"),
+            "each candidate DN should be under ou=people, got: {}",
+            entry.dn
+        );
+        // The store value for a DN picker is the DN itself.
+        assert!(
+            dn_lc.starts_with("uid="),
+            "seeded user DNs should start with uid=, got: {}",
+            entry.dn
+        );
+    }
+}
+
+/// Test 2 — gidNumber binding: searching posixGroups and extracting the scalar
+/// `gidNumber` via `pick_value` gives a numeric value (not a DN).
+///
+/// The `gidNumber` binding (user profile, candidate=posixgroup, store=Attr("gidNumber"))
+/// searches `ou=groups` for posixGroup entries and commits their `gidNumber`
+/// scalar — not their DN. Asserts: hits are non-empty; `pick_value(&attrs,
+/// "gidNumber")` yields Some(numeric string) that parses as an integer.
+#[test]
+fn picker_gidnumber_scalar_store_resolves_group_gidnumber() {
+    let uri = match std::env::var("EDAPTOR_TEST_LDAP_URI") {
+        Ok(u) => u,
+        Err(_) => {
+            eprintln!(
+                "SKIP picker_gidnumber_scalar_store_resolves_group_gidnumber: set EDAPTOR_TEST_LDAP_URI to run"
+            );
+            return;
+        }
+    };
+
+    let (config, password) = admin_config(uri);
+    let worker = WorkerHandle::spawn(config, password).expect("spawn admin worker");
+
+    let cfg: edaptor::config::Config = toml::from_str(include_str!("../examples/demo-config.toml"))
+        .expect("demo-config.toml parses");
+    let pickers = resolve_pickers(&cfg.profiles);
+
+    let gid_picker = pickers
+        .iter()
+        .find(|p| p.binding.attr == "gidNumber")
+        .expect("gidNumber picker must be in demo config");
+    let binding = &gid_picker.binding;
+
+    // Confirm the store key is a scalar attribute, not a DN.
+    assert_eq!(
+        binding.store,
+        StoreKey::Attr("gidNumber".to_string()),
+        "gidNumber binding must store the gidNumber scalar attribute"
+    );
+
+    // Determine the store attribute name for the search attrs list.
+    let store_attr = match &binding.store {
+        StoreKey::Attr(a) => a.clone(),
+        StoreKey::Dn => panic!("expected scalar store"),
+    };
+
+    let filter = build_member_filter(
+        &binding.scope.object_classes,
+        &binding.scope.search_attrs,
+        "",
+    );
+
+    worker
+        .submit(Request::Search {
+            id: 420,
+            base: binding.scope.base.clone(),
+            scope: SearchScope::Subtree,
+            filter,
+            attrs: vec![store_attr.clone(), "cn".to_string()],
+            size_limit: Some(10),
+        })
+        .expect("submit gidNumber candidate search");
+
+    let entries = match poll_for_id(&worker, 420, Duration::from_secs(10)) {
+        Some(Response::Entries { entries, .. }) => entries,
+        other => panic!("gidNumber candidate search failed: {}", describe(&other)),
+    };
+
+    assert!(
+        !entries.is_empty(),
+        "gidNumber picker search should return at least one posixGroup candidate"
+    );
+
+    for entry in &entries {
+        let scalar = pick_value(&entry.attrs, &store_attr)
+            .unwrap_or_else(|| panic!("gidNumber must be present on entry {}", entry.dn));
+
+        // The store value must be parseable as an integer (it's a UNIX gid).
+        scalar.parse::<i64>().unwrap_or_else(|_| {
+            panic!(
+                "gidNumber scalar '{scalar}' must be numeric for {}",
+                entry.dn
+            )
+        });
+
+        // The store value must NOT look like a DN (no commas / equals typical in DNs).
+        assert!(
+            !scalar.contains(',') && !scalar.contains("ou="),
+            "gidNumber scalar store must be a plain integer, not a DN: '{scalar}'"
+        );
+    }
+}
+
+/// Test 3 — memberUid multi-scalar round-trip: derive two uid values the way the
+/// picker derives them (via `pick_value` on real directory entries), create a
+/// throwaway posixGroup carrying those values in `memberUid`, read it back, and
+/// assert exactly those two scalars are present (order-insensitive). Then delete
+/// the entry.
+///
+/// This exercises the FULL store-value extraction path: the two uids come from
+/// the same `pick_value(&entry.attrs, "uid")` call that the production
+/// `Response::Entries` intercept uses for a scalar-store binding. Any regression
+/// in that extraction would prevent us from deriving the uids here.
+#[test]
+fn picker_memberuid_multi_scalar_round_trips_uids() {
+    let uri = match std::env::var("EDAPTOR_TEST_LDAP_URI") {
+        Ok(u) => u,
+        Err(_) => {
+            eprintln!(
+                "SKIP picker_memberuid_multi_scalar_round_trips_uids: set EDAPTOR_TEST_LDAP_URI to run"
+            );
+            return;
+        }
+    };
+
+    let (config, password) = admin_config(uri);
+    let worker = WorkerHandle::spawn(config, password).expect("spawn admin worker");
+
+    let group_dn = "cn=ztest-picker-memberuid,ou=groups,dc=example,dc=org";
+
+    // Idempotent cleanup from any prior aborted run.
+    cleanup_entry(&worker, 430, group_dn);
+
+    // --- Resolve the memberUid binding from demo-config. ---
+    let cfg: edaptor::config::Config = toml::from_str(include_str!("../examples/demo-config.toml"))
+        .expect("demo-config.toml parses");
+    let pickers = resolve_pickers(&cfg.profiles);
+
+    let memberuid_picker = pickers
+        .iter()
+        .find(|p| p.binding.attr == "memberUid")
+        .expect("memberUid picker must be in demo config");
+    let binding = &memberuid_picker.binding;
+
+    // Confirm the store key is a scalar uid attribute (not a DN).
+    assert_eq!(
+        binding.store,
+        StoreKey::Attr("uid".to_string()),
+        "memberUid binding must store the uid scalar attribute"
+    );
+
+    // --- Search candidate users using the picker's own scope, requesting `uid`. ---
+    let filter = build_member_filter(
+        &binding.scope.object_classes,
+        &binding.scope.search_attrs,
+        "",
+    );
+
+    worker
+        .submit(Request::Search {
+            id: 435,
+            base: binding.scope.base.clone(),
+            scope: SearchScope::Subtree,
+            filter,
+            attrs: vec!["uid".to_string()],
+            size_limit: Some(5),
+        })
+        .expect("submit memberUid candidate search");
+
+    let candidate_entries = match poll_for_id(&worker, 435, Duration::from_secs(10)) {
+        Some(Response::Entries { entries, .. }) => entries,
+        other => panic!("memberUid candidate search failed: {}", describe(&other)),
+    };
+
+    // --- Extract store values exactly as the production picker does. ---
+    // Collect two distinct non-empty uid scalars via pick_value.
+    let derived_uids: Vec<String> = {
+        let mut seen = std::collections::BTreeSet::new();
+        let mut out = Vec::new();
+        for entry in &candidate_entries {
+            if let Some(uid) = pick_value(&entry.attrs, "uid") {
+                if seen.insert(uid.clone()) {
+                    // Confirm it is a plain uid, not a DN.
+                    assert!(
+                        !uid.contains(',') && !uid.contains("ou="),
+                        "pick_value must return a plain uid scalar, not a DN: '{uid}'"
+                    );
+                    out.push(uid);
+                    if out.len() == 2 {
+                        break;
+                    }
+                }
+            }
+        }
+        out
+    };
+    assert_eq!(
+        derived_uids.len(),
+        2,
+        "need at least 2 distinct seeded users with a uid attribute under {}",
+        binding.scope.base
+    );
+    let uid_a = &derived_uids[0];
+    let uid_b = &derived_uids[1];
+
+    // --- ADD a throwaway posixGroup carrying the two derived uid scalars. ---
+    let mut attrs: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    attrs.insert(
+        "objectClass".to_string(),
+        vec!["top".to_string(), "posixGroup".to_string()],
+    );
+    attrs.insert("cn".to_string(), vec!["ztest-picker-memberuid".to_string()]);
+    // Use a high gidNumber that won't clash with seeded groups (5000–5004).
+    attrs.insert("gidNumber".to_string(), vec!["59999".to_string()]);
+    attrs.insert("memberUid".to_string(), vec![uid_a.clone(), uid_b.clone()]);
+
+    worker
+        .submit(Request::Add {
+            id: 440,
+            dn: group_dn.to_string(),
+            attrs,
+        })
+        .expect("submit throwaway posixGroup add");
+
+    match poll_for_id(&worker, 440, Duration::from_secs(10)) {
+        Some(Response::WriteOk { .. }) => {}
+        Some(Response::WriteError { msg, .. }) if is_schema_missing(&msg) => {
+            eprintln!(
+                "SKIP picker_memberuid_multi_scalar_round_trips_uids: posix schema absent ({msg})"
+            );
+            return;
+        }
+        other => panic!("throwaway posixGroup ADD failed: {}", describe(&other)),
+    }
+
+    // --- Read back the group. ---
+    worker
+        .submit(Request::Search {
+            id: 450,
+            base: group_dn.to_string(),
+            scope: SearchScope::Base,
+            filter: "(objectClass=*)".to_string(),
+            attrs: vec!["memberUid".to_string()],
+            size_limit: None,
+        })
+        .expect("submit throwaway group read");
+
+    let read_back = poll_for_id(&worker, 450, Duration::from_secs(10));
+
+    // Cleanup before asserting so the directory stays clean even on assertion failure.
+    cleanup_entry(&worker, 460, group_dn);
+
+    let member_uids = match read_back {
+        Some(Response::Entries { entries, .. }) => {
+            let entry = entries.into_iter().next().expect("group entry must exist");
+            entry.attrs.get("memberUid").cloned().unwrap_or_default()
+        }
+        other => panic!("throwaway group read failed: {}", describe(&other)),
+    };
+
+    // Order-insensitive membership check: exactly the two derived uids must be present.
+    assert_eq!(
+        member_uids.len(),
+        2,
+        "memberUid must have exactly 2 scalar values, got: {member_uids:?}"
+    );
+    assert!(
+        member_uids.iter().any(|v| v == uid_a),
+        "memberUid must contain derived uid '{uid_a}', got: {member_uids:?}"
+    );
+    assert!(
+        member_uids.iter().any(|v| v == uid_b),
+        "memberUid must contain derived uid '{uid_b}', got: {member_uids:?}"
+    );
+
+    // Confirm neither value looks like a DN (scalar store, not DN store).
+    for uid_val in &member_uids {
+        assert!(
+            !uid_val.contains(',') && !uid_val.contains("ou="),
+            "memberUid value must be a plain uid scalar, not a DN: '{uid_val}'"
+        );
+    }
+}
+
+/// Test 4 — memberOf binding wiring: assert that the resolved `memberOf` picker
+/// has `fanout_attr == Some("member")`, `store == StoreKey::Dn`, and searches
+/// under `ou=groups` (the group scope). This pins the fan-out wiring from the
+/// real demo config without duplicating the write round-trip already covered by
+/// `reverse_memberof_edit_writes_group_member` in `live_membership.rs`.
+///
+/// This test does NO LDAP I/O — it only parses demo-config and asserts the
+/// resolved binding — so it runs in every `cargo test` without the live server.
+#[test]
+fn picker_memberof_binding_resolves_fanout_to_member() {
+    let cfg: edaptor::config::Config = toml::from_str(include_str!("../examples/demo-config.toml"))
+        .expect("demo-config.toml parses");
+    let pickers = resolve_pickers(&cfg.profiles);
+
+    let memberof = pickers
+        .iter()
+        .find(|p| p.binding.attr == "memberOf")
+        .expect("memberOf picker must be resolved from demo config");
+    let binding = &memberof.binding;
+
+    // Fan-out wiring: the synthetic back-ref writes `member` on each picked group.
+    assert_eq!(
+        binding.fanout_attr.as_deref(),
+        Some("member"),
+        "memberOf binding must fan out to the `member` attribute on picked groups"
+    );
+
+    // Store: picks the group's DN (to be written as `member` on the group entry).
+    assert_eq!(
+        binding.store,
+        StoreKey::Dn,
+        "memberOf binding must use StoreKey::Dn (picks group DNs)"
+    );
+
+    // Scope: candidate search base must be under ou=groups (the group profile).
+    assert!(
+        binding.scope.base.to_lowercase().contains("ou=groups"),
+        "memberOf candidate scope must search under ou=groups, got: {}",
+        binding.scope.base
+    );
 }
