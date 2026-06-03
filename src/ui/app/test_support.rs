@@ -2,6 +2,7 @@
 #![cfg(test)]
 
 use super::*;
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use crate::ldap::worker::RawSubschema;
 use crate::workflows::structure::StructureInput;
 
