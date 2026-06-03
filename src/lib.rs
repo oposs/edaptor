@@ -7,6 +7,7 @@ pub mod form;
 pub mod ldap;
 pub mod samba;
 pub mod schema;
+pub mod testdata;
 pub mod ui;
 pub mod workflows;
 
