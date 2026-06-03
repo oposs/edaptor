@@ -3,6 +3,7 @@
 
 use super::*;
 use crate::ldap::worker::RawSubschema;
+use crate::workflows::structure::StructureInput;
 
 /// A bare App (no form) with the given read-only flag, for dispatch tests.
 pub(crate) fn bare_app(read_only: bool) -> App {
