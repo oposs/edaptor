@@ -1,8 +1,8 @@
 # edaptor — Project Handover
 
 **Date:** 2026-06-03
-**`main` HEAD:** `e722902` (working tree clean; local-only — not pushed to `origin`)
-**In-progress branch:** `feat-unified-picker` (off `main`) — **design only**: the *unified configurable picker* spec is committed; no implementation yet. See "In progress" below.
+**`main` HEAD:** `010f37c` (working tree clean; local-only — not pushed to `origin`)
+**Latest landed:** the **unified configurable picker** (`[profile.picker.<attr>]`) is **implemented and merged to `main`** — see below. Known follow-up: split the ~2850-line `src/ui/app.rs` god-file into focused modules (deferred, user-approved).
 
 `edaptor` is a Rust **ratatui** TUI for administering an OpenLDAP directory (users, groups, group memberships). It derives the directory's structure from live schema introspection (`cn=subschema`) and generates edit forms from `objectClass` definitions; a TOML config declares connection settings plus *entry profiles* ("what a user/group means here").
 
@@ -24,7 +24,7 @@
 | **Rich user templates** (multi-OC profiles, defaults, autonumber, password, `[profile.lookup]` value-lookup, F7 chooser) | ✅ **merged to `main`** (`d98305b`) |
 | **Rich provisioned test server + seed data** | ✅ merged to `main` (`ba20f39`…`33cf887`) |
 | **Picker UX fixes** (scroll, search-matches-first, multi-value-editor scroll) | ✅ merged to `main` (`cfe6563`, `87e5533`) |
-| **Unified configurable picker** (replaces `[[relation]]` + `[profile.lookup]`) | 🚧 **design approved, spec written**; implementation pending on `feat-unified-picker` |
+| **Unified configurable picker** (replaces `[[relation]]` + `[profile.lookup]`) | ✅ **implemented + merged to `main`** (`010f37c`); one `[profile.picker.<attr>]` binding, gated live tests for all 4 shapes |
 | M6 leftovers (paged-scale lists, result-code→human table polish, SASL EXTERNAL/GSSAPI auth, packaging) | ⏳ pending |
 
 ---
@@ -73,51 +73,34 @@ unit + `TestBackend` render tests in `src/ui/picker.rs` and `src/ui/view.rs`.
 
 ---
 
-## In progress: unified configurable picker (`feat-unified-picker`)
+## Unified configurable picker (merged to `main`, `010f37c`)
 
-**Design approved; spec committed; NOT implemented.** Collapses the three forked
-field-population mechanisms — `[[relation]]` (DN membership + memberOf fan-out)
-and `[profile.lookup.<attr>]` (single scalar) — plus the would-be multi-scalar
-case (`memberUid` storing `uid`) into **one** `[profile.picker.<attr>]` binding:
+Collapsed the three forked field-population mechanisms — `[[relation]]` (DN
+membership + `memberOf` fan-out), `[profile.lookup.<attr>]` (single scalar), and
+the previously-unbuilt multi-scalar case (`memberUid` storing `uid`) — into
+**one** `[profile.picker.<attr>]` binding consumed by one engine. Implemented
+TDD/subagent-driven in 10 commits (`55649df…8b56cfd`); spec
+[`specs/2026-06-03-unified-picker-design.md`](superpowers/specs/2026-06-03-unified-picker-design.md),
+plan [`plans/2026-06-03-unified-picker.md`](superpowers/plans/2026-06-03-unified-picker.md).
 
-- `candidate` (profile name → search scope), `store` (`"dn"` default, or an attr
-  name — also the identity key), `select` (`auto`|`single`|`multi`),
-  `fanout_attr` (synthetic back-ref like `memberOf` → writes `member` on each
-  picked group). One internal `PickerBinding`; `PickerState` keys by store value
-  instead of always-DN; one `open`/search/commit path. Clean cut (no back-compat
-  for `[[relation]]`/`lookup`); demo config + README rewritten; a `posixgroup`
-  profile added so `memberUid` becomes a multi-select user picker.
+**Config surface** — `[profile.picker.<attr>]` on the profile owning the field:
+`candidate` (a `[[profile]]` name → search scope), `store` (`"dn"` default, or an
+attr name — also the identity key), `select` (`auto`|`single`|`multi`),
+`fanout_attr` (synthetic back-ref: field not written; this entry's DN
+added/removed in `fanout_attr` on each picked candidate). The demo config
+declares four: `member` (group, DN, multi), `gidNumber` (user, scalar, single),
+`memberUid` (posixgroup, `uid`, multi), `memberOf` (user, fanout → `member`).
 
-**Spec:** [`specs/2026-06-03-unified-picker-design.md`](superpowers/specs/2026-06-03-unified-picker-design.md) (on the branch). **Next step:** writing-plans → implementation. **When it lands it supersedes the "Membership picker" architecture below** (`relation.rs`, `LookupSpec`).
+**Where the code lives**
+- `src/config/relation.rs` (filename kept; now picker-only) — `PickerSpec`-resolved `PickerBinding`, `StoreKey::{Dn,Attr}`, `Cardinality`, `ResolvedPicker`, `resolve_pickers`, `picker_for`; `CandidateScope` + `scope_of` retained. (`Relation`/`ResolvedRelation`/`LookupSpec` and friends are **deleted**.)
+- `src/config/mod.rs` — `EntryProfile.pickers: BTreeMap<String, PickerSpec>`; `PickerSpec`. (`Config.relations`, `EntryProfile.lookups`, `LookupSpec` removed.)
+- `src/ui/picker.rs` — `Candidate{dn,label,store_value}`; `PickerState` keyed by **store value** (`key_ci` flag), `selected_values()`/`selected_dns()`.
+- `src/ui/edit_form.rs` — `EditField.picker: Option<PickerBinding>`; unified `ValueEditor::open(field, binding)` + `open_plain`; `tag_picker_fields(form, pickers, ocs, read_only)` (fan-out fields force-editable, honoring global read-only); `to_edit_entry` excludes fan-out fields; `fanout_labels()`.
+- `src/ui/app.rs` — `App.pickers`; `tag_picker_fields` wired into both form seams (`build_loaded_form`, `build_new_entry_form`); one `open_value_editor` dispatch, one `service_picker_search` (binding-driven), the `Response::Entries` store-value mapping (labels/DNs upgraded by store value), one Alt+S commit (single keeps the cursor fallback), `plan_combined_save` fan-out keyed on `fanout_attr`.
+- `src/ui/view.rs` — `render_value_editor` single-vs-multi markers from binding cardinality (passed as `single: bool`).
+- `tests/live_membership.rs`, `tests/live_templates.rs` — gated live tests; `live_templates` adds the 4-shape picker coverage (one un-gated config-resolution check).
 
----
-
-## Architecture: the picker today (current `main`; to be unified)
-
-> The relation membership picker and value-lookup are the **current** `main`
-> code; the unified-picker branch will replace them. Kept here until that lands.
-
-**Relation membership picker** — symmetric group↔user editing as a *picker mode*
-of the multi-value value-editor, driven by one `[[relation]]` block. Forward
-(group `member`): Enter opens a searchable user picker; commit writes the group.
-Reverse (user `memberOf`): Enter opens a group picker; save **fans out** `member`
-MODIFYs across affected groups (last-member pre-validation; partial-failure
-report); `memberOf` itself is never written (overlay-maintained).
-
-**Value-lookup** (`[profile.lookup.<attr>]`, e.g. gidNumber-from-group):
-single-select picker; Enter writes the chosen entry's `value_attr` **scalar**
-(not a DN) into the field.
-
-### Where the code lives
-- `src/config/relation.rs` — `Relation`, `ResolvedRelation`/`CandidateScope`/`RelationRole`, `resolve_relations`, `holder_lookup`/`backref_lookup`. Pure. (`CandidateScope` + label machinery survive the unification.)
-- `src/config/mod.rs` — `Config.relations`; `EntryProfile.{search_attrs, lookups, label}` + `search_attributes()`; `LookupSpec`.
-- `src/ui/picker.rs` — `PickerState` (selection always visible, toggle, cursor, `scroll`, `search_active`, `truncated`), `build_member_filter`/`escape_filter` (RFC 4515), `candidate_label`, `pick_value`, `Candidate{dn,label,value}`. Pure.
-- `src/ldap/worker.rs` — `Request::Search.size_limit`; `run_search` returns partial entries on a size/time limit (`is_limit_rc`).
-- `src/ui/edit_form.rs` — `FieldRelation` + `EditField.{relation,lookup}`; `build_edit_form(…, relations)` tags fields; `tag_lookup_fields`; `ValueEditor` (`open`/`open_picker`/`open_lookup`, `scroll`); `to_edit_entry` excludes BackRef fields.
-- `src/ui/app.rs` — `App.{relations,picker_search_id,picker_last_query}`; `picker_editor_key`; `service_picker_search`; the `Response::Entries` picker intercept; `plan_combined_save`/`combined_save_overlay`/`apply_combined_save`/`membership_fanout`/`would_empty`/`read_group_members`.
-- `src/ui/view.rs` — picker + multi-value-editor branches in `render_value_editor` (both scroll via `clamp_scroll`).
-- `src/ldap/ldif.rs` — `render_changesets` (multi-entry LDIF preview).
-- `tests/live_membership.rs`, `tests/live_templates.rs`, `tests/live_seed.rs` — gated live tests.
+**Known follow-up:** `src/ui/app.rs` is a ~2850-line (production) god-file. Split into focused modules under `src/ui/app/` (`worker_response`, `forms`, `save`, `picker_ui`) — deferred to its own branch by user decision; do it after this so the deletion churn is already behind us.
 
 ---
 
