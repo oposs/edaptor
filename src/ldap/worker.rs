@@ -58,6 +58,8 @@ pub struct StructureNodeRaw {
     pub description: Option<String>,
     /// objectClass values (kept for future domain classification).
     pub object_classes: Vec<String>,
+    /// All returned string attributes (used to render per-profile label templates).
+    pub attrs: BTreeMap<String, Vec<String>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -98,6 +100,9 @@ pub enum Request {
         base: String,
         /// Paged-results page size (e.g. 500).
         page_size: i32,
+        /// Attributes to request beyond the structural minimum
+        /// (`cn`/`description`/`objectClass`), e.g. label-template fields.
+        attrs: Vec<String>,
     },
     /// Modify an entry's attributes. `id` is echoed in the reply (D4).
     Modify {
@@ -383,8 +388,9 @@ fn worker_loop(conn: &mut LdapConn, config: &Config, rx: Receiver<Job>) {
                 id,
                 base,
                 page_size,
+                attrs,
             } => {
-                let resp = match run_load_structure(conn, &base, page_size) {
+                let resp = match run_load_structure(conn, &base, page_size, attrs) {
                     Ok(nodes) => Response::StructureEntries { id, nodes },
                     Err((msg, truncated)) => Response::StructureError { id, msg, truncated },
                 };
@@ -511,16 +517,23 @@ fn run_load_structure(
     conn: &mut LdapConn,
     base: &str,
     page_size: i32,
+    extra_attrs: Vec<String>,
 ) -> std::result::Result<Vec<StructureNodeRaw>, (String, bool)> {
     let adapters: Vec<Box<dyn Adapter<_, _>>> = vec![
         Box::new(EntriesOnly::new()),
         Box::new(PagedResults::new(page_size)),
     ];
-    let attrs = vec![
+    // Structural minimum plus any label-template attrs, de-duplicated case-insensitively.
+    let mut attrs = vec![
         "cn".to_string(),
         "description".to_string(),
         "objectClass".to_string(),
     ];
+    for extra in extra_attrs {
+        if !attrs.iter().any(|a| a.eq_ignore_ascii_case(&extra)) {
+            attrs.push(extra);
+        }
+    }
     let mut stream = conn
         .streaming_search_with(adapters, base, Scope::Subtree, "(objectClass=*)", attrs)
         .map_err(|e| (format!("{e}"), false))?;
@@ -556,11 +569,15 @@ fn structure_node_from(se: SearchEntry) -> StructureNodeRaw {
     let cn = first_attr(&se, "cn");
     let description = first_attr(&se, "description");
     let object_classes = se.attrs.get("objectClass").cloned().unwrap_or_default();
+    // Consume the entry's string attrs last (after the borrows above).
+    let dn = se.dn;
+    let attrs: BTreeMap<String, Vec<String>> = se.attrs.into_iter().collect();
     StructureNodeRaw {
-        dn: se.dn,
+        dn,
         cn,
         description,
         object_classes,
+        attrs,
     }
 }
 

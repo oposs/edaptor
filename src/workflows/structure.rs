@@ -18,6 +18,8 @@ pub struct StructureInput {
     pub description: Option<String>,
     /// objectClass values.
     pub object_classes: Vec<String>,
+    /// All returned string attributes (used to render per-profile label templates).
+    pub attrs: BTreeMap<String, Vec<String>>,
 }
 
 /// One node in the structure model.
@@ -29,6 +31,8 @@ pub struct StructureNode {
     pub label: String,
     /// objectClass values.
     pub object_classes: Vec<String>,
+    /// All returned string attributes (used to render per-profile label templates).
+    pub attrs: BTreeMap<String, Vec<String>>,
     /// Child DNs, in input order.
     pub children: Vec<String>,
 }
@@ -83,6 +87,7 @@ impl Structure {
                     dn: inp.dn.clone(),
                     label: label_for(inp),
                     object_classes: inp.object_classes.clone(),
+                    attrs: inp.attrs.clone(),
                     children: Vec::new(),
                 },
             );
@@ -94,6 +99,7 @@ impl Structure {
                 dn: root.to_string(),
                 label: rdn_of(root).to_string(),
                 object_classes: Vec::new(),
+                attrs: BTreeMap::new(),
                 children: Vec::new(),
             });
 
@@ -166,6 +172,7 @@ impl Structure {
             dn: child.dn.clone(),
             label: label_for(&child),
             object_classes: child.object_classes.clone(),
+            attrs: child.attrs.clone(),
             children: Vec::new(),
         };
         self.nodes.insert(child.dn.clone(), node);
@@ -205,6 +212,7 @@ mod tests {
             cn: cn.map(str::to_string),
             description: desc.map(str::to_string),
             object_classes: vec![],
+            attrs: Default::default(),
         }
     }
 

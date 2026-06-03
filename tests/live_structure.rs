@@ -43,6 +43,7 @@ fn eager_structure_scan_returns_subtree() {
             id: 1,
             base: "dc=example,dc=org".to_string(),
             page_size: 2,
+            attrs: vec![],
         })
         .expect("structure scan should reply");
 

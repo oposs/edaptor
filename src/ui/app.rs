@@ -228,6 +228,8 @@ pub struct App {
     pub status: String,
     /// Resolved membership relations (built once from config).
     pub relations: Vec<ResolvedRelation>,
+    /// Compiled column-2 label rules (built once from `config.profiles`).
+    pub label_rules: Vec<LabelRule>,
     /// Correlation id of the latest in-flight picker search (stale ids ignored).
     pub picker_search_id: Option<u64>,
     /// The picker search term last submitted (delta detection in the loop).
@@ -240,6 +242,9 @@ pub fn run(config: Config, password: String) -> Result<()> {
     let read_only = config.is_read_only();
     let profiles = config.profiles.clone();
     let relations = resolve_relations(&config.profiles, &config.relations);
+    // Compile the per-profile column-2 label rules and the attrs the scan must fetch.
+    let rules = label_rules(&profiles);
+    let scan_attrs = label_rule_attrs(&rules);
 
     // Sync startup: spawn the worker, fetch the schema, scan the structure.
     let worker = WorkerHandle::spawn(config, password)?;
@@ -254,6 +259,7 @@ pub fn run(config: Config, password: String) -> Result<()> {
         id: 0,
         base: base_dn.clone(),
         page_size: 500,
+        attrs: scan_attrs,
     })? {
         Response::StructureEntries { nodes, .. } => nodes,
         Response::StructureError { msg, truncated, .. } => {
@@ -275,7 +281,7 @@ pub fn run(config: Config, password: String) -> Result<()> {
 
     // Seed the UI state.
     let current_branch = structure.root_dn().to_string();
-    let rows = compute_rows(&structure, &current_branch, "");
+    let rows = compute_rows(&structure, &current_branch, "", &rules);
     let mut tree_state = TreeState::default();
     tree_state.open(vec![current_branch.clone()]);
     // Highlight the root node from the start so column 1 always shows a selection.
@@ -298,6 +304,7 @@ pub fn run(config: Config, password: String) -> Result<()> {
         overlay: None,
         status: String::new(),
         relations,
+        label_rules: rules,
         picker_search_id: None,
         picker_last_query: String::new(),
     };
@@ -509,7 +516,12 @@ fn handle_worker_response(
                     if structure.add_child(&parent, input) {
                         app.tree_items = build_tree_items(structure);
                     }
-                    app.rows = compute_rows(structure, &app.current_branch, &app.last_search);
+                    app.rows = compute_rows(
+                        structure,
+                        &app.current_branch,
+                        &app.last_search,
+                        &app.label_rules,
+                    );
                 }
                 Some(PostWrite::Deleted { dn }) => {
                     app.status = "Deleted.".to_string();
@@ -522,7 +534,12 @@ fn handle_worker_response(
                     if app.form.as_ref().map(|f| f.dn == dn).unwrap_or(false) {
                         app.form = None;
                     }
-                    app.rows = compute_rows(structure, &app.current_branch, &app.last_search);
+                    app.rows = compute_rows(
+                        structure,
+                        &app.current_branch,
+                        &app.last_search,
+                        &app.label_rules,
+                    );
                     app.last_seen_leaf = None;
                 }
                 None => app.status = "Saved.".to_string(),
@@ -1198,6 +1215,7 @@ fn refresh_structure(
         id: 0,
         base: base_dn.to_string(),
         page_size: 500,
+        attrs: label_rule_attrs(&app.label_rules),
     }) {
         Ok(Response::StructureEntries { nodes, .. }) => {
             *structure = Structure::build(base_dn, structure_inputs(nodes));
@@ -1205,7 +1223,12 @@ fn refresh_structure(
             if structure.get(&app.current_branch).is_none() {
                 app.current_branch = base_dn.to_string();
             }
-            app.rows = compute_rows(structure, &app.current_branch, &app.last_search);
+            app.rows = compute_rows(
+                structure,
+                &app.current_branch,
+                &app.last_search,
+                &app.label_rules,
+            );
             app.leaf_sel = 0;
             app.last_seen_leaf = None;
             app.status = "Refreshed.".to_string();
@@ -1576,7 +1599,7 @@ fn reconcile(
     if let Some(sel) = app.tree_state.selected().last().cloned() {
         if sel != app.current_branch && structure.get(&sel).is_some() {
             app.current_branch = sel;
-            app.rows = compute_rows(structure, &app.current_branch, &search);
+            app.rows = compute_rows(structure, &app.current_branch, &search, &app.label_rules);
             app.leaf_sel = 0;
             app.last_seen_leaf = None;
         }
@@ -1585,7 +1608,7 @@ fn reconcile(
     // 2) Search string changed → recompute the rows, keep the selection in range.
     if search != app.last_search {
         app.last_search = search.clone();
-        app.rows = compute_rows(structure, &app.current_branch, &search);
+        app.rows = compute_rows(structure, &app.current_branch, &search, &app.label_rules);
         if app.leaf_sel >= app.rows.len() {
             app.leaf_sel = app.rows.len().saturating_sub(1);
         }
@@ -2326,13 +2349,80 @@ fn next_id() -> u64 {
 
 /// The pane-2 rows for `branch` filtered by `search`: a `‹self›` row for the
 /// branch entry itself, then its leaf children `(label, dn)`. Pure.
-fn compute_rows(structure: &Structure, branch: &str, search: &str) -> Vec<(String, String)> {
+/// A compiled column-2 label rule: a profile's object classes + parsed template.
+pub struct LabelRule {
+    object_classes: Vec<String>,
+    template: Vec<crate::config::label::LabelSeg>,
+}
+
+/// Compile the profiles that declare a `label` into rules (config order). Profiles
+/// without a `label` are skipped, so an empty result reproduces the old behavior.
+fn label_rules(profiles: &[EntryProfile]) -> Vec<LabelRule> {
+    profiles
+        .iter()
+        .filter_map(|p| {
+            p.label.as_ref().map(|tmpl| LabelRule {
+                object_classes: p.object_classes.clone(),
+                template: crate::config::label::parse_label_template(tmpl),
+            })
+        })
+        .collect()
+}
+
+/// The union of attributes all rules reference (for the structure scan to fetch),
+/// de-duplicated case-insensitively (config order preserved).
+fn label_rule_attrs(rules: &[LabelRule]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for rule in rules {
+        for attr in crate::config::label::template_attrs(&rule.template) {
+            if !out.iter().any(|a| a.eq_ignore_ascii_case(&attr)) {
+                out.push(attr);
+            }
+        }
+    }
+    out
+}
+
+/// Render a node's display label: the FIRST rule whose object_classes are all
+/// present in `node_ocs` (case-insensitive), rendered against `attrs`. If no rule
+/// matches or the render is blank, return `fallback` (the structural label).
+fn render_node_label(
+    rules: &[LabelRule],
+    node_ocs: &[String],
+    attrs: &BTreeMap<String, Vec<String>>,
+    fallback: &str,
+) -> String {
+    for rule in rules {
+        let all_present = rule
+            .object_classes
+            .iter()
+            .all(|want| node_ocs.iter().any(|have| have.eq_ignore_ascii_case(want)));
+        if all_present {
+            let rendered = crate::config::label::render_label(&rule.template, attrs);
+            if !rendered.is_empty() {
+                return rendered;
+            }
+            return fallback.to_string();
+        }
+    }
+    fallback.to_string()
+}
+
+fn compute_rows(
+    structure: &Structure,
+    branch: &str,
+    search: &str,
+    rules: &[LabelRule],
+) -> Vec<(String, String)> {
     let mut rows = Vec::new();
     if let Some(node) = structure.get(branch) {
         rows.push((format!("‹self› {}", node.label), branch.to_string()));
     }
     for leaf in structure.filter_leaves(branch, search) {
-        rows.push((leaf.label.clone(), leaf.dn.clone()));
+        rows.push((
+            render_node_label(rules, &leaf.object_classes, &leaf.attrs, &leaf.label),
+            leaf.dn.clone(),
+        ));
     }
     rows
 }
@@ -2357,6 +2447,7 @@ fn structure_input_from_attrs(dn: &str, attrs: &BTreeMap<String, Vec<String>>) -
         cn: first("cn"),
         description: first("description"),
         object_classes,
+        attrs: attrs.clone(),
     }
 }
 
@@ -2368,6 +2459,7 @@ fn structure_inputs(nodes: Vec<StructureNodeRaw>) -> Vec<StructureInput> {
             dn: n.dn,
             cn: n.cn,
             description: n.description,
+            attrs: n.attrs,
             object_classes: n.object_classes,
         })
         .collect()
@@ -2839,6 +2931,7 @@ mod tests {
             overlay: Some(Overlay::ValueEditor(ve)),
             status: String::new(),
             relations: vec![],
+            label_rules: vec![],
             picker_search_id: None,
             picker_last_query: String::new(),
         }
@@ -2901,6 +2994,7 @@ mod tests {
             overlay: None,
             status: String::new(),
             relations: vec![],
+            label_rules: vec![],
             picker_search_id: None,
             picker_last_query: String::new(),
         }
@@ -3167,18 +3261,26 @@ mod tests {
                     cn: None,
                     description: Some("Example".into()),
                     object_classes: vec![],
+                    attrs: Default::default(),
                 },
                 StructureInput {
                     dn: "ou=users,dc=example,dc=org".into(),
                     cn: None,
                     description: None,
                     object_classes: vec![],
+                    attrs: Default::default(),
                 },
                 StructureInput {
                     dn: "uid=jane,ou=users,dc=example,dc=org".into(),
                     cn: Some("Jane".into()),
                     description: None,
-                    object_classes: vec![],
+                    object_classes: vec!["inetOrgPerson".into()],
+                    attrs: [
+                        ("cn".to_string(), vec!["Jane".to_string()]),
+                        ("uid".to_string(), vec!["jane".to_string()]),
+                    ]
+                    .into_iter()
+                    .collect(),
                 },
             ],
         )
@@ -3187,7 +3289,8 @@ mod tests {
     #[test]
     fn compute_rows_lists_self_then_leaves() {
         let s = structure();
-        let rows = compute_rows(&s, "ou=users,dc=example,dc=org", "");
+        // Empty rules → today's behavior: the leaf label is the structural cn.
+        let rows = compute_rows(&s, "ou=users,dc=example,dc=org", "", &[]);
         assert_eq!(rows[0].0, "‹self› ou=users");
         assert_eq!(
             rows[1],
@@ -3197,9 +3300,23 @@ mod tests {
             )
         );
         assert_eq!(
-            compute_rows(&s, "ou=users,dc=example,dc=org", "zzz").len(),
+            compute_rows(&s, "ou=users,dc=example,dc=org", "zzz", &[]).len(),
             1
         );
+    }
+
+    #[test]
+    fn compute_rows_renders_leaf_via_matching_label_rule() {
+        let s = structure();
+        let rules = vec![LabelRule {
+            object_classes: vec!["inetOrgPerson".into()],
+            template: crate::config::label::parse_label_template("{cn} ({uid})"),
+        }];
+        let rows = compute_rows(&s, "ou=users,dc=example,dc=org", "", &rules);
+        // The ‹self› container row is never templated.
+        assert_eq!(rows[0].0, "‹self› ou=users");
+        // The leaf renders via its profile's template.
+        assert_eq!(rows[1].0, "Jane (jane)");
     }
 
     #[test]
@@ -3208,6 +3325,130 @@ mod tests {
         let items = build_tree_items(&s);
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].children().len(), 1);
+    }
+
+    // ── per-profile label rules (pure) ───────────────────────────────────────────
+
+    fn bare_profile(name: &str) -> EntryProfile {
+        EntryProfile {
+            name: name.into(),
+            object_classes: vec![],
+            rdn_attr: String::new(),
+            search_base: String::new(),
+            show: vec![],
+            search_attrs: vec![],
+            defaults: Default::default(),
+            password: None,
+            lookups: Default::default(),
+            label: None,
+        }
+    }
+
+    fn rule(ocs: &[&str], tmpl: &str) -> LabelRule {
+        LabelRule {
+            object_classes: ocs.iter().map(|s| s.to_string()).collect(),
+            template: crate::config::label::parse_label_template(tmpl),
+        }
+    }
+
+    fn attr_map(pairs: &[(&str, &[&str])]) -> BTreeMap<String, Vec<String>> {
+        pairs
+            .iter()
+            .map(|(k, vs)| (k.to_string(), vs.iter().map(|s| s.to_string()).collect()))
+            .collect()
+    }
+
+    #[test]
+    fn label_rules_compiles_only_profiles_with_a_label() {
+        let mut with = bare_profile("user");
+        with.object_classes = vec!["inetOrgPerson".into()];
+        with.label = Some("{cn} ({uid})".into());
+        let without = bare_profile("group"); // label = None
+        let rules = label_rules(&[with, without]);
+        assert_eq!(rules.len(), 1);
+        assert_eq!(rules[0].object_classes, vec!["inetOrgPerson".to_string()]);
+    }
+
+    #[test]
+    fn label_rule_attrs_unions_and_dedups_case_insensitively() {
+        let rules = vec![
+            rule(&["inetOrgPerson"], "{cn} ({uid})"),
+            rule(&["device"], "{CN}-{serial}"),
+        ];
+        let attrs = label_rule_attrs(&rules);
+        // cn (case-folded dup dropped), uid, serial — config order preserved.
+        assert_eq!(
+            attrs,
+            vec!["cn".to_string(), "uid".to_string(), "serial".to_string()]
+        );
+    }
+
+    #[test]
+    fn render_node_label_uses_first_matching_rule() {
+        let rules = vec![rule(&["inetOrgPerson"], "{cn} ({uid})")];
+        let attrs = attr_map(&[("cn", &["Bob Baker"]), ("uid", &["bob"])]);
+        let ocs = vec!["inetOrgPerson".to_string(), "posixAccount".to_string()];
+        assert_eq!(
+            render_node_label(&rules, &ocs, &attrs, "fallback"),
+            "Bob Baker (bob)"
+        );
+    }
+
+    #[test]
+    fn render_node_label_matches_object_class_case_insensitively() {
+        let rules = vec![rule(&["inetOrgPerson"], "{uid}")];
+        let attrs = attr_map(&[("uid", &["bob"])]);
+        let ocs = vec!["INETORGPERSON".to_string()];
+        assert_eq!(render_node_label(&rules, &ocs, &attrs, "fb"), "bob");
+    }
+
+    #[test]
+    fn render_node_label_falls_back_when_no_rule_matches() {
+        let rules = vec![rule(&["device"], "{cn}")];
+        let attrs = attr_map(&[("cn", &["Bob"])]);
+        let ocs = vec!["inetOrgPerson".to_string()];
+        assert_eq!(render_node_label(&rules, &ocs, &attrs, "RDN"), "RDN");
+    }
+
+    #[test]
+    fn render_node_label_partial_render_shows_empty_segment_not_fallback() {
+        // `uid` missing → "Bob ()" (non-empty) is kept; only an all-empty render falls back.
+        let rules = vec![rule(&["inetOrgPerson"], "{cn} ({uid})")];
+        let attrs = attr_map(&[("cn", &["Bob"])]);
+        let ocs = vec!["inetOrgPerson".to_string()];
+        assert_eq!(render_node_label(&rules, &ocs, &attrs, "RDN"), "Bob ()");
+    }
+
+    #[test]
+    fn render_node_label_blank_render_falls_back() {
+        // Template is a single missing field → "" → fallback.
+        let rules = vec![rule(&["inetOrgPerson"], "{uid}")];
+        let attrs = attr_map(&[]); // no uid
+        let ocs = vec!["inetOrgPerson".to_string()];
+        assert_eq!(render_node_label(&rules, &ocs, &attrs, "RDN"), "RDN");
+    }
+
+    #[test]
+    fn render_node_label_rule_order_is_respected() {
+        let rules = vec![
+            rule(&["inetOrgPerson"], "first:{uid}"),
+            rule(&["inetOrgPerson"], "second:{uid}"),
+        ];
+        let attrs = attr_map(&[("uid", &["bob"])]);
+        let ocs = vec!["inetOrgPerson".to_string()];
+        assert_eq!(render_node_label(&rules, &ocs, &attrs, "fb"), "first:bob");
+    }
+
+    #[test]
+    fn render_node_label_requires_all_object_classes_present() {
+        let rules = vec![rule(&["inetOrgPerson", "posixAccount"], "{uid}")];
+        let attrs = attr_map(&[("uid", &["bob"])]);
+        // Only one of the two required OCs present → no match → fallback.
+        let ocs = vec!["inetOrgPerson".to_string()];
+        assert_eq!(render_node_label(&rules, &ocs, &attrs, "RDN"), "RDN");
+        // Both present → match.
+        let ocs = vec!["inetOrgPerson".to_string(), "posixAccount".to_string()];
+        assert_eq!(render_node_label(&rules, &ocs, &attrs, "RDN"), "bob");
     }
 
     // ── 4.4 helpers ────────────────────────────────────────────────────────────

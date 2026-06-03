@@ -701,6 +701,7 @@ mod tests {
             overlay: None,
             status: String::new(),
             relations: vec![],
+            label_rules: vec![],
             picker_search_id: None,
             picker_last_query: String::new(),
         }
@@ -857,6 +858,7 @@ mod tests {
             overlay: None,
             status: status.to_string(),
             relations: vec![],
+            label_rules: vec![],
             picker_search_id: None,
             picker_last_query: String::new(),
         }
