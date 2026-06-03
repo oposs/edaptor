@@ -461,13 +461,33 @@ mod tests {
         p.search_active = true;
         let rows = p.visible();
         let dns: Vec<_> = rows.iter().map(|r| r.candidate.dn.clone()).collect();
-        assert_eq!(dns, vec!["C", "D", "B", "A"], "results first, then unmatched selected");
+        assert_eq!(
+            dns,
+            vec!["C", "D", "B", "A"],
+            "results first, then unmatched selected"
+        );
         // B appears in the results block but is marked selected (no duplicate).
         let b = rows.iter().filter(|r| r.candidate.dn == "B").count();
         assert_eq!(b, 1, "B not duplicated");
-        assert!(rows.iter().find(|r| r.candidate.dn == "B").unwrap().selected);
-        assert!(rows.iter().find(|r| r.candidate.dn == "A").unwrap().selected);
-        assert!(!rows.iter().find(|r| r.candidate.dn == "C").unwrap().selected);
+        assert!(
+            rows.iter()
+                .find(|r| r.candidate.dn == "B")
+                .unwrap()
+                .selected
+        );
+        assert!(
+            rows.iter()
+                .find(|r| r.candidate.dn == "A")
+                .unwrap()
+                .selected
+        );
+        assert!(
+            !rows
+                .iter()
+                .find(|r| r.candidate.dn == "C")
+                .unwrap()
+                .selected
+        );
     }
 
     #[test]
@@ -477,7 +497,11 @@ mod tests {
         p.set_results(vec![c("C"), c("D"), c("B")]);
         assert!(!p.search_active, "defaults inactive");
         let dns: Vec<_> = p.visible().iter().map(|r| r.candidate.dn.clone()).collect();
-        assert_eq!(dns, vec!["A", "B", "C", "D"], "selected first, then unselected results");
+        assert_eq!(
+            dns,
+            vec!["A", "B", "C", "D"],
+            "selected first, then unselected results"
+        );
     }
 
     #[test]

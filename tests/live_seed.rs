@@ -1,9 +1,7 @@
 //! Live test (gated by EDAPTOR_TEST_LDAP_URI): the rich seed data loaded by
 //! scripts/test-ldap.sh is present and well-formed. SKIPS cleanly when unset.
 
-use edaptor::config::{
-    AuthConfig, AuthMethod, Config, PasswordSource, ServerConfig, TlsConfig,
-};
+use edaptor::config::{AuthConfig, AuthMethod, Config, PasswordSource, ServerConfig, TlsConfig};
 use edaptor::ldap::worker::{Request, Response, SearchScope, WorkerHandle};
 
 const BASE: &str = "dc=example,dc=org";
@@ -32,7 +30,12 @@ fn test_config(uri: String) -> (Config, String) {
     (config, password)
 }
 
-fn search(worker: &WorkerHandle, base: &str, filter: &str, attrs: Vec<String>) -> Vec<edaptor::ldap::worker::LdapEntry> {
+fn search(
+    worker: &WorkerHandle,
+    base: &str,
+    filter: &str,
+    attrs: Vec<String>,
+) -> Vec<edaptor::ldap::worker::LdapEntry> {
     let resp = worker
         .request(Request::Search {
             id: 1,
@@ -88,7 +91,11 @@ fn seed_has_posix_and_membership_groups() {
         "(objectClass=posixGroup)",
         vec!["gidNumber".to_string()],
     );
-    assert!(posix.len() >= 5, "expected >=5 posixGroups, got {}", posix.len());
+    assert!(
+        posix.len() >= 5,
+        "expected >=5 posixGroups, got {}",
+        posix.len()
+    );
     assert!(
         posix.iter().all(|e| e.attrs.contains_key("gidNumber")),
         "every posixGroup must expose gidNumber"
@@ -100,7 +107,11 @@ fn seed_has_posix_and_membership_groups() {
         "(objectClass=groupOfNames)",
         vec!["member".to_string()],
     );
-    assert!(gon.len() >= 5, "expected >=5 groupOfNames, got {}", gon.len());
+    assert!(
+        gon.len() >= 5,
+        "expected >=5 groupOfNames, got {}",
+        gon.len()
+    );
     assert!(
         gon.iter().all(|e| e.attrs.contains_key("member")),
         "every groupOfNames must expose member"
@@ -123,7 +134,10 @@ fn seed_samba_domain_is_discoverable() {
     );
     assert_eq!(domains.len(), 1, "exactly one sambaDomain");
     assert!(
-        domains[0].attrs.get("sambaSID").is_some_and(|v| !v.is_empty()),
+        domains[0]
+            .attrs
+            .get("sambaSID")
+            .is_some_and(|v| !v.is_empty()),
         "sambaDomain must yield a sambaSID"
     );
 }

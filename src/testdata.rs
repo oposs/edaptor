@@ -19,18 +19,51 @@ pub const SSHA_PASSWORD: &str = "{SSHA}aFhC+kK5zaFpP9mFw8+o2zC0ir486wTl";
 pub const FIXED_PWD_LAST_SET: u64 = 1_700_000_000;
 
 /// The five departments (round-robin assigned to users).
-pub const DEPARTMENTS: [&str; 5] =
-    ["Engineering", "Sales", "Marketing", "Finance", "Operations"];
+pub const DEPARTMENTS: [&str; 5] = ["Engineering", "Sales", "Marketing", "Finance", "Operations"];
 
 const FIRST_NAMES: [&str; 20] = [
-    "James", "Mary", "John", "Patricia", "Robert", "Jennifer", "Michael",
-    "Linda", "David", "Elizabeth", "William", "Barbara", "Richard", "Susan",
-    "Joseph", "Jessica", "Thomas", "Sarah", "Charles", "Karen",
+    "James",
+    "Mary",
+    "John",
+    "Patricia",
+    "Robert",
+    "Jennifer",
+    "Michael",
+    "Linda",
+    "David",
+    "Elizabeth",
+    "William",
+    "Barbara",
+    "Richard",
+    "Susan",
+    "Joseph",
+    "Jessica",
+    "Thomas",
+    "Sarah",
+    "Charles",
+    "Karen",
 ];
 const LAST_NAMES: [&str; 20] = [
-    "Smith", "Johnson", "Williams", "Brown", "Jones", "Garcia", "Miller",
-    "Davis", "Rodriguez", "Martinez", "Hernandez", "Lopez", "Gonzalez",
-    "Wilson", "Anderson", "Thomas", "Taylor", "Moore", "Jackson", "Martin",
+    "Smith",
+    "Johnson",
+    "Williams",
+    "Brown",
+    "Jones",
+    "Garcia",
+    "Miller",
+    "Davis",
+    "Rodriguez",
+    "Martinez",
+    "Hernandez",
+    "Lopez",
+    "Gonzalez",
+    "Wilson",
+    "Anderson",
+    "Thomas",
+    "Taylor",
+    "Moore",
+    "Jackson",
+    "Martin",
 ];
 
 /// Functional/role groups: (cn, description, every-Nth-user stride).
@@ -319,7 +352,11 @@ mod tests {
             .iter()
             .map(|u| format!("uid={},ou=people,{}", u.uid, opts.base_dn))
             .collect();
-        for g in ds.groups.iter().filter(|g| g.kind == GroupKind::GroupOfNames) {
+        for g in ds
+            .groups
+            .iter()
+            .filter(|g| g.kind == GroupKind::GroupOfNames)
+        {
             assert!(!g.members.is_empty(), "group {} has members", g.cn);
             for m in &g.members {
                 assert!(user_dns.contains(m), "group {} member {m} missing", g.cn);

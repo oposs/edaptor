@@ -709,7 +709,10 @@ mod tests {
             all.push_str(&row_text(buffer, 0, y, w));
             all.push('\n');
         }
-        assert!(all.contains("User39"), "cursor row must be visible after scroll");
+        assert!(
+            all.contains("User39"),
+            "cursor row must be visible after scroll"
+        );
         assert!(
             !all.contains("User00"),
             "early rows must scroll off screen, got:\n{all}"
@@ -751,7 +754,10 @@ mod tests {
             all.push_str(&row_text(buffer, 0, y, w));
             all.push('\n');
         }
-        assert!(all.contains("val39"), "selected row must be visible after scroll");
+        assert!(
+            all.contains("val39"),
+            "selected row must be visible after scroll"
+        );
         assert!(
             !all.contains("val00"),
             "early rows must scroll off screen, got:\n{all}"
