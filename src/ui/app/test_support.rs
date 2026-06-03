@@ -2,8 +2,10 @@
 #![cfg(test)]
 
 use super::*;
+use std::collections::BTreeMap;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use crate::ldap::worker::RawSubschema;
+use crate::ui::edit_form::FormMode;
 use crate::workflows::structure::StructureInput;
 
 /// A bare App (no form) with the given read-only flag, for dispatch tests.
