@@ -1,0 +1,46 @@
+# Password policies (mirrors the role's ppolicy_default.ldif.j2). Loaded as the
+# data admin. Must load before group/user data is irrelevant — only the ppolicy
+# overlay's olcPPolicyDefault references cn=default here.
+dn: ou=policies,dc=example,dc=org
+objectClass: organizationalUnit
+ou: policies
+
+dn: cn=default,ou=policies,dc=example,dc=org
+objectClass: pwdPolicy
+objectClass: person
+objectClass: top
+cn: default
+sn: default
+pwdAttribute: userPassword
+pwdMinLength: 8
+pwdMaxAge: 0
+pwdInHistory: 5
+pwdCheckQuality: 1
+pwdMinAge: 0
+pwdMaxFailure: 5
+pwdLockout: TRUE
+pwdLockoutDuration: 1800
+pwdGraceAuthNLimit: 3
+pwdExpireWarning: 604800
+pwdAllowUserChange: TRUE
+pwdSafeModify: FALSE
+
+dn: cn=serviceaccounts,ou=policies,dc=example,dc=org
+objectClass: pwdPolicy
+objectClass: person
+objectClass: top
+cn: serviceaccounts
+sn: serviceaccounts
+pwdAttribute: userPassword
+pwdMinLength: 8
+pwdMaxAge: 0
+pwdInHistory: 5
+pwdCheckQuality: 1
+pwdMinAge: 0
+pwdMaxFailure: 5
+pwdLockout: TRUE
+pwdLockoutDuration: 1800
+pwdGraceAuthNLimit: 0
+pwdExpireWarning: 0
+pwdAllowUserChange: FALSE
+pwdSafeModify: FALSE

@@ -1,0 +1,36 @@
+# Overlays for the edaptor test server (mirrors the oposs.openldap role).
+# NOTE: the overlay .so files are in /opt/bitnami/openldap/lib/openldap — the
+# default cn=module{0} olcModulePath points at libexec/ and FAILS to load them,
+# so we add a fresh module{1} with the correct path. Applied via cn=config admin.
+
+dn: cn=module{1},cn=config
+objectClass: olcModuleList
+cn: module{1}
+olcModulePath: /opt/bitnami/openldap/lib/openldap
+olcModuleLoad: memberof.so
+olcModuleLoad: refint.so
+olcModuleLoad: ppolicy.so
+
+dn: olcOverlay=memberof,olcDatabase={2}mdb,cn=config
+objectClass: olcOverlayConfig
+objectClass: olcMemberOf
+olcOverlay: memberof
+olcMemberOfRefInt: TRUE
+olcMemberOfDangling: ignore
+olcMemberOfGroupOC: groupOfNames
+olcMemberOfMemberAD: member
+olcMemberOfMemberOfAD: memberOf
+
+dn: olcOverlay=refint,olcDatabase={2}mdb,cn=config
+objectClass: olcOverlayConfig
+objectClass: olcRefintConfig
+olcOverlay: refint
+olcRefintAttribute: member memberOf owner manager
+
+dn: olcOverlay=ppolicy,olcDatabase={2}mdb,cn=config
+objectClass: olcOverlayConfig
+objectClass: olcPPolicyConfig
+olcOverlay: ppolicy
+olcPPolicyDefault: cn=default,ou=policies,dc=example,dc=org
+olcPPolicyHashCleartext: TRUE
+olcPPolicyUseLockout: TRUE

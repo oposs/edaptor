@@ -1,0 +1,9 @@
+# Mail schema (olcSchemaConfig). Provenance: oposs.openldap role
+# files/schemas/mail.schema. Loaded via the cn=config admin.
+dn: cn=mail,cn=schema,cn=config
+objectClass: olcSchemaConfig
+cn: mail
+olcAttributeTypes: ( 1.1.2.1.1.1 NAME 'mailQuota' DESC 'Mail quota in bytes' EQUALITY integerMatch SYNTAX 1.3.6.1.4.1.1466.115.121.1.27 SINGLE-VALUE )
+olcAttributeTypes: ( 1.1.2.1.1.2 NAME 'mailAlias' DESC 'Mail alias addresses' EQUALITY caseIgnoreIA5Match SUBSTR caseIgnoreIA5SubstringsMatch SYNTAX 1.3.6.1.4.1.1466.115.121.1.26{256} )
+olcAttributeTypes: ( 1.1.2.1.1.3 NAME 'mailEnabled' DESC 'Mail account enabled flag' EQUALITY booleanMatch SYNTAX 1.3.6.1.4.1.1466.115.121.1.7 SINGLE-VALUE )
+olcObjectClasses: ( 1.1.2.1.2.1 NAME 'mailAccount' DESC 'Mail account object class' SUP top AUXILIARY MUST ( mail ) MAY ( mailQuota $ mailAlias $ mailEnabled ) )

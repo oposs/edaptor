@@ -1,0 +1,47 @@
+# Base OUs, the sambaDomain entry, and representative service accounts.
+# Loaded as the data admin AFTER the samba schema is in cn=config.
+dn: ou=people,dc=example,dc=org
+objectClass: organizationalUnit
+ou: people
+description: User accounts
+
+dn: ou=groups,dc=example,dc=org
+objectClass: organizationalUnit
+ou: groups
+description: Groups
+
+dn: ou=services,dc=example,dc=org
+objectClass: organizationalUnit
+ou: services
+description: Service accounts and LDAP bind accounts
+
+# Samba domain — edaptor discovers the domain SID + RID base from this entry.
+dn: sambaDomainName=EXAMPLE,dc=example,dc=org
+objectClass: sambaDomain
+objectClass: top
+sambaDomainName: EXAMPLE
+sambaSID: S-1-5-21-1234567890-987654321-1122334455
+sambaAlgorithmicRidBase: 1000
+
+# Representative service accounts (illustrative; the functional rootDN is
+# cn=admin, which the demo config binds as). Password: test123
+dn: cn=sambamanager,ou=services,dc=example,dc=org
+objectClass: simpleSecurityObject
+objectClass: organizationalRole
+cn: sambamanager
+description: Samba service account
+userPassword: {SSHA}aFhC+kK5zaFpP9mFw8+o2zC0ir486wTl
+
+dn: cn=nssclient,ou=services,dc=example,dc=org
+objectClass: simpleSecurityObject
+objectClass: organizationalRole
+cn: nssclient
+description: NSS/PAM POSIX lookup account
+userPassword: {SSHA}aFhC+kK5zaFpP9mFw8+o2zC0ir486wTl
+
+dn: cn=ldapmanager,ou=services,dc=example,dc=org
+objectClass: simpleSecurityObject
+objectClass: organizationalRole
+cn: ldapmanager
+description: LDAP management account placeholder
+userPassword: {SSHA}aFhC+kK5zaFpP9mFw8+o2zC0ir486wTl
