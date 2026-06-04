@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
-# Start/stop a throwaway OpenLDAP server for edaptor integration tests (podman).
-# Usage: scripts/test-ldap.sh [start|stop]
+# Start/stop a throwaway OpenLDAP server for edaptor integration tests.
+# Works with podman or docker (auto-detected, podman preferred).
+# Usage: scripts/test-ldap.sh [--engine podman|docker] [start|stop]
+#   The engine can also be selected with EDAPTOR_CONTAINER_ENGINE=docker.
 set -euo pipefail
 
 NAME=edaptor-test-ldap
@@ -13,12 +15,12 @@ PROVISION_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/ldap-provision" && pwd)"
 apply_ldif() {  # <bind-dn> <password> <file>
   local bind_dn=$1 pw=$2 file=$3 base out rc
   base=$(basename "$file")
-  podman cp "$file" "$NAME:/tmp/$base"
+  "$ENGINE" cp "$file" "$NAME:/tmp/$base"
   # -c keeps going past entries that already exist (idempotent re-runs, and the
   # Bitnami default tree already owns e.g. ou=groups). ldapadd then exits
   # non-zero, which under `set -e` would abort provisioning — so we capture the
   # output + exit code and tolerate ONLY the benign "Already exists (68)".
-  if out=$(podman exec "$NAME" ldapadd -c -x -H ldap://localhost:1389 \
+  if out=$("$ENGINE" exec "$NAME" ldapadd -c -x -H ldap://localhost:1389 \
        -D "$bind_dn" -w "$pw" -f "/tmp/$base" 2>&1); then
     rc=0
   else
@@ -52,12 +54,42 @@ provision() {
   apply_ldif "cn=admin,dc=example,dc=org" "adminpassword" "$PROVISION_DIR/data/testdata.ldif"
 }
 
-case "${1:-start}" in
+# Parse args: an optional --engine override plus the start|stop command.
+ENGINE="${EDAPTOR_CONTAINER_ENGINE:-}"
+CMD=""
+usage() { echo "usage: $0 [--engine podman|docker] [start|stop]"; }
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --engine) ENGINE="${2:-}"; shift 2 ;;
+    --engine=*) ENGINE="${1#*=}"; shift ;;
+    start|stop) CMD="$1"; shift ;;
+    -h|--help) usage; exit 0 ;;
+    *) usage >&2; exit 1 ;;
+  esac
+done
+CMD="${CMD:-start}"
+
+# Resolve the container engine: honour an explicit choice, else prefer podman
+# and fall back to docker (the OpenLDAP image + cp/exec/run/stop calls work the
+# same on both).
+if [ -n "$ENGINE" ]; then
+  command -v "$ENGINE" >/dev/null 2>&1 || {
+    echo "ERROR: requested container engine '$ENGINE' not found in PATH" >&2; exit 1; }
+else
+  for _e in podman docker; do
+    if command -v "$_e" >/dev/null 2>&1; then ENGINE="$_e"; break; fi
+  done
+  [ -n "$ENGINE" ] || {
+    echo "ERROR: neither podman nor docker found in PATH" >&2; exit 1; }
+fi
+
+case "$CMD" in
   start)
+    echo "Using container engine: $ENGINE"
     # Make start idempotent: clear any leftover container from a prior run
     # (e.g. one left behind by a readiness timeout below).
-    podman rm -f "$NAME" >/dev/null 2>&1 || true
-    podman run -d --rm --name "$NAME" \
+    "$ENGINE" rm -f "$NAME" >/dev/null 2>&1 || true
+    "$ENGINE" run -d --rm --name "$NAME" \
       -p 1389:1389 \
       -e LDAP_ROOT="dc=example,dc=org" \
       -e LDAP_ADMIN_USERNAME="admin" \
@@ -68,7 +100,7 @@ case "${1:-start}" in
       "$IMAGE" >/dev/null
     echo "Waiting for LDAP to accept connections..."
     for _ in $(seq 1 30); do
-      if podman exec "$NAME" ldapsearch -x -H ldap://localhost:1389 \
+      if "$ENGINE" exec "$NAME" ldapsearch -x -H ldap://localhost:1389 \
            -b "dc=example,dc=org" -s base >/dev/null 2>&1; then
         echo "Ready."
         provision
@@ -81,15 +113,15 @@ case "${1:-start}" in
       sleep 1
     done
     echo "ERROR: LDAP did not become ready in time" >&2
-    podman stop "$NAME" >/dev/null 2>&1 || true
+    "$ENGINE" stop "$NAME" >/dev/null 2>&1 || true
     exit 1
     ;;
   stop)
-    podman stop "$NAME" >/dev/null 2>&1 || true
+    "$ENGINE" stop "$NAME" >/dev/null 2>&1 || true
     echo "Stopped $NAME"
     ;;
   *)
-    echo "usage: $0 [start|stop]" >&2
+    usage >&2
     exit 1
     ;;
 esac
