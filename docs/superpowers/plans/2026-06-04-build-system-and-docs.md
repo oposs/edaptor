@@ -124,9 +124,15 @@ Pins the same mdBook/mermaid versions CI uses, so `make docs` works locally with
 ```toml
 [tools]
 rust = "latest"
-"ubi:rust-lang/mdBook"        = "0.5.2"
+# mdBook's release archive ships a lowercase `mdbook` binary, but the repo is
+# `mdBook`; ubi needs the explicit exe name or it looks for `mdBook*` and fails.
+"ubi:rust-lang/mdBook"        = { version = "0.5.2", exe = "mdbook" }
 "ubi:badboy/mdbook-mermaid"   = "0.17.0"
 ```
+
+> **Note:** the `exe = "mdbook"` is required — without it `mise install` fails with
+> "could not find any files matching [mdBook*]" (ubi derives the binary name from
+> the repo name `mdBook`, but the shipped binary is lowercase `mdbook`).
 
 - [ ] **Step 2: Verify mise accepts it (if mise is installed)**
 
