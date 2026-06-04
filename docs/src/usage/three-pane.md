@@ -18,7 +18,7 @@ context to a modal dialog every time you edit.
 │             ││ …                │║ uidNumber     10001           ║
 │             ││                  │║ …                             ║
 └─────────────┘└──────────────────┘╚═══════════════════════════════╝
- ↑↓ Field · ↵ Edit · Alt+S Save · Alt+C Cancel   ·   Alt+X Quit   ·   uid=bob,…,dc=example,dc=org
+ ↑↓ Field · ↵ Edit · Alt+S Save · Alt+C Cancel · Alt+X Quit
 ```
 
 *(The form pane is focused here, so it carries the bold double border. In a real

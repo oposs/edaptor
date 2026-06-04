@@ -39,7 +39,7 @@ entry's attributes on the right. The focused pane is drawn with a double border.
 │             ││ …                │║ uidNumber     10001           ║
 │             ││                  │║ …                             ║
 └─────────────┘└──────────────────┘╚═══════════════════════════════╝
- ↑↓ Field · ↵ Edit · Alt+S Save · Alt+C Cancel   ·   Alt+X Quit   ·   uid=bob,…,dc=example,dc=org
+ ↑↓ Field · ↵ Edit · Alt+S Save · Alt+C Cancel · Alt+X Quit
 ```
 
 Move focus between panes with **Tab** and **Shift+Tab**. The key model is
