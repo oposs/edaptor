@@ -58,7 +58,7 @@ Sync (syncrepl), which would allow eager-load plus live push in one operation â€
 the natural future upgrade for live tree updates â€” but that is **deferred**.
 
 **Consequence:** edaptor does not assume the view is live. It refreshes on
-demand (F5) and re-reads automatically after each write, so what you see stays
+demand (Alt+R) and re-reads automatically after each write, so what you see stays
 consistent with what you just changed.
 
 ```mermaid
@@ -67,5 +67,5 @@ flowchart TD
     C2["No effective-rights control"] --> D2["Global read_only + graceful rc 50"]
     C3["Server size limits"] --> D3["{next} scan refuses on truncation"]
     C4["memberOf is overlay-maintained"] --> D4["Write member, fan out, never memberOf"]
-    C5["No persistent search (RFC 4533 deferred)"] --> D5["Manual F5 + refresh-after-write"]
+    C5["No persistent search (RFC 4533 deferred)"] --> D5["Manual Alt+R + refresh-after-write"]
 ```

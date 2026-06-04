@@ -35,7 +35,7 @@ responses each tick, so a search that takes seconds never blocks a keypress.
 flowchart LR
     UI["Three-pane TUI (ratatui)"] -- requests --> W["LDAP worker thread"]
     W -- results --> UI
-    W <--> S[("OpenLDAP\ncn=subschema, entries")]
+    W <--> S[("OpenLDAP<br/>cn=subschema, entries")]
 ```
 
 The TUI itself is built on [ratatui](https://ratatui.rs/) in a three-pane
