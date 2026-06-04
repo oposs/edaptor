@@ -1,11 +1,10 @@
-# edaptor
+# eDAPtor
 
-A terminal UI (TUI) for administering an OpenLDAP directory — adding, modifying
-and removing **users** and **groups**, and managing **group memberships** — built
-in Rust with [ratatui](https://ratatui.rs/).
+*the tui LDAP editor* — a terminal UI for administering an OpenLDAP directory —
+adding, modifying and removing **users** and **groups**, and managing **group
+memberships** — built in Rust with [ratatui](https://ratatui.rs/).
 
-> **eDAPtor** — the *DAP* (Directory Access Protocol, the P in LDAP) baked into
-> an *editor* / *adaptor*.
+> The name is **e**ditor and L**DAP**, creatively merged.
 
 📖 **Documentation:** <https://oposs.github.io/edaptor>
 
