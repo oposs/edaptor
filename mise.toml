@@ -1,0 +1,4 @@
+[tools]
+rust = "latest"
+"ubi:rust-lang/mdBook"        = "0.5.2"
+"ubi:badboy/mdbook-mermaid"   = "0.17.0"
