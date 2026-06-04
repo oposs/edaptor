@@ -46,14 +46,14 @@ range `[MIN, MAX]`** across the whole directory:
 uidNumber = "{next:10000-60000}"
 ```
 
-To compute the next free value, edaptor scans the directory for existing values
+To compute the next free value, eDAPtor scans the directory for existing values
 of the attribute and picks the lowest unused number in range.
 
 ### Size-limit caveat
 
 The auto-number scan is only safe if it sees **every** existing value. OpenLDAP
 imposes a server size limit (`olcSizeLimit`, default 500) that truncates large
-result sets for ordinary identities. If edaptor's scan is **truncated by a
+result sets for ordinary identities. If eDAPtor's scan is **truncated by a
 server size limit**, it cannot guarantee the chosen number is actually free, so
 it **refuses to allocate** rather than risk a collision.
 

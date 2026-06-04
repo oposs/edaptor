@@ -1,7 +1,7 @@
 # Creating, Editing, Renaming, Deleting
 
 All four operations happen in the [three-pane TUI](three-pane.md) and end the
-same way: edaptor computes the exact change, shows you an LDIF preview, and only
+same way: eDAPtor computes the exact change, shows you an LDIF preview, and only
 then applies it. The mechanics of that final step are described under
 [Change Flow](../concepts/change-flow.md); this page walks the four flows that
 lead into it.
@@ -18,7 +18,7 @@ read-only / system attributes are shown but not editable.
    the new value.
 3. As soon as a value differs from what was read, the form is **dirty**: a `*`
    appears next to the DN in the status line.
-4. Press **`Alt+S`** to save. edaptor diffs your edits against the original
+4. Press **`Alt+S`** to save. eDAPtor diffs your edits against the original
    entry, builds the change, shows the LDIF preview, and applies it on
    confirmation. If nothing actually changed, it reports that instead of writing.
 5. Press **`Alt+C`** to cancel, reverting the form to the last-read values.
@@ -26,7 +26,7 @@ read-only / system attributes are shown but not editable.
 ### The dirty-guard
 
 If you try to navigate away from — or quit while — a form has unsaved edits,
-edaptor does not silently discard them. It opens a guard overlay
+eDAPtor does not silently discard them. It opens a guard overlay
 (*"This entry has unsaved edits. Save them before moving on?"*) offering
 **Save**, **Discard**, or **Cancel**:
 
@@ -44,7 +44,7 @@ currently selected branch.
 
 1. A **profile chooser** overlay lists the entry profiles from your config
    (`user`, `group`, …). Pick one with `↑↓` and `↵` (or `Esc` to cancel).
-2. edaptor builds an empty form for that profile, pre-filling its
+2. eDAPtor builds an empty form for that profile, pre-filling its
    [defaults](../configuration/defaults.md): literal values, templated values
    such as `homeDirectory = "/home/{uid}"`, and auto-numbered values such as
    `uidNumber = "{next:10000-60000}"`. Defaults only fill **empty** fields — once
@@ -57,12 +57,12 @@ currently selected branch.
 
 ## Renaming (ModRdn)
 
-edaptor has no separate "rename" command — a rename is just an edit of the
+eDAPtor has no separate "rename" command — a rename is just an edit of the
 entry's **naming attribute** (its RDN attribute, e.g. `uid` for a user or `cn`
 for a group):
 
 1. Edit the value of the naming attribute in the form and press **`Alt+S`**.
-2. edaptor detects that the value naming the entry has changed and emits a
+2. eDAPtor detects that the value naming the entry has changed and emits a
    **ModRdn** (rename) operation instead of a plain modify. If you also changed
    other attributes in the same save, the rename is applied first, then the
    modifications.

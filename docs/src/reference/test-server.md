@@ -1,6 +1,6 @@
 # Test Server
 
-edaptor ships a script, `scripts/test-ldap.sh`, that stands up a fully
+eDAPtor ships a script, `scripts/test-ldap.sh`, that stands up a fully
 provisioned throwaway OpenLDAP server in a **podman** container (not docker). It
 is the fastest way to try the TUI against realistic data and is the backing
 server for the gated live test suite.
@@ -33,7 +33,7 @@ for the server to accept connections, then provisions and seeds it.
 ## Connecting
 
 The server listens on `ldap://localhost:1389`. Set these environment variables
-to point edaptor and the live tests at it:
+to point eDAPtor and the live tests at it:
 
 ```bash
 export EDAPTOR_TEST_LDAP_URI=ldap://localhost:1389
@@ -52,7 +52,7 @@ through.
 
 ## How the live test suite uses it
 
-edaptor's `live_*` tests talk to a real directory and are **gated by the
+eDAPtor's `live_*` tests talk to a real directory and are **gated by the
 `EDAPTOR_TEST_LDAP_URI` environment variable**: when it is unset, those tests
 skip, so `cargo test` is safe with no server running. When it is set (to the URI
 above), the live membership, template, seed, structure, and write tests run

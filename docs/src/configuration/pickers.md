@@ -3,7 +3,7 @@
 A `[profile.picker.<attr>]` table declares how the field for attribute `<attr>`
 is populated from a **live candidate search** against another profile. Instead
 of typing a raw DN or scalar, the operator opens a picker, searches, and selects
-one or more candidate entries; edaptor writes the right value(s) for you.
+one or more candidate entries; eDAPtor writes the right value(s) for you.
 
 ## The four knobs
 
@@ -55,7 +55,7 @@ This is a synthetic back-reference. Ticking a group does **not** write
 `memberOf` on the user; instead, `fanout_attr = "member"` causes the user's DN
 to be added to (or removed from) the `member` attribute of each picked `group`.
 The `memberOf` attribute itself is **overlay-maintained** by OpenLDAP's memberOf
-overlay, so **edaptor never writes it directly** (see
+overlay, so **eDAPtor never writes it directly** (see
 [LDAP Constraints](../concepts/ldap-constraints.md)).
 
 ### `member` / `memberUid` — multi-select, DN vs. scalar

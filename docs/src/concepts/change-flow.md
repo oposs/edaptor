@@ -1,6 +1,6 @@
 # Change Flow
 
-Every modification you make in edaptor follows the same path: the edited form is
+Every modification you make in eDAPtor follows the same path: the edited form is
 diffed against the entry as it was read, the difference becomes a **ChangeSet**,
 and that ChangeSet is rendered as an **LDIF preview** of the exact change before
 it is applied. Edits apply immediately on confirmation, but the LDIF preview is
@@ -20,7 +20,7 @@ flowchart TD
 
 ## Diff vs. original
 
-When you save, edaptor compares the form's current values to the values it read
+When you save, eDAPtor compares the form's current values to the values it read
 from the server. Only genuine differences survive: a field you never touched
 produces no change, and multi-valued attributes are compared **set-wise**, so
 merely reordering values without adding or removing any yields no modification.
@@ -37,10 +37,10 @@ operation:
 
 ## LDIF preview
 
-Before the operation is sent, edaptor shows it as LDIF — the same change the
+Before the operation is sent, eDAPtor shows it as LDIF — the same change the
 server will receive, in a format administrators already read. Passwords appear
 masked as `********` in the preview even though the cleartext is what gets
-written. Confirming applies the change; edaptor then re-reads the affected entry
+written. Confirming applies the change; eDAPtor then re-reads the affected entry
 so the view reflects reality (see
 [LDAP Constraints](ldap-constraints.md#no-live-change-notification)).
 

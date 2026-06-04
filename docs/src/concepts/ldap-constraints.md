@@ -1,6 +1,6 @@
 # LDAP Constraints
 
-Several design choices in edaptor exist because of hard limits in LDAP and
+Several design choices in eDAPtor exist because of hard limits in LDAP and
 OpenLDAP. Each constraint below maps to a concrete consequence in the UI.
 
 ## No cheap "has children" signal
@@ -9,17 +9,17 @@ LDAP gives no structural leaf/branch flag — *any* entry may have children, and
 OpenLDAP does not enforce DIT structure rules by default. There is no
 inexpensive way to ask "does this node have children?".
 
-**Consequence:** edaptor **eagerly loads the directory structure** at startup
+**Consequence:** eDAPtor **eagerly loads the directory structure** at startup
 (DN plus a few label attributes), so "is this a branch?" becomes a free local
 computation: a branch is simply an entry with at least one child. Create-child
 is therefore offered on any entry.
 
 ## No per-entry rights introspection
 
-OpenLDAP does not implement the *Get Effective Rights* control, so edaptor
+OpenLDAP does not implement the *Get Effective Rights* control, so eDAPtor
 cannot reliably ask, per entry, whether the bound identity may write it.
 
-**Consequence:** instead of per-entry button hiding, edaptor uses a **global
+**Consequence:** instead of per-entry button hiding, eDAPtor uses a **global
 `read_only` mode** (a [config flag](../configuration/server-auth.md), and/or an
 anonymous bind) to suppress the write actions, and otherwise discovers the truth
 at save time — handling `insufficientAccess` (result code 50) gracefully rather
@@ -45,8 +45,8 @@ not yet a delivered guarantee.)
 OpenLDAP's `memberof` overlay as a back-reference to the forward `member`
 attribute.
 
-**Consequence:** edaptor **writes `member`, never `memberOf`.** When you tick a
-group in a user's membership picker, edaptor fans the change out by adding (or
+**Consequence:** eDAPtor **writes `member`, never `memberOf`.** When you tick a
+group in a user's membership picker, eDAPtor fans the change out by adding (or
 removing) that user's DN in the group's `member` attribute; the overlay then
 updates `memberOf` on its own. See [Pickers](../configuration/pickers.md) for the
 `fanout_attr` mechanism.
@@ -57,7 +57,7 @@ OpenLDAP does not support Persistent Search. It *does* support RFC 4533 Content
 Sync (syncrepl), which would allow eager-load plus live push in one operation —
 the natural future upgrade for live tree updates — but that is **deferred**.
 
-**Consequence:** edaptor does not assume the view is live. It refreshes on
+**Consequence:** eDAPtor does not assume the view is live. It refreshes on
 demand (Alt+R) and re-reads automatically after each write, so what you see stays
 consistent with what you just changed.
 

@@ -2,7 +2,7 @@
 
 ## Building from source
 
-edaptor is a Rust application. With a recent stable Rust toolchain installed,
+eDAPtor is a Rust application. With a recent stable Rust toolchain installed,
 build a release binary with:
 
 ```bash
@@ -17,7 +17,7 @@ automatically, so you do not have to manage versions by hand.
 
 ## TLS backend
 
-edaptor uses the [rustls](https://github.com/rustls/rustls) TLS backend, so
+eDAPtor uses the [rustls](https://github.com/rustls/rustls) TLS backend, so
 **no OpenSSL is needed** to build or run it. This also means static,
 self-contained `musl` release binaries can be produced without vendoring a TLS
 library; pre-built static binaries will be published via GitHub Releases once
@@ -25,7 +25,7 @@ the project is pushed.
 
 ## Configuration file
 
-edaptor reads a single TOML configuration file. Point it at one explicitly with
+eDAPtor reads a single TOML configuration file. Point it at one explicitly with
 `--config <path>`, or let it fall back to the default location
 `~/.config/edaptor/config.toml`:
 

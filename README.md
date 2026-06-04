@@ -1,6 +1,6 @@
 # eDAPtor
 
-*the tui LDAP editor* — a terminal UI for administering an OpenLDAP directory —
+*The TUI LDAP editor* — a terminal UI for administering an OpenLDAP directory —
 adding, modifying and removing **users** and **groups**, and managing **group
 memberships** — built in Rust with [ratatui](https://ratatui.rs/).
 
@@ -10,7 +10,7 @@ memberships** — built in Rust with [ratatui](https://ratatui.rs/).
 
 ## What makes it different
 
-edaptor **derives the directory's structure from the LDAP server itself** via
+eDAPtor **derives the directory's structure from the LDAP server itself** via
 full schema introspection (`cn=subschema`) and generates its edit forms
 dynamically from `objectClass` definitions. A config file holds all connection
 properties plus a small set of *entry profiles* describing what a "user" and a
@@ -48,7 +48,7 @@ for usage, and `docs/superpowers/specs/` for the design specifications.
 `scripts/test-ldap.sh start` launches a podman OpenLDAP that mirrors the
 `oposs.openldap` role — Samba + mail schemas, the memberOf/refint/ppolicy
 overlays, password policies — and seeds it with ~600 users across 5 departments
-and ~25 groups (see `scripts/ldap-provision/`). Point edaptor at it with:
+and ~25 groups (see `scripts/ldap-provision/`). Point eDAPtor at it with:
 
 ```bash
 scripts/test-ldap.sh start

@@ -1,6 +1,6 @@
 # Object Model
 
-edaptor has a **two-tier object model**. At the base sits a generic,
+eDAPtor has a **two-tier object model**. At the base sits a generic,
 schema-driven entry engine that knows nothing about users or groups. Layered
 over it is a pervasive *users & groups* understanding that adds the domain
 knowledge real administration needs — passwords, memberships, and the Samba
@@ -12,13 +12,13 @@ The base engine treats every entry uniformly: a DN, a set of `objectClass`
 values, and the attributes those classes permit (see
 [Architecture](architecture.md)). From the live schema it can render any entry
 as a form and apply the five core operations — **view, create, edit, delete,
-rename** — without knowing what the entry *is*. This is what makes edaptor work
+rename** — without knowing what the entry *is*. This is what makes eDAPtor work
 against an arbitrary directory: nothing here is specialised to a particular
 schema.
 
 ## The layer: users & groups
 
-On top of the generic engine, edaptor layers an understanding of the things
+On top of the generic engine, eDAPtor layers an understanding of the things
 administrators actually manage. This layer is configured through
 [entry profiles](../configuration/entry-profiles.md) and the sub-tables they
 carry, and it acts *across all five operations* of the base engine:

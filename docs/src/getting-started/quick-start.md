@@ -1,11 +1,11 @@
 # Quick Start
 
-The fastest way to try edaptor is the bundled podman test server. It launches an
+The fastest way to try eDAPtor is the bundled podman test server. It launches an
 OpenLDAP instance that mirrors a realistic deployment — Samba and mail schemas,
 the memberOf / refint / ppolicy overlays, password policies — and seeds it with
 sample data.
 
-## Start the test server and run edaptor
+## Start the test server and run eDAPtor
 
 ```bash
 scripts/test-ldap.sh start
@@ -25,7 +25,7 @@ scripts/test-ldap.sh stop
 
 ## What you will see
 
-On launch, edaptor presents a three-pane layout: the directory tree (DIT) on the
+On launch, eDAPtor presents a three-pane layout: the directory tree (DIT) on the
 left, the entries within the selected node in the middle, and the selected
 entry's attributes on the right. The focused pane is drawn with a double border.
 
@@ -48,5 +48,5 @@ Alt-based: **Alt+R** refresh, **Alt+N** new, **Alt+D** delete, **Alt+S** save,
 
 ## Next steps
 
-- [Configuration](../configuration/overview.md) — connect edaptor to your own
+- [Configuration](../configuration/overview.md) — connect eDAPtor to your own
   directory and tailor its entry profiles.

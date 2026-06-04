@@ -1,6 +1,6 @@
 # Server & Authentication
 
-The `[server]`, `[server.tls]`, and `[auth]` tables tell edaptor where the
+The `[server]`, `[server.tls]`, and `[auth]` tables tell eDAPtor where the
 directory is, how to trust its TLS certificate, and how to bind.
 
 ## `[server]`
@@ -16,7 +16,7 @@ timeout_secs = 10                             # bound the TCP connect so an unre
 
 - **`uri`** — the directory URL. Use `ldap://` for a plaintext connection (often
   combined with `start_tls`) or `ldaps://` for implicit TLS on the LDAPS port.
-- **`base_dn`** — the root of the subtree edaptor loads and browses.
+- **`base_dn`** — the root of the subtree eDAPtor loads and browses.
 - **`start_tls`** — when `true`, an `ldap://` connection is upgraded to TLS with
   StartTLS after connecting. **Do not combine `start_tls = true` with an
   `ldaps://` URI** — `ldaps://` is already TLS, so layering StartTLS on top is a
@@ -24,7 +24,7 @@ timeout_secs = 10                             # bound the TCP connect so an unre
 - **`read_only`** — when `true`, all write actions in the TUI are disabled. Use
   this for a safe browse-only session. (Because OpenLDAP exposes no per-entry
   effective-rights signal, read-only is a global mode rather than something
-  edaptor can decide per entry — see
+  eDAPtor can decide per entry — see
   [LDAP Constraints](../concepts/ldap-constraints.md).)
 - **`timeout_secs`** — bounds the TCP connect so an unreachable server cannot
   make the TUI hang.
@@ -45,11 +45,11 @@ verify    = true                              # set false ONLY for testing — a
   addition to (or instead of) the system store. Use this when your directory's
   certificate is signed by a private/internal CA.
 - **`verify`** — certificate verification. Leave it `true`.
-  Setting `verify = false` makes edaptor **accept any certificate**, defeating
+  Setting `verify = false` makes eDAPtor **accept any certificate**, defeating
   the protection TLS provides; use it **only for testing** against a server with
   a self-signed certificate you cannot otherwise trust.
 
-edaptor's TLS is built on the **rustls** backend, so no OpenSSL is required at
+eDAPtor's TLS is built on the **rustls** backend, so no OpenSSL is required at
 build or run time.
 
 ## `[auth]`

@@ -3,7 +3,7 @@
 This is the complete annotated `examples/config.toml` — a copy-pasteable
 starting point that exercises every supported option. Replace the
 `dc=example,dc=com` base, the object classes, and the search bases with whatever
-your directory actually uses; edaptor introspects `cn=subschema`, so the forms
+your directory actually uses; eDAPtor introspects `cn=subschema`, so the forms
 adapt to your schema automatically.
 
 ```toml

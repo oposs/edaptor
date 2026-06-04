@@ -1,6 +1,6 @@
 [book]
 title = "eDAPtor"
-description = "the tui LDAP editor"
+description = "The TUI LDAP editor"
 authors = ["Tobias Oetiker"]
 language = "en"
 src = "src"

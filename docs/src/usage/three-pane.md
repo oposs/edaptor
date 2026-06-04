@@ -1,6 +1,6 @@
 # The Three-Pane TUI
 
-edaptor presents the directory as three side-by-side panes — a navigation
+eDAPtor presents the directory as three side-by-side panes — a navigation
 tree, an entry list, and a detail/edit form — over a single bottom status
 line. The layout is persistent: you keep the directory, the current container's
 entries, and the selected entry's form all on screen at once, instead of losing
@@ -26,7 +26,7 @@ terminal the active border is also drawn in cyan, which ASCII cannot show.)*
 
 - **DIT (navigation tree)** — the directory's branch structure: every container
   (an entry that has children), with the base DN as the root. The whole
-  structure is loaded eagerly at startup, so navigation is instant and edaptor
+  structure is loaded eagerly at startup, so navigation is instant and eDAPtor
   knows exactly which nodes are branches and which are leaves. Selecting a branch
   drives the entry list. Move with `↑↓`, fold/unfold a branch with `←→`.
 
@@ -51,7 +51,7 @@ terminal the active border is also drawn in cyan, which ASCII cannot show.)*
 
 Exactly one pane is focused at a time. The focused pane is marked by a **bold,
 double-line border** (drawn in cyan); the other two panes get a dim single-line
-border. There is no background inversion — edaptor uses the terminal's default
+border. There is no background inversion — eDAPtor uses the terminal's default
 (typically light/white) background everywhere, so it reads cleanly in any
 color scheme.
 

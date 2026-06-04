@@ -1,6 +1,6 @@
 # Passwords & Samba
 
-edaptor sets passwords two ways: an **inline password field** in the create/edit
+eDAPtor sets passwords two ways: an **inline password field** in the create/edit
 form (for entries whose profile declares a password), and the **`edaptor passwd`
 CLI** for setting a password from the command line. The configuration that turns
 on the inline field is described under
@@ -25,7 +25,7 @@ clear place to set the password.
 If the profile sets `samba = true`, saving the password also keeps the entry's
 Samba credentials in sync in the same atomic change:
 
-- edaptor computes the **NT hash client-side** and writes `sambaNTPassword`
+- eDAPtor computes the **NT hash client-side** and writes `sambaNTPassword`
   alongside `userPassword`, and updates `sambaPwdLastSet`.
 - This requires the entry to be a `sambaSamAccount`; the Samba SID is derived
   from the directory's `sambaDomain` entry.

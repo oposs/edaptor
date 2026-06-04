@@ -1,6 +1,6 @@
 # Configuration Overview
 
-edaptor is driven by a single [TOML](https://toml.io/) file. It declares the
+eDAPtor is driven by a single [TOML](https://toml.io/) file. It declares the
 LDAP connection, how to authenticate, and a set of *entry profiles* describing
 what a "user" or a "group" means in your directory.
 
@@ -10,11 +10,11 @@ Pass it with:
 edaptor --config /path/to/config.toml
 ```
 
-When `--config` is omitted, edaptor looks for `~/.config/edaptor/config.toml`.
+When `--config` is omitted, eDAPtor looks for `~/.config/edaptor/config.toml`.
 
 ## The config declares intent, not field layouts
 
-edaptor introspects the live schema (`cn=subschema`) and generates its edit
+eDAPtor introspects the live schema (`cn=subschema`) and generates its edit
 forms dynamically from the `objectClass` definitions it finds there. This means
 the config file never enumerates fields or describes form layouts — those adapt
 automatically to whatever your directory's schema says.

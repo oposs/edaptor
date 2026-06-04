@@ -1,6 +1,6 @@
 # eDAPtor
 
-*the tui LDAP editor*
+*The TUI LDAP editor*
 
 eDAPtor is a terminal UI for administering an OpenLDAP directory — adding,
 modifying and removing **users** and **groups**, and managing **group
@@ -10,7 +10,7 @@ memberships** — built in Rust with [ratatui](https://ratatui.rs/).
 
 ## What makes it different
 
-edaptor **derives the directory's structure from the LDAP server itself.** It
+eDAPtor **derives the directory's structure from the LDAP server itself.** It
 introspects the live schema via `cn=subschema` and generates its edit forms
 dynamically from the relevant `objectClass` definitions, so the fields it shows
 always match what the server will actually accept. A single TOML config holds

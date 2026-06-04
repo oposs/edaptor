@@ -1,6 +1,6 @@
 # Entry Profiles
 
-A `[[profile]]` table declares one *kind* of entry edaptor manages — a "user", a
+A `[[profile]]` table declares one *kind* of entry eDAPtor manages — a "user", a
 "group", a "posixgroup", and so on. Because `[[profile]]` is an array of tables,
 you repeat it once per kind. Each profile says what its entries are made of and
 where they live; the edit form itself is generated from the live schema for the
@@ -22,7 +22,7 @@ label          = "{cn} ({uid})"               # e.g. "Bob Baker (bob)"
 - **`name`** — the profile's identifier. It is referenced by pickers in other
   profiles (a picker's `candidate` names a profile by this key).
 - **`object_classes`** — the object classes an entry of this kind carries.
-  edaptor introspects these against `cn=subschema` to build the edit form, and
+  eDAPtor introspects these against `cn=subschema` to build the edit form, and
   emits `top` plus all listed classes (deduplicated) on create. The list also
   forms the search filter that finds entries of this profile.
 - **`rdn_attr`** — the attribute that forms the entry's RDN (relative
@@ -32,7 +32,7 @@ label          = "{cn} ({uid})"               # e.g. "Bob Baker (bob)"
 - **`show`** — the attributes displayed (and editable) for this profile.
 - **`search_attrs`** — the attributes a picker's substring search matches
   against when this profile is a candidate. It follows a **fallback chain**: if
-  `search_attrs` is omitted, edaptor falls back to `show`; if `show` is also
+  `search_attrs` is omitted, eDAPtor falls back to `show`; if `show` is also
   absent, it falls back to `["cn"]`.
 - **`label`** — how an entry of this profile is rendered in the membership
   picker. `{attr}` is substituted by that attribute's value and literal text is

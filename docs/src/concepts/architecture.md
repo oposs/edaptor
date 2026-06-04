@@ -1,19 +1,19 @@
 # Architecture
 
-edaptor is built around two ideas that, together, make it feel responsive and
+eDAPtor is built around two ideas that, together, make it feel responsive and
 keep it portable across directories: **schema-driven forms** and a **background
 LDAP worker**.
 
 ## Schema-driven forms
 
-edaptor does not ship a hard-coded notion of what a "user" or a "group" looks
+eDAPtor does not ship a hard-coded notion of what a "user" or a "group" looks
 like. At startup it introspects the directory's own schema by reading
 `cn=subschema`, then generates its edit forms **dynamically from the
 `objectClass` definitions** of the entry being viewed.
 
 Each `objectClass` declares its `MUST` and `MAY` attributes; the schema also
 records each attribute's syntax and whether it is single- or multi-valued.
-edaptor turns that information directly into form fields — required vs. optional,
+eDAPtor turns that information directly into form fields — required vs. optional,
 scalar vs. multi-value, plain vs. masked — so the form always matches what the
 server will actually accept.
 

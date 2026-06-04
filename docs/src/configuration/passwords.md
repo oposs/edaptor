@@ -30,7 +30,7 @@ place of the value, so the actual password is never displayed.
 ## The Samba lifecycle (`samba = true`)
 
 Setting `samba = true` keeps a Samba (NT) password in sync with the Unix
-password. On save, in addition to `ldap_attribute`, edaptor writes:
+password. On save, in addition to `ldap_attribute`, eDAPtor writes:
 
 - **`sambaNTPassword`** — the NT hash of the password, computed **client-side**.
 - **`sambaPwdLastSet`** — the timestamp of the change.
@@ -41,7 +41,7 @@ Requirements and details:
   profile's [`object_classes`](entry-profiles.md)) for these attributes to be
   valid.
 - The account **SID** is derived from the directory's **`sambaDomain`** entry.
-- Because the NT hash is computed on the client, edaptor can write both the Unix
+- Because the NT hash is computed on the client, eDAPtor can write both the Unix
   and Samba passwords from a single masked field — they stay synchronized.
 
 ## The `edaptor passwd` CLI
