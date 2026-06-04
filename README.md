@@ -2,10 +2,12 @@
 
 A terminal UI (TUI) for administering an OpenLDAP directory — adding, modifying
 and removing **users** and **groups**, and managing **group memberships** — built
-in Rust on a [Turbo Vision](https://crates.io/crates/turbo-vision) port.
+in Rust with [ratatui](https://ratatui.rs/).
 
 > **eDAPtor** — the *DAP* (Directory Access Protocol, the P in LDAP) baked into
 > an *editor* / *adaptor*.
+
+📖 **Documentation:** <https://oposs.github.io/edaptor>
 
 ## What makes it different
 
@@ -22,10 +24,11 @@ overlays, and the Samba schema).
 
 ## Status
 
-🚧 **Early development.** The design is complete; implementation is being planned
-and executed in milestones.
-
-- 📄 Design specification: [`docs/superpowers/specs/2026-05-29-edaptor-design.md`](docs/superpowers/specs/2026-05-29-edaptor-design.md)
+**Working.** The core milestones are implemented on a three-pane ratatui
+interface: schema-driven create/edit/rename/delete, defaults and auto-numbering,
+inline passwords with the Samba lifecycle, unified candidate pickers, and
+symmetric membership editing. See the [documentation](https://oposs.github.io/edaptor)
+for usage, and `docs/superpowers/specs/` for the design specifications.
 
 ## Highlights of the design
 
@@ -165,4 +168,4 @@ store     = "uid"
 
 ## License
 
-To be determined.
+[MIT](LICENSE) © Tobias Oetiker
