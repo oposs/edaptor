@@ -1,0 +1,27 @@
+[book]
+title = "edaptor"
+description = "A terminal UI for administering an OpenLDAP directory"
+authors = ["Tobias Oetiker"]
+language = "en"
+src = "src"
+
+[build]
+build-dir = "book"
+
+[preprocessor.mermaid]
+command = "mdbook-mermaid"
+
+[output.html]
+additional-js = ["mermaid.min.js", "mermaid-init.js", "theme/version-selector.js"]
+additional-css = ["theme/version-selector.css"]
+default-theme = "light"
+preferred-dark-theme = "navy"
+git-repository-url = "https://github.com/oposs/edaptor"
+edit-url-template = "https://github.com/oposs/edaptor/edit/main/docs/{path}"
+site-url = "/edaptor/"
+
+[output.html.playground]
+editable = false
+
+[output.html.fold]
+enable = true

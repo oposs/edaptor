@@ -7,3 +7,4 @@
 # editor / OS
 *.swp
 .DS_Store
+docs/book/
