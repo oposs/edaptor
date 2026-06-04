@@ -9,9 +9,12 @@ clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 toml = "1"
 anyhow = "1"
-ldap3 = "0.12"            # default features: sync + tls (native-tls)
+ldap3 = { version = "0.12", default-features = false, features = ["sync", "tls-rustls-ring"] }
 md4 = "0.11"             # NT hash (sambaNTPassword = MD4(UTF-16LE(password)))
-native-tls = "0.2"       # build a custom TlsConnector for a configured CA
+# default-features = false is REQUIRED: drops rustls's default aws-lc-rs provider,
+# leaving only ldap3's `ring`. Two providers would panic ClientConfig::builder().
+rustls = { version = "0.23", default-features = false }  # custom ClientConfig for a configured CA
+rustls-pemfile = "2"     # parse PEM CA certificates into CertificateDer
 rpassword = "7"          # read the bind password without echo
 ldap-types = { version = "0.7", default-features = false, features = ["chumsky"] }
 chumsky = "0.12"
