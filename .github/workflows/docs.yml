@@ -1,0 +1,117 @@
+name: Documentation
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'docs/**'
+      - 'src/**'
+      - '.github/workflows/docs.yml'
+      - '.github/scripts/manage-doc-versions.sh'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+env:
+  PAGES_URL: "https://oposs.github.io/edaptor"
+
+jobs:
+  build-dev:
+    name: Build Dev Documentation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install mdBook and plugins
+        run: |
+          mkdir -p ~/bin
+          curl -sSL https://github.com/rust-lang/mdBook/releases/download/v0.5.2/mdbook-v0.5.2-x86_64-unknown-linux-gnu.tar.gz | tar -xz -C ~/bin
+          curl -sSL https://github.com/badboy/mdbook-mermaid/releases/download/v0.17.0/mdbook-mermaid-v0.17.0-x86_64-unknown-linux-gnu.tar.gz | tar -xz -C ~/bin
+          echo "$HOME/bin" >> $GITHUB_PATH
+
+      - name: Setup mermaid assets
+        run: mdbook-mermaid install docs
+
+      - name: Build documentation
+        working-directory: docs
+        run: mdbook build
+
+      - name: Upload dev docs artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: docs-dev
+          path: docs/book
+          retention-days: 1
+
+  deploy:
+    name: Deploy to GitHub Pages
+    runs-on: ubuntu-latest
+    needs: [build-dev]
+    if: ${{ always() && needs.build-dev.result == 'success' }}
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: .github/scripts
+
+      - name: Download dev docs
+        uses: actions/download-artifact@v4
+        with:
+          name: docs-dev
+          path: new-docs
+
+      - name: Mirror existing GitHub Pages
+        run: |
+          mkdir -p site
+          wget --mirror --no-parent --no-host-directories \
+               --directory-prefix=site \
+               --reject="index.html?*" \
+               --execute robots=off \
+               --quiet \
+               "$PAGES_URL/" 2>/dev/null || echo "No existing site to mirror (first deployment?)"
+          find site -name "*.tmp" -delete 2>/dev/null || true
+          find site -name "index.html\?*" -delete 2>/dev/null || true
+          echo "Existing site contents:"
+          ls -la site/ || echo "(empty)"
+
+      - name: Update site with dev docs
+        run: |
+          rm -rf site/edaptor/dev
+          mkdir -p site/edaptor/dev
+          cp -r new-docs/* site/edaptor/dev/
+
+      - name: Update versions and redirect
+        run: |
+          chmod +x .github/scripts/manage-doc-versions.sh
+          .github/scripts/manage-doc-versions.sh site/edaptor cull
+          .github/scripts/manage-doc-versions.sh site/edaptor update-json
+          .github/scripts/manage-doc-versions.sh site/edaptor generate-redirect
+
+      - name: Show final site structure
+        run: |
+          echo "Final site structure:"
+          find site -type f -name "*.html" | head -20
+          echo ""
+          echo "versions.json:"
+          cat site/edaptor/versions.json
+
+      - name: Setup Pages
+        uses: actions/configure-pages@v4
+
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: site/edaptor
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
