@@ -580,6 +580,7 @@ dependencies = [
  "toml",
  "tui-prompts",
  "tui-tree-widget",
+ "unicode-width",
 ]
 
 [[package]]

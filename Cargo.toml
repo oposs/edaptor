@@ -26,6 +26,7 @@ ratatui = "0.30"
 tui-tree-widget = "0.24"
 tui-prompts = "0.6"
 crossterm = "0.29"
+unicode-width = "0.2"
 
 [dev-dependencies]
 tempfile = "3"
