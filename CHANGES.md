@@ -8,7 +8,14 @@ All notable changes to eDAPtor are documented here. The format follows
 
 ### New
 
+- Configurable, presence-keyed, width-aware DIT tree labels via `[[tree.label]]`
+  rules. The structural RDN is now always shown by default (e.g.
+  `ou=people (People)`), and narrow panes degrade gracefully while keeping the RDN.
+
 ### Changed
+
+- DIT tree branch labels now always include the RDN by default (previously a
+  node with a `description` showed only the description).
 
 ### Fixed
 

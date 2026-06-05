@@ -15,6 +15,7 @@
 - [Defaults](configuration/defaults.md)
 - [Passwords](configuration/passwords.md)
 - [Pickers](configuration/pickers.md)
+- [DIT Tree Labels](configuration/tree-labels.md)
 - [Full Example](configuration/full-example.md)
 
 # Concepts
