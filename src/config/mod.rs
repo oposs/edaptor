@@ -692,6 +692,21 @@ mod tests {
     }
 
     #[test]
+    fn tree_label_without_template_is_a_parse_error() {
+        let toml = r#"
+            [server]
+            uri = "ldap://ldap.example.com:389"
+            base_dn = "dc=example,dc=com"
+            [auth]
+            bind_dn = "cn=admin,dc=example,dc=com"
+
+            [[tree.label]]
+            when = ["cn"]
+        "#;
+        assert!(toml::from_str::<Config>(toml).is_err());
+    }
+
+    #[test]
     fn config_without_tree_table_has_empty_label_list() {
         let toml = r#"
             [server]
