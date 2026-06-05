@@ -421,7 +421,8 @@ impl Ctx<'_> {
                     }
                     Some(PostWrite::Deleted { dn }) => {
                         app.status = "Deleted.".to_string();
-                        structure.remove(&dn);
+                        // Tree is rebuilt at render time; the reflow-needed bool is moot.
+                        let _ = structure.remove(&dn);
                         // Clear the form if it was showing the now-deleted entry.
                         if app.form.as_ref().map(|f| f.dn == dn).unwrap_or(false) {
                             app.form = None;
