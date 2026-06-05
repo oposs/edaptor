@@ -332,6 +332,15 @@ pub fn inject_password_fields(form: &mut EditForm, spec: &crate::config::Passwor
     let (primary, confirm) = password_field_labels(spec);
     form.fields
         .retain(|f| !f.label.eq_ignore_ascii_case(&primary));
+    // The injected password fields start blank ("blank == leave the password
+    // unchanged"), so the stored hash must not linger in the baseline — otherwise
+    // the empty field reads as a pending delete and the entry looks permanently
+    // dirty, popping a spurious Save/Discard/Stay guard on every navigation. The
+    // save path strips the same pseudo-field in `stage_edit_password`; mirror it
+    // here so `is_dirty()` agrees. (The confirm label is synthetic, never present
+    // in the baseline.)
+    form.baseline
+        .retain(|k, _| !k.eq_ignore_ascii_case(&primary));
     let mk = |label: String| EditField {
         label,
         must: false,
@@ -676,6 +685,27 @@ mod tests {
             .all(|f| f.secret && f.editable && !f.multi));
         // The unrelated field survives.
         assert!(form.fields.iter().any(|f| f.label == "cn"));
+    }
+
+    #[test]
+    fn injected_blank_password_is_not_dirty() {
+        // Regression: a password-profile entry has its stored `userPassword`
+        // replaced by blank injected fields, but `build_edit_form` already
+        // recorded the stored hash as the baseline. The blank field must NOT read
+        // as a pending delete — otherwise every ou=people entry looks dirty the
+        // instant it loads and navigating between entries pops a spurious
+        // Save/Discard/Stay guard.
+        let mut form = writable_form(); // baseline carries userPassword = ["secret"]
+        assert!(!form.is_dirty(), "the unmodified form starts clean");
+        let spec = crate::config::PasswordSpec {
+            ldap_attribute: "userPassword".into(),
+            samba: false,
+        };
+        inject_password_fields(&mut form, &spec);
+        assert!(
+            !form.is_dirty(),
+            "a freshly loaded password entry with no typed password must be clean"
+        );
     }
 
     #[test]
