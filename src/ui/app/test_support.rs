@@ -33,6 +33,7 @@ pub(crate) fn bare_app(read_only: bool) -> App {
         status: String::new(),
         pickers: vec![],
         label_rules: vec![],
+        tree_rules: Vec::new(),
         picker_search_id: None,
         picker_last_query: String::new(),
     }

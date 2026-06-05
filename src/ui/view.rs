@@ -817,6 +817,7 @@ mod tests {
             status: String::new(),
             pickers: vec![],
             label_rules: vec![],
+            tree_rules: Vec::new(),
             picker_search_id: None,
             picker_last_query: String::new(),
         }
@@ -974,6 +975,7 @@ mod tests {
             status: status.to_string(),
             pickers: vec![],
             label_rules: vec![],
+            tree_rules: Vec::new(),
             picker_search_id: None,
             picker_last_query: String::new(),
         }

@@ -113,6 +113,9 @@ pub struct App {
     pub pickers: Vec<crate::config::relation::ResolvedPicker>,
     /// Compiled column-2 label rules (built once from `config.profiles`).
     pub(crate) label_rules: Vec<LabelRule>,
+    /// Compiled DIT-tree (pane 1) branch-label rules (built once from
+    /// `config.tree`). Drives the render-time tree-label build.
+    pub(crate) tree_rules: Vec<crate::config::tree_label::CompiledTreeRule>,
     /// Correlation id of the latest in-flight picker search (stale ids ignored).
     pub picker_search_id: Option<u64>,
     /// The picker search term last submitted (delta detection in the loop).
@@ -127,7 +130,13 @@ pub fn run(config: Config, password: String) -> Result<()> {
     let pickers = resolve_pickers(&config.profiles);
     // Compile the per-profile column-2 label rules and the attrs the scan must fetch.
     let rules = label_rules(&profiles);
-    let scan_attrs = label_rule_attrs(&rules);
+    let tree_rules = crate::config::tree_label::compile_tree_rules(&config.tree);
+    let mut scan_attrs = label_rule_attrs(&rules);
+    for a in crate::config::tree_label::tree_template_attrs(&tree_rules) {
+        if !scan_attrs.iter().any(|x| x.eq_ignore_ascii_case(&a)) {
+            scan_attrs.push(a);
+        }
+    }
 
     // Sync startup: spawn the worker, fetch the schema, scan the structure.
     let worker = WorkerHandle::spawn(config, password)?;
@@ -188,6 +197,7 @@ pub fn run(config: Config, password: String) -> Result<()> {
         status: String::new(),
         pickers,
         label_rules: rules,
+        tree_rules,
         picker_search_id: None,
         picker_last_query: String::new(),
     };

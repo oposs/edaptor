@@ -139,7 +139,15 @@ fn refresh_structure(
         id: 0,
         base: base_dn.to_string(),
         page_size: 500,
-        attrs: label_rule_attrs(&app.label_rules),
+        attrs: {
+                let mut a = label_rule_attrs(&app.label_rules);
+                for t in crate::config::tree_label::tree_template_attrs(&app.tree_rules) {
+                    if !a.iter().any(|x| x.eq_ignore_ascii_case(&t)) {
+                        a.push(t);
+                    }
+                }
+                a
+            },
     }) {
         Ok(Response::StructureEntries { nodes, .. }) => {
             *structure = Structure::build(base_dn, structure_inputs(nodes));
