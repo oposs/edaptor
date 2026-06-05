@@ -45,6 +45,22 @@ pub(crate) fn label_rule_attrs(rules: &[LabelRule]) -> Vec<String> {
     out
 }
 
+/// Combined attribute list for a structure scan: all attrs referenced by the
+/// column-2 label rules plus all attrs referenced by the tree-label rules,
+/// deduped case-insensitively.
+pub(crate) fn structure_scan_attrs(
+    label_rules: &[LabelRule],
+    tree_rules: &[crate::config::tree_label::CompiledTreeRule],
+) -> Vec<String> {
+    let mut out = label_rule_attrs(label_rules);
+    for a in crate::config::tree_label::tree_template_attrs(tree_rules) {
+        if !out.iter().any(|x| x.eq_ignore_ascii_case(&a)) {
+            out.push(a);
+        }
+    }
+    out
+}
+
 /// Render a node's display label: the FIRST rule whose object_classes are all
 /// present in `node_ocs` (case-insensitive), rendered against `attrs`. If no rule
 /// matches or the render is blank, return `fallback` (the structural label).

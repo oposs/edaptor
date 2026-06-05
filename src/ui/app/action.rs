@@ -15,7 +15,8 @@ use crate::workflows::structure::Structure;
 
 use super::overlay::{GuardIntent, Overlay, PendingAction, PostWrite};
 use super::structure_view::{
-    build_tree_items, compute_rows, label_rule_attrs, structure_input_from_attrs, structure_inputs,
+    build_tree_items, compute_rows, structure_input_from_attrs, structure_inputs,
+    structure_scan_attrs,
 };
 use super::{
     combined_save_overlay, next_id, open_create_form, prepare_create, prepare_edit_save,
@@ -139,15 +140,7 @@ fn refresh_structure(
         id: 0,
         base: base_dn.to_string(),
         page_size: 500,
-        attrs: {
-                let mut a = label_rule_attrs(&app.label_rules);
-                for t in crate::config::tree_label::tree_template_attrs(&app.tree_rules) {
-                    if !a.iter().any(|x| x.eq_ignore_ascii_case(&t)) {
-                        a.push(t);
-                    }
-                }
-                a
-            },
+        attrs: structure_scan_attrs(&app.label_rules, &app.tree_rules),
     }) {
         Ok(Response::StructureEntries { nodes, .. }) => {
             *structure = Structure::build(base_dn, structure_inputs(nodes));

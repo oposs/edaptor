@@ -51,7 +51,7 @@ pub(crate) use overlay::PostWrite;
 pub use overlay::{GuardIntent, Overlay, PendingAction};
 pub(crate) use save::{allocate_number, combined_save_overlay, prepare_edit_save, submit_prepared};
 pub(crate) use structure_view::{
-    build_tree_items, compute_rows, label_rule_attrs, label_rules, structure_inputs, LabelRule,
+    build_tree_items, compute_rows, label_rules, structure_inputs, structure_scan_attrs, LabelRule,
 };
 pub(crate) use value_editor::{membership_candidate_label, service_picker_search};
 
@@ -131,12 +131,7 @@ pub fn run(config: Config, password: String) -> Result<()> {
     // Compile the per-profile column-2 label rules and the attrs the scan must fetch.
     let rules = label_rules(&profiles);
     let tree_rules = crate::config::tree_label::compile_tree_rules(&config.tree);
-    let mut scan_attrs = label_rule_attrs(&rules);
-    for a in crate::config::tree_label::tree_template_attrs(&tree_rules) {
-        if !scan_attrs.iter().any(|x| x.eq_ignore_ascii_case(&a)) {
-            scan_attrs.push(a);
-        }
-    }
+    let scan_attrs = structure_scan_attrs(&rules, &tree_rules);
 
     // Sync startup: spawn the worker, fetch the schema, scan the structure.
     let worker = WorkerHandle::spawn(config, password)?;
