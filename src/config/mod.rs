@@ -118,6 +118,31 @@ pub struct PickerSpec {
     pub fanout_attr: Option<String>,
 }
 
+/// One option in a `choice` widget: the stored token and its UI label.
+#[derive(Debug, Deserialize, Clone, PartialEq, Eq)]
+pub struct ChoiceOption {
+    /// The token stored in the encoded value (a samba letter, a shell path, …).
+    pub value: String,
+    /// The human-facing label shown in the checklist and the summary.
+    pub label: String,
+}
+
+/// A `[profile.widget.<attr>]` binding. `kind`-tagged so future widget kinds add
+/// variants without breaking existing config.
+#[derive(Debug, Deserialize, Clone, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "lowercase")]
+pub enum WidgetSpecCfg {
+    /// Pick from a fixed vocabulary; (de)serialise a single attribute string.
+    Choice {
+        /// `"single"` or `"multi"`.
+        select: String,
+        /// `"plain"` | `"bracketed"` (now); `"bitmask"` | `"delimited"` (reserved).
+        format: String,
+        /// The selectable options (non-empty; validated at resolve time).
+        options: Vec<ChoiceOption>,
+    },
+}
+
 /// A minimal entry profile (M3 slice). Richer metadata (password/membership/
 /// Samba/labels/search_attributes) arrives in M4.
 #[derive(Debug, Deserialize, Default, Clone)]
@@ -147,6 +172,9 @@ pub struct EntryProfile {
     /// the named attribute's field is populated from a candidate search.
     #[serde(default, rename = "picker")]
     pub pickers: std::collections::BTreeMap<String, PickerSpec>,
+    /// Per-attribute rich-widget bindings (`[profile.widget.<attr>]`).
+    #[serde(default, rename = "widget")]
+    pub widgets: std::collections::BTreeMap<String, WidgetSpecCfg>,
     /// Optional display-label template (`label = "{cn} ({uid})"`). When set, the
     /// membership picker renders entries of this profile via the template; `None`
     /// keeps the default behavior. The raw string is parsed into segments in
@@ -508,6 +536,7 @@ mod tests {
             defaults: Default::default(),
             password: None,
             pickers: Default::default(),
+            widgets: Default::default(),
             label: None,
         };
         assert_eq!(
@@ -717,6 +746,40 @@ mod tests {
         "#;
         let cfg: Config = toml::from_str(toml).expect("parses");
         assert!(cfg.tree.label.is_empty());
+    }
+
+    #[test]
+    fn parses_profile_widget_table() {
+        let toml = r#"
+[server]
+uri = "ldap://x"
+base_dn = "dc=x"
+[auth]
+
+[[profile]]
+name = "user"
+object_classes = ["inetOrgPerson"]
+
+[profile.widget.sambaAcctFlags]
+kind = "choice"
+select = "multi"
+format = "bracketed"
+options = [ { value = "D", label = "Disabled" }, { value = "X", label = "No expire" } ]
+
+[profile.widget.loginShell]
+kind = "choice"
+select = "single"
+format = "plain"
+options = [ { value = "/bin/bash", label = "Bash" } ]
+"#;
+        let cfg: Config = toml::from_str(toml).expect("parse");
+        let p = &cfg.profiles[0];
+        assert_eq!(p.widgets.len(), 2);
+        let WidgetSpecCfg::Choice { select, format, options } = &p.widgets["sambaAcctFlags"];
+        assert_eq!(select, "multi");
+        assert_eq!(format, "bracketed");
+        assert_eq!(options[0].value, "D");
+        assert_eq!(options[0].label, "Disabled");
     }
 
     #[test]

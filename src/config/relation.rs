@@ -150,6 +150,7 @@ mod tests {
             defaults: Default::default(),
             password: None,
             pickers: Default::default(),
+            widgets: Default::default(),
             label: None,
         }
     }

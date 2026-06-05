@@ -18,6 +18,7 @@ pub(crate) fn bare_profile(name: &str) -> EntryProfile {
         defaults: Default::default(),
         password: None,
         pickers: Default::default(),
+        widgets: Default::default(),
         label: None,
     }
 }
@@ -57,6 +58,7 @@ pub(crate) fn create_user_profile() -> EntryProfile {
         defaults: Default::default(),
         password: None,
         pickers: Default::default(),
+        widgets: Default::default(),
         label: None,
     }
 }
