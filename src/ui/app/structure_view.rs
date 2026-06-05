@@ -222,6 +222,19 @@ mod tests {
     use crate::ui::app::test_support::*;
 
     #[test]
+    fn structure_scan_attrs_includes_custom_tree_template_attrs() {
+        let label_rules: Vec<LabelRule> = vec![];
+        let tree_rules = vec![crate::config::tree_label::CompiledTreeRule {
+            when: vec![],
+            template: crate::config::label::parse_label_template("{rdn} [{ou}]"),
+        }];
+        let attrs = structure_scan_attrs(&label_rules, &tree_rules);
+        // The custom template's `{ou}` is scanned; the reserved `{rdn}` is excluded.
+        assert!(attrs.iter().any(|a| a.eq_ignore_ascii_case("ou")));
+        assert!(!attrs.iter().any(|a| a.eq_ignore_ascii_case("rdn")));
+    }
+
+    #[test]
     fn compute_rows_lists_self_then_leaves() {
         let s = structure();
         // Empty rules → today's behavior: the leaf label is the structural cn.

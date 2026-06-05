@@ -26,7 +26,8 @@ template = "{rdn}"            # fallback: no `when` → always matches
 ```
 
 - **`when`** (default `[]`): attribute names that must all be present. Matching is
-  case-insensitive. An empty/omitted `when` always matches.
+  case-insensitive. An empty/omitted `when` always matches. (The reserved `rdn` is
+  always considered present.)
 - **`template`**: reuses the `{field}` substitution from entry labels, plus the
   reserved **`{rdn}`** token (the node's relative DN, e.g. `ou=people`). An unknown
   `{field}` renders empty.

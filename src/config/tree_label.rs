@@ -133,8 +133,14 @@ pub fn eval_tree_label(
 }
 
 /// An attribute is "present" when it exists (case-insensitively) with a non-empty
-/// first value.
+/// first value. The reserved `rdn` token is always considered present because it is
+/// bound from the node's DN at render time and is never stored in `attrs`.
 fn present(attrs: &BTreeMap<String, Vec<String>>, name: &str) -> bool {
+    // The reserved `rdn` token is always available (bound from the node's DN at
+    // render time, never stored in `attrs`), so a `when` requiring it matches.
+    if name.eq_ignore_ascii_case("rdn") {
+        return true;
+    }
     attrs
         .iter()
         .find(|(k, _)| k.eq_ignore_ascii_case(name))
@@ -332,6 +338,22 @@ mod tests {
         let segs = eval_tree_label(&rules, &a, "ou=people");
         let texts: Vec<String> = segs.iter().map(|s| s.text()).collect();
         assert_eq!(texts, vec!["ou=people".to_string()]);
+    }
+
+    #[test]
+    fn eval_when_rdn_is_treated_as_always_present() {
+        // A `when` that requires the reserved `rdn` token must always match
+        // (rdn is always available), so this rule fires even with empty attrs.
+        let rules = vec![CompiledTreeRule {
+            when: vec!["RDN".to_string()], // also checks case-insensitivity
+            template: parse_label_template("{rdn}!"),
+        }];
+        let a: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        let segs = eval_tree_label(&rules, &a, "ou=x");
+        assert_eq!(
+            segs.iter().map(|s| s.text()).collect::<Vec<_>>(),
+            vec!["ou=x!".to_string()]
+        );
     }
 
     #[test]
