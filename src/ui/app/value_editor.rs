@@ -449,6 +449,7 @@ mod tests {
             widget: WidgetSpec::ReadOnlyText,
             editor: TextState::new(),
             picker: Some(member_dn_binding()),
+            widget_choice: None,
         };
         let mut app = bare_app(false);
         app.form = Some(EditForm {
@@ -581,6 +582,7 @@ mod tests {
             widget: WidgetSpec::ReadOnlyText,
             editor: TextState::new(),
             picker: Some(gid_picker_binding()),
+            widget_choice: None,
         };
         let mut app = bare_app(false);
         app.form = Some(EditForm {

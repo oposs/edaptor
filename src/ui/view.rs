@@ -610,6 +610,7 @@ mod tests {
             widget: WidgetSpec::ReadOnlyText,
             editor: TextState::new().with_value(value.to_string()),
             picker: None,
+            widget_choice: None,
         }
     }
 
@@ -796,6 +797,7 @@ mod tests {
             widget: WidgetSpec::ReadOnlyText,
             editor: TextState::new(),
             picker: None,
+            widget_choice: None,
         };
         App {
             focus: Pane::Form,
@@ -1004,6 +1006,7 @@ mod tests {
                 widget: WidgetSpec::ReadOnlyText,
                 editor: TextState::new().with_value(value.to_string()),
                 picker: None,
+                widget_choice: None,
             }],
             baseline,
             mode: FormMode::Edit,

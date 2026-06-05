@@ -537,6 +537,7 @@ mod tests {
             widget: WidgetSpec::ReadOnlyText,
             editor: TextState::new().with_value("ann".to_string()),
             picker: None,
+            widget_choice: None,
         };
 
         let desc_field = EditField {
@@ -551,6 +552,7 @@ mod tests {
             widget: WidgetSpec::ReadOnlyText,
             editor: TextState::new(),
             picker: None,
+            widget_choice: None,
         };
 
         let memberof_field = EditField {
@@ -571,6 +573,7 @@ mod tests {
                 select: None,
                 fanout_attr: Some("member".into()),
             }),
+            widget_choice: None,
         };
 
         let mut baseline = BTreeMap::new();
@@ -611,6 +614,7 @@ mod tests {
             widget: WidgetSpec::ReadOnlyText,
             editor: TextState::new().with_value("bob".to_string()),
             picker: None,
+            widget_choice: None,
         };
 
         let memberof_field = EditField {
@@ -631,6 +635,7 @@ mod tests {
                 select: None,
                 fanout_attr: Some("member".into()),
             }),
+            widget_choice: None,
         };
 
         let mut baseline = BTreeMap::new();

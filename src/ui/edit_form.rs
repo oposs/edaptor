@@ -46,6 +46,8 @@ pub struct EditField {
     pub editor: TextState<'static>,
     /// `Some` when this field is bound to a `[profile.picker.<attr>]` picker.
     pub picker: Option<crate::config::relation::PickerBinding>,
+    /// `Some` when bound to a `[profile.widget.<attr>]` choice widget.
+    pub widget_choice: Option<crate::config::widget::ChoiceWidget>,
 }
 
 impl EditField {
@@ -305,6 +307,7 @@ pub fn build_edit_form(model: &FormModel, schema: &SchemaModel, read_only: bool)
                 widget: f.widget.clone(),
                 editor: TextState::new().with_value(seed),
                 picker: None,
+                widget_choice: None,
             }
         })
         .collect();
@@ -353,6 +356,7 @@ pub fn inject_password_fields(form: &mut EditForm, spec: &crate::config::Passwor
         widget: WidgetSpec::ReadOnlyText,
         editor: TextState::new(),
         picker: None,
+        widget_choice: None,
     };
     form.fields.push(mk(primary));
     form.fields.push(mk(confirm));
@@ -380,6 +384,28 @@ pub fn tag_picker_fields(
             field.picker = Some(binding.clone());
         } else if field.editable {
             field.picker = Some(binding.clone());
+        }
+    }
+}
+
+/// Attach a `[profile.widget.<attr>]` choice widget to each matching field. A
+/// choice field stays editable (Enter opens the choice overlay). Mirrors
+/// `tag_picker_fields`; `.any()` objectClass matching via `widget_for`.
+pub fn tag_widget_fields(
+    form: &mut EditForm,
+    widgets: &[crate::config::widget::ResolvedWidget],
+    object_classes: &[String],
+    read_only: bool,
+) {
+    if read_only {
+        return;
+    }
+    for field in &mut form.fields {
+        if let Some(w) =
+            crate::config::widget::widget_for(widgets, object_classes, &field.label)
+        {
+            field.widget_choice = Some(w.clone());
+            field.editable = true;
         }
     }
 }
@@ -466,6 +492,7 @@ mod tests {
                     select: None,
                     fanout_attr: fanout,
                 }),
+                widget_choice: None,
             }],
             baseline: Default::default(),
             mode: FormMode::Edit,
@@ -654,6 +681,7 @@ mod tests {
             widget: crate::ui::form::WidgetSpec::ReadOnlyText,
             editor: TextState::new(),
             picker: None,
+            widget_choice: None,
         };
         let mut form = EditForm {
             dn: "uid=alice,ou=people,dc=example,dc=org".into(),
@@ -727,6 +755,7 @@ mod tests {
                 widget: crate::ui::form::WidgetSpec::ReadOnlyText,
                 editor: TextState::new().with_value(seed),
                 picker: None,
+                widget_choice: None,
             }
         };
         let mut form = EditForm {
@@ -774,6 +803,7 @@ mod tests {
                 widget: crate::ui::form::WidgetSpec::ReadOnlyText,
                 editor: TextState::new().with_value(seed),
                 picker: None,
+                widget_choice: None,
             }
         };
         let mut form = EditForm {
@@ -806,6 +836,7 @@ mod tests {
                 widget: WidgetSpec::ReadOnlyText,
                 editor: TextState::new(),
                 picker: None,
+                widget_choice: None,
             }],
             baseline: Default::default(),
             mode: FormMode::Edit,
@@ -848,6 +879,7 @@ mod tests {
                 widget: WidgetSpec::ReadOnlyText,
                 editor: TextState::new(),
                 picker: None,
+                widget_choice: None,
             }],
             baseline: Default::default(),
             mode: FormMode::Edit,
@@ -874,6 +906,7 @@ mod tests {
             widget: WidgetSpec::ReadOnlyText,
             editor: TextState::new().with_value("1001"),
             picker: None,
+            widget_choice: None,
         };
         let binding = PickerBinding {
             attr: "gidNumber".into(),
@@ -893,5 +926,41 @@ mod tests {
         assert_eq!(p.selected[0].store_value, "1001");
         assert!(!p.key_ci, "scalar store → exact key compare");
         assert_eq!(ve.binding.as_ref().unwrap().attr, "gidNumber");
+    }
+
+    #[test]
+    fn tag_widget_fields_attaches_matching_choice() {
+        use crate::config::widget::{ChoiceFormat, ChoiceWidget, ResolvedWidget};
+        use crate::config::relation::Cardinality;
+        use crate::config::ChoiceOption;
+
+        let mut form = writable_form();
+        form.fields.push(EditField {
+            label: "loginShell".into(),
+            must: false,
+            editable: true,
+            multi: false,
+            secret: false,
+            ordered: false,
+            values: vec!["/bin/bash".into()],
+            kind: crate::schema::FieldKind::Text,
+            widget: crate::ui::form::WidgetSpec::ReadOnlyText,
+            editor: TextState::new().with_value("/bin/bash".to_string()),
+            picker: None,
+            widget_choice: None,
+        });
+        let widgets = vec![ResolvedWidget {
+            owner_object_classes: vec!["demoPerson".into()],
+            attr: "loginShell".into(),
+            widget: ChoiceWidget {
+                select: Cardinality::Single,
+                format: ChoiceFormat::Plain,
+                options: vec![ChoiceOption { value: "/bin/bash".into(), label: "Bash".into() }],
+            },
+        }];
+        tag_widget_fields(&mut form, &widgets, &["demoPerson".to_string()], false);
+        let f = form.fields.iter().find(|f| f.label == "loginShell").unwrap();
+        assert!(f.widget_choice.is_some());
+        assert!(f.editable, "a choice field stays editable");
     }
 }
