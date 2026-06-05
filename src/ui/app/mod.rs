@@ -238,6 +238,16 @@ fn event_loop(
     let mut post: HashMap<u64, PostWrite> = HashMap::new();
     let mut pending_followups: HashMap<u64, (String, Vec<ModOp>, Option<String>)> = HashMap::new();
 
+    // `ratatui::init()` enters the alternate screen but does NOT clear it, and the
+    // first `draw()`'s autoresize sees no size change, so ratatui never issues its
+    // startup full-clear (that only happens via `resize()`). Without it the initial
+    // frame is not reliably painted against the un-cleared screen: prior content
+    // persists, and on some terminals the UI does not appear at all until the user
+    // resizes (which triggers `resize()` -> `clear()` -> full repaint). A one-time
+    // `clear()` does that physical clear + back-buffer reset at startup. `?` still
+    // unwinds through the caller's `ratatui::restore()`, which runs after `event_loop`.
+    terminal.clear()?;
+
     loop {
         terminal.draw(|f| view::ui(f, app, &structure))?;
 
