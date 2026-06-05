@@ -5,6 +5,7 @@ pub mod label;
 pub mod password;
 pub mod relation;
 pub mod tree_label;
+pub mod widget;
 pub use password::PasswordSource;
 
 use crate::config::defaults::ProfileDefaults;
