@@ -72,6 +72,53 @@ pub fn render_label(segs: &[LabelSeg], attrs: &BTreeMap<String, Vec<String>>) ->
     out
 }
 
+/// One rendered run of a label, retaining whether it came from a templated
+/// `{field}` (`from_field = true`) or from literal template text. Used by the
+/// DIT-tree trimmer to know which characters may be ellipsized.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Piece {
+    pub text: String,
+    pub from_field: bool,
+}
+
+/// Render `segs` into ordered [`Piece`]s. The reserved field name `rdn`
+/// (case-insensitive) binds to `rdn`; every other `{field}` resolves from
+/// `attrs` exactly like [`render_label`] (missing → empty). Empty field values
+/// produce an empty `from_field` piece (kept, not dropped).
+pub fn render_pieces(
+    segs: &[LabelSeg],
+    attrs: &BTreeMap<String, Vec<String>>,
+    rdn: &str,
+) -> Vec<Piece> {
+    let mut out = Vec::new();
+    for seg in segs {
+        match seg {
+            LabelSeg::Lit(s) => out.push(Piece {
+                text: s.clone(),
+                from_field: false,
+            }),
+            LabelSeg::Field(name) => {
+                let value = if name.eq_ignore_ascii_case("rdn") {
+                    rdn.to_string()
+                } else {
+                    attrs
+                        .iter()
+                        .find(|(k, _)| k.eq_ignore_ascii_case(name))
+                        .and_then(|(_, v)| v.first())
+                        .map(String::as_str)
+                        .unwrap_or("")
+                        .to_string()
+                };
+                out.push(Piece {
+                    text: value,
+                    from_field: true,
+                });
+            }
+        }
+    }
+    out
+}
+
 /// The distinct attribute names a template references (the `{field}` segments),
 /// case-preserved, de-duplicated. Used to decide which attrs the picker fetches.
 pub fn template_attrs(segs: &[LabelSeg]) -> Vec<String> {
@@ -153,6 +200,38 @@ mod tests {
         assert_eq!(
             template_attrs(&parse_label_template("{cn}-{cn}")),
             vec!["cn".to_string()]
+        );
+    }
+
+    #[test]
+    fn render_pieces_marks_field_vs_literal_provenance() {
+        let segs = parse_label_template("{rdn} ({description})");
+        let mut attrs = BTreeMap::new();
+        attrs.insert("description".to_string(), vec!["People".to_string()]);
+        let pieces = render_pieces(&segs, &attrs, "ou=people");
+        assert_eq!(
+            pieces,
+            vec![
+                Piece { text: "ou=people".to_string(), from_field: true },
+                Piece { text: " (".to_string(), from_field: false },
+                Piece { text: "People".to_string(), from_field: true },
+                Piece { text: ")".to_string(), from_field: false },
+            ]
+        );
+    }
+
+    #[test]
+    fn render_pieces_binds_rdn_case_insensitively_and_keeps_empty_field() {
+        let segs = parse_label_template("{RDN}={cn}");
+        let attrs: BTreeMap<String, Vec<String>> = BTreeMap::new(); // cn absent
+        let pieces = render_pieces(&segs, &attrs, "uid=bob");
+        assert_eq!(
+            pieces,
+            vec![
+                Piece { text: "uid=bob".to_string(), from_field: true },
+                Piece { text: "=".to_string(), from_field: false },
+                Piece { text: "".to_string(), from_field: true }, // empty field kept
+            ]
         );
     }
 }
