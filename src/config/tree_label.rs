@@ -94,6 +94,7 @@ mod tests {
         let rules = compile_tree_rules(&cfg);
         assert_eq!(rules.len(), 1);
         assert_eq!(rules[0].when, vec!["ou".to_string()]);
+        assert_eq!(rules[0].template, parse_label_template("{rdn} [{ou}]"));
     }
 
     #[test]
