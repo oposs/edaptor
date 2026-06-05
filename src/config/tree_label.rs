@@ -242,6 +242,8 @@ fn fit_segment(seg: &Segment, budget: usize, guard: bool) -> Option<String> {
         }
     }
     if !ellipsis_done {
+        // A present-but-empty field value: no chars were processed, so still mark
+        // the trimmed-but-present value with the ellipsis.
         out.push('…');
     }
     if !kept_any && !guard {
@@ -503,5 +505,41 @@ mod tests {
         assert_eq!(fit_label(&segs, 9), "ou=x");
         // avail 10: budget 5 → field cols 2 → one CJK char "(日…)" width 2+2+1=5.
         assert_eq!(fit_label(&segs, 10), "ou=x (日…)");
+    }
+
+    #[test]
+    fn fit_empty_segment_list_is_empty_string() {
+        assert_eq!(fit_label(&[], 20), "");
+    }
+
+    #[test]
+    fn fit_empty_field_value_segment() {
+        // Template "({cn})" with cn present-but-empty: segment "()" + an empty field.
+        let rules = vec![CompiledTreeRule {
+            when: vec![],
+            template: parse_label_template("({cn})"),
+        }];
+        let mut a = std::collections::BTreeMap::new();
+        a.insert("cn".to_string(), vec!["".to_string()]);
+        let segs = eval_tree_label(&rules, &a, "cn=x");
+        // Fits as-is when wide enough (no trimming needed): "()" width 2.
+        assert_eq!(fit_label(&segs, 5), "()");
+    }
+
+    #[test]
+    fn fit_first_segment_with_framing_literals_under_pressure() {
+        // Template "[{rdn}]": single segment "[ou=people]" (lit "[" + field + lit "]").
+        let rules = vec![CompiledTreeRule {
+            when: vec![],
+            template: parse_label_template("[{rdn}]"),
+        }];
+        let a: std::collections::BTreeMap<String, Vec<String>> = std::collections::BTreeMap::new();
+        let segs = eval_tree_label(&rules, &a, "ou=people");
+        // Wide: full label.
+        assert_eq!(fit_label(&segs, 11), "[ou=people]");
+        // Under extreme pressure the guard keeps >=1 field char + ellipsis. Both
+        // framing literals are preserved (literal pieces are emitted unconditionally),
+        // so the field is trimmed *between* them → "[o…]" (documented behavior).
+        assert_eq!(fit_label(&segs, 2), "[o…]");
     }
 }
