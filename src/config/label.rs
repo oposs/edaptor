@@ -234,4 +234,13 @@ mod tests {
             ]
         );
     }
+
+    #[test]
+    fn render_pieces_resolves_non_rdn_field_case_insensitively() {
+        let segs = parse_label_template("{CN}");
+        let mut attrs = BTreeMap::new();
+        attrs.insert("cn".to_string(), vec!["Bob Baker".to_string()]);
+        let pieces = render_pieces(&segs, &attrs, "uid=bob");
+        assert_eq!(pieces, vec![Piece { text: "Bob Baker".to_string(), from_field: true }]);
+    }
 }
