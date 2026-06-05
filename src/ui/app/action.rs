@@ -15,8 +15,7 @@ use crate::workflows::structure::Structure;
 
 use super::overlay::{GuardIntent, Overlay, PendingAction, PostWrite};
 use super::structure_view::{
-    build_tree_items, compute_rows, structure_input_from_attrs, structure_inputs,
-    structure_scan_attrs,
+    compute_rows, structure_input_from_attrs, structure_inputs, structure_scan_attrs,
 };
 use super::{
     combined_save_overlay, next_id, open_create_form, prepare_create, prepare_edit_save,
@@ -144,7 +143,6 @@ fn refresh_structure(
     }) {
         Ok(Response::StructureEntries { nodes, .. }) => {
             *structure = Structure::build(base_dn, structure_inputs(nodes));
-            app.tree_items = build_tree_items(structure);
             if structure.get(&app.current_branch).is_none() {
                 app.current_branch = base_dn.to_string();
             }

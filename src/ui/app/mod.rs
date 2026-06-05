@@ -17,7 +17,7 @@ use std::time::Duration;
 use anyhow::{anyhow, Result};
 use crossterm::event::{self, Event, KeyEventKind};
 use tui_prompts::{State, TextState};
-use tui_tree_widget::{TreeItem, TreeState};
+use tui_tree_widget::TreeState;
 
 use crate::config::relation::resolve_pickers;
 use crate::config::{Config, EntryProfile};
@@ -79,8 +79,6 @@ pub struct App {
     // Pane 1 — branch tree.
     /// Selection / expansion state for the tree widget.
     pub tree_state: TreeState<String>,
-    /// The tree items (built once from the eager [`Structure`]).
-    pub tree_items: Vec<TreeItem<'static, String>>,
 
     // Pane 2 — leaf list + search.
     /// The branch whose leaves are listed in pane 2.
@@ -178,7 +176,6 @@ pub fn run(config: Config, password: String) -> Result<()> {
         should_quit: false,
         read_only,
         tree_state,
-        tree_items: build_tree_items(&structure),
         current_branch,
         last_search: String::new(),
         rows,
@@ -242,7 +239,7 @@ fn event_loop(
     let mut pending_followups: HashMap<u64, (String, Vec<ModOp>, Option<String>)> = HashMap::new();
 
     loop {
-        terminal.draw(|f| view::ui(f, app))?;
+        terminal.draw(|f| view::ui(f, app, &structure))?;
 
         // Per-tick receiver. Reborrow `app`/`read_flow` so the scoped
         // `terminal.draw` borrow above is released first (plan §2.1).
@@ -412,11 +409,9 @@ impl Ctx<'_> {
                             app.form_scroll = 0;
                             app.last_seen_leaf = None;
                         }
-                        // A new child may turn a former leaf into a branch → rebuild
-                        // the tree; always refresh the leaf rows.
-                        if structure.add_child(&parent, input) {
-                            app.tree_items = build_tree_items(structure);
-                        }
+                        // A new child may turn a former leaf into a branch; always
+                        // refresh the leaf rows. The tree is rebuilt at render time.
+                        let _ = structure.add_child(&parent, input);
                         app.rows = compute_rows(
                             structure,
                             &app.current_branch,
@@ -426,11 +421,7 @@ impl Ctx<'_> {
                     }
                     Some(PostWrite::Deleted { dn }) => {
                         app.status = "Deleted.".to_string();
-                        let was_branch = structure.get(&dn).map(|n| n.is_branch()).unwrap_or(false);
-                        let demoted = structure.remove(&dn);
-                        if was_branch || demoted {
-                            app.tree_items = build_tree_items(structure);
-                        }
+                        structure.remove(&dn);
                         // Clear the form if it was showing the now-deleted entry.
                         if app.form.as_ref().map(|f| f.dn == dn).unwrap_or(false) {
                             app.form = None;

@@ -19,6 +19,7 @@ use tui_tree_widget::Tree;
 use crate::ui::app::{App, Overlay, Pane};
 use crate::ui::edit_form::{EditField, ValueEditor};
 use crate::ui::form::WidgetSpec;
+use crate::workflows::structure::Structure;
 
 /// The three-pane column split: branch tree | leaf list | edit form.
 const COLUMNS: [Constraint; 3] = [
@@ -75,7 +76,7 @@ fn pane_hints(pane: Pane, read_only: bool) -> &'static str {
 
 /// Render the whole frame from `app`: the 3-column pane area, then a 1-row status
 /// line at the bottom. Overlays render over the WHOLE frame (`f.area()`).
-pub fn ui(f: &mut Frame, app: &mut App) {
+pub fn ui(f: &mut Frame, app: &mut App, structure: &Structure) {
     let chunks = Layout::vertical([
         Constraint::Min(0),    // pane area
         Constraint::Length(1), // status line
@@ -83,7 +84,7 @@ pub fn ui(f: &mut Frame, app: &mut App) {
     .split(f.area());
 
     let cols = Layout::horizontal(COLUMNS).split(chunks[0]);
-    render_tree(f, app, cols[0]);
+    render_tree(f, app, structure, cols[0]);
     render_leaf(f, app, cols[1]);
     render_form(f, app, cols[2]);
 
@@ -123,9 +124,12 @@ pub fn pane_block(title: &str, focused: bool) -> Block<'static> {
 
 /// Pane 1 — the branch tree (DIT outline). Stateful: selection lives in
 /// `app.tree_state`; `reconcile` reads it to switch the leaf pane's branch.
-fn render_tree(f: &mut Frame, app: &mut App, area: Rect) {
+fn render_tree(f: &mut Frame, app: &mut App, structure: &Structure, area: Rect) {
     let focused = app.focus == Pane::Tree;
-    let tree = Tree::new(&app.tree_items)
+    // Tree inner width = pane width minus the 1-col Block border on each side.
+    let inner_width = area.width.saturating_sub(2) as usize;
+    let items = crate::ui::app::build_tree_items(structure, &app.tree_rules, inner_width);
+    let tree = Tree::new(&items)
         .expect("tree item ids are unique DNs")
         .block(pane_block("DIT", focused))
         .highlight_style(selection_style(focused));
@@ -798,7 +802,6 @@ mod tests {
             should_quit: false,
             read_only: false,
             tree_state: TreeState::default(),
-            tree_items: vec![],
             current_branch: String::new(),
             last_search: String::new(),
             rows: vec![],
@@ -961,7 +964,6 @@ mod tests {
             should_quit: false,
             read_only,
             tree_state: TreeState::default(),
-            tree_items: vec![],
             current_branch: String::new(),
             last_search: String::new(),
             rows: vec![],

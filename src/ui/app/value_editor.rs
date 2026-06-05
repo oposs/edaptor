@@ -360,7 +360,6 @@ mod tests {
             should_quit: false,
             read_only: false,
             tree_state: TreeState::default(),
-            tree_items: vec![],
             current_branch: String::new(),
             last_search: String::new(),
             rows: vec![],

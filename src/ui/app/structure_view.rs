@@ -5,6 +5,8 @@ use std::collections::BTreeMap;
 
 use tui_tree_widget::TreeItem;
 
+use crate::config::label::Piece;
+use crate::config::tree_label::{eval_tree_label, fit_label, CompiledTreeRule, Segment};
 use crate::config::EntryProfile;
 use crate::ldap::worker::StructureNodeRaw;
 use crate::workflows::structure::{Structure, StructureInput};
@@ -150,16 +152,49 @@ pub(crate) fn structure_inputs(nodes: Vec<StructureNodeRaw>) -> Vec<StructureInp
         .collect()
 }
 
-/// Build the pane-1 tree items from the eager [`Structure`]. Only branch nodes
-/// appear in the tree (leaves are listed in pane 2); the identifier is the DN so
-/// `tree_state.selected()` yields the branch DN. (Port of the facade's
-/// `build_structure_tree`.)
-pub(crate) fn build_tree_items(structure: &Structure) -> Vec<TreeItem<'static, String>> {
-    fn build(structure: &Structure, dn: &str) -> TreeItem<'static, String> {
-        let label = structure
-            .get(dn)
-            .map(|n| n.label.clone())
-            .unwrap_or_else(|| dn.split(',').next().unwrap_or(dn).trim().to_string());
+/// The fitted label for one branch node at `depth`, given the DIT pane's inner
+/// width. Text x-offset inside the tree = per-depth indent (2 cols/level) +
+/// node symbol (2 cols) + highlight symbol (0, none configured).
+pub(crate) fn node_label(
+    structure: &Structure,
+    dn: &str,
+    rules: &[CompiledTreeRule],
+    inner_width: usize,
+    depth: usize,
+) -> String {
+    let avail = inner_width.saturating_sub(depth * 2 + 2);
+    let rdn = dn.split(',').next().unwrap_or(dn).trim();
+    match structure.get(dn) {
+        Some(n) => fit_label(&eval_tree_label(rules, &n.attrs, rdn), avail),
+        None => fit_label(
+            &[Segment {
+                pieces: vec![Piece {
+                    text: rdn.to_string(),
+                    from_field: true,
+                }],
+            }],
+            avail,
+        ),
+    }
+}
+
+/// Build the pane-1 tree items from the eager [`Structure`], rendering each
+/// branch node's label via the compiled tree rules and width-fitting it to the
+/// pane's inner width. Only branch nodes appear (leaves live in pane 2); the id
+/// is the DN so `tree_state.selected()` yields the branch DN.
+pub(crate) fn build_tree_items(
+    structure: &Structure,
+    rules: &[CompiledTreeRule],
+    inner_width: usize,
+) -> Vec<TreeItem<'static, String>> {
+    fn build(
+        structure: &Structure,
+        dn: &str,
+        rules: &[CompiledTreeRule],
+        inner_width: usize,
+        depth: usize,
+    ) -> TreeItem<'static, String> {
+        let label = node_label(structure, dn, rules, inner_width, depth);
         let mut children = Vec::new();
         if let Some(n) = structure.get(dn) {
             for child_dn in &n.children {
@@ -168,7 +203,7 @@ pub(crate) fn build_tree_items(structure: &Structure) -> Vec<TreeItem<'static, S
                     .map(|c| c.is_branch())
                     .unwrap_or(false)
                 {
-                    children.push(build(structure, child_dn));
+                    children.push(build(structure, child_dn, rules, inner_width, depth + 1));
                 }
             }
         }
@@ -178,7 +213,7 @@ pub(crate) fn build_tree_items(structure: &Structure) -> Vec<TreeItem<'static, S
             TreeItem::new(dn.to_string(), label, children).expect("DNs are unique ids")
         }
     }
-    vec![build(structure, structure.root_dn())]
+    vec![build(structure, structure.root_dn(), rules, inner_width, 0)]
 }
 
 #[cfg(test)]
@@ -239,9 +274,24 @@ mod tests {
     #[test]
     fn tree_items_contain_only_branches() {
         let s = structure();
-        let items = build_tree_items(&s);
+        let rules = crate::config::tree_label::default_tree_rules();
+        let items = build_tree_items(&s, &rules, 80);
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].children().len(), 1);
+    }
+
+    #[test]
+    fn deepest_visible_node_still_shows_its_rdn_when_narrow() {
+        let s = structure();
+        let rules = crate::config::tree_label::default_tree_rules();
+        // Root at a deliberately narrow inner width: the RDN (text before '=') must survive.
+        let root = s.root_dn();
+        let label = node_label(&s, root, &rules, 12, 0);
+        let rdn_type = root.split(',').next().unwrap().split('=').next().unwrap();
+        assert!(
+            label.starts_with(rdn_type),
+            "narrow label {label:?} should still begin with the RDN type {rdn_type:?}"
+        );
     }
 
     // ── per-profile label rules (pure) ───────────────────────────────────────────

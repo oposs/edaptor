@@ -19,7 +19,6 @@ pub(crate) fn bare_app(read_only: bool) -> App {
         should_quit: false,
         read_only,
         tree_state: TreeState::default(),
-        tree_items: vec![],
         current_branch: String::new(),
         last_search: String::new(),
         rows: vec![],
