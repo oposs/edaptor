@@ -212,10 +212,22 @@ mod tests {
         assert_eq!(
             pieces,
             vec![
-                Piece { text: "ou=people".to_string(), from_field: true },
-                Piece { text: " (".to_string(), from_field: false },
-                Piece { text: "People".to_string(), from_field: true },
-                Piece { text: ")".to_string(), from_field: false },
+                Piece {
+                    text: "ou=people".to_string(),
+                    from_field: true
+                },
+                Piece {
+                    text: " (".to_string(),
+                    from_field: false
+                },
+                Piece {
+                    text: "People".to_string(),
+                    from_field: true
+                },
+                Piece {
+                    text: ")".to_string(),
+                    from_field: false
+                },
             ]
         );
     }
@@ -228,9 +240,18 @@ mod tests {
         assert_eq!(
             pieces,
             vec![
-                Piece { text: "uid=bob".to_string(), from_field: true },
-                Piece { text: "=".to_string(), from_field: false },
-                Piece { text: "".to_string(), from_field: true }, // empty field kept
+                Piece {
+                    text: "uid=bob".to_string(),
+                    from_field: true
+                },
+                Piece {
+                    text: "=".to_string(),
+                    from_field: false
+                },
+                Piece {
+                    text: "".to_string(),
+                    from_field: true
+                }, // empty field kept
             ]
         );
     }
@@ -241,6 +262,12 @@ mod tests {
         let mut attrs = BTreeMap::new();
         attrs.insert("cn".to_string(), vec!["Bob Baker".to_string()]);
         let pieces = render_pieces(&segs, &attrs, "uid=bob");
-        assert_eq!(pieces, vec![Piece { text: "Bob Baker".to_string(), from_field: true }]);
+        assert_eq!(
+            pieces,
+            vec![Piece {
+                text: "Bob Baker".to_string(),
+                from_field: true
+            }]
+        );
     }
 }

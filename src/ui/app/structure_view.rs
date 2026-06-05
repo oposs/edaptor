@@ -288,7 +288,7 @@ mod tests {
         // indent term (depth*2) actually bites. node_label subtracts depth*2 + 2
         // (indent + node symbol) from inner_width.
         let branch = "ou=users,dc=example,dc=org"; // RDN "ou=users", width 8
-        // inner 12, depth 1 -> avail = 12 - (1*2 + 2) = 8 -> RDN fits EXACTLY.
+                                                   // inner 12, depth 1 -> avail = 12 - (1*2 + 2) = 8 -> RDN fits EXACTLY.
         assert_eq!(node_label(&s, branch, &rules, 12, 1), "ou=users");
         // One column narrower -> avail 7 -> RDN ellipsized. This pins the indent
         // math from BOTH sides (an over- or under-subtracted constant fails one).

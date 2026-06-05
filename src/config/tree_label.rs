@@ -150,10 +150,7 @@ fn str_width(s: &str) -> usize {
 
 /// Join segments with single spaces (their on-screen separators).
 fn join_text(segs: &[&Segment]) -> String {
-    segs.iter()
-        .map(|s| s.text())
-        .collect::<Vec<_>>()
-        .join(" ")
+    segs.iter().map(|s| s.text()).collect::<Vec<_>>().join(" ")
 }
 
 /// Longest prefix of `s` whose display width is ≤ `cols`.
@@ -470,7 +467,10 @@ mod tests {
         }];
         let a = attrs(&[("cn", "X")]);
         let segs = eval_tree_label(&rules, &a, "cn=x");
-        assert_eq!(segs.iter().map(|s| s.text()).collect::<Vec<_>>(), vec!["X", "--", "end"]);
+        assert_eq!(
+            segs.iter().map(|s| s.text()).collect::<Vec<_>>(),
+            vec!["X", "--", "end"]
+        );
         // "X -- end" width 8; at avail 5 the pure-literal "end" drops whole → "X --".
         assert_eq!(fit_label(&segs, 5), "X --");
         // at avail 3 "--" also drops → "X".
