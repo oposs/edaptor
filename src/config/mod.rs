@@ -4,6 +4,7 @@ pub mod defaults;
 pub mod label;
 pub mod password;
 pub mod relation;
+pub mod tree_label;
 pub use password::PasswordSource;
 
 use crate::config::defaults::ProfileDefaults;
@@ -24,6 +25,28 @@ pub struct Config {
     /// is discovered in the directory (spec §9). Absent `[samba]` table is fine.
     #[serde(default)]
     pub samba: SambaConfig,
+    /// Configurable DIT-tree (pane 1) branch labels. Absent `[tree]` is fine.
+    #[serde(default)]
+    pub tree: TreeConfig,
+}
+
+/// The optional `[tree]` table: ordered, presence-keyed labelling rules for the
+/// DIT navigation tree (pane 1) branch nodes. Absent table → empty list →
+/// compile substitutes the built-in default rule set.
+#[derive(Debug, Default, Deserialize)]
+pub struct TreeConfig {
+    #[serde(default)]
+    pub label: Vec<TreeLabelRule>,
+}
+
+/// One `[[tree.label]]` rule. The first rule whose `when` attributes are all
+/// present (non-empty first value) wins; a rule with an empty/omitted `when` is
+/// the unconditional fallback.
+#[derive(Debug, Deserialize)]
+pub struct TreeLabelRule {
+    #[serde(default)]
+    pub when: Vec<String>,
+    pub template: String,
 }
 
 /// Fallback Samba domain settings (spec §9). The live `sambaDomain` entry takes
@@ -626,6 +649,59 @@ mod tests {
         "#;
         let cfg: Config = toml::from_str(toml).unwrap();
         assert!(cfg.profiles[0].label.is_none());
+    }
+
+    #[test]
+    fn parses_tree_label_rules() {
+        let toml = r#"
+            [server]
+            uri = "ldap://ldap.example.com:389"
+            base_dn = "dc=example,dc=com"
+            [auth]
+            bind_dn = "cn=admin,dc=example,dc=com"
+
+            [[tree.label]]
+            when     = ["description"]
+            template = "{rdn} ({description})"
+
+            [[tree.label]]
+            template = "{rdn}"
+        "#;
+        let cfg: Config = toml::from_str(toml).expect("parses");
+        assert_eq!(cfg.tree.label.len(), 2);
+        assert_eq!(cfg.tree.label[0].when, vec!["description".to_string()]);
+        assert_eq!(cfg.tree.label[0].template, "{rdn} ({description})");
+        assert!(cfg.tree.label[1].when.is_empty());
+        assert_eq!(cfg.tree.label[1].template, "{rdn}");
+    }
+
+    #[test]
+    fn tree_when_defaults_to_empty() {
+        let toml = r#"
+            [server]
+            uri = "ldap://ldap.example.com:389"
+            base_dn = "dc=example,dc=com"
+            [auth]
+            bind_dn = "cn=admin,dc=example,dc=com"
+
+            [[tree.label]]
+            template = "{rdn}"
+        "#;
+        let cfg: Config = toml::from_str(toml).expect("parses");
+        assert!(cfg.tree.label[0].when.is_empty());
+    }
+
+    #[test]
+    fn config_without_tree_table_has_empty_label_list() {
+        let toml = r#"
+            [server]
+            uri = "ldap://ldap.example.com:389"
+            base_dn = "dc=example,dc=com"
+            [auth]
+            bind_dn = "cn=admin,dc=example,dc=com"
+        "#;
+        let cfg: Config = toml::from_str(toml).expect("parses");
+        assert!(cfg.tree.label.is_empty());
     }
 
     #[test]
