@@ -144,7 +144,7 @@ fn edit_focused_field(app: &mut App, key: KeyEvent) {
     let focus = app.form_focus;
     if let Some(form) = app.form.as_mut() {
         if let Some(field) = form.fields.get_mut(focus) {
-            if field.editable && !field.multi {
+            if field.editable && !field.multi && field.widget_choice.is_none() {
                 field.editor.handle_key_event(key);
             }
         }
@@ -476,6 +476,99 @@ mod tests {
         assert_eq!(next_index(0, 3), 1);
         assert_eq!(next_index(2, 3), 2);
         assert_eq!(next_index(0, 0), 0);
+    }
+
+    /// Choice fields must NOT accept inline key input — they are edited exclusively
+    /// via the overlay opened by Enter. A plain (non-choice) editable single field
+    /// must still accept inline edits.
+    #[test]
+    fn choice_field_ignores_inline_key_input() {
+        use crate::config::relation::Cardinality;
+        use crate::config::widget::{ChoiceFormat, ChoiceWidget};
+        use crate::config::ChoiceOption;
+        use crate::schema::FieldKind;
+        use crate::ui::edit_form::{EditField, EditForm, FormMode};
+        use crate::ui::form::WidgetSpec;
+
+        let s = empty_structure();
+
+        let make_choice_widget = || ChoiceWidget {
+            select: Cardinality::Single,
+            format: ChoiceFormat::Plain,
+            options: vec![
+                ChoiceOption {
+                    value: "/bin/bash".into(),
+                    label: "Bash".into(),
+                },
+                ChoiceOption {
+                    value: "/bin/sh".into(),
+                    label: "sh".into(),
+                },
+            ],
+        };
+
+        // Build an app with two fields: index 0 is a choice field, index 1 is plain.
+        let mut app = bare_app(false);
+        app.focus = Pane::Form;
+        app.form = Some(EditForm {
+            dn: "cn=Alice,dc=example,dc=org".to_string(),
+            fields: vec![
+                EditField {
+                    label: "loginShell".to_string(),
+                    must: false,
+                    editable: true,
+                    multi: false,
+                    secret: false,
+                    ordered: false,
+                    values: vec!["/bin/bash".to_string()],
+                    kind: FieldKind::Text,
+                    widget: WidgetSpec::ReadOnlyText,
+                    editor: tui_prompts::TextState::new().with_value("/bin/bash".to_string()),
+                    picker: None,
+                    widget_choice: Some(make_choice_widget()),
+                },
+                EditField {
+                    label: "sn".to_string(),
+                    must: false,
+                    editable: true,
+                    multi: false,
+                    secret: false,
+                    ordered: false,
+                    values: vec!["Smith".to_string()],
+                    kind: FieldKind::Text,
+                    widget: WidgetSpec::ReadOnlyText,
+                    editor: tui_prompts::TextState::new().with_value("Smith".to_string()),
+                    picker: None,
+                    widget_choice: None,
+                },
+            ],
+            baseline: Default::default(),
+            mode: FormMode::Edit,
+        });
+
+        // Focus the choice field (index 0) and type a character.
+        app.form_focus = 0;
+        dispatch_key(&mut app, key(KeyCode::Char('x')), &s);
+        let choice_value = app.form.as_ref().unwrap().fields[0]
+            .editor
+            .value()
+            .to_string();
+        assert_eq!(
+            choice_value, "/bin/bash",
+            "choice field must NOT accept inline key input"
+        );
+
+        // Now focus the plain field (index 1) and type a character — it SHOULD change.
+        app.form_focus = 1;
+        dispatch_key(&mut app, key(KeyCode::Char('!')), &s);
+        let plain_value = app.form.as_ref().unwrap().fields[1]
+            .editor
+            .value()
+            .to_string();
+        assert_ne!(
+            plain_value, "Smith",
+            "plain editable field MUST accept inline key input"
+        );
     }
 
     #[test]

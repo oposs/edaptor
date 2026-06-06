@@ -64,6 +64,11 @@ pub fn resolve_widgets(profiles: &[EntryProfile]) -> Result<Vec<ResolvedWidget>,
                 }
                 other => return Err(format!("[profile.widget.{attr}]: bad format \"{other}\"")),
             };
+            if format == ChoiceFormat::Plain && select == Cardinality::Multi {
+                return Err(format!(
+                    "[profile.widget.{attr}]: format \"plain\" requires select = \"single\""
+                ));
+            }
             out.push(ResolvedWidget {
                 owner_object_classes: owner.object_classes.clone(),
                 attr: attr.clone(),
@@ -182,9 +187,11 @@ mod tests {
     use crate::config::{ChoiceOption, EntryProfile, WidgetSpecCfg};
 
     fn profile_with(attr: &str, select: &str, format: &str, opts: &[(&str, &str)]) -> EntryProfile {
-        let mut p = EntryProfile::default();
-        p.name = "user".into();
-        p.object_classes = vec!["inetOrgPerson".into()];
+        let mut p = EntryProfile {
+            name: "user".into(),
+            object_classes: vec!["inetOrgPerson".into()],
+            ..Default::default()
+        };
         p.widgets.insert(
             attr.into(),
             WidgetSpecCfg::Choice {
@@ -219,15 +226,20 @@ mod tests {
     #[test]
     fn rejects_empty_options_and_unknown_format() {
         let p_empty = profile_with("a", "single", "plain", &[]);
-        assert!(resolve_widgets(&vec![p_empty]).is_err());
+        assert!(resolve_widgets(&[p_empty]).is_err());
         let p_bad = profile_with("a", "single", "nope", &[("x", "X")]);
-        assert!(resolve_widgets(&vec![p_bad]).is_err());
+        assert!(resolve_widgets(&[p_bad]).is_err());
+    }
+
+    #[test]
+    fn rejects_multi_plain() {
+        assert!(resolve_widgets(&[profile_with("a", "multi", "plain", &[("x", "X")])]).is_err());
     }
 
     #[test]
     fn reserved_formats_error_until_wired() {
         let p = profile_with("a", "multi", "bitmask", &[("x", "X")]);
-        assert!(resolve_widgets(&vec![p]).is_err());
+        assert!(resolve_widgets(&[p]).is_err());
     }
 
     #[test]
