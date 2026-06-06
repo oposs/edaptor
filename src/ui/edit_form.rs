@@ -103,6 +103,12 @@ pub struct ValueEditor {
     /// path). `None` for the plain free-text multi-value editor. Boxed to keep
     /// `ValueEditor` (and thus the `Overlay` enum) small.
     pub binding: Option<Box<crate::config::relation::PickerBinding>>,
+    /// `Some` ⇒ a static choice widget editor (no LDAP search). Reuses the
+    /// picker UI (a candidate list) but the candidates are the widget's fixed
+    /// options and the commit assembles the encoded string via the pure helper.
+    pub choice: Option<crate::config::widget::ChoiceWidget>,
+    /// The field's original value, for the lossless merge-from-original commit.
+    pub choice_original: String,
 }
 
 impl ValueEditor {
@@ -125,6 +131,8 @@ impl ValueEditor {
             picker: None,
             search: TextState::new(),
             binding: None,
+            choice: None,
+            choice_original: String::new(),
         }
     }
 
@@ -155,6 +163,62 @@ impl ValueEditor {
             picker: Some(PickerState::new(selected, key_ci)),
             search: TextState::new(),
             binding: Some(Box::new(binding.clone())),
+            choice: None,
+            choice_original: String::new(),
+        }
+    }
+
+    /// Open a static choice editor for a `[profile.widget.<attr>]`-bound field.
+    /// Reuses the picker UI but seeds the candidate list from the widget's fixed
+    /// options (no LDAP search): `results` holds every option, `selected` the
+    /// currently-checked subset (per [`ChoiceWidget::seed_checked`]). `saved` is
+    /// left empty — a static list has no saved/"will be removed" semantics — and
+    /// `key_ci` is false so option tokens compare exactly. Toggling reorders
+    /// checked options to the top (acceptable for a small fixed list).
+    pub fn open_choice(
+        field_idx: usize,
+        field: &EditField,
+        widget: &crate::config::widget::ChoiceWidget,
+    ) -> Self {
+        let original = field.current_values().first().cloned().unwrap_or_default();
+        let checked = widget.seed_checked(&original);
+        let all: Vec<Candidate> = widget
+            .options
+            .iter()
+            .map(|o| Candidate {
+                dn: o.value.clone(),
+                label: o.label.clone(),
+                store_value: o.value.clone(),
+            })
+            .collect();
+        let selected: Vec<Candidate> = all
+            .iter()
+            .filter(|c| checked.iter().any(|v| v == &c.store_value))
+            .cloned()
+            .collect();
+        let picker = PickerState {
+            selected,
+            results: all,
+            saved: Vec::new(),
+            cursor: 0,
+            scroll: 0,
+            search_active: false,
+            truncated: false,
+            key_ci: false,
+        };
+        ValueEditor {
+            field: field_idx,
+            label: field.label.clone(),
+            ordered: false,
+            secret: field.secret,
+            rows: Vec::new(),
+            sel: 0,
+            scroll: 0,
+            picker: Some(picker),
+            search: TextState::new(),
+            binding: None,
+            choice: Some(widget.clone()),
+            choice_original: original,
         }
     }
 
@@ -401,9 +465,7 @@ pub fn tag_widget_fields(
         return;
     }
     for field in &mut form.fields {
-        if let Some(w) =
-            crate::config::widget::widget_for(widgets, object_classes, &field.label)
-        {
+        if let Some(w) = crate::config::widget::widget_for(widgets, object_classes, &field.label) {
             field.widget_choice = Some(w.clone());
             field.editable = true;
         }
@@ -930,8 +992,8 @@ mod tests {
 
     #[test]
     fn tag_widget_fields_attaches_matching_choice() {
-        use crate::config::widget::{ChoiceFormat, ChoiceWidget, ResolvedWidget};
         use crate::config::relation::Cardinality;
+        use crate::config::widget::{ChoiceFormat, ChoiceWidget, ResolvedWidget};
         use crate::config::ChoiceOption;
 
         let mut form = writable_form();
@@ -955,11 +1017,18 @@ mod tests {
             widget: ChoiceWidget {
                 select: Cardinality::Single,
                 format: ChoiceFormat::Plain,
-                options: vec![ChoiceOption { value: "/bin/bash".into(), label: "Bash".into() }],
+                options: vec![ChoiceOption {
+                    value: "/bin/bash".into(),
+                    label: "Bash".into(),
+                }],
             },
         }];
         tag_widget_fields(&mut form, &widgets, &["demoPerson".to_string()], false);
-        let f = form.fields.iter().find(|f| f.label == "loginShell").unwrap();
+        let f = form
+            .fields
+            .iter()
+            .find(|f| f.label == "loginShell")
+            .unwrap();
         assert!(f.widget_choice.is_some());
         assert!(f.editable, "a choice field stays editable");
     }

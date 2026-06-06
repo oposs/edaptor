@@ -30,7 +30,12 @@ pub(crate) fn open_value_editor(app: &mut App, _structure: &Structure) {
         return;
     };
 
-    if let Some(binding) = field.picker.clone().filter(|_| field.editable) {
+    if let Some(w) = field.widget_choice.clone().filter(|_| field.editable) {
+        // A `[profile.widget.<attr>]` choice field opens a static choice overlay
+        // (the picker UI seeded from fixed options, no LDAP search).
+        let ve = ValueEditor::open_choice(focus, field, &w);
+        app.overlay = Some(Overlay::ValueEditor(ve));
+    } else if let Some(binding) = field.picker.clone().filter(|_| field.editable) {
         // Unified picker: open from the resolved binding. Labels and real DNs are
         // upgraded from search results in the `Response::Entries` intercept.
         let ve = ValueEditor::open(focus, field, &binding);
@@ -70,6 +75,31 @@ fn picker_editor_key(app: &mut App, key: KeyEvent) {
             app.picker_last_query.clear();
         }
         KeyCode::Char('s') | KeyCode::Char('S') if alt => {
+            // A choice widget commits the assembled (lossless merge-from-original)
+            // encoded string into the inline editor — a single-valued field reads
+            // `current_values()` from `editor`, NOT `values`.
+            if let Some(Overlay::ValueEditor(ve)) = app.overlay.take() {
+                if let Some(w) = ve.choice.as_ref() {
+                    let checked: Vec<String> = ve
+                        .picker
+                        .as_ref()
+                        .map(|p| p.selected_values())
+                        .unwrap_or_default();
+                    let value = w.commit_value(&ve.choice_original, &checked);
+                    if let Some(field) = app.form.as_mut().and_then(|f| f.fields.get_mut(ve.field))
+                    {
+                        field.editor = TextState::new().with_value(value.clone());
+                        field.values = if value.is_empty() {
+                            vec![]
+                        } else {
+                            vec![value]
+                        };
+                    }
+                    return;
+                }
+                // Not a choice editor: put the overlay back for the picker path below.
+                app.overlay = Some(Overlay::ValueEditor(ve));
+            }
             // Alt+S commits the selection into the field, driven by the binding's
             // cardinality. A single-select commit writes the chosen scalar into the
             // inline editor (a single-value field saves from `editor`, NOT `values`);
@@ -136,10 +166,17 @@ fn picker_editor_key(app: &mut App, key: KeyEvent) {
                 })
                 .unwrap_or(false);
             if let Some(Overlay::ValueEditor(ve)) = app.overlay.as_mut() {
-                let single = match ve.binding.as_deref().and_then(|b| b.select) {
-                    Some(crate::config::relation::Cardinality::Single) => true,
-                    Some(crate::config::relation::Cardinality::Multi) => false,
-                    None => field_single,
+                // A choice widget drives cardinality from its own `select`; a
+                // picker uses the binding's select with an `auto` field-arity
+                // fallback.
+                let single = if let Some(w) = ve.choice.as_ref() {
+                    matches!(w.select, crate::config::relation::Cardinality::Single)
+                } else {
+                    match ve.binding.as_deref().and_then(|b| b.select) {
+                        Some(crate::config::relation::Cardinality::Single) => true,
+                        Some(crate::config::relation::Cardinality::Multi) => false,
+                        None => field_single,
+                    }
                 };
                 if let Some(p) = ve.picker.as_mut() {
                     if single {
@@ -169,7 +206,11 @@ fn picker_editor_key(app: &mut App, key: KeyEvent) {
         }
         _ => {
             if let Some(Overlay::ValueEditor(ve)) = app.overlay.as_mut() {
-                ve.search.handle_key_event(key);
+                // A static choice editor has no search box — ignore char keys so
+                // they cannot type into (or fire a search against) a fixed list.
+                if ve.choice.is_none() {
+                    ve.search.handle_key_event(key);
+                }
             }
         }
     }
@@ -354,6 +395,8 @@ mod tests {
             picker: None,
             search: TextState::new(),
             binding: None,
+            choice: None,
+            choice_original: String::new(),
         };
         App {
             focus: Pane::Form,
@@ -476,6 +519,8 @@ mod tests {
             picker: Some(crate::ui::picker::PickerState::new(vec![], true)),
             search: TextState::new(),
             binding: Some(Box::new(member_dn_binding())),
+            choice: None,
+            choice_original: String::new(),
         }
     }
 
@@ -897,6 +942,98 @@ mod tests {
             f.values.is_empty(),
             "Alt+Space must not populate values with a DN"
         );
+    }
+
+    /// App with a one-field form whose single field is bound to a choice widget.
+    /// The field is single-valued (`multi=false`) so `current_values()` reads the
+    /// editor; `editor`/`values` are both seeded with `value`.
+    fn app_with_choice_field(
+        attr: &str,
+        value: &str,
+        widget: &crate::config::widget::ChoiceWidget,
+    ) -> App {
+        use crate::schema::FieldKind;
+        use crate::ui::edit_form::EditField;
+        use crate::ui::form::WidgetSpec;
+        let field = EditField {
+            label: attr.into(),
+            must: false,
+            editable: true,
+            multi: false,
+            secret: false,
+            ordered: false,
+            values: vec![value.to_string()],
+            kind: FieldKind::Text,
+            widget: WidgetSpec::ReadOnlyText,
+            editor: TextState::new().with_value(value.to_string()),
+            picker: None,
+            widget_choice: Some(widget.clone()),
+        };
+        let mut app = bare_app(false);
+        app.form = Some(EditForm {
+            dn: "uid=alice,ou=people,dc=test".into(),
+            fields: vec![field],
+            baseline: Default::default(),
+            mode: FormMode::Edit,
+        });
+        app.focus = Pane::Form;
+        app.form_focus = 0;
+        app
+    }
+
+    #[test]
+    fn choice_commit_writes_assembled_string_to_editor() {
+        use crate::config::relation::Cardinality;
+        use crate::config::widget::{ChoiceFormat, ChoiceWidget};
+        use crate::config::ChoiceOption;
+        let widget = ChoiceWidget {
+            select: Cardinality::Multi,
+            format: ChoiceFormat::Bracketed,
+            options: vec![ChoiceOption {
+                value: "D".into(),
+                label: "Disabled".into(),
+            }],
+        };
+        let mut app = app_with_choice_field("sambaAcctFlags", "[U          ]", &widget);
+        open_value_editor(&mut app, &empty_structure());
+        value_editor_key(&mut app, key(KeyCode::Enter)); // toggle D in
+        value_editor_key(&mut app, alt(KeyCode::Char('s'))); // commit
+        assert!(app.overlay.is_none(), "overlay closes on commit");
+        let f = &app.form.as_ref().unwrap().fields[0];
+        assert_eq!(f.editor.value(), "[DU         ]");
+        assert_eq!(f.current_values(), vec!["[DU         ]".to_string()]);
+    }
+
+    #[test]
+    fn choice_single_select_radio_replaces_and_commits_to_editor() {
+        // A single-select Plain choice: Enter radio-selects, Alt+S commits the
+        // chosen option's value into the editor (replacing the original).
+        use crate::config::relation::Cardinality;
+        use crate::config::widget::{ChoiceFormat, ChoiceWidget};
+        use crate::config::ChoiceOption;
+        let widget = ChoiceWidget {
+            select: Cardinality::Single,
+            format: ChoiceFormat::Plain,
+            options: vec![
+                ChoiceOption {
+                    value: "/bin/bash".into(),
+                    label: "Bash".into(),
+                },
+                ChoiceOption {
+                    value: "/bin/sh".into(),
+                    label: "POSIX sh".into(),
+                },
+            ],
+        };
+        let mut app = app_with_choice_field("loginShell", "/bin/bash", &widget);
+        open_value_editor(&mut app, &empty_structure());
+        // Move cursor to the second option (POSIX sh) and radio-select it.
+        value_editor_key(&mut app, key(KeyCode::Down));
+        value_editor_key(&mut app, key(KeyCode::Enter));
+        value_editor_key(&mut app, alt(KeyCode::Char('s')));
+        let f = &app.form.as_ref().unwrap().fields[0];
+        assert_eq!(f.editor.value(), "/bin/sh");
+        assert_eq!(f.current_values(), vec!["/bin/sh".to_string()]);
     }
 
     #[test]

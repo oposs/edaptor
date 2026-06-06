@@ -333,16 +333,24 @@ fn render_overlay(f: &mut Frame, app: &mut App) {
     // an `auto` fall-back to the field's schema arity (mirrors the commit path in
     // `app::overlay_key`). Computed via immutable borrows before the `&mut` render.
     let single = match app.overlay.as_ref() {
-        Some(Overlay::ValueEditor(ve)) => match ve.binding.as_deref().and_then(|b| b.select) {
-            Some(crate::config::relation::Cardinality::Single) => true,
-            Some(crate::config::relation::Cardinality::Multi) => false,
-            None => app
-                .form
-                .as_ref()
-                .and_then(|fm| fm.fields.get(ve.field))
-                .map(|f| !f.multi)
-                .unwrap_or(false),
-        },
+        Some(Overlay::ValueEditor(ve)) => {
+            if let Some(w) = ve.choice.as_ref() {
+                // A static choice widget drives radio vs checkbox from its own
+                // `select` cardinality, not a picker binding.
+                matches!(w.select, crate::config::relation::Cardinality::Single)
+            } else {
+                match ve.binding.as_deref().and_then(|b| b.select) {
+                    Some(crate::config::relation::Cardinality::Single) => true,
+                    Some(crate::config::relation::Cardinality::Multi) => false,
+                    None => app
+                        .form
+                        .as_ref()
+                        .and_then(|fm| fm.fields.get(ve.field))
+                        .map(|f| !f.multi)
+                        .unwrap_or(false),
+                }
+            }
+        }
         _ => false,
     };
     if let Some(Overlay::ValueEditor(ve)) = app.overlay.as_mut() {
@@ -418,6 +426,8 @@ fn render_value_editor(f: &mut Frame, ve: &mut ValueEditor, single: bool, area: 
     let label = ve.label.clone();
     let search_value = ve.search.value().to_string();
     let search_position = ve.search.position();
+    // A static choice editor has no search box (fixed option list).
+    let is_choice = ve.choice.is_some();
     // Picker mode: searchable candidate list with always-visible selection.
     if let Some(picker) = ve.picker.as_mut() {
         let rect = centered(70, 20, area);
@@ -426,17 +436,20 @@ fn render_value_editor(f: &mut Frame, ve: &mut ValueEditor, single: bool, area: 
             .borders(Borders::ALL)
             .border_type(BorderType::Double)
             .title(format!(" {} ", label))
-            .title_bottom(match (single, picker.truncated) {
+            .title_bottom(match (is_choice, single, picker.truncated) {
+                // Static choice editor: no search; Enter selects (single) / toggles (multi).
+                (true, true, _) => " ↑↓ move · Enter select · Alt+S save · Alt+C cancel ",
+                (true, false, _) => " ↑↓ move · Enter toggle · Alt+S save · Alt+C cancel ",
                 // Single-select picker: Enter radio-selects the highlighted row.
-                (true, true) => {
+                (false, true, true) => {
                     " ↑↓ move · Enter select · Alt+S save · Alt+C cancel · type to search · more match — narrow search "
                 }
-                (true, false) => " ↑↓ move · Enter select · Alt+S save · Alt+C cancel · type to search ",
+                (false, true, false) => " ↑↓ move · Enter select · Alt+S save · Alt+C cancel · type to search ",
                 // Membership multi-select picker: Enter toggles a candidate in/out.
-                (false, true) => {
+                (false, false, true) => {
                     " ↑↓ move · Enter toggle · Alt+S save · Alt+C cancel · type to search · more match — narrow search "
                 }
-                (false, false) => " ↑↓ move · Enter toggle · Alt+S save · Alt+C cancel · type to search ",
+                (false, false, false) => " ↑↓ move · Enter toggle · Alt+S save · Alt+C cancel · type to search ",
             })
             .border_style(
                 Style::default()
@@ -448,21 +461,29 @@ fn render_value_editor(f: &mut Frame, ve: &mut ValueEditor, single: bool, area: 
         if inner.height == 0 {
             return;
         }
-        // First row: search box.
-        let search_text = format!("Search: {}", search_value);
-        f.render_widget(
-            Paragraph::new(search_text).style(Style::default().fg(Color::Blue)),
-            Rect::new(inner.x, inner.y, inner.width, 1),
-        );
-        // Show terminal cursor at the insertion point within the search box.
-        let prefix_width = "Search: ".len() as u16;
-        let col = (search_position as u16).min(inner.width.saturating_sub(prefix_width + 1));
-        f.set_cursor_position((inner.x + prefix_width + col, inner.y));
+        // First row: search box — except for a static choice editor, which has a
+        // fixed option list and so renders the candidates from the top row.
+        if !is_choice {
+            let search_text = format!("Search: {}", search_value);
+            f.render_widget(
+                Paragraph::new(search_text).style(Style::default().fg(Color::Blue)),
+                Rect::new(inner.x, inner.y, inner.width, 1),
+            );
+            // Show terminal cursor at the insertion point within the search box.
+            let prefix_width = "Search: ".len() as u16;
+            let col = (search_position as u16).min(inner.width.saturating_sub(prefix_width + 1));
+            f.set_cursor_position((inner.x + prefix_width + col, inner.y));
+        }
         // Remaining rows: visible candidates, scrolled so the cursor stays on
-        // screen (sticky viewport, same as the form list).
+        // screen (sticky viewport, same as the form list). A choice editor has no
+        // search row, so its list starts at the very top.
         let rows = picker.visible();
-        let list_area_y = inner.y + 1;
-        let list_height = inner.height.saturating_sub(1);
+        let list_area_y = if is_choice { inner.y } else { inner.y + 1 };
+        let list_height = if is_choice {
+            inner.height
+        } else {
+            inner.height.saturating_sub(1)
+        };
         let viewport = list_height as usize;
         picker.scroll = clamp_scroll(picker.cursor, picker.scroll, viewport, rows.len());
         let scroll = picker.scroll;
@@ -657,6 +678,8 @@ mod tests {
             picker: Some(PickerState::new(selected, true)),
             search: TextState::new(),
             binding: None,
+            choice: None,
+            choice_original: String::new(),
         }
     }
 
@@ -708,6 +731,8 @@ mod tests {
             picker: Some(ps),
             search: TextState::new(),
             binding: None,
+            choice: None,
+            choice_original: String::new(),
         };
         let (w, h) = (70u16, 20u16);
         let backend = TestBackend::new(w, h);
@@ -750,6 +775,8 @@ mod tests {
             picker: None,
             search: TextState::new(),
             binding: None,
+            choice: None,
+            choice_original: String::new(),
         };
         let (w, h) = (60u16, 20u16);
         let backend = TestBackend::new(w, h);
@@ -1117,6 +1144,8 @@ mod tests {
             picker: Some(ps),
             search: TextState::new(),
             binding: None,
+            choice: None,
+            choice_original: String::new(),
         };
         let (w, h) = (70u16, 20u16);
         let backend = TestBackend::new(w, h);
@@ -1149,6 +1178,85 @@ mod tests {
         assert!(
             !all.contains("[ ]"),
             "checkbox marker `[ ]` must not appear in single-select mode, got:\n{all}"
+        );
+    }
+
+    /// A static choice editor must NOT render the `Search:` row (the option list
+    /// is fixed) and must list its options from the top.
+    #[test]
+    fn render_value_editor_choice_omits_search_row() {
+        use crate::config::relation::Cardinality;
+        use crate::config::widget::{ChoiceFormat, ChoiceWidget};
+        use crate::config::ChoiceOption;
+        use crate::ui::picker::{Candidate, PickerState};
+
+        let widget = ChoiceWidget {
+            select: Cardinality::Multi,
+            format: ChoiceFormat::Bracketed,
+            options: vec![
+                ChoiceOption {
+                    value: "D".into(),
+                    label: "Disabled".into(),
+                },
+                ChoiceOption {
+                    value: "X".into(),
+                    label: "No expiry".into(),
+                },
+            ],
+        };
+        let all: Vec<Candidate> = widget
+            .options
+            .iter()
+            .map(|o| Candidate {
+                dn: o.value.clone(),
+                label: o.label.clone(),
+                store_value: o.value.clone(),
+            })
+            .collect();
+        let ps = PickerState {
+            selected: Vec::new(),
+            results: all,
+            saved: Vec::new(),
+            cursor: 0,
+            scroll: 0,
+            search_active: false,
+            truncated: false,
+            key_ci: false,
+        };
+        let mut ve = crate::ui::edit_form::ValueEditor {
+            field: 0,
+            label: "sambaAcctFlags".to_string(),
+            ordered: false,
+            secret: false,
+            rows: Vec::new(),
+            sel: 0,
+            scroll: 0,
+            picker: Some(ps),
+            search: TextState::new(),
+            binding: None,
+            choice: Some(widget),
+            choice_original: "[U          ]".to_string(),
+        };
+        let (w, h) = (70u16, 20u16);
+        let backend = TestBackend::new(w, h);
+        let mut terminal = Terminal::new(backend).unwrap();
+        // multi-select choice → checkbox markers, no search row
+        terminal
+            .draw(|f| render_value_editor(f, &mut ve, false, Rect::new(0, 0, w, h)))
+            .expect("choice editor render must not panic");
+        let buffer = terminal.backend().buffer();
+        let mut all = String::new();
+        for y in 0..h {
+            all.push_str(&row_text(buffer, 0, y, w));
+            all.push('\n');
+        }
+        assert!(
+            !all.contains("Search:"),
+            "a static choice editor must not show a Search: row, got:\n{all}"
+        );
+        assert!(
+            all.contains("[ ] Disabled"),
+            "choice options listed with checkbox markers, got:\n{all}"
         );
     }
 }
