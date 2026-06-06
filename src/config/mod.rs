@@ -776,7 +776,11 @@ options = [ { value = "/bin/bash", label = "Bash" } ]
         let cfg: Config = toml::from_str(toml).expect("parse");
         let p = &cfg.profiles[0];
         assert_eq!(p.widgets.len(), 2);
-        let WidgetSpecCfg::Choice { select, format, options } = &p.widgets["sambaAcctFlags"];
+        let WidgetSpecCfg::Choice {
+            select,
+            format,
+            options,
+        } = &p.widgets["sambaAcctFlags"];
         assert_eq!(select, "multi");
         assert_eq!(format, "bracketed");
         assert_eq!(options[0].value, "D");

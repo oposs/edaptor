@@ -1286,8 +1286,14 @@ mod tests {
                 select: Cardinality::Multi,
                 format: ChoiceFormat::Bracketed,
                 options: vec![
-                    ChoiceOption { value: "D".to_string(), label: "Disabled".to_string() },
-                    ChoiceOption { value: "X".to_string(), label: "No expire".to_string() },
+                    ChoiceOption {
+                        value: "D".to_string(),
+                        label: "Disabled".to_string(),
+                    },
+                    ChoiceOption {
+                        value: "X".to_string(),
+                        label: "No expire".to_string(),
+                    },
                 ],
             }),
         };

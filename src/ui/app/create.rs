@@ -170,7 +170,14 @@ pub(crate) fn open_create_form(
     } else {
         profile.search_base.clone()
     };
-    let form = build_new_entry_form(read_flow.schema(), profile, &app.pickers, &app.widgets, i, container);
+    let form = build_new_entry_form(
+        read_flow.schema(),
+        profile,
+        &app.pickers,
+        &app.widgets,
+        i,
+        container,
+    );
     app.form = Some(form);
     app.form_focus = 0;
     app.form_scroll = 0;

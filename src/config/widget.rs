@@ -39,9 +39,15 @@ pub fn resolve_widgets(profiles: &[EntryProfile]) -> Result<Vec<ResolvedWidget>,
     let mut out = Vec::new();
     for owner in profiles {
         for (attr, spec) in &owner.widgets {
-            let WidgetSpecCfg::Choice { select, format, options } = spec;
+            let WidgetSpecCfg::Choice {
+                select,
+                format,
+                options,
+            } = spec;
             if options.is_empty() {
-                return Err(format!("[profile.widget.{attr}]: options must not be empty"));
+                return Err(format!(
+                    "[profile.widget.{attr}]: options must not be empty"
+                ));
             }
             let select = match select.to_ascii_lowercase().as_str() {
                 "single" => Cardinality::Single,
@@ -61,7 +67,11 @@ pub fn resolve_widgets(profiles: &[EntryProfile]) -> Result<Vec<ResolvedWidget>,
             out.push(ResolvedWidget {
                 owner_object_classes: owner.object_classes.clone(),
                 attr: attr.clone(),
-                widget: ChoiceWidget { select, format, options: options.clone() },
+                widget: ChoiceWidget {
+                    select,
+                    format,
+                    options: options.clone(),
+                },
             });
         }
     }
@@ -182,7 +192,10 @@ mod tests {
                 format: format.into(),
                 options: opts
                     .iter()
-                    .map(|(v, l)| ChoiceOption { value: v.to_string(), label: l.to_string() })
+                    .map(|(v, l)| ChoiceOption {
+                        value: v.to_string(),
+                        label: l.to_string(),
+                    })
                     .collect(),
             },
         );
@@ -191,9 +204,12 @@ mod tests {
 
     #[test]
     fn resolves_bracketed_and_plain() {
-        let profiles = vec![
-            profile_with("sambaAcctFlags", "multi", "bracketed", &[("D", "Disabled")]),
-        ];
+        let profiles = vec![profile_with(
+            "sambaAcctFlags",
+            "multi",
+            "bracketed",
+            &[("D", "Disabled")],
+        )];
         let resolved = resolve_widgets(&profiles).expect("ok");
         let w = widget_for(&resolved, &["inetOrgPerson".into()], "sambaacctflags").unwrap();
         assert_eq!(w.select, crate::config::relation::Cardinality::Multi);
@@ -220,8 +236,14 @@ mod tests {
             select: crate::config::relation::Cardinality::Multi,
             format: ChoiceFormat::Bracketed,
             options: vec![
-                ChoiceOption { value: "D".into(), label: "Disabled".into() },
-                ChoiceOption { value: "X".into(), label: "No expire".into() },
+                ChoiceOption {
+                    value: "D".into(),
+                    label: "Disabled".into(),
+                },
+                ChoiceOption {
+                    value: "X".into(),
+                    label: "No expire".into(),
+                },
             ],
         };
         let checked = w.seed_checked("[UW         ]");
@@ -236,12 +258,21 @@ mod tests {
             select: crate::config::relation::Cardinality::Single,
             format: ChoiceFormat::Plain,
             options: vec![
-                ChoiceOption { value: "/bin/bash".into(), label: "Bash".into() },
-                ChoiceOption { value: "/bin/sh".into(), label: "POSIX sh".into() },
+                ChoiceOption {
+                    value: "/bin/bash".into(),
+                    label: "Bash".into(),
+                },
+                ChoiceOption {
+                    value: "/bin/sh".into(),
+                    label: "POSIX sh".into(),
+                },
             ],
         };
         assert_eq!(w.seed_checked("/bin/sh"), vec!["/bin/sh".to_string()]);
-        assert_eq!(w.commit_value("/bin/bash", &["/bin/sh".to_string()]), "/bin/sh");
+        assert_eq!(
+            w.commit_value("/bin/bash", &["/bin/sh".to_string()]),
+            "/bin/sh"
+        );
         assert_eq!(w.present_summary("/bin/sh"), "POSIX sh");
         assert_eq!(w.present_summary("/bin/zsh"), "/bin/zsh");
     }
@@ -252,8 +283,14 @@ mod tests {
             select: crate::config::relation::Cardinality::Multi,
             format: ChoiceFormat::Bracketed,
             options: vec![
-                ChoiceOption { value: "D".into(), label: "Disabled".into() },
-                ChoiceOption { value: "X".into(), label: "No expire".into() },
+                ChoiceOption {
+                    value: "D".into(),
+                    label: "Disabled".into(),
+                },
+                ChoiceOption {
+                    value: "X".into(),
+                    label: "No expire".into(),
+                },
             ],
         };
         assert_eq!(w.present_summary("[DU         ]"), "Disabled");

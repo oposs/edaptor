@@ -33,7 +33,11 @@ pub fn parse_bracketed(s: &str) -> BTreeSet<char> {
 /// justified to width 11 inside `[`...`]`.
 pub fn serialize_bracketed(set: &BTreeSet<char>) -> String {
     let mut letters: String = ACB_ORDER.iter().filter(|c| set.contains(c)).collect();
-    let mut unknown: Vec<char> = set.iter().copied().filter(|c| !ACB_ORDER.contains(c)).collect();
+    let mut unknown: Vec<char> = set
+        .iter()
+        .copied()
+        .filter(|c| !ACB_ORDER.contains(c))
+        .collect();
     unknown.sort_unstable();
     letters.extend(unknown);
     format!("[{letters:<11}]")
@@ -154,7 +158,10 @@ mod tests {
     #[test]
     fn bracketed_tolerates_missing_brackets_and_empty() {
         assert!(parse_bracketed("U").contains(&'U'));
-        assert_eq!(serialize_bracketed(&std::collections::BTreeSet::new()), "[           ]");
+        assert_eq!(
+            serialize_bracketed(&std::collections::BTreeSet::new()),
+            "[           ]"
+        );
     }
 
     #[test]
