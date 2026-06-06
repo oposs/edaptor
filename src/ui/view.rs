@@ -294,6 +294,10 @@ fn selection_style(active: bool) -> Style {
 /// - editable single → the live editor value (so typing is visible);
 /// - read-only single → the stored value.
 fn field_display_value(fld: &EditField) -> String {
+    if let Some(w) = &fld.widget_choice {
+        let current = fld.current_values().first().cloned().unwrap_or_default();
+        return w.present_summary(&current);
+    }
     if fld.secret {
         return "•".repeat(secret_len(fld));
     }
@@ -1258,5 +1262,35 @@ mod tests {
             all.contains("[ ] Disabled"),
             "choice options listed with checkbox markers, got:\n{all}"
         );
+    }
+
+    #[test]
+    fn choice_field_renders_set_labels_summary() {
+        use crate::config::relation::Cardinality;
+        use crate::config::widget::{ChoiceFormat, ChoiceWidget};
+        use crate::config::ChoiceOption;
+
+        let fld = EditField {
+            label: "sambaAcctFlags".to_string(),
+            must: false,
+            editable: true,
+            multi: false,
+            secret: false,
+            ordered: false,
+            values: vec!["[DU         ]".to_string()],
+            kind: FieldKind::Text,
+            widget: WidgetSpec::ReadOnlyText,
+            editor: TextState::new().with_value("[DU         ]".to_string()),
+            picker: None,
+            widget_choice: Some(ChoiceWidget {
+                select: Cardinality::Multi,
+                format: ChoiceFormat::Bracketed,
+                options: vec![
+                    ChoiceOption { value: "D".to_string(), label: "Disabled".to_string() },
+                    ChoiceOption { value: "X".to_string(), label: "No expire".to_string() },
+                ],
+            }),
+        };
+        assert_eq!(field_display_value(&fld), "Disabled");
     }
 }
