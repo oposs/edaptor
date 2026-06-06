@@ -372,6 +372,7 @@ mod tests {
             overlay: Some(Overlay::ValueEditor(ve)),
             status: String::new(),
             pickers: vec![],
+            widgets: vec![],
             label_rules: vec![],
             tree_rules: Vec::new(),
             picker_search_id: None,

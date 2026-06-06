@@ -109,6 +109,9 @@ pub struct App {
     /// Resolved picker bindings (built once from config profiles). Drives field
     /// population.
     pub pickers: Vec<crate::config::relation::ResolvedPicker>,
+    /// Resolved choice-widget bindings (built once from config profiles). Tags
+    /// fields that should render as a dropdown/choice widget.
+    pub widgets: Vec<crate::config::widget::ResolvedWidget>,
     /// Compiled column-2 label rules (built once from `config.profiles`).
     pub(crate) label_rules: Vec<LabelRule>,
     /// Compiled DIT-tree (pane 1) branch-label rules (built once from
@@ -126,6 +129,8 @@ pub fn run(config: Config, password: String) -> Result<()> {
     let read_only = config.is_read_only();
     let profiles = config.profiles.clone();
     let pickers = resolve_pickers(&config.profiles);
+    let widgets = crate::config::widget::resolve_widgets(&config.profiles)
+        .map_err(|e| anyhow::anyhow!("config error: {e}"))?;
     // Compile the per-profile column-2 label rules and the attrs the scan must fetch.
     let rules = label_rules(&profiles);
     let tree_rules = crate::config::tree_label::compile_tree_rules(&config.tree);
@@ -188,6 +193,7 @@ pub fn run(config: Config, password: String) -> Result<()> {
         overlay: None,
         status: String::new(),
         pickers,
+        widgets,
         label_rules: rules,
         tree_rules,
         picker_search_id: None,
@@ -475,6 +481,7 @@ impl Ctx<'_> {
                             read_flow.schema(),
                             app.read_only,
                             &app.pickers,
+                            &app.widgets,
                             profiles,
                         ));
                         app.form_focus = 0;

@@ -324,6 +324,7 @@ fn reload_form_sync(
                 read_flow.schema(),
                 app.read_only,
                 &app.pickers,
+                &app.widgets,
                 profiles,
             ));
             app.form_focus = 0;

@@ -489,6 +489,7 @@ mod tests {
             &user_schema(),
             &create_user_profile(),
             &[],
+            &[],
             0,
             "ou=people,dc=example,dc=org".to_string(),
         ));

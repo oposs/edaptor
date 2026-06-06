@@ -123,6 +123,7 @@ pub(crate) fn build_new_entry_form(
     schema: &SchemaModel,
     profile: &EntryProfile,
     pickers: &[crate::config::relation::ResolvedPicker],
+    widgets: &[crate::config::widget::ResolvedWidget],
     profile_idx: usize,
     container: String,
 ) -> EditForm {
@@ -145,6 +146,8 @@ pub(crate) fn build_new_entry_form(
     // Tag picker-bound fields so Enter opens the unified picker overlay.
     let ocs = object_classes_of(&form);
     crate::ui::edit_form::tag_picker_fields(&mut form, pickers, &ocs, false);
+    // Tag choice-widget fields so they render as a dropdown/choice widget.
+    crate::ui::edit_form::tag_widget_fields(&mut form, widgets, &ocs, false);
     // Final step: order fields after injection/tagging set secret/picker flags.
     crate::ui::edit_form::order_fields(&mut form);
     form
@@ -167,7 +170,7 @@ pub(crate) fn open_create_form(
     } else {
         profile.search_base.clone()
     };
-    let form = build_new_entry_form(read_flow.schema(), profile, &app.pickers, i, container);
+    let form = build_new_entry_form(read_flow.schema(), profile, &app.pickers, &app.widgets, i, container);
     app.form = Some(form);
     app.form_focus = 0;
     app.form_scroll = 0;
@@ -191,6 +194,7 @@ mod tests {
         let form = build_new_entry_form(
             &user_schema(),
             &create_user_profile(),
+            &[],
             &[],
             0,
             "ou=people,dc=example,dc=org".to_string(),

@@ -31,6 +31,7 @@ pub(crate) fn bare_app(read_only: bool) -> App {
         overlay: None,
         status: String::new(),
         pickers: vec![],
+        widgets: vec![],
         label_rules: vec![],
         tree_rules: Vec::new(),
         picker_search_id: None,
