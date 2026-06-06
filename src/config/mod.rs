@@ -788,6 +788,21 @@ options = [ { value = "/bin/bash", label = "Bash" } ]
     }
 
     #[test]
+    fn demo_config_widgets_resolve() {
+        let toml = include_str!("../../examples/demo-config.toml");
+        let cfg: Config = toml::from_str(toml).expect("demo-config.toml parses");
+        let widgets = crate::config::widget::resolve_widgets(&cfg.profiles)
+            .expect("demo-config widgets resolve");
+        // sambaAcctFlags + loginShell presets are present
+        assert!(widgets
+            .iter()
+            .any(|w| w.attr.eq_ignore_ascii_case("sambaAcctFlags")));
+        assert!(widgets
+            .iter()
+            .any(|w| w.attr.eq_ignore_ascii_case("loginShell")));
+    }
+
+    #[test]
     fn parses_profile_picker_block() {
         let cfg: Config = toml::from_str(
             r#"

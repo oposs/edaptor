@@ -71,6 +71,18 @@ uidNumber     = "{next:10000-60000}"
 ldap_attribute = "userPassword"               # default; omit to use userPassword
 samba          = false
 
+# Widget bindings: `[profile.widget.<attr>]` declares a rich in-line widget for
+# an attribute's field. Choice widgets display a fixed vocabulary as a checklist.
+[profile.widget.loginShell]
+kind   = "choice"
+select = "single"
+format = "plain"
+options = [
+  { value = "/bin/bash",     label = "Bash" },
+  { value = "/bin/sh",       label = "POSIX sh" },
+  { value = "/sbin/nologin", label = "No login" },
+]
+
 # Picker bindings: `[profile.picker.<attr>]` declares how an attribute's field is
 # populated from a live candidate search. Four knobs:
 #   candidate   (required) — a [[profile]] `name` supplying the candidate search scope.

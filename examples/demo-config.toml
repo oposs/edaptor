@@ -37,6 +37,26 @@ uidNumber     = "{next:10000-60000}"
 ldap_attribute = "userPassword"
 samba          = true
 
+[profile.widget.sambaAcctFlags]
+kind   = "choice"
+select = "multi"
+format = "bracketed"
+options = [
+  { value = "D", label = "Disabled" },
+  { value = "X", label = "Password never expires" },
+  { value = "N", label = "No password required" },
+]
+
+[profile.widget.loginShell]
+kind   = "choice"
+select = "single"
+format = "plain"
+options = [
+  { value = "/bin/bash",     label = "Bash" },
+  { value = "/bin/sh",       label = "POSIX sh" },
+  { value = "/sbin/nologin", label = "No login" },
+]
+
 # gidNumber resolves a posixGroup and stores that group's gidNumber scalar.
 [profile.picker.gidNumber]
 candidate = "posixgroup"
