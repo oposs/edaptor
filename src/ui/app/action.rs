@@ -207,6 +207,10 @@ fn revert_form(app: &mut App) {
             field.editor = TextState::new().with_value(base.first().cloned().unwrap_or_default());
             field.values = base;
         }
+        // Drop any password staged by the PasswordEditor popup; otherwise the form
+        // stays dirty after a revert and a later save would apply the discarded
+        // password.
+        form.pending_password = None;
         app.status = "Reverted.".to_string();
     }
 }
@@ -552,5 +556,25 @@ mod tests {
         ));
         revert_form(&mut app);
         assert!(app.form.is_none(), "create form discarded on cancel");
+    }
+
+    #[test]
+    fn revert_clears_staged_pending_password() {
+        let mut app = with_form(bare_app(false), "cn=Alice,dc=example,dc=org");
+        app.form.as_mut().unwrap().pending_password = Some("staged-secret".to_string());
+        assert!(
+            app.form.as_ref().unwrap().is_dirty(),
+            "a staged password makes the form dirty"
+        );
+        revert_form(&mut app);
+        assert_eq!(
+            app.form.as_ref().unwrap().pending_password,
+            None,
+            "revert clears the staged password"
+        );
+        assert!(
+            !app.form.as_ref().unwrap().is_dirty(),
+            "form is clean after reverting the staged password"
+        );
     }
 }
