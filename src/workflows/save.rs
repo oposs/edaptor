@@ -85,6 +85,45 @@ pub fn prepare_save(
     }
 }
 
+/// Derive the password mods for an edit save from a staged `pending` cleartext.
+///
+/// Always strips `primary` and every `derived` attribute from BOTH `original`
+/// and `edited` (case-insensitive) so the plain attribute diff can never
+/// double-write them — the directory's stored hash on the baseline would
+/// otherwise diff to a spurious Delete, and a derived value present on both
+/// sides would shadow the REPLACE. When `pending` is `Some`, returns the REPLACE
+/// mods produced by [`crate::samba::password::password_add_attrs`] together with
+/// the attrs to mask in the preview (`primary` + `derived`). When `pending` is
+/// `None`, only the strip happens and both returned vecs are empty. `now_secs` is
+/// injected for testability. Pure (no clock, no I/O).
+pub fn stage_pending_password(
+    pending: Option<&str>,
+    primary: &str,
+    derived: &[String],
+    samba: bool,
+    now_secs: u64,
+    original: &mut std::collections::BTreeMap<String, Vec<String>>,
+    edited: &mut std::collections::BTreeMap<String, Vec<String>>,
+) -> (Vec<ModOp>, Vec<String>) {
+    let strip = |m: &mut std::collections::BTreeMap<String, Vec<String>>| {
+        m.retain(|k, _| {
+            !k.eq_ignore_ascii_case(primary) && !derived.iter().any(|d| d.eq_ignore_ascii_case(k))
+        });
+    };
+    strip(original);
+    strip(edited);
+    let Some(pw) = pending else {
+        return (Vec::new(), Vec::new());
+    };
+    let mods: Vec<ModOp> = crate::samba::password::password_add_attrs(pw, primary, samba, now_secs)
+        .into_iter()
+        .map(|(attr, values)| ModOp::Replace { attr, values })
+        .collect();
+    let mut mask = vec![primary.to_string()];
+    mask.extend(derived.iter().cloned());
+    (mods, mask)
+}
+
 /// The parent DN (everything after the first comma), or `None` at the top.
 pub fn parent_dn(dn: &str) -> Option<&str> {
     dn.split_once(',').map(|(_, rest)| rest)
@@ -346,6 +385,45 @@ mod tests {
             ),
             PrepareSave::NoChanges
         ));
+    }
+
+    #[test]
+    fn stage_pending_password_derives_and_strips() {
+        let mut orig = BTreeMap::from([
+            ("userPassword".to_string(), vec!["{SSHA}old".to_string()]),
+            ("sambaNTPassword".to_string(), vec!["OLD".to_string()]),
+            ("cn".to_string(), vec!["A".to_string()]),
+        ]);
+        let mut edited = orig.clone();
+        let derived = vec!["sambaNTPassword".to_string(), "sambaPwdLastSet".to_string()];
+        let (mods, mask) = stage_pending_password(
+            Some("hunter2"),
+            "userPassword",
+            &derived,
+            true,
+            1_700_000_000,
+            &mut orig,
+            &mut edited,
+        );
+        assert!(mods
+            .iter()
+            .any(|m| matches!(m, ModOp::Replace { attr, .. } if attr == "userPassword")));
+        assert!(mods
+            .iter()
+            .any(|m| matches!(m, ModOp::Replace { attr, .. } if attr == "sambaNTPassword")));
+        assert!(!orig.contains_key("userPassword") && !edited.contains_key("sambaNTPassword"));
+        assert!(orig.contains_key("cn"));
+        assert!(mask.contains(&"userPassword".to_string()));
+    }
+
+    #[test]
+    fn stage_pending_password_none_only_strips() {
+        let mut orig = BTreeMap::from([("userPassword".to_string(), vec!["x".to_string()])]);
+        let mut edited = orig.clone();
+        let (mods, mask) =
+            stage_pending_password(None, "userPassword", &[], false, 0, &mut orig, &mut edited);
+        assert!(mods.is_empty() && mask.is_empty());
+        assert!(!orig.contains_key("userPassword"));
     }
 
     #[test]

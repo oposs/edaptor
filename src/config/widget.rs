@@ -137,6 +137,24 @@ pub fn widget_for<'a>(
         .map(|w| &w.kind)
 }
 
+/// The password widget (if any) whose owner object classes overlap `ocs`. `.any()`
+/// owner objectClass overlap, matching [`widget_for`]/`picker_for`.
+pub fn password_widget_for<'a>(
+    widgets: &'a [ResolvedWidget],
+    ocs: &[String],
+) -> Option<&'a PasswordWidget> {
+    widgets.iter().find_map(|w| match &w.kind {
+        WidgetKind::Password(pw)
+            if w.owner_object_classes
+                .iter()
+                .any(|o| ocs.iter().any(|e| e.eq_ignore_ascii_case(o))) =>
+        {
+            Some(pw)
+        }
+        _ => None,
+    })
+}
+
 impl ChoiceWidget {
     /// Parse `value` into the present-token set (format-specific).
     fn parse(&self, value: &str) -> BTreeSet<String> {

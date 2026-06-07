@@ -60,7 +60,8 @@ impl super::Ctx<'_> {
                 let prep = match prepare_edit_save(
                     form,
                     read_flow.schema(),
-                    profiles,
+                    &app.widgets,
+                    app.connection_encrypted,
                     now_unix_secs_or_zero(),
                 ) {
                     Ok(p) => p,
@@ -285,7 +286,8 @@ impl super::Ctx<'_> {
                 let prep = match prepare_edit_save(
                     form,
                     read_flow.schema(),
-                    profiles,
+                    &app.widgets,
+                    app.connection_encrypted,
                     now_unix_secs_or_zero(),
                 ) {
                     Ok(p) => p,

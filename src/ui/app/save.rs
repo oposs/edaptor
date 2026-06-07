@@ -8,6 +8,7 @@ use super::overlay::{GuardIntent, Overlay, PendingAction, PostWrite};
 use super::{
     build_loaded_form, next_id, object_classes_of, perform_guard_intent, rebind_selection, App,
 };
+use crate::config::widget::{password_widget_for, ResolvedWidget};
 use crate::config::EntryProfile;
 use crate::form::changeset::{diff, ChangeSet, EditEntry, ModOp};
 use crate::form::validate::format_validation_errors;
@@ -20,7 +21,7 @@ use crate::workflows::create::{now_unix_secs_or_zero, profile_for_entry, stage_e
 use crate::workflows::read_flow::ReadFlow;
 use crate::workflows::save::{
     compose_renamed_dn, decide_allocation, mask_changeset_secrets, membership_fanout, prepare_save,
-    would_empty, PrepareSave,
+    stage_pending_password, would_empty, PrepareSave,
 };
 
 /// Build the `(original, edited, object_classes)` for a single-entry edit save,
@@ -32,9 +33,14 @@ use crate::workflows::save::{
 pub(crate) fn prepare_edit_save(
     form: &EditForm,
     schema: &SchemaModel,
-    profiles: &[EntryProfile],
+    widgets: &[ResolvedWidget],
+    connection_encrypted: bool,
     now_secs: u64,
 ) -> Result<PrepareSave, String> {
+    // Defence in depth: never stage a cleartext password change over a plain link.
+    if form.pending_password.is_some() && !connection_encrypted {
+        return Err("password change requires an encrypted connection".into());
+    }
     // Strip fan-out labels from the baseline so `diff` does not emit a spurious
     // Delete for attrs whose changes drive the per-candidate fan-out save.
     let fanout_lbls = form.fanout_labels();
@@ -47,17 +53,22 @@ pub(crate) fn prepare_edit_save(
     }
     let mut edited = form.to_edit_entry();
     let object_classes = object_classes_of(form);
-    let (password_mods, mask_attrs) =
-        match profile_for_entry(profiles, &object_classes).and_then(|p| p.password.clone()) {
-            Some(spec) => stage_edit_password(
-                &spec,
-                &object_classes,
-                &mut original.attrs,
-                &mut edited.attrs,
-                now_secs,
-            )?,
-            None => (Vec::new(), Vec::new()),
-        };
+    // Derive the password contribution from the staged `pending_password` (set by
+    // the set-password popup), stripping primary + derived from BOTH sides BEFORE
+    // the plain diff so they never double-write. Always strip even when no password
+    // is pending, so a derived attr present on the baseline can never diff.
+    let (password_mods, mask_attrs) = match password_widget_for(widgets, &object_classes) {
+        Some(pw) => stage_pending_password(
+            form.pending_password.as_deref(),
+            &pw.primary,
+            &pw.derived,
+            pw.samba,
+            now_secs,
+            &mut original.attrs,
+            &mut edited.attrs,
+        ),
+        None => (Vec::new(), Vec::new()),
+    };
     Ok(prepare_save(
         schema,
         &original,
@@ -748,6 +759,123 @@ mod tests {
                 );
             }
             _ => panic!("expected Ready"),
+        }
+    }
+
+    /// A user EditForm with no fan-out field (so it goes through the single-entry
+    /// `prepare_edit_save` path), carrying the directory's stored hash on the
+    /// baseline and `pending_password` already staged by the set-password popup.
+    fn pw_user_form_pending(pending: Option<&str>) -> EditForm {
+        let oc_field = EditField {
+            label: "objectClass".into(),
+            must: true,
+            editable: false,
+            multi: true,
+            secret: false,
+            ordered: false,
+            values: vec!["testUser".into()],
+            kind: FieldKind::Text,
+            widget: WidgetSpec::ReadOnlyText,
+            editor: TextState::new(),
+            picker: None,
+            widget_binding: None,
+        };
+        let uid_field = EditField {
+            label: "uid".into(),
+            must: true,
+            editable: true,
+            multi: false,
+            secret: false,
+            ordered: false,
+            values: vec!["ann".into()],
+            kind: FieldKind::Text,
+            widget: WidgetSpec::ReadOnlyText,
+            editor: TextState::new().with_value("ann".to_string()),
+            picker: None,
+            widget_binding: None,
+        };
+        let mut baseline = BTreeMap::new();
+        baseline.insert("objectClass".into(), vec!["testUser".into()]);
+        baseline.insert("uid".into(), vec!["ann".into()]);
+        baseline.insert("userPassword".into(), vec!["{SSHA}old".into()]);
+        EditForm {
+            dn: "uid=ann,ou=people,dc=x".into(),
+            fields: vec![oc_field, uid_field],
+            baseline,
+            mode: FormMode::Edit,
+            pending_password: pending.map(|s| s.to_string()),
+        }
+    }
+
+    /// A resolved password widget bound to `testUser`.
+    fn password_widgets() -> Vec<ResolvedWidget> {
+        use crate::config::widget::{PasswordWidget, WidgetKind};
+        vec![ResolvedWidget {
+            owner_object_classes: vec!["testUser".into()],
+            attr: "userPassword".into(),
+            kind: WidgetKind::Password(PasswordWidget {
+                primary: "userPassword".into(),
+                derived: vec![],
+                samba: false,
+            }),
+        }]
+    }
+
+    #[test]
+    fn prepare_edit_save_pending_password_replaces_and_masks() {
+        let form = pw_user_form_pending(Some("hunter2"));
+        let prep = prepare_edit_save(
+            &form,
+            &user_schema(),
+            &password_widgets(),
+            true,
+            1_700_000_000,
+        )
+        .expect("encrypted: ok");
+        match prep {
+            PrepareSave::Ready { plan, ldif, .. } => {
+                assert!(ldif.contains("********"), "preview masks the password");
+                assert!(!ldif.contains("hunter2"), "cleartext must not appear");
+                match plan {
+                    SavePlan::Modify(mods) => assert!(
+                        mods.contains(&ModOp::Replace {
+                            attr: "userPassword".into(),
+                            values: vec!["hunter2".into()],
+                        }),
+                        "new password is a REPLACE in the plan"
+                    ),
+                    _ => panic!("expected Modify"),
+                }
+            }
+            _ => panic!("expected Ready"),
+        }
+    }
+
+    #[test]
+    fn prepare_edit_save_no_pending_strips_baseline_hash_no_change() {
+        // Blank password (no pending): the baseline hash must be stripped so it
+        // never diffs to a Delete; with no other edit this is NoChanges.
+        let form = pw_user_form_pending(None);
+        let prep = prepare_edit_save(
+            &form,
+            &user_schema(),
+            &password_widgets(),
+            true,
+            1_700_000_000,
+        )
+        .expect("ok");
+        assert!(
+            matches!(prep, PrepareSave::NoChanges),
+            "blank password + no other edit is NoChanges (baseline hash stripped)"
+        );
+    }
+
+    #[test]
+    fn prepare_edit_save_pending_on_plain_connection_is_rejected() {
+        let form = pw_user_form_pending(Some("hunter2"));
+        match prepare_edit_save(&form, &user_schema(), &password_widgets(), false, 0) {
+            Err(err) => assert!(err.contains("encrypted"), "TLS guard message: {err}"),
+            Ok(_) => panic!("plain connection must be rejected"),
         }
     }
 
