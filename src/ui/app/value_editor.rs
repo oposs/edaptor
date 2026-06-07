@@ -30,7 +30,9 @@ pub(crate) fn open_value_editor(app: &mut App, _structure: &Structure) {
         return;
     };
 
-    if let Some(w) = field.widget_choice.clone().filter(|_| field.editable) {
+    if let Some(crate::config::widget::WidgetKind::Choice(w)) =
+        field.widget_binding.clone().filter(|_| field.editable)
+    {
         // A `[profile.widget.<attr>]` choice field opens a static choice overlay
         // (the picker UI seeded from fixed options, no LDAP search).
         let ve = ValueEditor::open_choice(focus, field, &w);
@@ -493,7 +495,7 @@ mod tests {
             widget: WidgetSpec::ReadOnlyText,
             editor: TextState::new(),
             picker: Some(member_dn_binding()),
-            widget_choice: None,
+            widget_binding: None,
         };
         let mut app = bare_app(false);
         app.form = Some(EditForm {
@@ -501,6 +503,7 @@ mod tests {
             fields: vec![field],
             baseline: Default::default(),
             mode: FormMode::Edit,
+            pending_password: None,
         });
         app
     }
@@ -628,7 +631,7 @@ mod tests {
             widget: WidgetSpec::ReadOnlyText,
             editor: TextState::new(),
             picker: Some(gid_picker_binding()),
-            widget_choice: None,
+            widget_binding: None,
         };
         let mut app = bare_app(false);
         app.form = Some(EditForm {
@@ -636,6 +639,7 @@ mod tests {
             fields: vec![field],
             baseline: Default::default(),
             mode: FormMode::Edit,
+            pending_password: None,
         });
         app.form_focus = 0;
         app
@@ -967,7 +971,7 @@ mod tests {
             widget: WidgetSpec::ReadOnlyText,
             editor: TextState::new().with_value(value.to_string()),
             picker: None,
-            widget_choice: Some(widget.clone()),
+            widget_binding: Some(crate::config::widget::WidgetKind::Choice(widget.clone())),
         };
         let mut app = bare_app(false);
         app.form = Some(EditForm {
@@ -975,6 +979,7 @@ mod tests {
             fields: vec![field],
             baseline: Default::default(),
             mode: FormMode::Edit,
+            pending_password: None,
         });
         app.focus = Pane::Form;
         app.form_focus = 0;

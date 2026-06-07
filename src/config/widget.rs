@@ -24,12 +24,28 @@ pub struct ChoiceWidget {
     pub options: Vec<ChoiceOption>,
 }
 
+/// A resolved password widget: the primary cleartext attr plus the derived
+/// attrs written alongside it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PasswordWidget {
+    pub primary: String,
+    pub derived: Vec<String>,
+    pub samba: bool,
+}
+
+/// A resolved widget of any palette kind.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WidgetKind {
+    Choice(ChoiceWidget),
+    Password(PasswordWidget),
+}
+
 /// A resolved widget bound to its owning profile's object classes (for matching).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedWidget {
     pub owner_object_classes: Vec<String>,
     pub attr: String,
-    pub widget: ChoiceWidget,
+    pub kind: WidgetKind,
 }
 
 /// Resolve every `[profile.widget.*]`. Returns `Err(msg)` on an invalid binding
@@ -39,48 +55,64 @@ pub fn resolve_widgets(profiles: &[EntryProfile]) -> Result<Vec<ResolvedWidget>,
     let mut out = Vec::new();
     for owner in profiles {
         for (attr, spec) in &owner.widgets {
-            let WidgetSpecCfg::Choice {
-                select,
-                format,
-                options,
-            } = spec
-            else {
-                // Non-choice widgets (e.g. Password) are not resolved here.
-                continue;
-            };
-            if options.is_empty() {
-                return Err(format!(
-                    "[profile.widget.{attr}]: options must not be empty"
-                ));
-            }
-            let select = match select.to_ascii_lowercase().as_str() {
-                "single" => Cardinality::Single,
-                "multi" => Cardinality::Multi,
-                other => return Err(format!("[profile.widget.{attr}]: bad select \"{other}\"")),
-            };
-            let format = match format.to_ascii_lowercase().as_str() {
-                "plain" => ChoiceFormat::Plain,
-                "bracketed" => ChoiceFormat::Bracketed,
-                "bitmask" | "delimited" => {
-                    return Err(format!(
-                        "[profile.widget.{attr}]: format \"{format}\" not yet implemented"
-                    ))
+            let kind = match spec {
+                WidgetSpecCfg::Choice {
+                    select,
+                    format,
+                    options,
+                } => {
+                    if options.is_empty() {
+                        return Err(format!(
+                            "[profile.widget.{attr}]: options must not be empty"
+                        ));
+                    }
+                    let select = match select.to_ascii_lowercase().as_str() {
+                        "single" => Cardinality::Single,
+                        "multi" => Cardinality::Multi,
+                        other => {
+                            return Err(format!("[profile.widget.{attr}]: bad select \"{other}\""))
+                        }
+                    };
+                    let format = match format.to_ascii_lowercase().as_str() {
+                        "plain" => ChoiceFormat::Plain,
+                        "bracketed" => ChoiceFormat::Bracketed,
+                        "bitmask" | "delimited" => {
+                            return Err(format!(
+                                "[profile.widget.{attr}]: format \"{format}\" not yet implemented"
+                            ))
+                        }
+                        other => {
+                            return Err(format!("[profile.widget.{attr}]: bad format \"{other}\""))
+                        }
+                    };
+                    if format == ChoiceFormat::Plain && select == Cardinality::Multi {
+                        return Err(format!(
+                            "[profile.widget.{attr}]: format \"plain\" requires select = \"single\""
+                        ));
+                    }
+                    WidgetKind::Choice(ChoiceWidget {
+                        select,
+                        format,
+                        options: options.clone(),
+                    })
                 }
-                other => return Err(format!("[profile.widget.{attr}]: bad format \"{other}\"")),
+                WidgetSpecCfg::Password { samba } => {
+                    let derived = if *samba {
+                        vec!["sambaNTPassword".to_string(), "sambaPwdLastSet".to_string()]
+                    } else {
+                        Vec::new()
+                    };
+                    WidgetKind::Password(PasswordWidget {
+                        primary: attr.clone(),
+                        derived,
+                        samba: *samba,
+                    })
+                }
             };
-            if format == ChoiceFormat::Plain && select == Cardinality::Multi {
-                return Err(format!(
-                    "[profile.widget.{attr}]: format \"plain\" requires select = \"single\""
-                ));
-            }
             out.push(ResolvedWidget {
                 owner_object_classes: owner.object_classes.clone(),
                 attr: attr.clone(),
-                widget: ChoiceWidget {
-                    select,
-                    format,
-                    options: options.clone(),
-                },
+                kind,
             });
         }
     }
@@ -93,7 +125,7 @@ pub fn widget_for<'a>(
     widgets: &'a [ResolvedWidget],
     ocs: &[String],
     attr: &str,
-) -> Option<&'a ChoiceWidget> {
+) -> Option<&'a WidgetKind> {
     widgets
         .iter()
         .find(|w| {
@@ -102,7 +134,7 @@ pub fn widget_for<'a>(
                     .iter()
                     .any(|oc| ocs.iter().any(|e| e.eq_ignore_ascii_case(oc)))
         })
-        .map(|w| &w.widget)
+        .map(|w| &w.kind)
 }
 
 impl ChoiceWidget {
@@ -222,9 +254,56 @@ mod tests {
             &[("D", "Disabled")],
         )];
         let resolved = resolve_widgets(&profiles).expect("ok");
-        let w = widget_for(&resolved, &["inetOrgPerson".into()], "sambaacctflags").unwrap();
-        assert_eq!(w.select, crate::config::relation::Cardinality::Multi);
-        assert!(matches!(w.format, ChoiceFormat::Bracketed));
+        match widget_for(&resolved, &["inetOrgPerson".into()], "sambaacctflags").unwrap() {
+            WidgetKind::Choice(w) => {
+                assert_eq!(w.select, crate::config::relation::Cardinality::Multi);
+                assert!(matches!(w.format, ChoiceFormat::Bracketed));
+            }
+            _ => panic!("expected choice widget"),
+        }
+    }
+
+    #[test]
+    fn resolves_password_widget_with_derived() {
+        let mut p = EntryProfile {
+            name: "user".into(),
+            object_classes: vec!["inetOrgPerson".into()],
+            ..Default::default()
+        };
+        p.widgets.insert(
+            "userPassword".into(),
+            WidgetSpecCfg::Password { samba: true },
+        );
+        let resolved = resolve_widgets(&[p]).expect("ok");
+        match widget_for(&resolved, &["inetOrgPerson".into()], "userPassword").unwrap() {
+            WidgetKind::Password(pw) => {
+                assert_eq!(pw.primary, "userPassword");
+                assert!(pw.samba);
+                assert_eq!(
+                    pw.derived,
+                    vec!["sambaNTPassword".to_string(), "sambaPwdLastSet".to_string()]
+                );
+            }
+            _ => panic!("expected password widget"),
+        }
+    }
+
+    #[test]
+    fn resolves_password_widget_without_samba_has_no_derived() {
+        let mut p = EntryProfile {
+            name: "u".into(),
+            object_classes: vec!["inetOrgPerson".into()],
+            ..Default::default()
+        };
+        p.widgets.insert(
+            "userPassword".into(),
+            WidgetSpecCfg::Password { samba: false },
+        );
+        let resolved = resolve_widgets(&[p]).unwrap();
+        match widget_for(&resolved, &["inetOrgPerson".into()], "userPassword").unwrap() {
+            WidgetKind::Password(pw) => assert!(pw.derived.is_empty()),
+            _ => panic!("expected password widget"),
+        }
     }
 
     #[test]

@@ -144,7 +144,7 @@ fn edit_focused_field(app: &mut App, key: KeyEvent) {
     let focus = app.form_focus;
     if let Some(form) = app.form.as_mut() {
         if let Some(field) = form.fields.get_mut(focus) {
-            if field.editable && !field.multi && field.widget_choice.is_none() {
+            if field.editable && !field.multi && field.widget_binding.is_none() {
                 field.editor.handle_key_event(key);
             }
         }
@@ -525,7 +525,9 @@ mod tests {
                     widget: WidgetSpec::ReadOnlyText,
                     editor: tui_prompts::TextState::new().with_value("/bin/bash".to_string()),
                     picker: None,
-                    widget_choice: Some(make_choice_widget()),
+                    widget_binding: Some(crate::config::widget::WidgetKind::Choice(
+                        make_choice_widget(),
+                    )),
                 },
                 EditField {
                     label: "sn".to_string(),
@@ -539,11 +541,12 @@ mod tests {
                     widget: WidgetSpec::ReadOnlyText,
                     editor: tui_prompts::TextState::new().with_value("Smith".to_string()),
                     picker: None,
-                    widget_choice: None,
+                    widget_binding: None,
                 },
             ],
             baseline: Default::default(),
             mode: FormMode::Edit,
+            pending_password: None,
         });
 
         // Focus the choice field (index 0) and type a character.

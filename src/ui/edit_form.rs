@@ -46,8 +46,8 @@ pub struct EditField {
     pub editor: TextState<'static>,
     /// `Some` when this field is bound to a `[profile.picker.<attr>]` picker.
     pub picker: Option<crate::config::relation::PickerBinding>,
-    /// `Some` when bound to a `[profile.widget.<attr>]` choice widget.
-    pub widget_choice: Option<crate::config::widget::ChoiceWidget>,
+    /// `Some` when bound to a `[profile.widget.<attr>]` widget (choice or password).
+    pub widget_binding: Option<crate::config::widget::WidgetKind>,
 }
 
 impl EditField {
@@ -260,6 +260,10 @@ pub struct EditForm {
     pub baseline: BTreeMap<String, Vec<String>>,
     /// Edit an existing entry, or compose a new one (Create → Add on save).
     pub mode: FormMode,
+    /// A password change staged by the PasswordEditor popup (cleartext), pending
+    /// the next save. The password fields are read-only, so the new value cannot
+    /// live in a field editor; it lives here. Cleared on save/revert.
+    pub pending_password: Option<String>,
 }
 
 impl EditForm {
@@ -320,6 +324,9 @@ impl EditForm {
     /// semantics, so a pure reorder of a multi-valued attribute is NOT dirty. A
     /// missing baseline key is treated as an empty set.
     pub fn is_dirty(&self) -> bool {
+        if self.pending_password.is_some() {
+            return true;
+        }
         const EMPTY: &Vec<String> = &Vec::new();
         self.fields.iter().any(|f| {
             let current = f.current_values();
@@ -371,7 +378,7 @@ pub fn build_edit_form(model: &FormModel, schema: &SchemaModel, read_only: bool)
                 widget: f.widget.clone(),
                 editor: TextState::new().with_value(seed),
                 picker: None,
-                widget_choice: None,
+                widget_binding: None,
             }
         })
         .collect();
@@ -388,6 +395,7 @@ pub fn build_edit_form(model: &FormModel, schema: &SchemaModel, read_only: bool)
         fields,
         baseline,
         mode: FormMode::Edit,
+        pending_password: None,
     }
 }
 
@@ -420,7 +428,7 @@ pub fn inject_password_fields(form: &mut EditForm, spec: &crate::config::Passwor
         widget: WidgetSpec::ReadOnlyText,
         editor: TextState::new(),
         picker: None,
-        widget_choice: None,
+        widget_binding: None,
     };
     form.fields.push(mk(primary));
     form.fields.push(mk(confirm));
@@ -465,8 +473,10 @@ pub fn tag_widget_fields(
         return;
     }
     for field in &mut form.fields {
-        if let Some(w) = crate::config::widget::widget_for(widgets, object_classes, &field.label) {
-            field.widget_choice = Some(w.clone());
+        if let Some(kind @ crate::config::widget::WidgetKind::Choice(_)) =
+            crate::config::widget::widget_for(widgets, object_classes, &field.label)
+        {
+            field.widget_binding = Some(kind.clone());
             field.editable = true;
         }
     }
@@ -557,10 +567,11 @@ mod tests {
                     select: None,
                     fanout_attr: fanout,
                 }),
-                widget_choice: None,
+                widget_binding: None,
             }],
             baseline: Default::default(),
             mode: FormMode::Edit,
+            pending_password: None,
         };
         let with_fanout = mk(Some("member".into()));
         assert_eq!(with_fanout.fanout_labels(), vec!["memberOf".to_string()]);
@@ -764,13 +775,14 @@ mod tests {
             widget: crate::ui::form::WidgetSpec::ReadOnlyText,
             editor: TextState::new(),
             picker: None,
-            widget_choice: None,
+            widget_binding: None,
         };
         let mut form = EditForm {
             dn: "uid=alice,ou=people,dc=example,dc=org".into(),
             fields: vec![plain("cn"), plain("userPassword")],
             baseline: Default::default(),
             mode: FormMode::Edit,
+            pending_password: None,
         };
         let spec = crate::config::PasswordSpec {
             ldap_attribute: "userPassword".into(),
@@ -838,7 +850,7 @@ mod tests {
                 widget: crate::ui::form::WidgetSpec::ReadOnlyText,
                 editor: TextState::new().with_value(seed),
                 picker: None,
-                widget_choice: None,
+                widget_binding: None,
             }
         };
         let mut form = EditForm {
@@ -853,6 +865,7 @@ mod tests {
             ],
             baseline: Default::default(),
             mode: FormMode::Edit,
+            pending_password: None,
         };
         order_fields(&mut form);
         let labels: Vec<&str> = form.fields.iter().map(|f| f.label.as_str()).collect();
@@ -886,7 +899,7 @@ mod tests {
                 widget: crate::ui::form::WidgetSpec::ReadOnlyText,
                 editor: TextState::new().with_value(seed),
                 picker: None,
-                widget_choice: None,
+                widget_binding: None,
             }
         };
         let mut form = EditForm {
@@ -896,6 +909,7 @@ mod tests {
             fields: vec![mk("aaa", vec![]), mk("zoo", vec!["v"])],
             baseline: Default::default(),
             mode: FormMode::Edit,
+            pending_password: None,
         };
         order_fields(&mut form);
         let labels: Vec<&str> = form.fields.iter().map(|f| f.label.as_str()).collect();
@@ -919,10 +933,11 @@ mod tests {
                 widget: WidgetSpec::ReadOnlyText,
                 editor: TextState::new(),
                 picker: None,
-                widget_choice: None,
+                widget_binding: None,
             }],
             baseline: Default::default(),
             mode: FormMode::Edit,
+            pending_password: None,
         };
         let pickers = vec![ResolvedPicker {
             owner_object_classes: vec!["inetOrgPerson".into()],
@@ -962,10 +977,11 @@ mod tests {
                 widget: WidgetSpec::ReadOnlyText,
                 editor: TextState::new(),
                 picker: None,
-                widget_choice: None,
+                widget_binding: None,
             }],
             baseline: Default::default(),
             mode: FormMode::Edit,
+            pending_password: None,
         };
         tag_picker_fields(&mut form2, &pickers, &["inetOrgPerson".to_string()], true);
         assert!(
@@ -989,7 +1005,7 @@ mod tests {
             widget: WidgetSpec::ReadOnlyText,
             editor: TextState::new().with_value("1001"),
             picker: None,
-            widget_choice: None,
+            widget_binding: None,
         };
         let binding = PickerBinding {
             attr: "gidNumber".into(),
@@ -1014,7 +1030,7 @@ mod tests {
     #[test]
     fn tag_widget_fields_attaches_matching_choice() {
         use crate::config::relation::Cardinality;
-        use crate::config::widget::{ChoiceFormat, ChoiceWidget, ResolvedWidget};
+        use crate::config::widget::{ChoiceFormat, ChoiceWidget, ResolvedWidget, WidgetKind};
         use crate::config::ChoiceOption;
 
         let mut form = writable_form();
@@ -1030,19 +1046,19 @@ mod tests {
             widget: crate::ui::form::WidgetSpec::ReadOnlyText,
             editor: TextState::new().with_value("/bin/bash".to_string()),
             picker: None,
-            widget_choice: None,
+            widget_binding: None,
         });
         let widgets = vec![ResolvedWidget {
             owner_object_classes: vec!["demoPerson".into()],
             attr: "loginShell".into(),
-            widget: ChoiceWidget {
+            kind: WidgetKind::Choice(ChoiceWidget {
                 select: Cardinality::Single,
                 format: ChoiceFormat::Plain,
                 options: vec![ChoiceOption {
                     value: "/bin/bash".into(),
                     label: "Bash".into(),
                 }],
-            },
+            }),
         }];
         tag_widget_fields(&mut form, &widgets, &["demoPerson".to_string()], false);
         let f = form
@@ -1050,7 +1066,15 @@ mod tests {
             .iter()
             .find(|f| f.label == "loginShell")
             .unwrap();
-        assert!(f.widget_choice.is_some());
+        assert!(matches!(f.widget_binding, Some(WidgetKind::Choice(_))));
         assert!(f.editable, "a choice field stays editable");
+    }
+
+    #[test]
+    fn pending_password_makes_form_dirty() {
+        let mut form = writable_form();
+        assert!(!form.is_dirty());
+        form.pending_password = Some("hunter2".into());
+        assert!(form.is_dirty(), "a staged password change is dirty");
     }
 }

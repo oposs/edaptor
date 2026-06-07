@@ -294,7 +294,7 @@ fn selection_style(active: bool) -> Style {
 /// - editable single → the live editor value (so typing is visible);
 /// - read-only single → the stored value.
 fn field_display_value(fld: &EditField) -> String {
-    if let Some(w) = &fld.widget_choice {
+    if let Some(crate::config::widget::WidgetKind::Choice(w)) = &fld.widget_binding {
         let current = fld.current_values().first().cloned().unwrap_or_default();
         return w.present_summary(&current);
     }
@@ -635,7 +635,7 @@ mod tests {
             widget: WidgetSpec::ReadOnlyText,
             editor: TextState::new().with_value(value.to_string()),
             picker: None,
-            widget_choice: None,
+            widget_binding: None,
         }
     }
 
@@ -828,7 +828,7 @@ mod tests {
             widget: WidgetSpec::ReadOnlyText,
             editor: TextState::new(),
             picker: None,
-            widget_choice: None,
+            widget_binding: None,
         };
         App {
             focus: Pane::Form,
@@ -846,6 +846,7 @@ mod tests {
                 fields: vec![field],
                 baseline: Default::default(),
                 mode: FormMode::Edit,
+                pending_password: None,
             }),
             form_focus: 0,
             form_scroll: 0,
@@ -1039,10 +1040,11 @@ mod tests {
                 widget: WidgetSpec::ReadOnlyText,
                 editor: TextState::new().with_value(value.to_string()),
                 picker: None,
-                widget_choice: None,
+                widget_binding: None,
             }],
             baseline,
             mode: FormMode::Edit,
+            pending_password: None,
         });
         app
     }
@@ -1282,7 +1284,7 @@ mod tests {
             widget: WidgetSpec::ReadOnlyText,
             editor: TextState::new().with_value("[DU         ]".to_string()),
             picker: None,
-            widget_choice: Some(ChoiceWidget {
+            widget_binding: Some(crate::config::widget::WidgetKind::Choice(ChoiceWidget {
                 select: Cardinality::Multi,
                 format: ChoiceFormat::Bracketed,
                 options: vec![
@@ -1295,7 +1297,7 @@ mod tests {
                         label: "No expire".to_string(),
                     },
                 ],
-            }),
+            })),
         };
         assert_eq!(field_display_value(&fld), "Disabled");
     }

@@ -58,10 +58,11 @@ pub(crate) fn with_form(mut app: App, dn: &str) -> App {
             widget: WidgetSpec::ReadOnlyText,
             editor: TextState::new().with_value("x".to_string()),
             picker: None,
-            widget_choice: None,
+            widget_binding: None,
         }],
         baseline: Default::default(),
         mode: FormMode::Edit,
+        pending_password: None,
     });
     app
 }
