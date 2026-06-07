@@ -2,7 +2,7 @@
 //! preview secrets, compute membership fan-out, decide number allocation, and
 //! compose renamed DNs. No terminal, no network, no UI types.
 
-use crate::form::changeset::{diff, ChangeSet, EditEntry, ModOp};
+use crate::form::changeset::{diff, is_secret_attr, ChangeSet, EditEntry, ModOp};
 use crate::form::validate::{plan_save, validate, SavePlan, ValidationError};
 use crate::ldap::ldif::render_changeset;
 use crate::schema::SchemaModel;
@@ -31,7 +31,12 @@ pub enum PrepareSave {
 /// cleartext password or NT hash. `sambaPwdLastSet` is not secret and is left
 /// intact (it is not in `mask_attrs`). Pure.
 pub fn mask_changeset_secrets(cs: &ChangeSet, mask_attrs: &[String]) -> ChangeSet {
-    let is_masked = |attr: &str| mask_attrs.iter().any(|a| a.eq_ignore_ascii_case(attr));
+    // Mask the explicit `mask_attrs` (the password flow's derived attrs) AND any
+    // attribute that is intrinsically secret — defence in depth, so a secret can
+    // never appear in clear in the preview no matter how it entered the changeset.
+    let is_masked = |attr: &str| {
+        is_secret_attr(attr) || mask_attrs.iter().any(|a| a.eq_ignore_ascii_case(attr))
+    };
     let mut out = cs.clone();
     for m in &mut out.mods {
         match m {
@@ -160,6 +165,44 @@ mod tests {
     use super::*;
     use crate::workflows::test_fixtures::user_schema;
     use std::collections::BTreeMap;
+
+    #[test]
+    fn mask_changeset_secrets_masks_secret_attrs_even_without_mask_list() {
+        // Defense in depth: a secret attribute that reaches a changeset by ANY
+        // path (not just the password flow) must never appear cleartext in the
+        // preview — even when `mask_attrs` is empty.
+        let cs = ChangeSet {
+            dn: "uid=jsmith,ou=people,dc=example,dc=org".into(),
+            modrdn: None,
+            mods: vec![
+                ModOp::Replace {
+                    attr: "sambaNTPassword".into(),
+                    values: vec!["hunter2".into()],
+                },
+                ModOp::Replace {
+                    attr: "cn".into(),
+                    values: vec!["James".into()],
+                },
+            ],
+        };
+        let masked = mask_changeset_secrets(&cs, &[]);
+        let val = |attr: &str| {
+            masked.mods.iter().find_map(|m| match m {
+                ModOp::Replace { attr: a, values } if a == attr => Some(values.clone()),
+                _ => None,
+            })
+        };
+        assert_eq!(
+            val("sambaNTPassword"),
+            Some(vec!["********".to_string()]),
+            "secret attr masked even with empty mask_attrs"
+        );
+        assert_eq!(
+            val("cn"),
+            Some(vec!["James".to_string()]),
+            "non-secret attr untouched"
+        );
+    }
 
     #[test]
     fn compose_renamed_dn_replaces_rdn() {

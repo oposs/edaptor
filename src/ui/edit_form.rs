@@ -14,7 +14,7 @@ use std::collections::BTreeMap;
 use tui_prompts::{State, TextState};
 
 use crate::config::relation::{PickerBinding, StoreKey};
-use crate::form::changeset::{is_x_ordered, EditEntry};
+use crate::form::changeset::{is_secret_attr, is_x_ordered, EditEntry};
 use crate::schema::{FieldKind, SchemaModel};
 use crate::ui::form::{FormField, FormModel, WidgetSpec};
 use crate::ui::picker::{Candidate, PickerState};
@@ -347,7 +347,7 @@ pub(crate) fn value_set_eq(a: &[String], b: &[String]) -> bool {
 ///   (binary / boolean-checkbox / and normally `memberOf` stay static —
 ///   [`field_is_editable`]). Picker fields are tagged separately by
 ///   [`tag_picker_fields`] at the call seams, which may override editability.
-/// - `secret`   = a password attribute ([`is_secret_attr`]);
+/// - `secret`   = a password attribute ([`crate::form::changeset::is_secret_attr`]);
 /// - `ordered`  = an X-ORDERED config attribute ([`is_x_ordered`]).
 ///
 /// P1 uses the result purely for display. The single-value `editor` is seeded
@@ -498,17 +498,20 @@ fn field_is_editable(field: &FormField) -> bool {
     if field.label.eq_ignore_ascii_case("memberOf") {
         return false;
     }
+    // Secret/hash attributes are managed by the password flow (the injected
+    // userPassword + confirm fields derive `sambaNTPassword` via the NT hash) —
+    // never hand-edited inline. A raw edit of `sambaNTPassword`/`sambaLMPassword`
+    // would be written verbatim (no hashing), storing a broken/cleartext value,
+    // and would leak into the confirm preview. So they are display-only (masked).
+    // The injected password fields set `editable: true` directly, so they are
+    // unaffected; change passwords there or via the `passwd` subcommand.
+    if is_secret_attr(&field.label) {
+        return false;
+    }
     !matches!(
         field.widget,
         WidgetSpec::BinaryNote(_) | WidgetSpec::DisabledCheckBox(_)
     )
-}
-
-/// Whether `attr` holds a secret that must be masked on screen. Conservative
-/// minimal set (extend as needed); case-insensitive.
-pub fn is_secret_attr(attr: &str) -> bool {
-    const SECRET: &[&str] = &["userPassword", "sambaNTPassword", "sambaLMPassword"];
-    SECRET.iter().any(|a| a.eq_ignore_ascii_case(attr))
 }
 
 #[cfg(test)]
@@ -633,6 +636,24 @@ mod tests {
         assert!(field("userPassword").secret, "userPassword is secret");
         assert!(!field("cn").secret);
         assert!(field("cn").editable, "cn edits in writable mode");
+    }
+
+    #[test]
+    fn secret_fields_are_not_editable() {
+        // Password/hash attributes (userPassword, sambaNTPassword, sambaLMPassword)
+        // are managed by the password flow — never hand-edited inline. A direct
+        // edit would be written verbatim (no NT-hash) and leak into the confirm
+        // preview, so they render masked + read-only. The injected password
+        // fields stay editable independently (they set `editable: true` directly).
+        let model = build_form_model(&schema(), &["demoPerson"], &entry(), &[]);
+        let form = build_edit_form(&model, &schema(), false);
+        let field = |name: &str| form.fields.iter().find(|f| f.label == name).unwrap();
+        assert!(field("userPassword").secret);
+        assert!(
+            !field("userPassword").editable,
+            "secret/hash fields must be read-only inline"
+        );
+        assert!(field("cn").editable, "non-secret fields stay editable");
     }
 
     #[test]
