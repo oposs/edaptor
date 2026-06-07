@@ -179,6 +179,10 @@ pub(crate) fn overlay_key(app: &mut App, key: KeyEvent) -> Option<PendingAction>
             value_editor_key(app, key);
             None
         }
+        Some(Overlay::PasswordEditor(_)) => {
+            super::password_editor::password_editor_key(app, key);
+            None
+        }
         Some(Overlay::Guard { .. }) => guard_key(app, key),
         Some(Overlay::ChooseProfile { .. }) => choose_profile_key(app, key),
         None => None,

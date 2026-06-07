@@ -34,6 +34,7 @@ mod action;
 mod create;
 mod input;
 mod overlay;
+pub(crate) mod password_editor;
 mod save;
 mod structure_view;
 #[cfg(test)]
@@ -75,6 +76,10 @@ pub struct App {
     pub should_quit: bool,
     /// Global read-only mode (no editing / writes).
     pub read_only: bool,
+    /// Whether the LDAP connection is encrypted (ldaps:// or start_tls). The
+    /// set-password popup is gated on this — a cleartext password must never be
+    /// staged over an unencrypted link.
+    pub connection_encrypted: bool,
 
     // Pane 1 — branch tree.
     /// Selection / expansion state for the tree widget.
@@ -127,6 +132,7 @@ pub struct App {
 pub fn run(config: Config, password: String) -> Result<()> {
     let base_dn = config.server.base_dn.clone();
     let read_only = config.is_read_only();
+    let connection_encrypted = config.is_encrypted();
     let profiles = config.profiles.clone();
     let pickers = resolve_pickers(&config.profiles);
     let widgets = crate::config::widget::resolve_widgets(&config.profiles)
@@ -180,6 +186,7 @@ pub fn run(config: Config, password: String) -> Result<()> {
         focus: Pane::Tree,
         should_quit: false,
         read_only,
+        connection_encrypted,
         tree_state,
         current_branch,
         last_search: String::new(),

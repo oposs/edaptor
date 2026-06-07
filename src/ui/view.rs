@@ -361,6 +361,10 @@ fn render_overlay(f: &mut Frame, app: &mut App) {
         render_value_editor(f, ve, single, area);
         return;
     }
+    if let Some(Overlay::PasswordEditor(ed)) = app.overlay.as_ref() {
+        render_password_editor(f, ed, area);
+        return;
+    }
     let (title, body, hint, border) = match app.overlay.as_ref() {
         Some(Overlay::Confirm { title, body, .. }) => {
             (title.clone(), body.clone(), " [Y]es   [N]o ", Color::Yellow)
@@ -378,6 +382,7 @@ fn render_overlay(f: &mut Frame, app: &mut App) {
             Color::Yellow,
         ),
         Some(Overlay::ValueEditor(_)) => return, // handled above (needs &mut)
+        Some(Overlay::PasswordEditor(_)) => return, // handled above
         Some(Overlay::ChooseProfile { entries, sel }) => {
             let body = entries
                 .iter()
@@ -580,6 +585,78 @@ fn render_value_editor(f: &mut Frame, ve: &mut ValueEditor, single: bool, area: 
     }
 }
 
+/// Draw the set-password popup: two masked rows (New / Confirm) with the focused
+/// row marked, the affected-attrs note, an optional validation message, and the
+/// key hints. The cleartext is NEVER rendered — only bullet masks.
+fn render_password_editor(
+    f: &mut Frame,
+    ed: &crate::ui::app::password_editor::PasswordEditor,
+    area: Rect,
+) {
+    use crate::ui::app::password_editor::PwField;
+
+    let new_mask = "•".repeat(ed.new.value().chars().count());
+    let confirm_mask = "•".repeat(ed.confirm.value().chars().count());
+    let new_marker = if ed.focus == PwField::New { ">" } else { " " };
+    let confirm_marker = if ed.focus == PwField::Confirm {
+        ">"
+    } else {
+        " "
+    };
+
+    let mut lines = vec![
+        format!("{new_marker} New password: {new_mask}"),
+        format!("{confirm_marker} Confirm:      {confirm_mask}"),
+        String::new(),
+        format!("Updates: {}", ed.affected.join(", ")),
+    ];
+    if !ed.message.is_empty() {
+        lines.push(ed.message.clone());
+    }
+    let body = lines.join("\n");
+    let body_lines = body.lines().count().max(1) as u16;
+
+    let w = 60.min(area.width.saturating_sub(4)).max(20);
+    let h = (body_lines + 4).clamp(7, area.height.saturating_sub(2).max(7));
+    let rect = centered(w, h, area);
+
+    f.render_widget(Clear, rect);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Double)
+        .title(" Set password ")
+        .title_bottom(" Alt+S set · Alt+C cancel · Tab switch ")
+        .border_style(
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        );
+    let inner = block.inner(rect);
+    f.render_widget(block, rect);
+
+    // Render the body; the validation message (last line, when present) in red.
+    let normal_count = if ed.message.is_empty() {
+        body_lines as usize
+    } else {
+        body_lines as usize - 1
+    };
+    let normal_body: String = body
+        .lines()
+        .take(normal_count)
+        .collect::<Vec<_>>()
+        .join("\n");
+    f.render_widget(
+        Paragraph::new(normal_body).wrap(Wrap { trim: false }),
+        Rect::new(inner.x, inner.y, inner.width, inner.height),
+    );
+    if !ed.message.is_empty() && normal_count < inner.height as usize {
+        f.render_widget(
+            Paragraph::new(ed.message.clone()).style(Style::default().fg(Color::Red)),
+            Rect::new(inner.x, inner.y + normal_count as u16, inner.width, 1),
+        );
+    }
+}
+
 /// Center a `w`×`h` rect within `area` (clamped to fit). (Spike `centered`,
 /// re-expressing the facade's `center_origin` math.)
 pub fn centered(w: u16, h: u16, area: Rect) -> Rect {
@@ -607,8 +684,8 @@ pub fn clamp_scroll(focus: usize, scroll: usize, viewport: usize, n: usize) -> u
 #[cfg(test)]
 mod tests {
     use super::{
-        centered, clamp_scroll, field_display_value, render_form, render_value_editor,
-        selection_style, status_line,
+        centered, clamp_scroll, field_display_value, render_form, render_password_editor,
+        render_value_editor, selection_style, status_line,
     };
     use crate::schema::FieldKind;
     use crate::ui::app::{App, Pane};
@@ -707,6 +784,39 @@ mod tests {
             }
         }
         assert!(found, "saved selected row must render `*[x] ...`");
+    }
+
+    #[test]
+    fn password_editor_renders_masked_and_leaks_no_cleartext() {
+        use crate::ui::app::password_editor::{PasswordEditor, PwField};
+        use tui_prompts::TextState;
+        let ed = PasswordEditor {
+            new: TextState::new().with_value("hunter2".to_string()),
+            confirm: TextState::new().with_value("hun".to_string()),
+            focus: PwField::New,
+            affected: vec!["userPassword".to_string(), "sambaNTPassword".to_string()],
+            message: String::new(),
+        };
+        let (w, h) = (70u16, 20u16);
+        let backend = TestBackend::new(w, h);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| render_password_editor(f, &ed, Rect::new(0, 0, w, h)))
+            .expect("password popup render must not panic");
+        let buffer = terminal.backend().buffer();
+        let mut whole = String::new();
+        for y in 0..h {
+            whole.push_str(&row_text(buffer, 0, y, w));
+            whole.push('\n');
+        }
+        assert!(whole.contains("Set password"), "title shown");
+        assert!(whole.contains("Updates:"), "affected note shown");
+        assert!(whole.contains("userPassword"), "affected attr shown");
+        assert!(
+            !whole.contains("hunter2") && !whole.contains("hun"),
+            "cleartext must never be rendered: {whole:?}"
+        );
+        assert!(whole.contains('•'), "masked bullets shown");
     }
 
     #[test]
@@ -834,6 +944,7 @@ mod tests {
             focus: Pane::Form,
             should_quit: false,
             read_only: false,
+            connection_encrypted: false,
             tree_state: TreeState::default(),
             current_branch: String::new(),
             last_search: String::new(),
@@ -998,6 +1109,7 @@ mod tests {
             focus: Pane::Tree,
             should_quit: false,
             read_only,
+            connection_encrypted: false,
             tree_state: TreeState::default(),
             current_branch: String::new(),
             last_search: String::new(),

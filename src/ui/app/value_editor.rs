@@ -30,6 +30,17 @@ pub(crate) fn open_value_editor(app: &mut App, _structure: &Structure) {
         return;
     };
 
+    // A password-bound field opens the dedicated set-password popup (the field is
+    // read-only; the new value is staged into `pending_password`, not the editor).
+    // Read the binding kind, drop the `form` borrow, then re-enter via the popup.
+    if matches!(
+        field.widget_binding,
+        Some(crate::config::widget::WidgetKind::Password(_))
+    ) {
+        super::password_editor::open_password_editor(app);
+        return;
+    }
+
     if let Some(crate::config::widget::WidgetKind::Choice(w)) =
         field.widget_binding.clone().filter(|_| field.editable)
     {
@@ -404,6 +415,7 @@ mod tests {
             focus: Pane::Form,
             should_quit: false,
             read_only: false,
+            connection_encrypted: false,
             tree_state: TreeState::default(),
             current_branch: String::new(),
             last_search: String::new(),

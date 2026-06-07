@@ -29,6 +29,9 @@ pub enum Overlay {
     },
     /// The multi-value popup editor (Enter on a multi field).
     ValueEditor(ValueEditor),
+    /// The set-password popup (Enter on a password-bound field): a TLS-gated
+    /// New + Confirm editor that stages a cleartext password into the form.
+    PasswordEditor(crate::ui::app::password_editor::PasswordEditor),
     /// The Save/Discard/Stay guard shown when leaving a dirty form — by changing
     /// the selection, moving focus off the form pane, or quitting. Carries the
     /// pending [`GuardIntent`] to resume once the user chooses.

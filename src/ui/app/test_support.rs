@@ -18,6 +18,7 @@ pub(crate) fn bare_app(read_only: bool) -> App {
         focus: Pane::Tree,
         should_quit: false,
         read_only,
+        connection_encrypted: false,
         tree_state: TreeState::default(),
         current_branch: String::new(),
         last_search: String::new(),
