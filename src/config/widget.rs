@@ -43,7 +43,11 @@ pub fn resolve_widgets(profiles: &[EntryProfile]) -> Result<Vec<ResolvedWidget>,
                 select,
                 format,
                 options,
-            } = spec;
+            } = spec
+            else {
+                // Non-choice widgets (e.g. Password) are not resolved here.
+                continue;
+            };
             if options.is_empty() {
                 return Err(format!(
                     "[profile.widget.{attr}]: options must not be empty"

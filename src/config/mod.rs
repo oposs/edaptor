@@ -142,6 +142,13 @@ pub enum WidgetSpecCfg {
         /// The selectable options (non-empty; validated at resolve time).
         options: Vec<ChoiceOption>,
     },
+    /// Inline password widget: renders a masked field with a set-password popup.
+    /// When `samba` is true, also syncs `sambaNTPassword` / `sambaPwdLastSet`.
+    Password {
+        /// When true, also write Samba NT-hash attributes alongside the LDAP password.
+        #[serde(default)]
+        samba: bool,
+    },
 }
 
 /// A minimal entry profile (M3 slice). Richer metadata (password/membership/
@@ -787,7 +794,10 @@ options = [ { value = "/bin/bash", label = "Bash" } ]
             select,
             format,
             options,
-        } = &p.widgets["sambaAcctFlags"];
+        } = &p.widgets["sambaAcctFlags"]
+        else {
+            panic!("expected Choice widget for sambaAcctFlags");
+        };
         assert_eq!(select, "multi");
         assert_eq!(format, "bracketed");
         assert_eq!(options[0].value, "D");
@@ -828,6 +838,30 @@ options = [ { value = "/bin/bash", label = "Bash" } ]
         assert!(mk("ldap://h:389", "true").is_encrypted());
         assert!(mk("LDAPS://H", "false").is_encrypted()); // case-insensitive
         assert!(!mk("ldap://h:389", "false").is_encrypted());
+    }
+
+    #[test]
+    fn parses_password_widget() {
+        let toml = r#"
+[server]
+uri = "ldaps://x"
+base_dn = "dc=x"
+[auth]
+
+[[profile]]
+name = "user"
+object_classes = ["inetOrgPerson"]
+
+[profile.widget.userPassword]
+kind = "password"
+samba = true
+"#;
+        let cfg: Config = toml::from_str(toml).expect("parse");
+        let p = &cfg.profiles[0];
+        match &p.widgets["userPassword"] {
+            WidgetSpecCfg::Password { samba } => assert!(*samba),
+            other => panic!("expected password, got {other:?}"),
+        }
     }
 
     #[test]
