@@ -2,13 +2,12 @@
 //! create LDIF, and staging passwords for both the create and edit paths.
 
 use crate::config::EntryProfile;
-use crate::ldap::ldif::render_add;
 use crate::ldap::worker::WorkerHandle;
 use crate::schema::SchemaModel;
 use crate::ui::edit_form::{build_edit_form, EditForm, FormMode};
 use crate::workflows::create::{
-    apply_static_defaults, empty_form_for_profile, mask_password_attrs, plan_create,
-    stage_password, CreatePrep,
+    apply_static_defaults, empty_form_for_profile, fold_create_password, now_unix_secs_or_zero,
+    plan_create, CreatePrep,
 };
 use crate::workflows::read_flow::ReadFlow;
 
@@ -35,6 +34,16 @@ pub(crate) fn prepare_create(
     let Some(profile) = profiles.get(profile_idx) else {
         return;
     };
+    // The cleartext password is staged into `pending_password` by the set-password
+    // popup (the masked field is read-only inline), not carried in the form fields.
+    let pending_password = form.pending_password.clone();
+    // Defence in depth: never stage a cleartext password over a plain link.
+    if pending_password.is_some() && !app.connection_encrypted {
+        app.overlay = Some(Overlay::Error {
+            text: "password change requires an encrypted connection".into(),
+        });
+        return;
+    }
     let mut edited = form.to_edit_entry();
     // Fill empty fields from the profile's defaults; autonumber fields need a
     // synchronous directory scan (which may refuse on a truncated result).
@@ -50,19 +59,6 @@ pub(crate) fn prepare_create(
             }
         }
     }
-    // Strip the password + confirm pseudo-fields (validating they match) BEFORE
-    // building/validating the entry; the cleartext is injected into the real Add
-    // afterwards and masked in the preview.
-    let password = match &profile.password {
-        Some(spec) => match stage_password(spec, &mut edited.attrs) {
-            Ok(pw) => pw,
-            Err(text) => {
-                app.overlay = Some(Overlay::Error { text });
-                return;
-            }
-        },
-        None => None,
-    };
     match plan_create(read_flow.schema(), profile, &container, &edited) {
         CreatePrep::Confirm {
             dn,
@@ -70,34 +66,18 @@ pub(crate) fn prepare_create(
             container,
             ldif,
         } => {
-            // Inject the password (cleartext + optional Samba hashes) into the real
-            // Add, and mask those values in the preview body.
-            let body = match (&profile.password, &password) {
-                (Some(spec), Some(cleartext)) => {
-                    let samba = spec.samba
-                        && attrs
-                            .get("objectClass")
-                            .map(|ocs| {
-                                ocs.iter()
-                                    .any(|o| o.eq_ignore_ascii_case("sambaSamAccount"))
-                            })
-                            .unwrap_or(false);
-                    let now = std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .map(|d| d.as_secs())
-                        .unwrap_or(0);
-                    for (k, v) in crate::samba::password::password_add_attrs(
-                        cleartext,
-                        &spec.ldap_attribute,
-                        samba,
-                        now,
-                    ) {
-                        attrs.insert(k, v);
-                    }
-                    render_add(&dn, &mask_password_attrs(&attrs, &spec.ldap_attribute))
-                }
-                _ => ldif,
-            };
+            // Fold the staged password (cleartext + optional Samba hashes) into the
+            // new-entry Add, masking those values in the preview body. The widget's
+            // `primary`/`samba` come from the resolved widgets for the new entry's
+            // object classes; absent a password, keep the plain LDIF preview.
+            let body = fold_create_password(
+                &dn,
+                &mut attrs,
+                pending_password.as_deref(),
+                &app.widgets,
+                now_unix_secs_or_zero(),
+            )
+            .unwrap_or(ldif);
             app.overlay = Some(Overlay::Confirm {
                 title: "Create this entry?".to_string(),
                 body,
@@ -138,11 +118,6 @@ pub(crate) fn build_new_entry_form(
         profile_idx,
         container,
     };
-    // When the profile declares a password, replace the schema password field
-    // with the masked password + confirm fields.
-    if let Some(spec) = &profile.password {
-        crate::ui::edit_form::inject_password_fields(&mut form, spec);
-    }
     // Tag picker-bound fields so Enter opens the unified picker overlay.
     let ocs = object_classes_of(&form);
     crate::ui::edit_form::tag_picker_fields(&mut form, pickers, &ocs, false);

@@ -725,6 +725,13 @@ mod tests {
         let mut profile = create_user_profile();
         profile.object_classes = vec!["testUser".into()];
         profile.password = Some(spec);
+        // `profile_for_entry` now keys on a password WIDGET (Task 8); the combined-save
+        // path still reads `profile.password` (migrated in Task 9), so the fixture
+        // must carry both for the path to engage.
+        profile.widgets.insert(
+            "userPassword".into(),
+            crate::config::WidgetSpecCfg::Password { samba: false },
+        );
         (form, vec![profile])
     }
 

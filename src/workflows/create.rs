@@ -115,6 +115,37 @@ pub fn mask_password_attrs(
     out
 }
 
+/// Fold a staged create-form password into a new entry's attribute set (pure;
+/// clock injected). When a cleartext `pending` is set AND the new entry's object
+/// classes match a password widget, inserts `password_add_attrs` (primary +
+/// optional Samba secrets) into `attrs` and returns the masked LDIF preview body.
+/// Otherwise leaves `attrs` untouched and returns `None` (the caller keeps its
+/// plain preview). The Samba contribution is driven solely by the widget's
+/// `samba` flag, matching the edit path's [`stage_pending_password`].
+pub fn fold_create_password(
+    dn: &str,
+    attrs: &mut BTreeMap<String, Vec<String>>,
+    pending: Option<&str>,
+    widgets: &[crate::config::widget::ResolvedWidget],
+    now_secs: u64,
+) -> Option<String> {
+    let ocs: Vec<String> = attrs.get("objectClass").cloned().unwrap_or_default();
+    match (
+        pending,
+        crate::config::widget::password_widget_for(widgets, &ocs),
+    ) {
+        (Some(clear), Some(pw)) => {
+            for (k, v) in
+                crate::samba::password::password_add_attrs(clear, &pw.primary, pw.samba, now_secs)
+            {
+                attrs.insert(k, v);
+            }
+            Some(render_add(dn, &mask_password_attrs(attrs, &pw.primary)))
+        }
+        _ => None,
+    }
+}
+
 /// Wall-clock seconds since the Unix epoch (0 on a pre-epoch clock). The one
 /// impure call in the password paths; isolated so the planners stay pure.
 pub fn now_unix_secs_or_zero() -> u64 {
@@ -144,14 +175,19 @@ fn profile_for_entry_where<'a>(
     })
 }
 
-/// The first configured profile that declares a `[profile.password]` block and
-/// whose object classes all match `entry_ocs`. `None` when no password-profile
-/// matches. Thin wrapper over [`profile_for_entry_where`]. Pure.
+/// The first configured profile that declares a password widget
+/// (`[profile.widget.<attr>] kind = "password"`) and whose object classes all
+/// match `entry_ocs`. `None` when no password-profile matches. Thin wrapper over
+/// [`profile_for_entry_where`]. Pure.
 pub fn profile_for_entry<'a>(
     profiles: &'a [EntryProfile],
     entry_ocs: &[String],
 ) -> Option<&'a EntryProfile> {
-    profile_for_entry_where(profiles, entry_ocs, |p| p.password.is_some())
+    profile_for_entry_where(profiles, entry_ocs, |p| {
+        p.widgets
+            .values()
+            .any(|w| matches!(w, crate::config::WidgetSpecCfg::Password { .. }))
+    })
 }
 
 /// Edit-path password mods: the same `(attr, values)` pairs as create
@@ -636,18 +672,18 @@ mod tests {
     }
 
     #[test]
-    fn profile_for_entry_requires_oc_subset_and_password_spec() {
-        use crate::config::PasswordSpec;
+    fn profile_for_entry_requires_oc_subset_and_password_widget() {
+        use crate::config::WidgetSpecCfg;
         let mut pw_user = create_user_profile();
         pw_user.object_classes = vec!["inetOrgPerson".into(), "posixAccount".into()];
-        pw_user.password = Some(PasswordSpec {
-            ldap_attribute: "userPassword".into(),
-            samba: false,
-        });
-        // A profile with no password block must never match.
+        pw_user.widgets.insert(
+            "userPassword".into(),
+            WidgetSpecCfg::Password { samba: false },
+        );
+        // A profile with no password widget must never match.
         let mut plain = create_user_profile();
         plain.object_classes = vec!["inetOrgPerson".into()];
-        plain.password = None;
+        plain.widgets.clear();
         let profiles = vec![plain, pw_user];
 
         let ocs = vec![
@@ -656,11 +692,121 @@ mod tests {
             "posixAccount".to_string(),
         ];
         let m = profile_for_entry(&profiles, &ocs).expect("password profile matches");
-        assert!(m.password.is_some());
+        assert!(m
+            .widgets
+            .values()
+            .any(|w| matches!(w, WidgetSpecCfg::Password { .. })));
         assert_eq!(m.object_classes.len(), 2);
         // Entry missing posixAccount: the 2-OC profile no longer matches, and the
-        // plain profile has no password → None.
+        // plain profile has no password widget → None.
         assert!(profile_for_entry(&profiles, &["inetOrgPerson".to_string()]).is_none());
+    }
+
+    fn pw_widget(samba: bool) -> crate::config::widget::ResolvedWidget {
+        crate::config::widget::ResolvedWidget {
+            owner_object_classes: vec!["inetOrgPerson".into()],
+            attr: "userPassword".into(),
+            kind: crate::config::widget::WidgetKind::Password(
+                crate::config::widget::PasswordWidget {
+                    primary: "userPassword".into(),
+                    derived: if samba {
+                        vec!["sambaNTPassword".into(), "sambaPwdLastSet".into()]
+                    } else {
+                        Vec::new()
+                    },
+                    samba,
+                },
+            ),
+        }
+    }
+
+    fn add_attrs() -> BTreeMap<String, Vec<String>> {
+        let mut attrs: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        attrs.insert(
+            "objectClass".into(),
+            vec!["top".into(), "inetOrgPerson".into()],
+        );
+        attrs.insert("uid".into(), vec!["alice".into()]);
+        attrs
+    }
+
+    #[test]
+    fn fold_create_password_inserts_userpassword_when_staged() {
+        let widgets = vec![pw_widget(false)];
+        let mut attrs = add_attrs();
+        let body = fold_create_password(
+            "uid=alice,ou=people,dc=example,dc=org",
+            &mut attrs,
+            Some("hunter2"),
+            &widgets,
+            1_700_000_000,
+        )
+        .expect("staged password yields a masked preview");
+        assert_eq!(
+            attrs.get("userPassword"),
+            Some(&vec!["hunter2".to_string()])
+        );
+        assert!(!attrs.contains_key("sambaNTPassword"));
+        // The preview body masks the cleartext.
+        assert!(body.contains("********"));
+        assert!(!body.contains("hunter2"));
+    }
+
+    #[test]
+    fn fold_create_password_includes_samba_attrs_when_samba_widget() {
+        let widgets = vec![pw_widget(true)];
+        let mut attrs = add_attrs();
+        let body = fold_create_password(
+            "uid=alice,ou=people,dc=example,dc=org",
+            &mut attrs,
+            Some("hunter2"),
+            &widgets,
+            1_700_000_000,
+        )
+        .expect("staged samba password yields a masked preview");
+        assert_eq!(
+            attrs.get("userPassword"),
+            Some(&vec!["hunter2".to_string()])
+        );
+        assert_eq!(
+            attrs.get("sambaNTPassword"),
+            Some(&vec![crate::samba::nthash::nt_hash("hunter2")])
+        );
+        assert_eq!(
+            attrs.get("sambaPwdLastSet"),
+            Some(&vec!["1700000000".to_string()])
+        );
+        assert!(!body.contains("hunter2"));
+    }
+
+    #[test]
+    fn fold_create_password_omits_when_no_pending() {
+        let widgets = vec![pw_widget(false)];
+        let mut attrs = add_attrs();
+        let body = fold_create_password(
+            "uid=alice,ou=people,dc=example,dc=org",
+            &mut attrs,
+            None,
+            &widgets,
+            1_700_000_000,
+        );
+        assert!(body.is_none(), "no staged password keeps the plain preview");
+        assert!(!attrs.contains_key("userPassword"));
+        assert!(!attrs.contains_key("sambaNTPassword"));
+    }
+
+    #[test]
+    fn fold_create_password_omits_when_no_password_widget() {
+        let mut attrs = add_attrs();
+        let body = fold_create_password(
+            "uid=alice,ou=people,dc=example,dc=org",
+            &mut attrs,
+            Some("hunter2"),
+            &[],
+            1_700_000_000,
+        );
+        assert!(body.is_none());
+        assert!(!attrs.contains_key("userPassword"));
     }
 
     #[test]
