@@ -276,7 +276,7 @@ fn event_loop(
 
         // 1) Drain ALL pending worker responses (writes first, then read forms).
         while let Some(resp) = cx.worker.poll() {
-            cx.handle_worker_response(&resp, &mut structure, profiles);
+            cx.handle_worker_response(&resp, &mut structure);
         }
 
         // 2) Poll input with a timeout so the worker drain keeps ticking. An open
@@ -314,12 +314,7 @@ impl Ctx<'_> {
     /// flow. Writes are handled first (re-read after a save); otherwise a built
     /// form is installed (only when its DN matches the current selection — see
     /// below).
-    pub(crate) fn handle_worker_response(
-        &mut self,
-        resp: &Response,
-        structure: &mut Structure,
-        profiles: &[EntryProfile],
-    ) {
+    pub(crate) fn handle_worker_response(&mut self, resp: &Response, structure: &mut Structure) {
         // Reborrow the bundled fields into locals so the body below is the
         // original free-function body verbatim; the disjoint-field reborrows
         // preserve exactly the borrow split the separate params used to give.
@@ -489,7 +484,6 @@ impl Ctx<'_> {
                             app.read_only,
                             &app.pickers,
                             &app.widgets,
-                            profiles,
                         ));
                         app.form_focus = 0;
                         app.form_scroll = 0;

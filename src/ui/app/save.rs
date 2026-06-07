@@ -9,7 +9,6 @@ use super::{
     build_loaded_form, next_id, object_classes_of, perform_guard_intent, rebind_selection, App,
 };
 use crate::config::widget::{password_widget_for, ResolvedWidget};
-use crate::config::EntryProfile;
 use crate::form::changeset::{diff, ChangeSet, EditEntry, ModOp};
 use crate::form::validate::format_validation_errors;
 use crate::form::validate::{validate, SavePlan, ValidationError};
@@ -17,7 +16,7 @@ use crate::ldap::ldif::render_changesets;
 use crate::ldap::worker::{Request, Response, SearchScope, WorkerHandle};
 use crate::schema::SchemaModel;
 use crate::ui::edit_form::{value_set_eq, EditForm};
-use crate::workflows::create::{now_unix_secs_or_zero, profile_for_entry, stage_edit_password};
+use crate::workflows::create::now_unix_secs_or_zero;
 use crate::workflows::read_flow::ReadFlow;
 use crate::workflows::save::{
     compose_renamed_dn, decide_allocation, mask_changeset_secrets, membership_fanout, prepare_save,
@@ -172,7 +171,8 @@ enum CombinedPlan {
 fn plan_combined_save(
     form: &EditForm,
     schema: &SchemaModel,
-    profiles: &[EntryProfile],
+    widgets: &[ResolvedWidget],
+    connection_encrypted: bool,
     now_secs: u64,
 ) -> CombinedPlan {
     let fanout = form.fanout_labels();
@@ -206,24 +206,30 @@ fn plan_combined_save(
     }
 
     // Stage any password change the same way the single-entry path does: strip the
-    // injected password pseudo-fields from BOTH sides (so a blank field never diffs
-    // to a Delete that would clobber the stored password, and the `(confirm)`
-    // pseudo-attribute never leaks), and collect the REPLACE mods to fold into the
-    // own-entry MODIFY. A confirm mismatch blocks the whole combined save.
-    let (password_mods, mask_attrs) =
-        match profile_for_entry(profiles, &object_classes).and_then(|p| p.password.clone()) {
-            Some(spec) => match stage_edit_password(
-                &spec,
-                &object_classes,
+    // primary + derived password attrs from BOTH sides (so a blank field never diffs
+    // to a Delete that would clobber the stored password) and, when a cleartext is
+    // staged via `pending_password`, collect the REPLACE mods to fold into the
+    // own-entry MODIFY. A staged change over a plain link blocks the combined save.
+    let (password_mods, mask_attrs) = match password_widget_for(widgets, &object_classes) {
+        Some(pw) => {
+            if form.pending_password.is_some() && !connection_encrypted {
+                return CombinedPlan::Blocked(
+                    "Password change requires an encrypted connection (ldaps:// or start_tls)."
+                        .into(),
+                );
+            }
+            stage_pending_password(
+                form.pending_password.as_deref(),
+                &pw.primary,
+                &pw.derived,
+                pw.samba,
+                now_secs,
                 &mut original.attrs,
                 &mut edited.attrs,
-                now_secs,
-            ) {
-                Ok(x) => x,
-                Err(text) => return CombinedPlan::Blocked(text),
-            },
-            None => (Vec::new(), Vec::new()),
-        };
+            )
+        }
+        None => (Vec::new(), Vec::new()),
+    };
 
     let errors = validate(&edited, schema, &oc_refs);
     if !errors.is_empty() {
@@ -281,10 +287,17 @@ fn plan_combined_save(
 pub(crate) fn combined_save_overlay(
     form: &EditForm,
     schema: &SchemaModel,
-    profiles: &[EntryProfile],
+    widgets: &[ResolvedWidget],
+    connection_encrypted: bool,
     then_intent: Option<GuardIntent>,
 ) -> Option<Overlay> {
-    match plan_combined_save(form, schema, profiles, now_unix_secs_or_zero()) {
+    match plan_combined_save(
+        form,
+        schema,
+        widgets,
+        connection_encrypted,
+        now_unix_secs_or_zero(),
+    ) {
         CombinedPlan::Ready {
             entry_dn,
             own_mods,
@@ -312,13 +325,7 @@ pub(crate) fn combined_save_overlay(
 /// Synchronously re-read `dn` and rebuild the form so it reflects the directory
 /// after a combined save. Installs the fresh form directly without depending on
 /// the async poll loop or the overlay-gated install path.
-fn reload_form_sync(
-    app: &mut App,
-    worker: &WorkerHandle,
-    read_flow: &ReadFlow,
-    profiles: &[EntryProfile],
-    dn: &str,
-) {
+fn reload_form_sync(app: &mut App, worker: &WorkerHandle, read_flow: &ReadFlow, dn: &str) {
     rebind_selection(app, dn);
     if let Ok(Response::Entries { entries, .. }) = worker.request(Request::Search {
         id: next_id(),
@@ -336,7 +343,6 @@ fn reload_form_sync(
                 app.read_only,
                 &app.pickers,
                 &app.widgets,
-                profiles,
             ));
             app.form_focus = 0;
             app.form_scroll = 0;
@@ -351,7 +357,6 @@ fn reload_form_sync(
 impl super::Ctx<'_> {
     pub(crate) fn apply_combined_save(
         &mut self,
-        profiles: &[EntryProfile],
         entry_dn: &str,
         own_mods: Vec<ModOp>,
         fanout: Vec<(String, ModOp)>,
@@ -408,7 +413,7 @@ impl super::Ctx<'_> {
         // state immediately (before setting status/overlay). This avoids the
         // async install gate clearing the partial-failure message on the next
         // poll iteration.
-        reload_form_sync(app, worker, read_flow, profiles, entry_dn);
+        reload_form_sync(app, worker, read_flow, entry_dn);
 
         if failures.is_empty() {
             app.status = "Saved.".to_string();
@@ -669,7 +674,7 @@ mod tests {
     fn plan_combined_save_splits_own_and_fanout() {
         let form = user_form_own_and_memberof_change();
         let schema = user_schema();
-        let plan = plan_combined_save(&form, &schema, &[], 0);
+        let plan = plan_combined_save(&form, &schema, &[], true, 0);
         let (own_mods, fanout, _entry_dn) = match plan {
             CombinedPlan::Ready {
                 own_mods,
@@ -701,38 +706,24 @@ mod tests {
         let schema = user_schema();
         assert!(
             matches!(
-                plan_combined_save(&form, &schema, &[], 0),
+                plan_combined_save(&form, &schema, &[], true, 0),
                 CombinedPlan::Blocked(_)
             ),
             "rename + membership change must be Blocked"
         );
     }
 
-    /// A password-profile entry edited via the combined (membership) save path must
-    /// not let the injected password pseudo-fields leak into the own-entry MODIFY:
-    /// a BLANK field must never clobber the stored password, and the `(confirm)`
-    /// field must never become a real attribute.
-    fn pw_user_form_with_memberof_change() -> (EditForm, Vec<EntryProfile>) {
+    /// A password-widget entry edited via the combined (membership) save path,
+    /// carrying the directory's stored hash on the baseline. `pending` is the
+    /// cleartext staged by the set-password popup (None = no password change).
+    /// Returns the form plus the resolved password widget bound to `testUser`.
+    fn pw_user_form_with_memberof_change(pending: Option<&str>) -> (EditForm, Vec<ResolvedWidget>) {
         let mut form = user_form_own_and_memberof_change();
         // The directory returned the stored password hash on the entry.
         form.baseline
             .insert("userPassword".into(), vec!["{SSHA}old".into()]);
-        let spec = crate::config::PasswordSpec {
-            ldap_attribute: "userPassword".into(),
-            samba: false,
-        };
-        crate::ui::edit_form::inject_password_fields(&mut form, &spec);
-        let mut profile = create_user_profile();
-        profile.object_classes = vec!["testUser".into()];
-        profile.password = Some(spec);
-        // `profile_for_entry` now keys on a password WIDGET (Task 8); the combined-save
-        // path still reads `profile.password` (migrated in Task 9), so the fixture
-        // must carry both for the path to engage.
-        profile.widgets.insert(
-            "userPassword".into(),
-            crate::config::WidgetSpecCfg::Password { samba: false },
-        );
-        (form, vec![profile])
+        form.pending_password = pending.map(|s| s.to_string());
+        (form, password_widgets())
     }
 
     fn own_mods_touch(mods: &[ModOp], attr: &str) -> bool {
@@ -747,22 +738,15 @@ mod tests {
     }
 
     #[test]
-    fn combined_save_blank_password_does_not_clobber_or_leak() {
-        let (form, profiles) = pw_user_form_with_memberof_change();
-        // Password fields left blank by the operator.
-        match plan_combined_save(&form, &user_schema(), &profiles, 1_700_000_000) {
-            CombinedPlan::Ready { own_mods, ldif, .. } => {
+    fn combined_save_no_pending_password_does_not_clobber() {
+        // No password staged: the combined-save path must strip the baseline hash
+        // (so it never diffs to a Delete) and emit no userPassword mod.
+        let (form, widgets) = pw_user_form_with_memberof_change(None);
+        match plan_combined_save(&form, &user_schema(), &widgets, true, 1_700_000_000) {
+            CombinedPlan::Ready { own_mods, .. } => {
                 assert!(
                     !own_mods_touch(&own_mods, "userPassword"),
-                    "blank password must not emit a userPassword mod (clobber!)"
-                );
-                assert!(
-                    !own_mods_touch(&own_mods, "userPassword (confirm)"),
-                    "confirm pseudo-field must never become a real attribute"
-                );
-                assert!(
-                    !ldif.contains("(confirm)"),
-                    "confirm field must not leak to preview"
+                    "no staged password must not emit a userPassword mod (clobber!)"
                 );
             }
             _ => panic!("expected Ready"),
@@ -888,16 +872,11 @@ mod tests {
 
     #[test]
     fn combined_save_sets_password_as_replace_and_masks_preview() {
-        let (mut form, profiles) = pw_user_form_with_memberof_change();
-        // Operator typed a new password into both injected fields.
-        for f in form.fields.iter_mut() {
-            if f.label.eq_ignore_ascii_case("userPassword")
-                || f.label.eq_ignore_ascii_case("userPassword (confirm)")
-            {
-                f.editor = TextState::new().with_value("hunter2".to_string());
-            }
-        }
-        match plan_combined_save(&form, &user_schema(), &profiles, 1_700_000_000) {
+        // Operator staged a new password via the set-password popup, then a
+        // membership change. The combined own-entry MODIFY must carry the password
+        // REPLACE (masked in the preview) alongside the description change.
+        let (form, widgets) = pw_user_form_with_memberof_change(Some("hunter2"));
+        match plan_combined_save(&form, &user_schema(), &widgets, true, 1_700_000_000) {
             CombinedPlan::Ready { own_mods, ldif, .. } => {
                 assert!(
                     own_mods.contains(&ModOp::Replace {
@@ -905,10 +884,6 @@ mod tests {
                         values: vec!["hunter2".into()],
                     }),
                     "new password must be a REPLACE in own_mods"
-                );
-                assert!(
-                    !own_mods_touch(&own_mods, "userPassword (confirm)"),
-                    "confirm pseudo-field must never become a real attribute"
                 );
                 assert!(ldif.contains("********"), "preview masks the password");
                 assert!(
@@ -918,5 +893,17 @@ mod tests {
             }
             _ => panic!("expected Ready"),
         }
+    }
+
+    #[test]
+    fn combined_save_pending_password_on_plain_connection_is_blocked() {
+        let (form, widgets) = pw_user_form_with_memberof_change(Some("hunter2"));
+        assert!(
+            matches!(
+                plan_combined_save(&form, &user_schema(), &widgets, false, 1_700_000_000),
+                CombinedPlan::Blocked(_)
+            ),
+            "a staged password over a plain connection must be Blocked"
+        );
     }
 }

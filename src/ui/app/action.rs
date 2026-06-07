@@ -22,7 +22,7 @@ use super::{
     submit_prepared, App,
 };
 use crate::form::validate::format_validation_errors;
-use crate::workflows::create::{now_unix_secs_or_zero, profile_for_entry};
+use crate::workflows::create::now_unix_secs_or_zero;
 use crate::workflows::save::PrepareSave;
 
 /// Service a [`UiAction`] that needs the worker / schema. Save and cancel build
@@ -51,7 +51,13 @@ impl super::Ctx<'_> {
                 // Try the combined membership path first; fall back to the single-entry
                 // path when no backref field actually changed. No guard intent here —
                 // a plain Alt+S save has nothing to resume afterward.
-                if let Some(ov) = combined_save_overlay(form, read_flow.schema(), profiles, None) {
+                if let Some(ov) = combined_save_overlay(
+                    form,
+                    read_flow.schema(),
+                    &app.widgets,
+                    app.connection_encrypted,
+                    None,
+                ) {
                     app.overlay = Some(ov);
                     return;
                 }
@@ -276,9 +282,13 @@ impl super::Ctx<'_> {
                 }
                 // A membership-bearing save runs synchronously through CombinedSave;
                 // the pending guard intent rides along and is performed on success.
-                if let Some(ov) =
-                    combined_save_overlay(form, read_flow.schema(), profiles, Some(intent.clone()))
-                {
+                if let Some(ov) = combined_save_overlay(
+                    form,
+                    read_flow.schema(),
+                    &app.widgets,
+                    app.connection_encrypted,
+                    Some(intent.clone()),
+                ) {
                     app.overlay = Some(ov);
                     return;
                 }
@@ -355,7 +365,7 @@ impl super::Ctx<'_> {
                 fanout,
                 then_intent,
             } => {
-                self.apply_combined_save(profiles, &entry_dn, own_mods, fanout, then_intent);
+                self.apply_combined_save(&entry_dn, own_mods, fanout, then_intent);
             }
         }
     }
@@ -470,26 +480,18 @@ pub(crate) fn object_classes_of(form: &EditForm) -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// Build an edit form for a loaded entry and, when the entry is an instance of a
-/// password-profile, inject the masked password + confirm fields (suppressing the
-/// schema's password field), so the password can be changed inline. Skipped in
-/// read-only sessions — the injected field is editable. The single edit-form
-/// build seam used by the read flow and the post-combined-save reload.
+/// Build an edit form for a loaded entry and tag its picker- and widget-bound
+/// fields (e.g. the inline password widget) for the entry's object classes.
+/// The single edit-form build seam used by the read flow and the post-combined-save
+/// reload.
 pub(crate) fn build_loaded_form(
     model: &crate::ui::form::FormModel,
     schema: &SchemaModel,
     read_only: bool,
     pickers: &[crate::config::relation::ResolvedPicker],
     widgets: &[crate::config::widget::ResolvedWidget],
-    profiles: &[EntryProfile],
 ) -> EditForm {
     let mut form = build_edit_form(model, schema, read_only);
-    if !read_only {
-        let ocs = object_classes_of(&form);
-        if let Some(spec) = profile_for_entry(profiles, &ocs).and_then(|p| p.password.as_ref()) {
-            crate::ui::edit_form::inject_password_fields(&mut form, spec);
-        }
-    }
     // Tag picker-bound fields so Enter opens the unified picker overlay.
     let ocs = object_classes_of(&form);
     crate::ui::edit_form::tag_picker_fields(&mut form, pickers, &ocs, read_only);

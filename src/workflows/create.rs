@@ -4,23 +4,12 @@
 
 use std::collections::BTreeMap;
 
-use anyhow::Result;
-
-use crate::config::{EntryProfile, PasswordSpec};
-use crate::form::changeset::{EditEntry, ModOp};
+use crate::config::EntryProfile;
+use crate::form::changeset::EditEntry;
 use crate::form::validate::{format_validation_errors, validate};
 use crate::ldap::ldif::render_add;
 use crate::schema::SchemaModel;
 use crate::ui::form::{FormField, FormModel, WidgetSpec};
-
-/// The two synthetic form-field labels for a password spec: the primary (the
-/// configured LDAP attribute) and the confirmation field.
-pub fn password_field_labels(spec: &PasswordSpec) -> (String, String) {
-    (
-        spec.ldap_attribute.clone(),
-        format!("{} (confirm)", spec.ldap_attribute),
-    )
-}
 
 /// Outcome of planning a create from a Create-mode form (pure).
 pub enum CreatePrep {
@@ -68,36 +57,6 @@ pub fn plan_create(
         container: container.to_string(),
         ldif,
     }
-}
-
-/// Extract + validate the password from edited create/edit attrs. Removes BOTH
-/// the primary and confirm pseudo-attributes from `attrs` (confirm is never a real
-/// attribute). Returns `Ok(None)` when no password was entered, `Ok(Some(pw))` for
-/// a confirmed password, `Err` when the two entries disagree. Pure.
-pub fn stage_password(
-    spec: &PasswordSpec,
-    attrs: &mut BTreeMap<String, Vec<String>>,
-) -> Result<Option<String>, String> {
-    let (primary, confirm) = password_field_labels(spec);
-    let take = |attrs: &BTreeMap<String, Vec<String>>, label: &str| {
-        attrs
-            .iter()
-            .find(|(k, _)| k.eq_ignore_ascii_case(label))
-            .and_then(|(_, v)| v.first().cloned())
-            .unwrap_or_default()
-            .trim()
-            .to_string()
-    };
-    let pw = take(attrs, &primary);
-    let cf = take(attrs, &confirm);
-    attrs.retain(|k, _| !k.eq_ignore_ascii_case(&primary) && !k.eq_ignore_ascii_case(&confirm));
-    if pw.is_empty() {
-        return Ok(None);
-    }
-    if pw != cf {
-        return Err("Passwords do not match.".to_string());
-    }
-    Ok(Some(pw))
 }
 
 /// A copy of `attrs` with the password-related attribute values masked, for the
@@ -188,65 +147,6 @@ pub fn profile_for_entry<'a>(
             .values()
             .any(|w| matches!(w, crate::config::WidgetSpecCfg::Password { .. }))
     })
-}
-
-/// Edit-path password mods: the same `(attr, values)` pairs as create
-/// (`password_add_attrs`), mapped to REPLACE ops so the new credential overwrites
-/// the old within one atomic MODIFY. Honors `ldap_attribute` and Samba. Pure.
-fn password_replace_mods(
-    clear: &str,
-    ldap_attribute: &str,
-    samba: bool,
-    now_secs: u64,
-) -> Vec<ModOp> {
-    crate::samba::password::password_add_attrs(clear, ldap_attribute, samba, now_secs)
-        .into_iter()
-        .map(|(attr, values)| ModOp::Replace { attr, values })
-        .collect()
-}
-
-/// Compute the password contribution to an edit save. Always strips the password
-/// pseudo-fields (primary + confirm) from BOTH `baseline` and `edited`, so the
-/// injected masked field never appears as an attribute diff — an un-stripped
-/// baseline still carrying the directory's stored hash would otherwise diff to a
-/// spurious Delete. When a confirmed new password was entered, also strips the
-/// Samba secret attrs from both sides (the REPLACE mods are then their sole
-/// source) and returns those mods plus the attrs to mask in the preview. Returns
-/// empty vecs when the field was left blank. Pure (clock injected as `now_secs`).
-pub fn stage_edit_password(
-    spec: &PasswordSpec,
-    object_classes: &[String],
-    baseline: &mut BTreeMap<String, Vec<String>>,
-    edited: &mut BTreeMap<String, Vec<String>>,
-    now_secs: u64,
-) -> Result<(Vec<ModOp>, Vec<String>), String> {
-    let (primary, confirm) = password_field_labels(spec);
-    let strip = |m: &mut BTreeMap<String, Vec<String>>, labels: &[&str]| {
-        m.retain(|k, _| !labels.iter().any(|l| k.eq_ignore_ascii_case(l)));
-    };
-    // `primary` == spec.ldap_attribute; drop both pseudo-fields from the baseline
-    // so the stored value never diffs against the (blank) form field.
-    strip(baseline, &[primary.as_str(), confirm.as_str()]);
-    // stage_password validates the confirm match and removes both pseudo-fields
-    // from `edited`, returning the cleartext (or None when left blank).
-    let clear = match stage_password(spec, edited)? {
-        Some(pw) => pw,
-        None => return Ok((Vec::new(), Vec::new())),
-    };
-    let samba = spec.samba
-        && object_classes
-            .iter()
-            .any(|o| o.eq_ignore_ascii_case("sambaSamAccount"));
-    if samba {
-        strip(baseline, &["sambaNTPassword", "sambaPwdLastSet"]);
-        strip(edited, &["sambaNTPassword", "sambaPwdLastSet"]);
-    }
-    let mods = password_replace_mods(&clear, &spec.ldap_attribute, samba, now_secs);
-    let mut mask = vec![spec.ldap_attribute.clone()];
-    if samba {
-        mask.push("sambaNTPassword".to_string());
-    }
-    Ok((mods, mask))
 }
 
 /// Apply literal/template defaults to still-empty fields (pure); return the
@@ -418,7 +318,6 @@ mod tests {
             show: vec!["uid".to_string(), "cn".to_string(), "sn".to_string()],
             search_attrs: vec![],
             defaults: Default::default(),
-            password: None,
             pickers: Default::default(),
             widgets: Default::default(),
             label: None,
@@ -624,38 +523,6 @@ mod tests {
     }
 
     #[test]
-    fn stage_password_strips_fields_validates_match_and_empty() {
-        use crate::config::PasswordSpec;
-        use std::collections::BTreeMap;
-        let spec = PasswordSpec {
-            ldap_attribute: "userPassword".into(),
-            samba: false,
-        };
-        // matching pair → Some, both pseudo-fields stripped, other attrs kept
-        let mut attrs: BTreeMap<String, Vec<String>> = BTreeMap::new();
-        attrs.insert("userPassword".into(), vec!["hunter2".into()]);
-        attrs.insert("userPassword (confirm)".into(), vec!["hunter2".into()]);
-        attrs.insert("cn".into(), vec!["Alice".into()]);
-        assert_eq!(
-            stage_password(&spec, &mut attrs).unwrap(),
-            Some("hunter2".to_string())
-        );
-        assert!(!attrs.contains_key("userPassword"));
-        assert!(!attrs.contains_key("userPassword (confirm)"));
-        assert!(attrs.contains_key("cn"));
-        // mismatch → Err
-        let mut a2: BTreeMap<String, Vec<String>> = BTreeMap::new();
-        a2.insert("userPassword".into(), vec!["a".into()]);
-        a2.insert("userPassword (confirm)".into(), vec!["b".into()]);
-        assert!(stage_password(&spec, &mut a2).is_err());
-        // empty → None
-        let mut a3: BTreeMap<String, Vec<String>> = BTreeMap::new();
-        a3.insert("userPassword".into(), vec!["".into()]);
-        a3.insert("userPassword (confirm)".into(), vec!["".into()]);
-        assert_eq!(stage_password(&spec, &mut a3).unwrap(), None);
-    }
-
-    #[test]
     fn mask_password_attrs_masks_secret_values_only() {
         use std::collections::BTreeMap;
         let mut attrs: BTreeMap<String, Vec<String>> = BTreeMap::new();
@@ -807,111 +674,6 @@ mod tests {
         );
         assert!(body.is_none());
         assert!(!attrs.contains_key("userPassword"));
-    }
-
-    #[test]
-    fn stage_edit_password_blank_yields_no_mods_and_strips_pseudo_fields() {
-        use std::collections::BTreeMap;
-        // baseline carries the directory's stored hash; edited carries the blank
-        // injected fields. After staging, neither side keeps the password attr.
-        let mut baseline: BTreeMap<String, Vec<String>> = BTreeMap::new();
-        baseline.insert("userPassword".into(), vec!["{SSHA}deadbeef".into()]);
-        baseline.insert("cn".into(), vec!["Alice".into()]);
-        let mut edited: BTreeMap<String, Vec<String>> = BTreeMap::new();
-        edited.insert("userPassword".into(), vec!["".into()]);
-        edited.insert("userPassword (confirm)".into(), vec!["".into()]);
-        edited.insert("cn".into(), vec!["Alice".into()]);
-
-        let (mods, mask) = stage_edit_password(
-            &pw_spec(false),
-            &[],
-            &mut baseline,
-            &mut edited,
-            1_700_000_000,
-        )
-        .unwrap();
-        assert!(mods.is_empty(), "blank password produces no mods");
-        assert!(mask.is_empty());
-        assert!(
-            !baseline.contains_key("userPassword"),
-            "baseline hash stripped"
-        );
-        assert!(!edited.contains_key("userPassword"));
-        assert!(!edited.contains_key("userPassword (confirm)"));
-        assert!(baseline.contains_key("cn") && edited.contains_key("cn"));
-    }
-
-    #[test]
-    fn stage_edit_password_set_yields_replace_and_strips_baseline_hash() {
-        use std::collections::BTreeMap;
-        let mut baseline: BTreeMap<String, Vec<String>> = BTreeMap::new();
-        baseline.insert("userPassword".into(), vec!["{SSHA}old".into()]);
-        let mut edited: BTreeMap<String, Vec<String>> = BTreeMap::new();
-        edited.insert("userPassword".into(), vec!["hunter2".into()]);
-        edited.insert("userPassword (confirm)".into(), vec!["hunter2".into()]);
-
-        let (mods, mask) = stage_edit_password(
-            &pw_spec(false),
-            &[],
-            &mut baseline,
-            &mut edited,
-            1_700_000_000,
-        )
-        .unwrap();
-        assert_eq!(
-            mods,
-            vec![ModOp::Replace {
-                attr: "userPassword".into(),
-                values: vec!["hunter2".into()],
-            }]
-        );
-        assert_eq!(mask, vec!["userPassword".to_string()]);
-        assert!(!baseline.contains_key("userPassword"), "old hash stripped");
-    }
-
-    #[test]
-    fn stage_edit_password_samba_includes_nt_hash_and_strips_samba_attrs() {
-        use std::collections::BTreeMap;
-        let mut baseline: BTreeMap<String, Vec<String>> = BTreeMap::new();
-        baseline.insert("sambaNTPassword".into(), vec!["OLDHASH".into()]);
-        baseline.insert("sambaPwdLastSet".into(), vec!["1".into()]);
-        let mut edited: BTreeMap<String, Vec<String>> = BTreeMap::new();
-        edited.insert("userPassword".into(), vec!["hunter2".into()]);
-        edited.insert("userPassword (confirm)".into(), vec!["hunter2".into()]);
-
-        let ocs = vec!["sambaSamAccount".to_string()];
-        let (mods, mask) = stage_edit_password(
-            &pw_spec(true),
-            &ocs,
-            &mut baseline,
-            &mut edited,
-            1_700_000_000,
-        )
-        .unwrap();
-        // The NT hash REPLACE is present and equals the M5 nthash of the cleartext.
-        assert!(mods.contains(&ModOp::Replace {
-            attr: "sambaNTPassword".into(),
-            values: vec![crate::samba::nthash::nt_hash("hunter2")],
-        }));
-        assert!(mask.contains(&"sambaNTPassword".to_string()));
-        assert!(
-            !baseline.contains_key("sambaNTPassword"),
-            "old NT hash stripped"
-        );
-        assert!(!baseline.contains_key("sambaPwdLastSet"));
-    }
-
-    #[test]
-    fn stage_edit_password_mismatch_errors() {
-        use std::collections::BTreeMap;
-        let mut baseline: BTreeMap<String, Vec<String>> = BTreeMap::new();
-        let mut edited: BTreeMap<String, Vec<String>> = BTreeMap::new();
-        edited.insert("userPassword".into(), vec!["a".into()]);
-        edited.insert("userPassword (confirm)".into(), vec!["b".into()]);
-        assert!(
-            stage_edit_password(&pw_spec(false), &[], &mut baseline, &mut edited, 0).is_err(),
-            "confirm mismatch must error"
-        );
     }
 
     #[test]

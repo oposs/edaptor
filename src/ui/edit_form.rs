@@ -18,7 +18,6 @@ use crate::form::changeset::{is_secret_attr, is_x_ordered, EditEntry};
 use crate::schema::{FieldKind, SchemaModel};
 use crate::ui::form::{FormField, FormModel, WidgetSpec};
 use crate::ui::picker::{Candidate, PickerState};
-use crate::workflows::create::password_field_labels;
 
 /// One field of the editable form.
 pub struct EditField {
@@ -399,41 +398,6 @@ pub fn build_edit_form(model: &FormModel, schema: &SchemaModel, read_only: bool)
     }
 }
 
-/// Replace any schema-generated field for the password attribute with two masked
-/// password fields (the attribute + a confirmation). Call on a freshly built
-/// create/edit form when the profile declares `[profile.password]`. The schema
-/// password MAY field (if present) is removed first to avoid a duplicate (D8).
-pub fn inject_password_fields(form: &mut EditForm, spec: &crate::config::PasswordSpec) {
-    let (primary, confirm) = password_field_labels(spec);
-    form.fields
-        .retain(|f| !f.label.eq_ignore_ascii_case(&primary));
-    // The injected password fields start blank ("blank == leave the password
-    // unchanged"), so the stored hash must not linger in the baseline — otherwise
-    // the empty field reads as a pending delete and the entry looks permanently
-    // dirty, popping a spurious Save/Discard/Stay guard on every navigation. The
-    // save path strips the same pseudo-field in `stage_edit_password`; mirror it
-    // here so `is_dirty()` agrees. (The confirm label is synthetic, never present
-    // in the baseline.)
-    form.baseline
-        .retain(|k, _| !k.eq_ignore_ascii_case(&primary));
-    let mk = |label: String| EditField {
-        label,
-        must: false,
-        editable: true,
-        multi: false,
-        secret: true,
-        ordered: false,
-        values: Vec::new(),
-        kind: FieldKind::Text,
-        widget: WidgetSpec::ReadOnlyText,
-        editor: TextState::new(),
-        picker: None,
-        widget_binding: None,
-    };
-    form.fields.push(mk(primary));
-    form.fields.push(mk(confirm));
-}
-
 /// Tag each field whose attribute matches a resolved `[profile.picker.<attr>]`
 /// binding for the entry's object classes. Fan-out fields (`fanout_attr` set) are
 /// forced editable — their value is never written to the field itself, it fans
@@ -784,76 +748,6 @@ mod tests {
         // Restore the original value: back to clean.
         form.fields[i].editor = TextState::new().with_value("Alice");
         assert!(!form.is_dirty());
-    }
-
-    #[test]
-    fn inject_password_replaces_schema_field_with_two_masked_fields() {
-        let plain = |label: &str| EditField {
-            label: label.into(),
-            must: false,
-            editable: true,
-            multi: false,
-            secret: false,
-            ordered: false,
-            values: vec![],
-            kind: crate::schema::FieldKind::Text,
-            widget: crate::ui::form::WidgetSpec::ReadOnlyText,
-            editor: TextState::new(),
-            picker: None,
-            widget_binding: None,
-        };
-        let mut form = EditForm {
-            dn: "uid=alice,ou=people,dc=example,dc=org".into(),
-            fields: vec![plain("cn"), plain("userPassword")],
-            baseline: Default::default(),
-            mode: FormMode::Edit,
-            pending_password: None,
-        };
-        let spec = crate::config::PasswordSpec {
-            ldap_attribute: "userPassword".into(),
-            samba: false,
-        };
-        inject_password_fields(&mut form, &spec);
-        // Exactly one primary userPassword field (the schema one was removed).
-        let primaries: Vec<&EditField> = form
-            .fields
-            .iter()
-            .filter(|f| f.label.eq_ignore_ascii_case("userPassword"))
-            .collect();
-        assert_eq!(primaries.len(), 1);
-        assert!(form
-            .fields
-            .iter()
-            .any(|f| f.label == "userPassword (confirm)"));
-        // Both password fields are masked.
-        assert!(form
-            .fields
-            .iter()
-            .filter(|f| f.label.to_lowercase().contains("userpassword"))
-            .all(|f| f.secret && f.editable && !f.multi));
-        // The unrelated field survives.
-        assert!(form.fields.iter().any(|f| f.label == "cn"));
-    }
-
-    #[test]
-    fn injected_blank_password_is_not_dirty() {
-        // Regression: a password-profile entry has its stored `userPassword`
-        // replaced by blank injected fields, but `build_edit_form` already
-        // recorded the stored hash as the baseline. The blank field must NOT read
-        // as a pending delete — otherwise every ou=people entry looks dirty the
-        // instant it loads and navigating between entries pops a spurious
-        // Save/Discard/Stay guard.
-        let mut form = writable_form(); // baseline carries userPassword = ["secret"]
-        assert!(!form.is_dirty(), "the unmodified form starts clean");
-        let spec = crate::config::PasswordSpec {
-            ldap_attribute: "userPassword".into(),
-            samba: false,
-        };
-        inject_password_fields(&mut form, &spec);
-        assert!(
-            !form.is_dirty(),
-            "a freshly loaded password entry with no typed password must be clean"
-        );
     }
 
     #[test]

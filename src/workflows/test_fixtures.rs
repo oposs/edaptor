@@ -2,7 +2,7 @@
 //! workflows and ui test modules so they aren't duplicated.
 #![cfg(test)]
 
-use crate::config::{EntryProfile, PasswordSpec};
+use crate::config::EntryProfile;
 use crate::ldap::worker::RawSubschema;
 use crate::schema::SchemaModel;
 use std::collections::BTreeMap;
@@ -16,7 +16,6 @@ pub(crate) fn bare_profile(name: &str) -> EntryProfile {
         show: vec![],
         search_attrs: vec![],
         defaults: Default::default(),
-        password: None,
         pickers: Default::default(),
         widgets: Default::default(),
         label: None,
@@ -56,16 +55,8 @@ pub(crate) fn create_user_profile() -> EntryProfile {
         show: vec!["uid".into()],
         search_attrs: vec![],
         defaults: Default::default(),
-        password: None,
         pickers: Default::default(),
         widgets: Default::default(),
         label: None,
-    }
-}
-
-pub(crate) fn pw_spec(samba: bool) -> PasswordSpec {
-    PasswordSpec {
-        ldap_attribute: "userPassword".into(),
-        samba,
     }
 }
