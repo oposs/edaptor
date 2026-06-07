@@ -288,6 +288,13 @@ impl Config {
     pub fn is_read_only(&self) -> bool {
         self.server.read_only || self.auth.is_anonymous()
     }
+
+    /// Whether the LDAP connection is encrypted (LDAPS or StartTLS). Password
+    /// changes require this — `userPassword` is sent in clear for the server to
+    /// hash.
+    pub fn is_encrypted(&self) -> bool {
+        self.server.start_tls || self.server.uri.to_ascii_lowercase().starts_with("ldaps://")
+    }
 }
 
 #[cfg(test)]
@@ -800,6 +807,27 @@ options = [ { value = "/bin/bash", label = "Bash" } ]
         assert!(widgets
             .iter()
             .any(|w| w.attr.eq_ignore_ascii_case("loginShell")));
+    }
+
+    #[test]
+    fn is_encrypted_reflects_ldaps_or_starttls() {
+        let mk = |uri: &str, start_tls: &str| -> Config {
+            let toml = format!(
+                r#"
+                [server]
+                uri = "{uri}"
+                base_dn = "dc=x"
+                start_tls = {start_tls}
+                [auth]
+                bind_dn = "cn=admin,dc=x"
+                "#
+            );
+            toml::from_str(&toml).expect("parse")
+        };
+        assert!(mk("ldaps://h:636", "false").is_encrypted());
+        assert!(mk("ldap://h:389", "true").is_encrypted());
+        assert!(mk("LDAPS://H", "false").is_encrypted()); // case-insensitive
+        assert!(!mk("ldap://h:389", "false").is_encrypted());
     }
 
     #[test]
