@@ -460,24 +460,49 @@ pub fn tag_picker_fields(
     }
 }
 
-/// Attach a `[profile.widget.<attr>]` choice widget to each matching field. A
-/// choice field stays editable (Enter opens the choice overlay). Mirrors
-/// `tag_picker_fields`; `.any()` objectClass matching via `widget_for`.
+/// Attach a `[profile.widget.<attr>]` choice or password widget to each
+/// matching field. A choice field stays editable (Enter opens the choice
+/// overlay). Password fields stay read-only inline; Enter opens the password
+/// popup. Mirrors `tag_picker_fields`; `.any()` objectClass matching.
 pub fn tag_widget_fields(
     form: &mut EditForm,
     widgets: &[crate::config::widget::ResolvedWidget],
     object_classes: &[String],
     read_only: bool,
 ) {
+    use crate::config::widget::WidgetKind;
     if read_only {
         return;
     }
-    for field in &mut form.fields {
-        if let Some(kind @ crate::config::widget::WidgetKind::Choice(_)) =
-            crate::config::widget::widget_for(widgets, object_classes, &field.label)
-        {
-            field.widget_binding = Some(kind.clone());
-            field.editable = true;
+    let has_oc = |ocs: &[String]| {
+        ocs.iter()
+            .any(|oc| object_classes.iter().any(|e| e.eq_ignore_ascii_case(oc)))
+    };
+    for rw in widgets {
+        if !has_oc(&rw.owner_object_classes) {
+            continue;
+        }
+        match &rw.kind {
+            WidgetKind::Choice(_) => {
+                if let Some(f) = form
+                    .fields
+                    .iter_mut()
+                    .find(|f| f.label.eq_ignore_ascii_case(&rw.attr))
+                {
+                    f.widget_binding = Some(rw.kind.clone());
+                    f.editable = true;
+                }
+            }
+            WidgetKind::Password(pw) => {
+                let mut targets = vec![pw.primary.clone()];
+                targets.extend(pw.derived.iter().cloned());
+                for f in form.fields.iter_mut() {
+                    if targets.iter().any(|t| t.eq_ignore_ascii_case(&f.label)) {
+                        f.widget_binding = Some(rw.kind.clone());
+                        // password fields stay read-only inline; Enter opens the popup
+                    }
+                }
+            }
         }
     }
 }
@@ -1076,5 +1101,56 @@ mod tests {
         assert!(!form.is_dirty());
         form.pending_password = Some("hunter2".into());
         assert!(form.is_dirty(), "a staged password change is dirty");
+    }
+
+    #[test]
+    fn tag_widget_fields_tags_primary_and_derived_for_password() {
+        use crate::config::widget::{PasswordWidget, ResolvedWidget, WidgetKind};
+        // writable_form() is built from entry() which has a userPassword field,
+        // using schema() which declares demoPerson as an object class.
+        let mut form = writable_form();
+        // Add a sambaNTPassword field (not in the standard schema, so add manually).
+        form.fields.push(EditField {
+            label: "sambaNTPassword".into(),
+            must: false,
+            editable: false,
+            multi: false,
+            secret: true,
+            ordered: false,
+            values: vec!["DEAD".into()],
+            kind: crate::schema::FieldKind::Text,
+            widget: crate::ui::form::WidgetSpec::ReadOnlyText,
+            editor: TextState::new(),
+            picker: None,
+            widget_binding: None,
+        });
+        let widgets = vec![ResolvedWidget {
+            owner_object_classes: vec!["demoPerson".into()],
+            attr: "userPassword".into(),
+            kind: WidgetKind::Password(PasswordWidget {
+                primary: "userPassword".into(),
+                derived: vec!["sambaNTPassword".into(), "sambaPwdLastSet".into()],
+                samba: true,
+            }),
+        }];
+        tag_widget_fields(&mut form, &widgets, &["demoPerson".to_string()], false);
+        let tagged = |n: &str| {
+            matches!(
+                form.fields
+                    .iter()
+                    .find(|f| f.label == n)
+                    .unwrap()
+                    .widget_binding,
+                Some(WidgetKind::Password(_))
+            )
+        };
+        assert!(
+            tagged("userPassword"),
+            "primary field must be tagged Password"
+        );
+        assert!(
+            tagged("sambaNTPassword"),
+            "derived field must be tagged Password"
+        );
     }
 }
