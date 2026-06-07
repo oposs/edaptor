@@ -1,9 +1,54 @@
 # Widgets
 
 A `[profile.widget.<attr>]` table declares a **rich in-line widget** for the
-field of attribute `<attr>`. Instead of typing a raw string, the operator opens
-a checklist overlay and ticks the desired options; eDAPtor encodes the result
-in the correct format for the attribute.
+field of attribute `<attr>`. The widget `kind` determines what happens when the
+operator activates the field: a checklist overlay for `choice`, or a set-password
+popup for `password`.
+
+## The `password` kind
+
+The `password` kind turns the named attribute into a **masked, set-password
+field**. Pressing Enter on the field (or on any derived password attribute such
+as `sambaNTPassword`) opens a popup where the operator types the new password
+twice to confirm. The value is sent in cleartext to the directory; the LDIF
+preview shows `********` instead.
+
+```toml
+[profile.widget.userPassword]
+kind  = "password"
+samba = false
+```
+
+The TOML table key (`userPassword` above) is the **primary cleartext attribute**
+written to the directory.
+
+### Options
+
+- **`kind`** *(required)* — must be `"password"`.
+- **`samba`** *(optional, default `false`)* — when `true`, eDAPtor also writes:
+  - **`sambaNTPassword`** — the NT hash of the password, computed client-side.
+  - **`sambaPwdLastSet`** — the timestamp of the change.
+  The entry must carry the **`sambaSamAccount`** object class for these attributes
+  to be valid; the Samba SID is derived from the directory's `sambaDomain` entry.
+
+### TLS requirement
+
+Password changes require an encrypted connection. eDAPtor refuses to send a
+cleartext password over an unencrypted link — configure the server with
+`ldaps://` or `start_tls = true`.
+
+### Worked example
+
+```toml
+# Samba-enabled password widget: writes userPassword + sambaNTPassword/sambaPwdLastSet.
+[profile.widget.userPassword]
+kind  = "password"
+samba = true
+```
+
+Pressing Enter on the `userPassword` field (or on `sambaNTPassword`) opens the
+"New password" + "Confirm" popup. On confirmation eDAPtor writes all three
+attributes in a single atomic MODIFY.
 
 ## The `choice` kind
 

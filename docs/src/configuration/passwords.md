@@ -1,36 +1,43 @@
 # Passwords
 
-The optional `[profile.password]` table turns on an **inline password field**
-for a profile's create and edit forms.
+Password handling is configured via the `[profile.widget.<attr>]` table with
+`kind = "password"`. This turns the named attribute into a **masked,
+set-password field** in the create/edit form.
 
 ```toml
-[profile.password]
-ldap_attribute = "userPassword"               # default; omit to use userPassword
-samba          = false
+[profile.widget.userPassword]
+kind  = "password"
+samba = false
 ```
 
-- **`ldap_attribute`** — the directory attribute the password is written to.
-  Defaults to `userPassword`; omit the key to use that default.
+- **Table key** (`userPassword` above) — the directory attribute the password
+  is written to. Use whatever LDAP attribute holds the cleartext password in your
+  directory (typically `userPassword`).
 - **`samba`** — when `true`, also maintain the Samba password attributes (see
   below).
 
+For the full list of options and a worked example see [Widgets](widgets.md#the-password-kind).
+
 ## The inline password field
 
-When a profile has a `[profile.password]` table, the create/edit form shows a
-**masked, confirm-twice field** for `ldap_attribute` (you type the password
-twice and it is rendered as dots, not echoed). The schema-generated field for
-that same attribute is **suppressed**, so you do not see a raw `userPassword`
-input alongside the masked one.
+When a profile has a `[profile.widget.<attr>]` table with `kind = "password"`,
+the create/edit form shows a **set-password popup** for that attribute (and any
+derived Samba attributes). Press Enter on the field to open the popup; type the
+password twice to confirm. The schema-generated raw field for that attribute is
+**suppressed**, so there is one clear place to set the password.
 
 On save, the **cleartext password goes to the directory** (OpenLDAP hashes it
 per its password policy / `pwdPolicy` configuration). The
 [LDIF preview](../concepts/change-flow.md) of the change shows `********` in
 place of the value, so the actual password is never displayed.
 
+Password changes require an encrypted connection (`ldaps://` or
+`start_tls = true`).
+
 ## The Samba lifecycle (`samba = true`)
 
 Setting `samba = true` keeps a Samba (NT) password in sync with the Unix
-password. On save, in addition to `ldap_attribute`, eDAPtor writes:
+password. On save, in addition to the primary attribute, eDAPtor writes:
 
 - **`sambaNTPassword`** — the NT hash of the password, computed **client-side**.
 - **`sambaPwdLastSet`** — the timestamp of the change.

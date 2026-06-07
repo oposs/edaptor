@@ -1,18 +1,18 @@
 # Passwords & Samba
 
 eDAPtor sets passwords two ways: an **inline password field** in the create/edit
-form (for entries whose profile declares a password), and the **`edaptor passwd`
-CLI** for setting a password from the command line. The configuration that turns
-on the inline field is described under
+form (for entries whose profile declares a password widget), and the
+**`edaptor passwd` CLI** for setting a password from the command line. The
+configuration that turns on the inline field is described under
 [Passwords](../configuration/passwords.md); this page covers using it.
 
 ## The inline password field (in the TUI)
 
 When an entry's [profile](../configuration/entry-profiles.md) declares a
-`[profile.password]` table, the create/edit form shows a dedicated **masked,
-confirm-twice** password field for that attribute (`userPassword` by default).
-The schema-generated raw field for that attribute is suppressed, so there is one
-clear place to set the password.
+`[profile.widget.<attr>]` table with `kind = "password"`, the create/edit form
+shows a dedicated **masked, set-password popup** for that attribute (`userPassword`
+by default). The schema-generated raw field for that attribute is suppressed, so
+there is one clear place to set the password.
 
 - Type the password once, then again to confirm — they must match.
 - The cleartext is sent to the directory; the **LDIF preview masks it as
@@ -52,7 +52,7 @@ StartTLS.
 
 There is currently **no standalone "Set Password" action inside the TUI** for an
 arbitrary entry. Passwords can be set in the TUI only through the **inline field**
-on the create/edit form of entries whose profile declares `[profile.password]`.
+on the create/edit form of entries whose profile declares a password widget.
 For any other entry — or to (re)set a password outside that form — use the
 **`edaptor passwd <dn>`** CLI described above.
 

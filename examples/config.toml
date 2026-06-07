@@ -63,16 +63,17 @@ loginShell    = "/bin/bash"
 homeDirectory = "/home/{uid}"
 uidNumber     = "{next:10000-60000}"
 
-# Inline password field: the create/edit form shows a masked, confirm-twice field
-# for `ldap_attribute` (the schema-generated field is suppressed). The cleartext
-# goes to the directory; the LDIF preview shows ********.
-#   samba = true -> also write sambaNTPassword/sambaPwdLastSet (needs sambaSamAccount).
-[profile.password]
-ldap_attribute = "userPassword"               # default; omit to use userPassword
-samba          = false
-
 # Widget bindings: `[profile.widget.<attr>]` declares a rich in-line widget for
-# an attribute's field. Choice widgets display a fixed vocabulary as a checklist.
+# an attribute's field.
+# Password widget: the create/edit form shows a masked "set password" popup for
+# the named attribute. The cleartext goes to the directory; the LDIF preview
+# shows ********. Requires an encrypted connection (ldaps:// or start_tls = true).
+#   samba = true -> also write sambaNTPassword/sambaPwdLastSet (needs sambaSamAccount).
+[profile.widget.userPassword]
+kind  = "password"
+samba = false
+
+# Choice widgets display a fixed vocabulary as a checklist.
 [profile.widget.loginShell]
 kind   = "choice"
 select = "single"

@@ -49,7 +49,8 @@ inline password field, and picker bindings that pull values from — or fan out 
 — other profiles. Those sub-tables are documented separately:
 
 - [`[profile.defaults]`](defaults.md) — fill empty fields on create.
-- [`[profile.password]`](passwords.md) — the inline masked password field.
+- [`[profile.widget.<attr>]`](widgets.md) — rich in-line widget (choice checklist
+  or masked password popup).
 - [`[profile.picker.<attr>]`](pickers.md) — populate an attribute from a live
   candidate search.
 

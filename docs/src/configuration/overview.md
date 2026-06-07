@@ -38,8 +38,8 @@ tables:
 
 `[[profile]]` is an *array of tables* — you write it once per kind of entry you
 manage. Each profile may carry sub-tables (`[profile.defaults]`,
-`[profile.password]`, `[profile.picker.<attr>]`) that refine how its entries are
-created and edited.
+`[profile.widget.<attr>]`, `[profile.picker.<attr>]`) that refine how its entries
+are created and edited.
 
 ## Orientation map
 
@@ -48,7 +48,7 @@ created and edited.
 | [Server & Authentication](server-auth.md) | `[server]`, `[server.tls]`, `[auth]` — the connection, TLS trust, and bind credentials. |
 | [Entry Profiles](entry-profiles.md) | `[[profile]]` — name, object classes, RDN attribute, search base, displayed/searched attributes, and labels. |
 | [Defaults](defaults.md) | `[profile.defaults]` — literal, templated, and auto-numbered values that fill empty fields on create. |
-| [Passwords](passwords.md) | `[profile.password]` — the inline masked password field and the Samba lifecycle. |
+| [Passwords](passwords.md) | `[profile.widget.<attr>] kind = "password"` — the masked set-password popup and the Samba lifecycle. |
 | [Pickers](pickers.md) | `[profile.picker.<attr>]` — populating an attribute from a live candidate search, including membership fan-out. |
 | [Full Example](full-example.md) | The complete annotated `examples/config.toml`, walked through table by table. |
 

@@ -72,13 +72,14 @@ loginShell    = "/bin/bash"
 homeDirectory = "/home/{uid}"
 uidNumber     = "{next:10000-60000}"
 
-# Inline password field: the create/edit form shows a masked, confirm-twice field
-# for `ldap_attribute` (the schema-generated field is suppressed). The cleartext
-# goes to the directory; the LDIF preview shows ********.
+# Widget bindings: `[profile.widget.<attr>]` declares a rich in-line widget for
+# an attribute's field.
+# Password widget: opens a set-password popup; the cleartext goes to the
+# directory; the LDIF preview shows ********. Requires an encrypted connection.
 #   samba = true -> also write sambaNTPassword/sambaPwdLastSet (needs sambaSamAccount).
-[profile.password]
-ldap_attribute = "userPassword"               # default; omit to use userPassword
-samba          = false
+[profile.widget.userPassword]
+kind  = "password"
+samba = false
 
 # Picker bindings: `[profile.picker.<attr>]` declares how an attribute's field is
 # populated from a live candidate search. Four knobs:
@@ -154,9 +155,10 @@ itself (`prompt`, `env:VAR`, or `command:cmd`). See
 A full posix (and optional Samba) account: multiple object classes, an `uid`
 RDN, a `label` template, and three sub-tables —
 [`[profile.defaults]`](defaults.md) (literal `loginShell`, templated
-`homeDirectory`, auto-numbered `uidNumber`), [`[profile.password]`](passwords.md)
-(the inline masked field), and two [`[profile.picker.<attr>]`](pickers.md)
-bindings (`gidNumber` stores a scalar; `memberOf` fans out to `member`). See
+`homeDirectory`, auto-numbered `uidNumber`),
+[`[profile.widget.userPassword]`](widgets.md#the-password-kind) (the masked
+set-password popup), and two [`[profile.picker.<attr>]`](pickers.md) bindings
+(`gidNumber` stores a scalar; `memberOf` fans out to `member`). See
 [Entry Profiles](entry-profiles.md).
 
 ### The `group` profile

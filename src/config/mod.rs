@@ -750,13 +750,35 @@ options = [ { value = "/bin/bash", label = "Bash" } ]
         let cfg: Config = toml::from_str(toml).expect("demo-config.toml parses");
         let widgets = crate::config::widget::resolve_widgets(&cfg.profiles)
             .expect("demo-config widgets resolve");
-        // sambaAcctFlags + loginShell presets are present
+        // sambaAcctFlags + loginShell choice widgets are present
         assert!(widgets
             .iter()
             .any(|w| w.attr.eq_ignore_ascii_case("sambaAcctFlags")));
         assert!(widgets
             .iter()
             .any(|w| w.attr.eq_ignore_ascii_case("loginShell")));
+        // userPassword password widget is present (migrated from [profile.password])
+        assert!(
+            widgets
+                .iter()
+                .any(|w| matches!(&w.kind, crate::config::widget::WidgetKind::Password(_))),
+            "expected a WidgetKind::Password in demo-config widgets"
+        );
+    }
+
+    #[test]
+    fn reference_config_parses() {
+        let toml = include_str!("../../examples/config.toml");
+        let cfg: Config = toml::from_str(toml).expect("examples/config.toml parses");
+        let widgets = crate::config::widget::resolve_widgets(&cfg.profiles)
+            .expect("examples/config.toml widgets resolve");
+        // userPassword password widget is present in the reference config too
+        assert!(
+            widgets
+                .iter()
+                .any(|w| matches!(&w.kind, crate::config::widget::WidgetKind::Password(_))),
+            "expected a WidgetKind::Password in reference config widgets"
+        );
     }
 
     #[test]

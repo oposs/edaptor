@@ -33,9 +33,9 @@ loginShell    = "/bin/bash"
 homeDirectory = "/home/{uid}"
 uidNumber     = "{next:10000-60000}"
 
-[profile.password]
-ldap_attribute = "userPassword"
-samba          = true
+[profile.widget.userPassword]
+kind  = "password"
+samba = true
 
 [profile.widget.sambaAcctFlags]
 kind   = "choice"
