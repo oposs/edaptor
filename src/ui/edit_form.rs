@@ -72,6 +72,20 @@ impl EditField {
     }
 }
 
+/// The bound picker, if this field carries a `kind = "picker"`/`"membership"`
+/// widget. `None` for choice/password/plain fields.
+fn widget_picker(f: &EditField) -> Option<&crate::config::relation::PickerBinding> {
+    match &f.widget_binding {
+        Some(crate::config::widget::WidgetKind::Picker(b)) => Some(b),
+        _ => None,
+    }
+}
+
+/// The fan-out back-ref attr for a field (a `kind = "membership"` widget), if any.
+fn fanout_attr_of(f: &EditField) -> Option<&str> {
+    widget_picker(f).and_then(|b| b.fanout_attr.as_deref())
+}
+
 /// The pop-up editor for a multi-valued attribute: one inline edit row per
 /// value, with insert / delete / reorder. Lives as an overlay over pane 3; on
 /// commit its [`committed_values`](ValueEditor::committed_values) replace the
@@ -288,12 +302,7 @@ impl EditForm {
         let attrs = self
             .fields
             .iter()
-            .filter(|f| {
-                f.picker
-                    .as_ref()
-                    .and_then(|b| b.fanout_attr.as_ref())
-                    .is_none()
-            })
+            .filter(|f| fanout_attr_of(f).is_none())
             .map(|f| (f.label.clone(), f.current_values()))
             .collect();
         EditEntry {
@@ -307,12 +316,7 @@ impl EditForm {
     pub fn fanout_labels(&self) -> Vec<String> {
         self.fields
             .iter()
-            .filter(|f| {
-                f.picker
-                    .as_ref()
-                    .and_then(|b| b.fanout_attr.as_ref())
-                    .is_some()
-            })
+            .filter(|f| fanout_attr_of(f).is_some())
             .map(|f| f.label.clone())
             .collect()
     }
@@ -424,10 +428,13 @@ pub fn tag_picker_fields(
     }
 }
 
-/// Attach a `[profile.widget.<attr>]` choice or password widget to each
-/// matching field. A choice field stays editable (Enter opens the choice
-/// overlay). Password fields stay read-only inline; Enter opens the password
-/// popup. Mirrors `tag_picker_fields`; `.any()` objectClass matching.
+/// Attach a `[profile.widget.<attr>]` widget (choice / password / picker /
+/// membership) to each matching field. Choice fields stay editable (Enter opens
+/// the choice overlay). Password fields stay read-only inline; Enter opens the
+/// password popup. Picker fields open the candidate picker; a membership
+/// (fan-out) binding forces the field editable (its value fans out, it is never
+/// written to the field itself), honoring global read-only. `.any()` objectClass
+/// matching, mirroring `picker_for`/`widget_for`.
 pub fn tag_widget_fields(
     form: &mut EditForm,
     widgets: &[crate::config::widget::ResolvedWidget],
@@ -435,9 +442,6 @@ pub fn tag_widget_fields(
     read_only: bool,
 ) {
     use crate::config::widget::WidgetKind;
-    if read_only {
-        return;
-    }
     let has_oc = |ocs: &[String]| {
         ocs.iter()
             .any(|oc| object_classes.iter().any(|e| e.eq_ignore_ascii_case(oc)))
@@ -447,7 +451,24 @@ pub fn tag_widget_fields(
             continue;
         }
         match &rw.kind {
+            WidgetKind::Picker(binding) => {
+                if let Some(f) = form
+                    .fields
+                    .iter_mut()
+                    .find(|f| f.label.eq_ignore_ascii_case(&rw.attr))
+                {
+                    if binding.fanout_attr.is_some() {
+                        f.editable = !read_only;
+                        f.widget_binding = Some(rw.kind.clone());
+                    } else if f.editable {
+                        f.widget_binding = Some(rw.kind.clone());
+                    }
+                }
+            }
             WidgetKind::Choice(_) => {
+                if read_only {
+                    continue;
+                }
                 if let Some(f) = form
                     .fields
                     .iter_mut()
@@ -458,17 +479,16 @@ pub fn tag_widget_fields(
                 }
             }
             WidgetKind::Password(pw) => {
+                if read_only {
+                    continue;
+                }
                 let mut targets = vec![pw.primary.clone()];
                 targets.extend(pw.derived.iter().cloned());
                 for f in form.fields.iter_mut() {
                     if targets.iter().any(|t| t.eq_ignore_ascii_case(&f.label)) {
                         f.widget_binding = Some(rw.kind.clone());
-                        // password fields stay read-only inline; Enter opens the popup
                     }
                 }
-            }
-            WidgetKind::Picker(_) => {
-                // Picker/membership wiring lands in a later task (tag onto widget_binding).
             }
         }
     }
@@ -481,7 +501,7 @@ pub fn order_fields(form: &mut EditForm) {
     fn bucket(f: &EditField) -> u8 {
         if f.must {
             0
-        } else if !f.current_values().is_empty() || f.secret || f.picker.is_some() {
+        } else if !f.current_values().is_empty() || f.secret || widget_picker(f).is_some() {
             1
         } else {
             2
@@ -547,7 +567,8 @@ mod tests {
                 kind: FieldKind::DistinguishedName,
                 widget: WidgetSpec::ReadOnlyText,
                 editor: TextState::new(),
-                picker: Some(PickerBinding {
+                picker: None,
+                widget_binding: Some(crate::config::widget::WidgetKind::Picker(PickerBinding {
                     attr: "memberOf".into(),
                     scope: CandidateScope {
                         base: "".into(),
@@ -558,8 +579,7 @@ mod tests {
                     store: StoreKey::Dn,
                     select: None,
                     fanout_attr: fanout,
-                }),
-                widget_binding: None,
+                })),
             }],
             baseline: Default::default(),
             mode: FormMode::Edit,
@@ -990,6 +1010,72 @@ mod tests {
             .unwrap();
         assert!(matches!(f.widget_binding, Some(WidgetKind::Choice(_))));
         assert!(f.editable, "a choice field stays editable");
+    }
+
+    #[test]
+    fn tag_widget_fields_attaches_picker_and_forces_fanout_editable() {
+        use crate::config::relation::{CandidateScope, PickerBinding, StoreKey};
+        use crate::config::widget::{ResolvedWidget, WidgetKind};
+
+        let scope = || CandidateScope {
+            base: "ou=groups,dc=x".into(),
+            object_classes: vec!["groupOfNames".into()],
+            search_attrs: vec!["cn".into()],
+            label_template: None,
+        };
+        // A fan-out (membership) picker on an operationally read-only field, plus a
+        // plain picker on an editable field.
+        let mk_form = || {
+            let mut form = writable_form();
+            form.fields.push(EditField {
+                label: "memberOf".into(),
+                must: false,
+                editable: false, // server-maintained, read-only by default
+                multi: true,
+                secret: false,
+                ordered: false,
+                values: vec![],
+                kind: FieldKind::DistinguishedName,
+                widget: WidgetSpec::ReadOnlyText,
+                editor: TextState::new(),
+                picker: None,
+                widget_binding: None,
+            });
+            form
+        };
+        let widgets = || {
+            vec![ResolvedWidget {
+                owner_object_classes: vec!["demoPerson".into()],
+                attr: "memberOf".into(),
+                kind: WidgetKind::Picker(PickerBinding {
+                    attr: "memberOf".into(),
+                    scope: scope(),
+                    store: StoreKey::Dn,
+                    select: None,
+                    fanout_attr: Some("member".into()),
+                }),
+            }]
+        };
+
+        // Writable: the fan-out picker is tagged and forced editable.
+        let mut form = mk_form();
+        tag_widget_fields(&mut form, &widgets(), &["demoPerson".to_string()], false);
+        let f = form.fields.iter().find(|f| f.label == "memberOf").unwrap();
+        assert!(matches!(f.widget_binding, Some(WidgetKind::Picker(_))));
+        assert!(
+            f.editable,
+            "a fan-out picker forces editability despite operational read-only"
+        );
+
+        // Global read-only: still tagged (so the popup is reachable), but NOT editable.
+        let mut form2 = mk_form();
+        tag_widget_fields(&mut form2, &widgets(), &["demoPerson".to_string()], true);
+        let f2 = form2.fields.iter().find(|f| f.label == "memberOf").unwrap();
+        assert!(matches!(f2.widget_binding, Some(WidgetKind::Picker(_))));
+        assert!(
+            !f2.editable,
+            "global read-only must not force a fan-out field editable"
+        );
     }
 
     #[test]

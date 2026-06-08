@@ -84,31 +84,33 @@ options = [
   { value = "/sbin/nologin", label = "No login" },
 ]
 
-# Picker bindings: `[profile.picker.<attr>]` declares how an attribute's field is
-# populated from a live candidate search. Four knobs:
+# Picker widgets: `[profile.widget.<attr>]` with `kind = "picker"`/`"membership"`
+# declare how an attribute's field is populated from a live candidate search.
+#   kind        (required) — "picker" stores picked value(s) in this entry's attr;
+#                 "membership" fans this entry's DN out into a back-ref attr.
 #   candidate   (required) — a [[profile]] `name` supplying the candidate search scope.
-#   store       (default "dn") — "dn" stores the candidate's DN; any other value is
-#                 an attribute name whose scalar is stored.
-#   select      (default "auto") — cardinality: "auto" derives from the attribute's
-#                 schema arity; "single" or "multi" override it.
-#   fanout_attr (optional) — when set, the field is NOT written to the server;
-#                 instead this entry's DN is added/removed in `fanout_attr` on each
-#                 picked candidate (e.g. a user's memberOf fan-out writes `member`
-#                 on each picked group).
+#   store       (picker, default "dn") — "dn" stores the candidate's DN; any other
+#                 value is an attribute name whose scalar is stored.
+#   select      (picker, default "auto") — cardinality: "auto" derives from the
+#                 attribute's schema arity; "single" or "multi" override it.
+#   via         (membership, required) — the back-ref attribute; this entry's DN is
+#                 added/removed in `via` on each picked candidate (e.g. a user's
+#                 memberOf fan-out writes `member` on each picked group).
 
 # gidNumber: single-select picker over posixGroups; stores the chosen group's
 # gidNumber scalar into the field (not its DN).
-[profile.picker.gidNumber]
+[profile.widget.gidNumber]
+kind      = "picker"
 candidate = "posixgroup"
 store     = "gidNumber"
 select    = "single"
 
 # memberOf: synthetic back-ref — ticking a group writes `member` on it. The
 # memberOf attribute itself is overlay-maintained; edaptor never writes it directly.
-[profile.picker.memberOf]
-candidate   = "group"
-store       = "dn"
-fanout_attr = "member"
+[profile.widget.memberOf]
+kind      = "membership"
+candidate = "group"
+via       = "member"
 
 [[profile]]
 name           = "group"
@@ -119,7 +121,8 @@ show           = ["cn", "description"]
 label          = "{cn}"
 
 # member: multi-select DN picker over users (cardinality from schema, typically multi).
-[profile.picker.member]
+[profile.widget.member]
+kind      = "picker"
 candidate = "user"
 
 [[profile]]
@@ -131,6 +134,7 @@ show           = ["cn", "gidNumber", "memberUid", "description"]
 label          = "{cn}"
 
 # memberUid: multi-select picker; stores each picked user's `uid` scalar (not DN).
-[profile.picker.memberUid]
+[profile.widget.memberUid]
+kind      = "picker"
 candidate = "user"
 store     = "uid"

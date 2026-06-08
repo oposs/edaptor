@@ -515,33 +515,23 @@ mod tests {
     }
 
     #[test]
-    fn demo_config_parses_with_pickers() {
+    fn demo_config_parses_widget_pickers() {
         let toml = include_str!("../../examples/demo-config.toml");
         let cfg: Config = toml::from_str(toml).expect("demo config parses");
-        let pickers = crate::config::relation::resolve_pickers(&cfg.profiles);
-        // member (group) + memberOf, gidNumber (user) + memberUid (posixgroup) = 4.
-        assert_eq!(pickers.len(), 4);
-        // Spot-check the fan-out and scalar-store bindings resolved correctly.
-        let mof = pickers
+        let user = cfg
+            .profiles
             .iter()
-            .find(|p| p.binding.attr == "memberOf")
-            .expect("memberOf picker");
-        assert_eq!(mof.binding.fanout_attr.as_deref(), Some("member"));
-        let gid = pickers
-            .iter()
-            .find(|p| p.binding.attr == "gidNumber")
-            .expect("gidNumber picker");
-        assert_eq!(
-            gid.binding.store,
-            crate::config::relation::StoreKey::Attr("gidNumber".to_string())
-        );
-        let muid = pickers
-            .iter()
-            .find(|p| p.binding.attr == "memberUid")
-            .expect("memberUid picker");
-        assert_eq!(
-            muid.binding.store,
-            crate::config::relation::StoreKey::Attr("uid".to_string())
+            .find(|p| p.name == "user")
+            .expect("user profile");
+        // memberOf migrated to a membership widget fanning out via `member`.
+        match &user.widgets["memberOf"] {
+            WidgetSpecCfg::Membership { via, .. } => assert_eq!(via, "member"),
+            other => panic!("expected Membership for memberOf, got {other:?}"),
+        }
+        // gidNumber migrated to a picker widget.
+        assert!(
+            matches!(&user.widgets["gidNumber"], WidgetSpecCfg::Picker { .. }),
+            "expected Picker for gidNumber"
         );
     }
 
@@ -804,6 +794,26 @@ options = [ { value = "/bin/bash", label = "Bash" } ]
                 .any(|w| matches!(&w.kind, crate::config::widget::WidgetKind::Password(_))),
             "expected a WidgetKind::Password in demo-config widgets"
         );
+        // memberOf resolves to a membership picker fanning out via `member`.
+        let mof = widgets
+            .iter()
+            .find(|w| w.attr.eq_ignore_ascii_case("memberOf"))
+            .expect("memberOf widget");
+        match &mof.kind {
+            crate::config::widget::WidgetKind::Picker(b) => {
+                assert_eq!(b.fanout_attr.as_deref(), Some("member"))
+            }
+            other => panic!("expected Picker for memberOf, got {other:?}"),
+        }
+        // gidNumber resolves to a plain picker (no fan-out).
+        let gid = widgets
+            .iter()
+            .find(|w| w.attr.eq_ignore_ascii_case("gidNumber"))
+            .expect("gidNumber widget");
+        match &gid.kind {
+            crate::config::widget::WidgetKind::Picker(b) => assert_eq!(b.fanout_attr, None),
+            other => panic!("expected Picker for gidNumber, got {other:?}"),
+        }
     }
 
     #[test]

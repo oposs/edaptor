@@ -48,7 +48,9 @@ pub(crate) fn open_value_editor(app: &mut App, _structure: &Structure) {
         // (the picker UI seeded from fixed options, no LDAP search).
         let ve = ValueEditor::open_choice(focus, field, &w);
         app.overlay = Some(Overlay::ValueEditor(ve));
-    } else if let Some(binding) = field.picker.clone().filter(|_| field.editable) {
+    } else if let Some(crate::config::widget::WidgetKind::Picker(binding)) =
+        field.widget_binding.clone().filter(|_| field.editable)
+    {
         // Unified picker: open from the resolved binding. Labels and real DNs are
         // upgraded from search results in the `Response::Entries` intercept.
         let ve = ValueEditor::open(focus, field, &binding);
@@ -506,8 +508,10 @@ mod tests {
             kind: FieldKind::Text,
             widget: WidgetSpec::ReadOnlyText,
             editor: TextState::new(),
-            picker: Some(member_dn_binding()),
-            widget_binding: None,
+            picker: None,
+            widget_binding: Some(crate::config::widget::WidgetKind::Picker(
+                member_dn_binding(),
+            )),
         };
         let mut app = bare_app(false);
         app.form = Some(EditForm {
@@ -642,8 +646,10 @@ mod tests {
             kind: FieldKind::Text,
             widget: WidgetSpec::ReadOnlyText,
             editor: TextState::new(),
-            picker: Some(gid_picker_binding()),
-            widget_binding: None,
+            picker: None,
+            widget_binding: Some(crate::config::widget::WidgetKind::Picker(
+                gid_picker_binding(),
+            )),
         };
         let mut app = bare_app(false);
         app.form = Some(EditForm {

@@ -257,7 +257,10 @@ fn plan_combined_save(
         preview_sets.push(mask_changeset_secrets(&own_cs, &mask_attrs));
     }
     for f in form.fields.iter().filter(|f| fanout.contains(&f.label)) {
-        let Some(attr) = f.picker.as_ref().and_then(|b| b.fanout_attr.clone()) else {
+        let Some(attr) = (match &f.widget_binding {
+            Some(crate::config::widget::WidgetKind::Picker(b)) => b.fanout_attr.clone(),
+            _ => None,
+        }) else {
             continue;
         };
         let base = form.baseline.get(&f.label).cloned().unwrap_or_default();
@@ -583,14 +586,16 @@ mod tests {
             kind: FieldKind::Text,
             widget: WidgetSpec::ReadOnlyText,
             editor: TextState::new(),
-            picker: Some(crate::config::relation::PickerBinding {
-                attr: "memberOf".into(),
-                scope: scope.clone(),
-                store: crate::config::relation::StoreKey::Dn,
-                select: None,
-                fanout_attr: Some("member".into()),
-            }),
-            widget_binding: None,
+            picker: None,
+            widget_binding: Some(crate::config::widget::WidgetKind::Picker(
+                crate::config::relation::PickerBinding {
+                    attr: "memberOf".into(),
+                    scope: scope.clone(),
+                    store: crate::config::relation::StoreKey::Dn,
+                    select: None,
+                    fanout_attr: Some("member".into()),
+                },
+            )),
         };
 
         let mut baseline = BTreeMap::new();
@@ -646,14 +651,16 @@ mod tests {
             kind: FieldKind::Text,
             widget: WidgetSpec::ReadOnlyText,
             editor: TextState::new(),
-            picker: Some(crate::config::relation::PickerBinding {
-                attr: "memberOf".into(),
-                scope,
-                store: crate::config::relation::StoreKey::Dn,
-                select: None,
-                fanout_attr: Some("member".into()),
-            }),
-            widget_binding: None,
+            picker: None,
+            widget_binding: Some(crate::config::widget::WidgetKind::Picker(
+                crate::config::relation::PickerBinding {
+                    attr: "memberOf".into(),
+                    scope,
+                    store: crate::config::relation::StoreKey::Dn,
+                    select: None,
+                    fanout_attr: Some("member".into()),
+                },
+            )),
         };
 
         let mut baseline = BTreeMap::new();
