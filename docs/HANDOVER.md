@@ -4,8 +4,8 @@ Carries the **current session's concerns** into the next session. Not a project
 history — for that, see git log, the specs under `docs/superpowers/specs/`, and
 project memory (`…/memory/MEMORY.md`).
 
-**Date:** 2026-06-08 · **`main` HEAD:** `25a86b1` · **0.2.0 is released**
-(tagged `b31fd65`). `main` is **local-only** (origin
+**Date:** 2026-06-08 · **`main` HEAD:** `78218f3` · **0.2.0 is released**
+(tagged `b31fd65`; 0.2.1 not yet cut). `main` is **local-only** (origin
 `git@github.com:oposs/edaptor.git` exists; `origin/main` is behind and **not
 pushed**).
 
@@ -14,59 +14,52 @@ introspects live schema (`cn=subschema`) and generates edit forms from
 `objectClass` definitions; a TOML config declares connection settings plus
 *entry profiles*. Earlier milestones (M1–M5, the 3-pane/ratatui redesign,
 rustls, the test server, the `app.rs` decomposition) and the **widget palette**
-(`[profile.widget.<attr>]` `kind = "choice"` and `"password"`) are **done and on
-`main`** — details in git, the specs, and memory.
+(`[profile.widget.<attr>]` `kind = "choice"`, `"password"`, `"picker"`,
+`"membership"`) are **done and on `main`** — details in git, the specs, and memory.
 
-The project is converging on **one configurable-fields concept: the widget
-palette.** `choice` and `password` are in; the next step folds the *picker*
-system in too (spec written — see below).
+The project has reached **one configurable-fields concept: the widget palette.**
+All four kinds are in; the picker/membership fold-in completed this session.
 
 ---
 
-## Done this session: docs + the picker-widget design
+## Done this session: picker/membership widgets (implemented + merged)
 
-No code shipped this session — documentation cleanup plus the next design.
+Folded the old `[profile.picker.<attr>]` system into the widget palette and
+**merged to `main`** (merge `78218f3`). Plan-driven, subagent-driven, 9 commits.
 
-1. **Widget palette → one doc home** (`e139e4f`). `configuration/widgets.md` now
-   opens with a *concept* section (the `[profile.widget.<attr>]` palette + the
-   `kind` discriminator + a kinds table) and hosts both `choice` and `password`.
-   Removed the stale "the only implemented kind is choice" line; **deleted
-   `configuration/passwords.md`** (folded into widgets.md) and repointed every
-   link (SUMMARY, overview orientation map, object-model, usage). Reworded
-   "inline password field" → "set-password popup" throughout. `mdbook build`
-   clean, no broken links.
-2. **`CHANGES.md` Unreleased backfilled** (`e139e4f`) — 0.2.0 shipped the choice
-   + password widgets and the security fixes but its changelog only listed DIT
-   tree labels; the **Unreleased** section now documents the widget palette, the
-   `[profile.password]` removal / read-only hash fields / TLS requirement, and
-   the permanently-dirty + cleartext-preview fixes. **User plans to cut 0.2.1**
-   with these.
-3. **Picker-widget SPEC written** (`25a86b1`), **NOT implemented**. Fold
-   `[profile.picker.<attr>]` into the palette as two kinds:
-   - **`kind = "picker"`** — store picked value(s) in *this* entry (`candidate`,
-     `store`, `select`). Covers `gidNumber`, `member`, `memberUid`.
-   - **`kind = "membership"`** — fan *this* entry's DN into a back-ref attr on
-     each picked candidate (`candidate`, `via`; always multi). Covers `memberOf`.
-   - `candidate` may be a profile-name string **or** an inline scope table
-     (`{ base, object_classes, search_attrs, label }`).
-   - Engine (live search, fan-out, combined-save) **unchanged** — both kinds
-     resolve into the existing `PickerBinding`/`CandidateScope`; only the config
-     front-end + storage location change. Clean removal of `[profile.picker]` /
-     `PickerSpec` / `App.pickers` / `EditField.picker` / `resolve_pickers` /
-     `picker_for` / `tag_picker_fields` (no back-compat).
-   - Spec: `docs/superpowers/specs/2026-06-08-picker-widget-design.md`.
+1. **Two new palette kinds** — `kind = "picker"` (store picked value(s) in this
+   entry: `candidate`, `store`, `select`; covers `gidNumber`/`member`/`memberUid`)
+   and `kind = "membership"` (fan this entry's DN into back-ref attr `via` on each
+   picked candidate; always multi; covers `memberOf`). `candidate` is a
+   `[[profile]]` name **or** an inline `{ base, object_classes, search_attrs?,
+   label? }` table (`CandidateRef`, `#[serde(untagged)]`).
+2. **Engine unchanged.** Both kinds resolve (in `config::widget::resolve_widgets`)
+   into the existing `PickerBinding`/`CandidateScope` as `WidgetKind::Picker(_)`;
+   live search / fan-out / combined-save are behavior-preserved.
+3. **Clean removal** (no back-compat): `[profile.picker]`, `PickerSpec`,
+   `EntryProfile.pickers`, `resolve_pickers`, `picker_for`, `tag_picker_fields`,
+   `ResolvedPicker`, `App.pickers`, `EditField.picker`. `EditField` carries only
+   `widget_binding`; every read site reads the `Picker` arm. `examples/*.toml`
+   migrated; `configuration/pickers.md` folded into `widgets.md`.
+4. **Verified.** 376 lib + 7 live tests green; clippy/fmt clean. Live TUI smoke:
+   `gidNumber` picker opens from `widget_binding`, candidate search returns
+   posixGroups with the current one radio-marked. `CHANGES.md` Unreleased updated.
+5. Spec `docs/superpowers/specs/2026-06-08-picker-widget-design.md`; plan
+   `docs/superpowers/plans/2026-06-08-picker-widget.md`. Memory:
+   `edaptor-picker-widget-merged`.
 
-**NEXT STEP:** write the implementation plan for the picker widget
-(writing-plans) and run it subagent-driven, on a branch.
+**NEXT STEP:** the configurable-field palette is complete. Candidate next work:
+**cut 0.2.1** (the Unreleased changelog now covers choice/password/picker/
+membership + security fixes); or pick up M6 leftovers / the remaining hardcoded
+attribute handlers as future palette kinds (see Open gaps).
 
 ---
 
 ## Open gaps (carry forward)
 
-1. **Picker-widget plan + implementation pending** (spec done, approved). It
-   touches the working membership/picker engine's *callers* (binding now lives in
-   `EditField.widget_binding`'s `Picker` arm, not `EditField.picker`) — engine
-   behavior is preserved, but the rewiring is broad; review carefully.
+1. **0.2.1 not yet cut.** The `CHANGES.md` Unreleased section now covers the full
+   widget palette (choice/password/picker/membership), the `[profile.password]` /
+   `[profile.picker]` removals, and the security fixes — ready to tag whenever.
 2. **TLS positive-path live smoke (password widget) still deferred.** Negative
    path was live-verified on plain `ldap://` (password fields → "requires an
    encrypted connection"). The positive path (set a password over TLS, confirm
