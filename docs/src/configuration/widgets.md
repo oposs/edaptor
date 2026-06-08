@@ -7,13 +7,15 @@ own editor and storage rules. Pressing **Enter** on a widget-bound field opens
 that kind's editor; the field is read-only to inline typing and shows a
 human-readable summary (or masked bullets) the rest of the time.
 
-Two kinds are available today, and more can be added without changing existing
+Four kinds are available today, and more can be added without changing existing
 configuration:
 
 | `kind` | Editor | Use it for |
 |---|---|---|
 | [`choice`](#the-choice-kind) | a checklist (multi) / radio list (single) over a fixed set of options | enumerated or flag attributes — `loginShell`, `sambaAcctFlags` |
 | [`password`](#the-password-kind) | a masked **New + Confirm** set-password popup | password / hash attributes — `userPassword`, with optional Samba sync |
+| [`picker`](#the-picker-kind) | a live candidate search; stores the picked value(s) in this entry | value lookup (`gidNumber`) and DN/scalar lists (`member`, `memberUid`) |
+| [`membership`](#the-membership-kind) | a live candidate search; fans this entry's DN into a back-ref attr on each pick | back-reference views (`memberOf`) |
 
 A widget is declared as a sub-table of an [entry profile](entry-profiles.md),
 keyed by the attribute it edits, e.g. `[profile.widget.loginShell]`.
@@ -155,3 +157,139 @@ When you save changes via a choice widget, eDAPtor:
 For bracketed format this means the `U` (normal-user) and other Samba-internal
 flags survive an edit even though they do not appear in the checklist. For plain
 format there is only one token so lossless preservation is not relevant.
+
+## The `picker` kind
+
+The `picker` kind turns the named attribute into a **live candidate search
+field**. Pressing Enter opens an overlay that searches entries from a linked
+profile; the operator selects one or more candidates and eDAPtor writes the
+right value(s) into this entry's attribute.
+
+```toml
+[profile.widget.gidNumber]
+kind      = "picker"
+candidate = "posixgroup"
+store     = "gidNumber"
+select    = "single"
+```
+
+### Options
+
+- **`kind`** *(required)* — must be `"picker"`.
+- **`candidate`** *(required)* — the source of candidates. Either:
+  - A **`[[profile]]` name string** (e.g. `"posixgroup"`) — the picker searches
+    that profile's `search_base` and matches on its `search_attrs`.
+  - An **inline scope table** — when you need a candidate set that has no managed
+    profile:
+    ```toml
+    candidate = { base = "ou=people,dc=example,dc=org", object_classes = ["inetOrgPerson"], search_attrs = ["cn", "uid"], label = "{cn} ({uid})" }
+    ```
+    Keys: `base` (required), `object_classes` (required), `search_attrs`
+    (optional, defaults to `["cn"]`), `label` (optional, defaults to `cn`).
+- **`store`** *(default `"dn"`)* — what to write per pick:
+  - `"dn"` — stores the candidate's full distinguished name.
+  - Any other value is treated as a **candidate attribute name** whose scalar
+    value is read from each picked entry and written instead (e.g. `"gidNumber"`
+    stores the chosen group's numeric GID, not its DN).
+- **`select`** *(default `"auto"`)* — cardinality override:
+  - `"auto"` — derives single vs. multi from the attribute's schema arity.
+  - `"single"` — at most one candidate may be picked.
+  - `"multi"` — multiple candidates may be picked.
+
+### Worked examples
+
+#### `gidNumber` — single-select, stores a scalar
+
+```toml
+[profile.widget.gidNumber]
+kind      = "picker"
+candidate = "posixgroup"
+store     = "gidNumber"
+select    = "single"
+```
+
+A single-select picker over `posixgroup` entries. Because `store = "gidNumber"`,
+eDAPtor writes the **chosen group's `gidNumber` scalar** into the user's
+`gidNumber` field — not the group's DN.
+
+#### `member` — multi-select, stores DNs
+
+```toml
+[profile.widget.member]
+kind      = "picker"
+candidate = "user"
+store     = "dn"
+select    = "multi"
+```
+
+A multi-select picker over `user` entries. Each picked user's **DN** is written
+into the group's `member` attribute. `store = "dn"` is the default, so the
+`store` key may be omitted; `select = "multi"` is also the schema default for
+`member`, so `select` may be omitted too.
+
+#### `secretary` — inline scope, single-select
+
+```toml
+[profile.widget.secretary]
+kind      = "picker"
+store     = "dn"
+select    = "single"
+candidate = { base = "ou=people,dc=example,dc=org", object_classes = ["inetOrgPerson"], search_attrs = ["cn", "uid"], label = "{cn} ({uid})" }
+```
+
+Uses an inline candidate scope rather than a named profile. Useful when you need
+a picker over a subset of the directory that does not have (or need) a full
+`[[profile]]` entry of its own.
+
+## The `membership` kind
+
+The `membership` kind is a **fan-out picker**: when the operator selects
+candidates, eDAPtor does **not** write this attribute on the current entry.
+Instead it adds (or removes) this entry's DN in the `via` attribute on each
+**picked candidate**. This is the right model for overlay-maintained
+back-references such as `memberOf`, where the attribute is kept in sync by
+OpenLDAP's `memberof` overlay and must **never be written directly**.
+
+```toml
+[profile.widget.memberOf]
+kind      = "membership"
+candidate = "group"
+via       = "member"
+```
+
+The overlay sees the `member` change on the group and updates `memberOf` on the
+user automatically.
+
+### Options
+
+- **`kind`** *(required)* — must be `"membership"`.
+- **`candidate`** *(required)* — the source of candidates. Same as for
+  [`picker`](#the-picker-kind): a `[[profile]]` name string or an inline scope
+  table.
+- **`via`** *(required)* — the attribute on each picked **candidate** that
+  receives this entry's DN. This attribute is always treated as multi-valued;
+  eDAPtor adds or removes exactly one DN value per toggled candidate.
+
+There is no `store` or `select` key for `membership` — storage is always DN,
+and the cardinality is always multi (the overlay collects one entry per group
+membership).
+
+### Worked example
+
+#### `memberOf` — fan-out into `member`
+
+```toml
+[profile.widget.memberOf]
+kind      = "membership"
+candidate = "group"
+via       = "member"
+```
+
+Pressing Enter on the `memberOf` field opens a picker over `group` entries.
+Ticking a group does **not** write `memberOf` on the current user; instead
+eDAPtor adds (or removes) the user's DN in that group's `member` attribute.
+OpenLDAP's `memberof` overlay then keeps the user's `memberOf` values in sync
+automatically.
+
+The membership *workflow* — editing from either side, incremental search, the
+fan-out write model — is described in [Membership Editing](../usage/membership.md).

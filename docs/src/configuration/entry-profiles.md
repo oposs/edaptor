@@ -19,8 +19,9 @@ search_attrs   = ["cn", "uid", "mail"]        # picker searches these attributes
 label          = "{cn} ({uid})"               # e.g. "Bob Baker (bob)"
 ```
 
-- **`name`** — the profile's identifier. It is referenced by pickers in other
-  profiles (a picker's `candidate` names a profile by this key).
+- **`name`** — the profile's identifier. It is referenced by picker and
+  membership widgets in other profiles (a widget's `candidate` names a profile
+  by this key).
 - **`object_classes`** — the object classes an entry of this kind carries.
   eDAPtor introspects these against `cn=subschema` to build the edit form, and
   emits `top` plus all listed classes (deduplicated) on create. The list also
@@ -49,10 +50,9 @@ set-password popup, and picker bindings that pull values from — or fan out to
 — other profiles. Those sub-tables are documented separately:
 
 - [`[profile.defaults]`](defaults.md) — fill empty fields on create.
-- [`[profile.widget.<attr>]`](widgets.md) — rich in-line widget (choice checklist
-  or masked password popup).
-- [`[profile.picker.<attr>]`](pickers.md) — populate an attribute from a live
-  candidate search.
+- [`[profile.widget.<attr>]`](widgets.md) — rich in-line widget: `choice`
+  checklist, `password` popup, `picker` candidate search, or `membership`
+  fan-out.
 
 ### A `groupOfNames` group
 
@@ -68,7 +68,7 @@ label          = "{cn}"
 
 Here `search_attrs` is omitted, so the picker substring search falls back to
 `show` (`cn`, `description`). The group's `member` attribute is populated by a
-[picker](pickers.md) over the `user` profile.
+[`picker` widget](widgets.md#the-picker-kind) over the `user` profile.
 
 ### A `posixGroup`
 
@@ -84,4 +84,5 @@ label          = "{cn}"
 
 A `posixGroup` carries a numeric `gidNumber` and lists its members by `uid` in
 `memberUid` (a scalar, not a DN). Both `gidNumber` (consumed by the user
-profile's picker) and `memberUid` are wired through [pickers](pickers.md).
+profile's picker widget) and `memberUid` are wired through
+[`picker` widgets](widgets.md#the-picker-kind).

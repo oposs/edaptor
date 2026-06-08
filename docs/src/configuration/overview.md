@@ -38,8 +38,7 @@ tables:
 
 `[[profile]]` is an *array of tables* — you write it once per kind of entry you
 manage. Each profile may carry sub-tables (`[profile.defaults]`,
-`[profile.widget.<attr>]`, `[profile.picker.<attr>]`) that refine how its entries
-are created and edited.
+`[profile.widget.<attr>]`) that refine how its entries are created and edited.
 
 ## Orientation map
 
@@ -48,8 +47,7 @@ are created and edited.
 | [Server & Authentication](server-auth.md) | `[server]`, `[server.tls]`, `[auth]` — the connection, TLS trust, and bind credentials. |
 | [Entry Profiles](entry-profiles.md) | `[[profile]]` — name, object classes, RDN attribute, search base, displayed/searched attributes, and labels. |
 | [Defaults](defaults.md) | `[profile.defaults]` — literal, templated, and auto-numbered values that fill empty fields on create. |
-| [Widgets](widgets.md) | `[profile.widget.<attr>]` — give a field a richer editor: a `choice` checklist (e.g. `sambaAcctFlags`, `loginShell`) or a `password` set-password popup (with optional Samba sync). |
-| [Pickers](pickers.md) | `[profile.picker.<attr>]` — populating an attribute from a live candidate search, including membership fan-out. |
+| [Widgets](widgets.md) | `[profile.widget.<attr>]` — give a field a richer editor: a `choice` checklist (e.g. `sambaAcctFlags`, `loginShell`), a `password` set-password popup (with optional Samba sync), a `picker` that populates an attribute from a live candidate search, or a `membership` fan-out that writes back-references on each picked candidate. |
 | [Full Example](full-example.md) | The complete annotated `examples/config.toml`, walked through table by table. |
 
 The fastest way to a working file is to copy
