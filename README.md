@@ -60,7 +60,10 @@ All generated users share the password `test123`.
 
 ## Configuration
 
-A single TOML file (`--config <path>`, default `~/.config/edaptor/config.toml`).
+A single TOML file (`--config <path>`, default `~/.config/edaptor/config.toml`)
+declares the LDAP connection, how to authenticate, and a set of *entry profiles*
+describing what a "user", "group", or "posixgroup" means in your directory. The
+skeleton is:
 
 ```toml
 [server]
@@ -72,98 +75,34 @@ timeout_secs = 10
 [auth]
 method          = "simple"
 bind_dn         = "cn=ldapmanager,dc=example,dc=com"
-# Password is NEVER stored here. Supported sources: "prompt", "env:VAR", "command:cmd"
+# Password is NEVER stored here. Sources: "prompt", "env:VAR", "command:cmd"
 password_source = "prompt"
 
-# Entry profiles: what a "user", "group", and "posixgroup" mean in this directory.
-# `search_attrs` sets which attributes the picker substring-search matches.
-# Falls back to `show`, then to `["cn"]` when omitted.
-#
-# This "user" is a full posix (+optional Samba) account template: multiple
-# object classes, defaulted/templated/auto-numbered fields, an inline password
-# field, and picker bindings that pull values from or fan out to other profiles.
 [[profile]]
 name           = "user"
 object_classes = ["inetOrgPerson", "posixAccount", "shadowAccount"]
 rdn_attr       = "uid"
 search_base    = "ou=people,dc=example,dc=com"
-show           = ["uid", "cn", "sn", "givenName", "mail", "uidNumber", "gidNumber", "homeDirectory"]
-search_attrs   = ["cn", "uid", "mail"]   # picker searches these attributes
-# How an entry of this profile is labelled in the membership picker. `{attr}` is
-# substituted by that attribute's value; literal text is kept. Defaults to cn.
-label          = "{cn} ({uid})"          # e.g. "Bob Baker (bob)"
-
-# Defaults fill EMPTY fields on create (operator-entered values are never
-# overwritten). Three value kinds:
-#   literal             -> a fixed string
-#   "/home/{uid}"       -> template; {attr} is substituted from another field
-#   "{next:MIN-MAX}"    -> auto-number; the next free value in [MIN,MAX] across
-#                          the whole directory (refuses if the scan is truncated
-#                          by a server size limit — bind with a high-limit identity)
+show           = ["uid", "cn", "sn", "mail", "uidNumber", "gidNumber"]
+# Defaults fill empty fields on create; widgets give fields a richer editor
+# (passwords, choice lists, candidate/membership pickers).
 [profile.defaults]
-loginShell    = "/bin/bash"
 homeDirectory = "/home/{uid}"
 uidNumber     = "{next:10000-60000}"
-
-# Inline password field: the create/edit form shows a masked, confirm-twice
-# field for `ldap_attribute` (the schema-generated field is suppressed). The
-# cleartext goes to the directory; the LDIF preview shows `********`.
-#   samba = true  -> also write sambaNTPassword/sambaPwdLastSet (needs sambaSamAccount).
-[profile.password]
-ldap_attribute = "userPassword"   # default; omit to use userPassword
-samba          = false
-
-# Picker bindings: `[profile.picker.<attr>]` declares how an attribute's field
-# is populated from a live candidate search. The four configuration knobs are:
-#
-#   candidate   (required) — a [[profile]] `name` supplying the candidate search scope.
-#   store       (default "dn") — what to write per pick: "dn" stores the candidate's DN;
-#                 any other value is treated as an attribute name whose scalar is stored.
-#   select      (default "auto") — cardinality: "auto" derives from the attribute's schema
-#                 arity; "single" or "multi" override it.
-#   fanout_attr (optional) — when set, the field is NOT written to the server; instead,
-#                 this entry's DN is added/removed in `fanout_attr` on each picked candidate
-#                 (e.g. a user's `memberOf` fan-out writes `member` on each picked group).
-
-# gidNumber: single-select picker over posixGroups; stores the chosen group's gidNumber
-# scalar into the field (not its DN).
-[profile.picker.gidNumber]
-candidate = "posixgroup"
-store     = "gidNumber"
-select    = "single"
-
-# memberOf: synthetic back-ref — ticking a group writes `member` on it.
-# The memberOf attribute itself is overlay-maintained; edaptor never writes it directly.
-[profile.picker.memberOf]
-candidate   = "group"
-store       = "dn"
-fanout_attr = "member"
-
-[[profile]]
-name           = "group"
-object_classes = ["groupOfNames"]
-rdn_attr       = "cn"
-search_base    = "ou=groups,dc=example,dc=com"
-show           = ["cn", "description"]
-label          = "{cn}"
-
-# member: multi-select DN picker over users (cardinality from schema, typically multi).
-[profile.picker.member]
-candidate = "user"
-
-[[profile]]
-name           = "posixgroup"
-object_classes = ["posixGroup"]
-rdn_attr       = "cn"
-search_base    = "ou=groups,dc=example,dc=com"
-show           = ["cn", "gidNumber", "memberUid", "description"]
-label          = "{cn}"
-
-# memberUid: multi-select picker; stores each picked user's `uid` scalar (not DN).
-[profile.picker.memberUid]
-candidate = "user"
-store     = "uid"
+[profile.widget.userPassword]
+kind = "password"
 ```
+
+This README intentionally stops here — the full, annotated reference lives in
+the documentation rather than being duplicated:
+
+- **[Entry Profiles](https://oposs.github.io/edaptor/configuration/entry-profiles.html)**
+  and **[Defaults](https://oposs.github.io/edaptor/configuration/defaults.html)**
+- **[Widgets](https://oposs.github.io/edaptor/configuration/widgets.html)** — the
+  `[profile.widget.<attr>]` palette: `password`, `choice`, `picker`, `membership`
+  (these replaced the former `[profile.picker]` / `[profile.password]` layers)
+- **[Full Example](https://oposs.github.io/edaptor/configuration/full-example.html)**
+  — the complete annotated `examples/config.toml`, copy-pasteable as a starting point
 
 ## License
 
