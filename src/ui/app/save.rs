@@ -257,10 +257,7 @@ fn plan_combined_save(
         preview_sets.push(mask_changeset_secrets(&own_cs, &mask_attrs));
     }
     for f in form.fields.iter().filter(|f| fanout.contains(&f.label)) {
-        let Some(attr) = (match &f.widget_binding {
-            Some(crate::config::widget::WidgetKind::Picker(b)) => b.fanout_attr.clone(),
-            _ => None,
-        }) else {
+        let Some(attr) = crate::ui::edit_form::fanout_attr_of(f).map(|s| s.to_string()) else {
             continue;
         };
         let base = form.baseline.get(&f.label).cloned().unwrap_or_default();

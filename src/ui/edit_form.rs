@@ -82,7 +82,7 @@ fn widget_picker(f: &EditField) -> Option<&crate::config::relation::PickerBindin
 }
 
 /// The fan-out back-ref attr for a field (a `kind = "membership"` widget), if any.
-fn fanout_attr_of(f: &EditField) -> Option<&str> {
+pub(crate) fn fanout_attr_of(f: &EditField) -> Option<&str> {
     widget_picker(f).and_then(|b| b.fanout_attr.as_deref())
 }
 
@@ -149,7 +149,7 @@ impl ValueEditor {
         }
     }
 
-    /// Open the picker for a `[profile.picker.<attr>]`-bound field. Seeds the
+    /// Open the picker for a `[profile.widget.<attr>]` picker-bound field. Seeds the
     /// selection from the field's current values (each becomes a `Candidate`
     /// whose `store_value`/key is that value; `dn` equals the value, upgraded to
     /// the real entry DN when a search result matches the store value). Key
@@ -355,8 +355,8 @@ pub(crate) fn value_set_eq(a: &[String], b: &[String]) -> bool {
 /// - `multi`    = the attribute is not single-valued in the schema;
 /// - `editable` = not global-read-only AND the field kind is editable
 ///   (binary / boolean-checkbox / and normally `memberOf` stay static —
-///   [`field_is_editable`]). Picker fields are tagged separately by
-///   [`tag_picker_fields`] at the call seams, which may override editability.
+///   [`field_is_editable`]). Picker/membership widgets are tagged separately by
+///   [`tag_widget_fields`] at the call seams, which may override editability.
 /// - `secret`   = a password attribute ([`crate::form::changeset::is_secret_attr`]);
 /// - `ordered`  = an X-ORDERED config attribute ([`is_x_ordered`]).
 ///
@@ -1023,57 +1023,107 @@ mod tests {
             search_attrs: vec!["cn".into()],
             label_template: None,
         };
-        // A fan-out (membership) picker on an operationally read-only field, plus a
-        // plain picker on an editable field.
+        // Three picker-bound fields:
+        //   memberOf — fan-out (membership) on an operationally read-only field;
+        //   member   — plain picker on an editable field (tagged via the else-if);
+        //   secretary — plain picker on a non-editable field (must NOT be tagged).
+        let plain_field = |label: &str, editable: bool| EditField {
+            label: label.into(),
+            must: false,
+            editable,
+            multi: true,
+            secret: false,
+            ordered: false,
+            values: vec![],
+            kind: FieldKind::DistinguishedName,
+            widget: WidgetSpec::ReadOnlyText,
+            editor: TextState::new(),
+            picker: None,
+            widget_binding: None,
+        };
         let mk_form = || {
             let mut form = writable_form();
-            form.fields.push(EditField {
-                label: "memberOf".into(),
-                must: false,
-                editable: false, // server-maintained, read-only by default
-                multi: true,
-                secret: false,
-                ordered: false,
-                values: vec![],
-                kind: FieldKind::DistinguishedName,
-                widget: WidgetSpec::ReadOnlyText,
-                editor: TextState::new(),
-                picker: None,
-                widget_binding: None,
-            });
+            form.fields.push(plain_field("memberOf", false)); // server-maintained, read-only
+            form.fields.push(plain_field("member", true)); // editable plain picker
+            form.fields.push(plain_field("secretary", false)); // non-editable plain picker
             form
         };
+        let plain_picker = |attr: &str| {
+            WidgetKind::Picker(PickerBinding {
+                attr: attr.into(),
+                scope: scope(),
+                store: StoreKey::Dn,
+                select: None,
+                fanout_attr: None,
+            })
+        };
         let widgets = || {
-            vec![ResolvedWidget {
-                owner_object_classes: vec!["demoPerson".into()],
-                attr: "memberOf".into(),
-                kind: WidgetKind::Picker(PickerBinding {
+            vec![
+                ResolvedWidget {
+                    owner_object_classes: vec!["demoPerson".into()],
                     attr: "memberOf".into(),
-                    scope: scope(),
-                    store: StoreKey::Dn,
-                    select: None,
-                    fanout_attr: Some("member".into()),
-                }),
-            }]
+                    kind: WidgetKind::Picker(PickerBinding {
+                        attr: "memberOf".into(),
+                        scope: scope(),
+                        store: StoreKey::Dn,
+                        select: None,
+                        fanout_attr: Some("member".into()),
+                    }),
+                },
+                ResolvedWidget {
+                    owner_object_classes: vec!["demoPerson".into()],
+                    attr: "member".into(),
+                    kind: plain_picker("member"),
+                },
+                ResolvedWidget {
+                    owner_object_classes: vec!["demoPerson".into()],
+                    attr: "secretary".into(),
+                    kind: plain_picker("secretary"),
+                },
+            ]
+        };
+        let find = |form: &EditForm, label: &str| {
+            form.fields
+                .iter()
+                .find(|f| f.label == label)
+                .map(|f| {
+                    (
+                        f.editable,
+                        matches!(f.widget_binding, Some(WidgetKind::Picker(_))),
+                    )
+                })
+                .unwrap()
         };
 
         // Writable: the fan-out picker is tagged and forced editable.
         let mut form = mk_form();
         tag_widget_fields(&mut form, &widgets(), &["demoPerson".to_string()], false);
-        let f = form.fields.iter().find(|f| f.label == "memberOf").unwrap();
-        assert!(matches!(f.widget_binding, Some(WidgetKind::Picker(_))));
+        let (mof_editable, mof_tagged) = find(&form, "memberOf");
+        assert!(mof_tagged, "fan-out picker is tagged");
         assert!(
-            f.editable,
+            mof_editable,
             "a fan-out picker forces editability despite operational read-only"
         );
+        // A plain picker on an already-editable field IS tagged (the else-if branch).
+        let (mem_editable, mem_tagged) = find(&form, "member");
+        assert!(mem_tagged, "an editable plain picker gets a widget binding");
+        assert!(mem_editable, "an editable plain picker stays editable");
+        // A plain picker on a non-editable field is NOT tagged.
+        let (sec_editable, sec_tagged) = find(&form, "secretary");
+        assert!(
+            !sec_tagged,
+            "a non-editable plain picker must not be tagged (would be unreachable)"
+        );
+        assert!(!sec_editable, "a non-editable plain picker stays read-only");
 
-        // Global read-only: still tagged (so the popup is reachable), but NOT editable.
+        // Global read-only: the fan-out field is still tagged (so the popup is
+        // reachable), but NOT editable.
         let mut form2 = mk_form();
         tag_widget_fields(&mut form2, &widgets(), &["demoPerson".to_string()], true);
-        let f2 = form2.fields.iter().find(|f| f.label == "memberOf").unwrap();
-        assert!(matches!(f2.widget_binding, Some(WidgetKind::Picker(_))));
+        let (mof2_editable, mof2_tagged) = find(&form2, "memberOf");
+        assert!(mof2_tagged);
         assert!(
-            !f2.editable,
+            !mof2_editable,
             "global read-only must not force a fan-out field editable"
         );
     }
