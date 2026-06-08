@@ -23,9 +23,9 @@ administrators actually manage. This layer is configured through
 [entry profiles](../configuration/entry-profiles.md) and the sub-tables they
 carry, and it acts *across all five operations* of the base engine:
 
-- **Passwords** — an inline masked, confirm-twice field on create/edit, with
+- **Passwords** — a masked set-password popup on create/edit, with
   cleartext written to the directory and `********` shown in the LDIF preview
-  (see [Passwords](../configuration/passwords.md)).
+  (see [Widgets](../configuration/widgets.md#the-password-kind)).
 - **Memberships** — [pickers](../configuration/pickers.md) that turn a candidate
   search into the right `member` / `memberUid` writes, including the fan-out that
   maintains overlay-driven back-references like `memberOf`.

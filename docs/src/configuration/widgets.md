@@ -1,9 +1,22 @@
 # Widgets
 
-A `[profile.widget.<attr>]` table declares a **rich in-line widget** for the
-field of attribute `<attr>`. The widget `kind` determines what happens when the
-operator activates the field: a checklist overlay for `choice`, or a set-password
-popup for `password`.
+A `[profile.widget.<attr>]` binding gives the field for attribute `<attr>` a
+**richer editor than a plain text box**. It is eDAPtor's extensible *widget
+palette*: the required `kind` key selects the behaviour, and each kind brings its
+own editor and storage rules. Pressing **Enter** on a widget-bound field opens
+that kind's editor; the field is read-only to inline typing and shows a
+human-readable summary (or masked bullets) the rest of the time.
+
+Two kinds are available today, and more can be added without changing existing
+configuration:
+
+| `kind` | Editor | Use it for |
+|---|---|---|
+| [`choice`](#the-choice-kind) | a checklist (multi) / radio list (single) over a fixed set of options | enumerated or flag attributes — `loginShell`, `sambaAcctFlags` |
+| [`password`](#the-password-kind) | a masked **New + Confirm** set-password popup | password / hash attributes — `userPassword`, with optional Samba sync |
+
+A widget is declared as a sub-table of an [entry profile](entry-profiles.md),
+keyed by the attribute it edits, e.g. `[profile.widget.loginShell]`.
 
 ## The `password` kind
 
@@ -52,8 +65,9 @@ attributes in a single atomic MODIFY.
 
 ## The `choice` kind
 
-The only implemented `kind` is `choice`. It presents a fixed vocabulary of
-options as a checklist.
+The `choice` kind presents a fixed vocabulary of options as a checklist
+(multi-select) or a radio list (single-select) and stores the selection in one
+attribute value.
 
 ```toml
 [profile.widget.sambaAcctFlags]

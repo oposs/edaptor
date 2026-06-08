@@ -47,7 +47,7 @@ password_source = "prompt"
 # it falls back to `show`, then to ["cn"] when omitted.
 #
 # This "user" is a full posix (+optional Samba) account template: multiple object
-# classes, defaulted/templated/auto-numbered fields, an inline password field,
+# classes, defaulted/templated/auto-numbered fields, a set-password popup,
 # and picker bindings that pull values from (or fan out to) other profiles.
 [[profile]]
 name           = "user"

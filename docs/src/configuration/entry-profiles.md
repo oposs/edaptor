@@ -44,8 +44,8 @@ label          = "{cn} ({uid})"               # e.g. "Bob Baker (bob)"
 ### A full user account
 
 The `user` profile above is a complete posix (and optionally Samba) account
-template: multiple object classes, defaulted/templated/auto-numbered fields, an
-inline password field, and picker bindings that pull values from — or fan out to
+template: multiple object classes, defaulted/templated/auto-numbered fields, a
+set-password popup, and picker bindings that pull values from — or fan out to
 — other profiles. Those sub-tables are documented separately:
 
 - [`[profile.defaults]`](defaults.md) — fill empty fields on create.

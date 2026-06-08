@@ -8,9 +8,36 @@ All notable changes to eDAPtor are documented here. The format follows
 
 ### New
 
+- **Configurable widget palette** via `[profile.widget.<attr>]` — bind an
+  attribute to a richer editor than a plain text box:
+  - `kind = "choice"` — pick from a fixed vocabulary and (de)serialize a single
+    value. Shipped for `sambaAcctFlags` (multi-select account flags, losslessly
+    preserving flags the UI does not surface) and `loginShell` (single-select
+    from a configured shell list). Read-only fields show a human-readable summary;
+    Enter opens a checklist/radio popup.
+  - `kind = "password"` — turns the attribute into a masked **set-password
+    field**. Enter on it (or on any derived Samba password attribute) opens a
+    New+Confirm popup that updates `userPassword` and, when `samba = true`,
+    `sambaNTPassword` + `sambaPwdLastSet` in one atomic change.
+
 ### Changed
 
+- **Passwords are now configured with `[profile.widget.<attr>] kind = "password"`**
+  instead of `[profile.password]`, which has been removed.
+- **Password and hash attributes (`userPassword`, `sambaNTPassword`,
+  `sambaLMPassword`) are read-only inline** and changed only through the
+  set-password popup — preventing a typed cleartext password from being written
+  verbatim into a hash attribute.
+- **Password changes require an encrypted connection** (`ldaps://` or
+  `start_tls = true`); the popup refuses to open on a plaintext connection.
+
 ### Fixed
+
+- Password-profile entries no longer appear permanently "dirty" (which popped a
+  spurious Save/Discard/Stay guard on every navigation between entries).
+- Secret values (passwords, NT hashes) are no longer shown in clear in the change
+  (LDIF) preview — they are masked as `********` regardless of how they enter the
+  change.
 
 ## 0.2.0 - 2026-06-08
 
