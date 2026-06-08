@@ -38,6 +38,9 @@ pub struct PasswordWidget {
 pub enum WidgetKind {
     Choice(ChoiceWidget),
     Password(PasswordWidget),
+    /// A unified candidate picker (covers `kind = "picker"` and `"membership"`).
+    /// `fanout_attr = Some(_)` marks a membership/fan-out binding.
+    Picker(crate::config::relation::PickerBinding),
 }
 
 /// A resolved widget bound to its owning profile's object classes (for matching).
@@ -46,6 +49,31 @@ pub struct ResolvedWidget {
     pub owner_object_classes: Vec<String>,
     pub attr: String,
     pub kind: WidgetKind,
+}
+
+/// Resolve a `CandidateRef` to a live-search `CandidateScope`: reuse a named
+/// profile's scope, or build one from an inline table.
+fn resolve_candidate(
+    c: &crate::config::CandidateRef,
+    profiles: &[EntryProfile],
+) -> Result<crate::config::relation::CandidateScope, String> {
+    use crate::config::CandidateRef;
+    match c {
+        CandidateRef::Profile(name) => profiles
+            .iter()
+            .find(|p| &p.name == name)
+            .map(crate::config::relation::scope_of)
+            .ok_or_else(|| format!("unknown candidate profile \"{name}\"")),
+        CandidateRef::Inline(s) => Ok(crate::config::relation::CandidateScope {
+            base: s.base.clone(),
+            object_classes: s.object_classes.clone(),
+            search_attrs: s.search_attrs.clone(),
+            label_template: s
+                .label
+                .as_ref()
+                .map(|l| crate::config::label::parse_label_template(l)),
+        }),
+    }
 }
 
 /// Resolve every `[profile.widget.*]`. Returns `Err(msg)` on an invalid binding
@@ -108,9 +136,40 @@ pub fn resolve_widgets(profiles: &[EntryProfile]) -> Result<Vec<ResolvedWidget>,
                         samba: *samba,
                     })
                 }
-                // Picker and Membership are not yet wired; skip at resolve time
-                // (resolution logic arrives in a later task).
-                WidgetSpecCfg::Picker { .. } | WidgetSpecCfg::Membership { .. } => continue,
+                WidgetSpecCfg::Picker {
+                    candidate,
+                    store,
+                    select,
+                } => {
+                    let scope = resolve_candidate(candidate, profiles)?;
+                    let store = if store.eq_ignore_ascii_case("dn") {
+                        crate::config::relation::StoreKey::Dn
+                    } else {
+                        crate::config::relation::StoreKey::Attr(store.clone())
+                    };
+                    let select = match select.to_ascii_lowercase().as_str() {
+                        "single" => Some(Cardinality::Single),
+                        "multi" => Some(Cardinality::Multi),
+                        _ => None,
+                    };
+                    WidgetKind::Picker(crate::config::relation::PickerBinding {
+                        attr: attr.clone(),
+                        scope,
+                        store,
+                        select,
+                        fanout_attr: None,
+                    })
+                }
+                WidgetSpecCfg::Membership { candidate, via } => {
+                    let scope = resolve_candidate(candidate, profiles)?;
+                    WidgetKind::Picker(crate::config::relation::PickerBinding {
+                        attr: attr.clone(),
+                        scope,
+                        store: crate::config::relation::StoreKey::Dn,
+                        select: Some(Cardinality::Multi),
+                        fanout_attr: Some(via.clone()),
+                    })
+                }
             };
             out.push(ResolvedWidget {
                 owner_object_classes: owner.object_classes.clone(),
@@ -241,7 +300,7 @@ impl ChoiceWidget {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{ChoiceOption, EntryProfile, WidgetSpecCfg};
+    use crate::config::{CandidateRef, ChoiceOption, EntryProfile, WidgetSpecCfg};
 
     fn profile_with(attr: &str, select: &str, format: &str, opts: &[(&str, &str)]) -> EntryProfile {
         let mut p = EntryProfile {
@@ -391,6 +450,147 @@ mod tests {
         );
         assert_eq!(w.present_summary("/bin/sh"), "POSIX sh");
         assert_eq!(w.present_summary("/bin/zsh"), "/bin/zsh");
+    }
+
+    #[test]
+    fn resolve_widget_picker_value_lookup() {
+        use crate::config::relation::{Cardinality, StoreKey};
+        let profiles = vec![
+            EntryProfile {
+                name: "user".into(),
+                object_classes: vec!["inetOrgPerson".into()],
+                widgets: [(
+                    "gidNumber".to_string(),
+                    WidgetSpecCfg::Picker {
+                        candidate: CandidateRef::Profile("posixgroup".into()),
+                        store: "gidNumber".into(),
+                        select: "single".into(),
+                    },
+                )]
+                .into_iter()
+                .collect(),
+                ..Default::default()
+            },
+            EntryProfile {
+                name: "posixgroup".into(),
+                object_classes: vec!["posixGroup".into()],
+                search_base: "ou=groups,dc=x".into(),
+                ..Default::default()
+            },
+        ];
+        let out = resolve_widgets(&profiles).expect("resolves");
+        let rw = out
+            .iter()
+            .find(|w| w.attr == "gidNumber")
+            .expect("gidNumber widget");
+        match &rw.kind {
+            WidgetKind::Picker(b) => {
+                assert_eq!(b.store, StoreKey::Attr("gidNumber".into()));
+                assert_eq!(b.select, Some(Cardinality::Single));
+                assert_eq!(b.fanout_attr, None);
+                assert_eq!(b.scope.base, "ou=groups,dc=x");
+                assert_eq!(b.scope.object_classes, vec!["posixGroup".to_string()]);
+            }
+            other => panic!("expected Picker, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resolve_widget_membership_fans_out() {
+        use crate::config::relation::{Cardinality, StoreKey};
+        let profiles = vec![
+            EntryProfile {
+                name: "user".into(),
+                object_classes: vec!["inetOrgPerson".into()],
+                widgets: [(
+                    "memberOf".to_string(),
+                    WidgetSpecCfg::Membership {
+                        candidate: CandidateRef::Profile("group".into()),
+                        via: "member".into(),
+                    },
+                )]
+                .into_iter()
+                .collect(),
+                ..Default::default()
+            },
+            EntryProfile {
+                name: "group".into(),
+                object_classes: vec!["groupOfNames".into()],
+                search_base: "ou=groups,dc=x".into(),
+                ..Default::default()
+            },
+        ];
+        let out = resolve_widgets(&profiles).expect("resolves");
+        let rw = out
+            .iter()
+            .find(|w| w.attr == "memberOf")
+            .expect("memberOf widget");
+        match &rw.kind {
+            WidgetKind::Picker(b) => {
+                assert_eq!(b.fanout_attr.as_deref(), Some("member"));
+                assert_eq!(b.select, Some(Cardinality::Multi));
+                assert_eq!(b.store, StoreKey::Dn);
+            }
+            other => panic!("expected Picker, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resolve_widget_picker_inline_scope() {
+        let profiles = vec![EntryProfile {
+            name: "user".into(),
+            object_classes: vec!["inetOrgPerson".into()],
+            widgets: [(
+                "secretary".to_string(),
+                WidgetSpecCfg::Picker {
+                    candidate: CandidateRef::Inline(crate::config::InlineScope {
+                        base: "ou=people,dc=x".into(),
+                        object_classes: vec!["inetOrgPerson".into()],
+                        search_attrs: vec!["cn".into()],
+                        label: Some("{cn}".into()),
+                    }),
+                    store: "dn".into(),
+                    select: "auto".into(),
+                },
+            )]
+            .into_iter()
+            .collect(),
+            ..Default::default()
+        }];
+        let out = resolve_widgets(&profiles).expect("resolves");
+        let rw = out.iter().find(|w| w.attr == "secretary").unwrap();
+        match &rw.kind {
+            WidgetKind::Picker(b) => {
+                assert_eq!(b.scope.base, "ou=people,dc=x");
+                assert_eq!(b.select, None); // "auto" → None (arity derived downstream)
+                assert!(b.scope.label_template.is_some());
+            }
+            other => panic!("expected Picker, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resolve_widget_picker_unknown_candidate_errors() {
+        let profiles = vec![EntryProfile {
+            name: "user".into(),
+            object_classes: vec!["inetOrgPerson".into()],
+            widgets: [(
+                "gidNumber".to_string(),
+                WidgetSpecCfg::Picker {
+                    candidate: CandidateRef::Profile("nope".into()),
+                    store: "dn".into(),
+                    select: "auto".into(),
+                },
+            )]
+            .into_iter()
+            .collect(),
+            ..Default::default()
+        }];
+        let err = resolve_widgets(&profiles).expect_err("unknown candidate profile errors");
+        assert!(
+            err.contains("nope"),
+            "error names the missing profile: {err}"
+        );
     }
 
     #[test]

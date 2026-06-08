@@ -467,6 +467,9 @@ pub fn tag_widget_fields(
                     }
                 }
             }
+            WidgetKind::Picker(_) => {
+                // Picker/membership wiring lands in a later task (tag onto widget_binding).
+            }
         }
     }
 }

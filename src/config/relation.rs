@@ -107,7 +107,7 @@ pub fn picker_for<'a>(
         .map(|p| &p.binding)
 }
 
-fn scope_of(p: &EntryProfile) -> CandidateScope {
+pub(crate) fn scope_of(p: &EntryProfile) -> CandidateScope {
     let template = p
         .label
         .as_ref()
