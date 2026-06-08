@@ -711,7 +711,6 @@ mod tests {
             kind: FieldKind::Text,
             widget: WidgetSpec::ReadOnlyText,
             editor: TextState::new().with_value(value.to_string()),
-            picker: None,
             widget_binding: None,
         }
     }
@@ -937,7 +936,6 @@ mod tests {
             kind: FieldKind::Text,
             widget: WidgetSpec::ReadOnlyText,
             editor: TextState::new(),
-            picker: None,
             widget_binding: None,
         };
         App {
@@ -963,7 +961,6 @@ mod tests {
             form_scroll: 0,
             overlay: None,
             status: String::new(),
-            pickers: vec![],
             widgets: vec![],
             label_rules: vec![],
             tree_rules: Vec::new(),
@@ -1122,7 +1119,6 @@ mod tests {
             form_scroll: 0,
             overlay: None,
             status: status.to_string(),
-            pickers: vec![],
             widgets: vec![],
             label_rules: vec![],
             tree_rules: Vec::new(),
@@ -1151,7 +1147,6 @@ mod tests {
                 kind: FieldKind::Text,
                 widget: WidgetSpec::ReadOnlyText,
                 editor: TextState::new().with_value(value.to_string()),
-                picker: None,
                 widget_binding: None,
             }],
             baseline,
@@ -1395,7 +1390,6 @@ mod tests {
             kind: FieldKind::Text,
             widget: WidgetSpec::ReadOnlyText,
             editor: TextState::new().with_value("[DU         ]".to_string()),
-            picker: None,
             widget_binding: Some(crate::config::widget::WidgetKind::Choice(ChoiceWidget {
                 select: Cardinality::Multi,
                 format: ChoiceFormat::Bracketed,

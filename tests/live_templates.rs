@@ -31,9 +31,8 @@ use edaptor::samba::password::password_add_attrs;
 use edaptor::ui::picker::{build_member_filter, pick_value};
 
 /// Resolve the `[profile.widget.<attr>]` picker/membership binding for `attr`
-/// from the given profiles. Pickers are now driven through the widget palette
-/// (`WidgetKind::Picker`), so the live tests resolve their bindings via
-/// `resolve_widgets` instead of the dormant `resolve_pickers` path.
+/// from the given profiles. Pickers are driven through the widget palette
+/// (`WidgetKind::Picker`) and resolved via `resolve_widgets`.
 fn picker_binding_for(profiles: &[EntryProfile], attr: &str) -> PickerBinding {
     let widgets = resolve_widgets(profiles).expect("demo-config widgets resolve");
     widgets

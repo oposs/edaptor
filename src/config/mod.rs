@@ -82,26 +82,6 @@ fn default_select() -> String {
     "auto".to_string()
 }
 
-/// Raw `[profile.picker.<attr>]` binding: how an attribute's field is populated
-/// from a live candidate search. Resolves (against the profile list) to a
-/// [`crate::config::relation::PickerBinding`].
-#[derive(Debug, Deserialize, Clone, PartialEq, Eq)]
-pub struct PickerSpec {
-    /// `[[profile]]` name supplying the candidate search scope.
-    pub candidate: String,
-    /// What to store per pick: the sentinel `"dn"` (default) or an attribute name.
-    #[serde(default = "default_store")]
-    pub store: String,
-    /// Cardinality: `"auto"` (from the attribute's schema arity), `"single"`, `"multi"`.
-    #[serde(default = "default_select")]
-    pub select: String,
-    /// Present ⇒ synthetic back-ref: the field is not written to the server; this
-    /// entry's DN is added/removed in `fanout_attr` on each picked candidate
-    /// (e.g. `memberOf` → write `member` on each picked group).
-    #[serde(default)]
-    pub fanout_attr: Option<String>,
-}
-
 /// One option in a `choice` widget: the stored token and its UI label.
 #[derive(Debug, Deserialize, Clone, PartialEq, Eq)]
 pub struct ChoiceOption {
@@ -195,10 +175,6 @@ pub struct EntryProfile {
     /// Per-attribute default values for newly-created entries (`[profile.defaults]`).
     #[serde(default)]
     pub defaults: ProfileDefaults,
-    /// Per-attribute picker bindings (`[profile.picker.<attr>]`). Each declares how
-    /// the named attribute's field is populated from a candidate search.
-    #[serde(default, rename = "picker")]
-    pub pickers: std::collections::BTreeMap<String, PickerSpec>,
     /// Per-attribute rich-widget bindings (`[profile.widget.<attr>]`).
     #[serde(default, rename = "widget")]
     pub widgets: std::collections::BTreeMap<String, WidgetSpecCfg>,
@@ -558,7 +534,6 @@ mod tests {
             show: vec!["uid".into(), "cn".into()],
             search_attrs: vec![],
             defaults: Default::default(),
-            pickers: Default::default(),
             widgets: Default::default(),
             label: None,
         };
@@ -874,48 +849,6 @@ samba = true
             WidgetSpecCfg::Password { samba } => assert!(*samba),
             other => panic!("expected password, got {other:?}"),
         }
-    }
-
-    #[test]
-    fn parses_profile_picker_block() {
-        let cfg: Config = toml::from_str(
-            r#"
-        [server]
-        uri = "ldaps://x"
-        base_dn = "dc=x"
-        [auth]
-        [[profile]]
-        name = "group"
-        object_classes = ["groupOfNames"]
-        [profile.picker.member]
-        candidate = "user"
-        [profile.picker.memberOf]
-        candidate = "group"
-        store = "dn"
-        fanout_attr = "member"
-        [profile.picker.gidNumber]
-        candidate = "posixgroup"
-        store = "gidNumber"
-        select = "single"
-        "#,
-        )
-        .unwrap();
-        let p = &cfg.profiles[0];
-        let member = p.pickers.get("member").expect("member picker");
-        assert_eq!(member.candidate, "user");
-        assert_eq!(member.store, "dn");
-        assert_eq!(member.select, "auto");
-        assert_eq!(member.fanout_attr, None);
-        let mof = p.pickers.get("memberOf").expect("memberOf picker");
-        assert_eq!(mof.fanout_attr.as_deref(), Some("member"));
-        assert_eq!(mof.candidate, "group");
-        assert_eq!(mof.store, "dn");
-        assert_eq!(mof.select, "auto");
-        let gid = p.pickers.get("gidNumber").expect("gidNumber picker");
-        assert_eq!(gid.store, "gidNumber");
-        assert_eq!(gid.select, "single");
-        assert_eq!(gid.candidate, "posixgroup");
-        assert_eq!(gid.fanout_attr, None);
     }
 
     #[test]

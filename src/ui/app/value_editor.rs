@@ -430,7 +430,6 @@ mod tests {
             form_scroll: 0,
             overlay: Some(Overlay::ValueEditor(ve)),
             status: String::new(),
-            pickers: vec![],
             widgets: vec![],
             label_rules: vec![],
             tree_rules: Vec::new(),
@@ -508,7 +507,6 @@ mod tests {
             kind: FieldKind::Text,
             widget: WidgetSpec::ReadOnlyText,
             editor: TextState::new(),
-            picker: None,
             widget_binding: Some(crate::config::widget::WidgetKind::Picker(
                 member_dn_binding(),
             )),
@@ -646,7 +644,6 @@ mod tests {
             kind: FieldKind::Text,
             widget: WidgetSpec::ReadOnlyText,
             editor: TextState::new(),
-            picker: None,
             widget_binding: Some(crate::config::widget::WidgetKind::Picker(
                 gid_picker_binding(),
             )),
@@ -664,7 +661,7 @@ mod tests {
     }
 
     #[test]
-    fn open_value_editor_opens_picker_for_single_value_lookup_field() {
+    fn open_value_editor_opens_picker_on_single_value_lookup_field() {
         // Trap 1: a scalar (multi=false) picker-bound field must still open a picker.
         let mut app = app_with_lookup_field();
         let s = empty_structure(); // root = dc=test
@@ -988,7 +985,6 @@ mod tests {
             kind: FieldKind::Text,
             widget: WidgetSpec::ReadOnlyText,
             editor: TextState::new().with_value(value.to_string()),
-            picker: None,
             widget_binding: Some(crate::config::widget::WidgetKind::Choice(widget.clone())),
         };
         let mut app = bare_app(false);

@@ -318,7 +318,6 @@ mod tests {
             show: vec!["uid".to_string(), "cn".to_string(), "sn".to_string()],
             search_attrs: vec![],
             defaults: Default::default(),
-            pickers: Default::default(),
             widgets: Default::default(),
             label: None,
         }

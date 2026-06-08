@@ -182,7 +182,7 @@ pub fn resolve_widgets(profiles: &[EntryProfile]) -> Result<Vec<ResolvedWidget>,
 }
 
 /// The choice widget for `(entry object classes, attr)`, if any. `.any()` owner
-/// objectClass overlap, matching `picker_for`.
+/// objectClass overlap.
 pub fn widget_for<'a>(
     widgets: &'a [ResolvedWidget],
     ocs: &[String],
@@ -200,7 +200,7 @@ pub fn widget_for<'a>(
 }
 
 /// The password widget (if any) whose owner object classes overlap `ocs`. `.any()`
-/// owner objectClass overlap, matching [`widget_for`]/`picker_for`.
+/// owner objectClass overlap, matching [`widget_for`].
 pub fn password_widget_for<'a>(
     widgets: &'a [ResolvedWidget],
     ocs: &[String],

@@ -484,22 +484,19 @@ pub(crate) fn object_classes_of(form: &EditForm) -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// Build an edit form for a loaded entry and tag its picker- and widget-bound
-/// fields (e.g. the inline password widget) for the entry's object classes.
-/// The single edit-form build seam used by the read flow and the post-combined-save
-/// reload.
+/// Build an edit form for a loaded entry and tag its widget-bound fields
+/// (e.g. the inline password widget, picker/membership) for the entry's object
+/// classes. The single edit-form build seam used by the read flow and the
+/// post-combined-save reload.
 pub(crate) fn build_loaded_form(
     model: &crate::ui::form::FormModel,
     schema: &SchemaModel,
     read_only: bool,
-    pickers: &[crate::config::relation::ResolvedPicker],
     widgets: &[crate::config::widget::ResolvedWidget],
 ) -> EditForm {
     let mut form = build_edit_form(model, schema, read_only);
-    // Tag picker-bound fields so Enter opens the unified picker overlay.
+    // Tag choice/picker/password/membership widget fields.
     let ocs = object_classes_of(&form);
-    crate::ui::edit_form::tag_picker_fields(&mut form, pickers, &ocs, read_only);
-    // Tag choice-widget fields so they render as a dropdown/choice widget.
     crate::ui::edit_form::tag_widget_fields(&mut form, widgets, &ocs, read_only);
     // Final step: order fields after injection/tagging set secret/picker flags.
     crate::ui::edit_form::order_fields(&mut form);
@@ -519,7 +516,6 @@ mod tests {
         app.form = Some(build_new_entry_form(
             &user_schema(),
             &create_user_profile(),
-            &[],
             &[],
             0,
             "ou=people,dc=example,dc=org".to_string(),
@@ -549,7 +545,6 @@ mod tests {
         app.form = Some(build_new_entry_form(
             &user_schema(),
             &create_user_profile(),
-            &[],
             &[],
             0,
             "ou=people,dc=example,dc=org".to_string(),

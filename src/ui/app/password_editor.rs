@@ -149,7 +149,6 @@ mod tests {
             kind: FieldKind::Text,
             widget: WidgetSpec::ReadOnlyText,
             editor: TextState::new(),
-            picker: None,
             widget_binding: Some(WidgetKind::Password(PasswordWidget {
                 primary: "userPassword".into(),
                 derived: vec![],

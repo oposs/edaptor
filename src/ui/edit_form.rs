@@ -43,8 +43,6 @@ pub struct EditField {
     /// Inline single-value edit state, seeded from `values[0]`. The Unicode-correct
     /// edit engine (tui-prompts); rendering is done by hand so the pane owns its bg.
     pub editor: TextState<'static>,
-    /// `Some` when this field is bound to a `[profile.picker.<attr>]` picker.
-    pub picker: Option<crate::config::relation::PickerBinding>,
     /// `Some` when bound to a `[profile.widget.<attr>]` widget (choice or password).
     pub widget_binding: Option<crate::config::widget::WidgetKind>,
 }
@@ -380,7 +378,6 @@ pub fn build_edit_form(model: &FormModel, schema: &SchemaModel, read_only: bool)
                 kind: f.kind,
                 widget: f.widget.clone(),
                 editor: TextState::new().with_value(seed),
-                picker: None,
                 widget_binding: None,
             }
         })
@@ -402,39 +399,13 @@ pub fn build_edit_form(model: &FormModel, schema: &SchemaModel, read_only: bool)
     }
 }
 
-/// Tag each field whose attribute matches a resolved `[profile.picker.<attr>]`
-/// binding for the entry's object classes. Fan-out fields (`fanout_attr` set) are
-/// forced editable — their value is never written to the field itself, it fans
-/// out. Non-fan-out fields keep their normal editable state and are tagged only
-/// when already editable.
-pub fn tag_picker_fields(
-    form: &mut EditForm,
-    pickers: &[crate::config::relation::ResolvedPicker],
-    object_classes: &[String],
-    read_only: bool,
-) {
-    for field in &mut form.fields {
-        let Some(binding) =
-            crate::config::relation::picker_for(pickers, object_classes, &field.label)
-        else {
-            continue;
-        };
-        if binding.fanout_attr.is_some() {
-            field.editable = !read_only; // override operational read-only, but honor global read-only
-            field.picker = Some(binding.clone());
-        } else if field.editable {
-            field.picker = Some(binding.clone());
-        }
-    }
-}
-
 /// Attach a `[profile.widget.<attr>]` widget (choice / password / picker /
 /// membership) to each matching field. Choice fields stay editable (Enter opens
 /// the choice overlay). Password fields stay read-only inline; Enter opens the
 /// password popup. Picker fields open the candidate picker; a membership
 /// (fan-out) binding forces the field editable (its value fans out, it is never
 /// written to the field itself), honoring global read-only. `.any()` objectClass
-/// matching, mirroring `picker_for`/`widget_for`.
+/// matching, mirroring `widget_for`.
 pub fn tag_widget_fields(
     form: &mut EditForm,
     widgets: &[crate::config::widget::ResolvedWidget],
@@ -567,7 +538,6 @@ mod tests {
                 kind: FieldKind::DistinguishedName,
                 widget: WidgetSpec::ReadOnlyText,
                 editor: TextState::new(),
-                picker: None,
                 widget_binding: Some(crate::config::widget::WidgetKind::Picker(PickerBinding {
                     attr: "memberOf".into(),
                     scope: CandidateScope {
@@ -791,7 +761,6 @@ mod tests {
                 kind: crate::schema::FieldKind::Text,
                 widget: crate::ui::form::WidgetSpec::ReadOnlyText,
                 editor: TextState::new().with_value(seed),
-                picker: None,
                 widget_binding: None,
             }
         };
@@ -840,7 +809,6 @@ mod tests {
                 kind: crate::schema::FieldKind::Text,
                 widget: crate::ui::form::WidgetSpec::ReadOnlyText,
                 editor: TextState::new().with_value(seed),
-                picker: None,
                 widget_binding: None,
             }
         };
@@ -859,80 +827,6 @@ mod tests {
     }
 
     #[test]
-    fn tag_picker_fields_tags_by_binding_and_forces_fanout_editable() {
-        use crate::config::relation::{CandidateScope, PickerBinding, ResolvedPicker, StoreKey};
-        let mut form = EditForm {
-            dn: "uid=bob,ou=people,dc=x".into(),
-            fields: vec![EditField {
-                label: "memberOf".into(),
-                must: false,
-                editable: false, // operational, read-only by default
-                multi: true,
-                secret: false,
-                ordered: false,
-                values: vec!["cn=admins,ou=groups,dc=x".into()],
-                kind: FieldKind::DistinguishedName,
-                widget: WidgetSpec::ReadOnlyText,
-                editor: TextState::new(),
-                picker: None,
-                widget_binding: None,
-            }],
-            baseline: Default::default(),
-            mode: FormMode::Edit,
-            pending_password: None,
-        };
-        let pickers = vec![ResolvedPicker {
-            owner_object_classes: vec!["inetOrgPerson".into()],
-            binding: PickerBinding {
-                attr: "memberOf".into(),
-                scope: CandidateScope {
-                    base: "ou=groups,dc=x".into(),
-                    object_classes: vec!["groupOfNames".into()],
-                    search_attrs: vec!["cn".into()],
-                    label_template: None,
-                },
-                store: StoreKey::Dn,
-                select: None,
-                fanout_attr: Some("member".into()),
-            },
-        }];
-        tag_picker_fields(&mut form, &pickers, &["inetOrgPerson".to_string()], false);
-        let f = &form.fields[0];
-        assert!(f.picker.is_some(), "memberOf gets a picker binding");
-        assert!(
-            f.editable,
-            "fan-out field forced editable despite operational read-only"
-        );
-
-        // global read-only mode must not force fan-out fields editable
-        let mut form2 = EditForm {
-            dn: "uid=bob,ou=people,dc=x".into(),
-            fields: vec![EditField {
-                label: "memberOf".into(),
-                must: false,
-                editable: false,
-                multi: true,
-                secret: false,
-                ordered: false,
-                values: vec!["cn=admins,ou=groups,dc=x".into()],
-                kind: FieldKind::DistinguishedName,
-                widget: WidgetSpec::ReadOnlyText,
-                editor: TextState::new(),
-                picker: None,
-                widget_binding: None,
-            }],
-            baseline: Default::default(),
-            mode: FormMode::Edit,
-            pending_password: None,
-        };
-        tag_picker_fields(&mut form2, &pickers, &["inetOrgPerson".to_string()], true);
-        assert!(
-            !form2.fields[0].editable,
-            "fan-out field stays read-only when global read_only=true"
-        );
-    }
-
-    #[test]
     fn value_editor_open_seeds_from_field_values_with_store_value_key() {
         use crate::config::relation::{CandidateScope, PickerBinding, StoreKey};
         let field = EditField {
@@ -946,7 +840,6 @@ mod tests {
             kind: FieldKind::Text,
             widget: WidgetSpec::ReadOnlyText,
             editor: TextState::new().with_value("1001"),
-            picker: None,
             widget_binding: None,
         };
         let binding = PickerBinding {
@@ -987,7 +880,6 @@ mod tests {
             kind: crate::schema::FieldKind::Text,
             widget: crate::ui::form::WidgetSpec::ReadOnlyText,
             editor: TextState::new().with_value("/bin/bash".to_string()),
-            picker: None,
             widget_binding: None,
         });
         let widgets = vec![ResolvedWidget {
@@ -1038,7 +930,6 @@ mod tests {
             kind: FieldKind::DistinguishedName,
             widget: WidgetSpec::ReadOnlyText,
             editor: TextState::new(),
-            picker: None,
             widget_binding: None,
         };
         let mk_form = || {
@@ -1154,7 +1045,6 @@ mod tests {
             kind: crate::schema::FieldKind::Text,
             widget: crate::ui::form::WidgetSpec::ReadOnlyText,
             editor: TextState::new(),
-            picker: None,
             widget_binding: None,
         });
         let widgets = vec![ResolvedWidget {

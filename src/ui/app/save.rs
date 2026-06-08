@@ -341,7 +341,6 @@ fn reload_form_sync(app: &mut App, worker: &WorkerHandle, read_flow: &ReadFlow, 
                 &model,
                 read_flow.schema(),
                 app.read_only,
-                &app.pickers,
                 &app.widgets,
             ));
             app.form_focus = 0;
@@ -553,7 +552,6 @@ mod tests {
             kind: FieldKind::Text,
             widget: WidgetSpec::ReadOnlyText,
             editor: TextState::new().with_value("ann".to_string()),
-            picker: None,
             widget_binding: None,
         };
 
@@ -568,7 +566,6 @@ mod tests {
             kind: FieldKind::Text,
             widget: WidgetSpec::ReadOnlyText,
             editor: TextState::new(),
-            picker: None,
             widget_binding: None,
         };
 
@@ -583,7 +580,6 @@ mod tests {
             kind: FieldKind::Text,
             widget: WidgetSpec::ReadOnlyText,
             editor: TextState::new(),
-            picker: None,
             widget_binding: Some(crate::config::widget::WidgetKind::Picker(
                 crate::config::relation::PickerBinding {
                     attr: "memberOf".into(),
@@ -633,7 +629,6 @@ mod tests {
             kind: FieldKind::Text,
             widget: WidgetSpec::ReadOnlyText,
             editor: TextState::new().with_value("bob".to_string()),
-            picker: None,
             widget_binding: None,
         };
 
@@ -648,7 +643,6 @@ mod tests {
             kind: FieldKind::Text,
             widget: WidgetSpec::ReadOnlyText,
             editor: TextState::new(),
-            picker: None,
             widget_binding: Some(crate::config::widget::WidgetKind::Picker(
                 crate::config::relation::PickerBinding {
                     attr: "memberOf".into(),
@@ -772,7 +766,6 @@ mod tests {
             kind: FieldKind::Text,
             widget: WidgetSpec::ReadOnlyText,
             editor: TextState::new(),
-            picker: None,
             widget_binding: None,
         };
         let uid_field = EditField {
@@ -786,7 +779,6 @@ mod tests {
             kind: FieldKind::Text,
             widget: WidgetSpec::ReadOnlyText,
             editor: TextState::new().with_value("ann".to_string()),
-            picker: None,
             widget_binding: None,
         };
         let mut baseline = BTreeMap::new();
