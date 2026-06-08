@@ -108,6 +108,9 @@ pub fn resolve_widgets(profiles: &[EntryProfile]) -> Result<Vec<ResolvedWidget>,
                         samba: *samba,
                     })
                 }
+                // Picker and Membership are not yet wired; skip at resolve time
+                // (resolution logic arrives in a later task).
+                WidgetSpecCfg::Picker { .. } | WidgetSpecCfg::Membership { .. } => continue,
             };
             out.push(ResolvedWidget {
                 owner_object_classes: owner.object_classes.clone(),

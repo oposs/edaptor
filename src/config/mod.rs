@@ -111,6 +111,28 @@ pub struct ChoiceOption {
     pub label: String,
 }
 
+/// A candidate source for a `picker`/`membership` widget: either the name of a
+/// declared `[[profile]]` (whose search scope is reused) or an inline scope.
+#[derive(Debug, Deserialize, Clone, PartialEq, Eq)]
+#[serde(untagged)]
+pub enum CandidateRef {
+    /// Name of a `[[profile]]` whose scope (base/object_classes/search_attrs/label) is reused.
+    Profile(String),
+    /// An inline candidate scope (pick from entries that have no managed profile).
+    Inline(InlineScope),
+}
+
+/// An inline `candidate = { … }` table for a picker/membership widget.
+#[derive(Debug, Deserialize, Clone, PartialEq, Eq)]
+pub struct InlineScope {
+    pub base: String,
+    pub object_classes: Vec<String>,
+    #[serde(default)]
+    pub search_attrs: Vec<String>,
+    #[serde(default)]
+    pub label: Option<String>,
+}
+
 /// A `[profile.widget.<attr>]` binding. `kind`-tagged so future widget kinds add
 /// variants without breaking existing config.
 #[derive(Debug, Deserialize, Clone, PartialEq, Eq)]
@@ -131,6 +153,24 @@ pub enum WidgetSpecCfg {
         /// When true, also write Samba NT-hash attributes alongside the LDAP password.
         #[serde(default)]
         samba: bool,
+    },
+    /// Pick candidate value(s) and store them in *this* entry's attribute
+    /// (covers value-lookup like `gidNumber` and DN/scalar lists like `member`).
+    Picker {
+        candidate: CandidateRef,
+        /// The sentinel `"dn"` (default), or a candidate attribute name to store.
+        #[serde(default = "default_store")]
+        store: String,
+        /// `"single"` | `"multi"` | `"auto"` (default; derive from schema arity).
+        #[serde(default = "default_select")]
+        select: String,
+    },
+    /// Fan *this* entry's DN out into a back-ref attr (`via`) on each picked
+    /// candidate (covers `memberOf`). Always multi-select; no `store`/`select`.
+    Membership {
+        candidate: CandidateRef,
+        /// The back-ref attribute written on each picked candidate (e.g. `member`).
+        via: String,
     },
 }
 
@@ -866,5 +906,121 @@ samba = true
         assert_eq!(gid.select, "single");
         assert_eq!(gid.candidate, "posixgroup");
         assert_eq!(gid.fanout_attr, None);
+    }
+
+    #[test]
+    fn widget_picker_parses_inline_candidate_scope() {
+        // The risky path: an untagged CandidateRef (inline table) nested in the
+        // internally-tagged WidgetSpecCfg. Must parse to Inline, not error.
+        let toml = r#"
+        [server]
+        uri = "ldap://x"
+        base_dn = "dc=x"
+        [auth]
+
+        [[profile]]
+        name = "user"
+        object_classes = ["inetOrgPerson"]
+
+        [profile.widget.secretary]
+        kind = "picker"
+        store = "dn"
+        select = "single"
+        candidate = { base = "ou=people,dc=example,dc=org", object_classes = ["inetOrgPerson"], search_attrs = ["cn", "uid"], label = "{cn} ({uid})" }
+    "#;
+        let cfg: Config = toml::from_str(toml).expect("parses inline candidate scope");
+        let spec = &cfg.profiles[0].widgets["secretary"];
+        match spec {
+            WidgetSpecCfg::Picker {
+                candidate,
+                store,
+                select,
+            } => {
+                assert_eq!(store, "dn");
+                assert_eq!(select, "single");
+                match candidate {
+                    CandidateRef::Inline(s) => {
+                        assert_eq!(s.base, "ou=people,dc=example,dc=org");
+                        assert_eq!(s.object_classes, vec!["inetOrgPerson".to_string()]);
+                        assert_eq!(s.search_attrs, vec!["cn".to_string(), "uid".to_string()]);
+                        assert_eq!(s.label.as_deref(), Some("{cn} ({uid})"));
+                    }
+                    other => panic!("expected inline scope, got {other:?}"),
+                }
+            }
+            other => panic!("expected Picker variant, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn widget_picker_and_membership_parse_profile_ref_candidate() {
+        let toml = r#"
+        [server]
+        uri = "ldap://x"
+        base_dn = "dc=x"
+        [auth]
+
+        [[profile]]
+        name = "user"
+        object_classes = ["inetOrgPerson"]
+
+        [profile.widget.gidNumber]
+        kind = "picker"
+        candidate = "posixgroup"
+        store = "gidNumber"
+        select = "single"
+
+        [profile.widget.memberOf]
+        kind = "membership"
+        candidate = "group"
+        via = "member"
+    "#;
+        let cfg: Config = toml::from_str(toml).expect("parses");
+        let w = &cfg.profiles[0].widgets;
+        match &w["gidNumber"] {
+            WidgetSpecCfg::Picker {
+                candidate,
+                store,
+                select,
+            } => {
+                assert_eq!(candidate, &CandidateRef::Profile("posixgroup".into()));
+                assert_eq!(store, "gidNumber");
+                assert_eq!(select, "single");
+            }
+            other => panic!("expected Picker, got {other:?}"),
+        }
+        match &w["memberOf"] {
+            WidgetSpecCfg::Membership { candidate, via } => {
+                assert_eq!(candidate, &CandidateRef::Profile("group".into()));
+                assert_eq!(via, "member");
+            }
+            other => panic!("expected Membership, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn widget_picker_store_and_select_default() {
+        let toml = r#"
+        [server]
+        uri = "ldap://x"
+        base_dn = "dc=x"
+        [auth]
+
+        [[profile]]
+        name = "user"
+        object_classes = ["inetOrgPerson"]
+
+        [profile.widget.member]
+        kind = "picker"
+        candidate = "user"
+    "#;
+        let cfg: Config = toml::from_str(toml).expect("parses");
+        match &cfg.profiles[0].widgets["member"] {
+            WidgetSpecCfg::Picker { store, select, .. } => {
+                assert_eq!(store, "dn"); // default_store
+                assert_eq!(select, "auto"); // default_select
+            }
+            other => panic!("expected Picker, got {other:?}"),
+        }
     }
 }
