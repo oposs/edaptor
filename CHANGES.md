@@ -19,9 +19,18 @@ All notable changes to eDAPtor are documented here. The format follows
     field**. Enter on it (or on any derived Samba password attribute) opens a
     New+Confirm popup that updates `userPassword` and, when `samba = true`,
     `sambaNTPassword` + `sambaPwdLastSet` in one atomic change.
+  - `kind = "picker"` — populate an attribute from a live candidate search and
+    store the picked value(s) in this entry (value lookup like `gidNumber`, or a
+    DN/scalar list like `member`/`memberUid`). `candidate` is a `[[profile]]`
+    name or an inline `{ base, object_classes, … }` scope.
+  - `kind = "membership"` — fan this entry's DN into a back-reference attribute
+    (`via`) on each picked candidate (e.g. `memberOf` writes `member` on each
+    chosen group).
 
 ### Changed
 
+- **Pickers are now configured with `[profile.widget.<attr>] kind = "picker"` /
+  `"membership"`** instead of `[profile.picker.<attr>]`, which has been removed.
 - **Passwords are now configured with `[profile.widget.<attr>] kind = "password"`**
   instead of `[profile.password]`, which has been removed.
 - **Password and hash attributes (`userPassword`, `sambaNTPassword`,
