@@ -48,7 +48,9 @@ pub(crate) fn open_value_editor(app: &mut App, _structure: &Structure) {
         // (the picker UI seeded from fixed options, no LDAP search).
         let ve = ValueEditor::open_choice(focus, field, &w);
         app.overlay = Some(Overlay::ValueEditor(ve));
-    } else if let Some(binding) = field.picker.clone().filter(|_| field.editable) {
+    } else if let Some(crate::config::widget::WidgetKind::Picker(binding)) =
+        field.widget_binding.clone().filter(|_| field.editable)
+    {
         // Unified picker: open from the resolved binding. Labels and real DNs are
         // upgraded from search results in the `Response::Entries` intercept.
         let ve = ValueEditor::open(focus, field, &binding);
@@ -428,7 +430,6 @@ mod tests {
             form_scroll: 0,
             overlay: Some(Overlay::ValueEditor(ve)),
             status: String::new(),
-            pickers: vec![],
             widgets: vec![],
             label_rules: vec![],
             tree_rules: Vec::new(),
@@ -506,8 +507,9 @@ mod tests {
             kind: FieldKind::Text,
             widget: WidgetSpec::ReadOnlyText,
             editor: TextState::new(),
-            picker: Some(member_dn_binding()),
-            widget_binding: None,
+            widget_binding: Some(crate::config::widget::WidgetKind::Picker(
+                member_dn_binding(),
+            )),
         };
         let mut app = bare_app(false);
         app.form = Some(EditForm {
@@ -642,8 +644,9 @@ mod tests {
             kind: FieldKind::Text,
             widget: WidgetSpec::ReadOnlyText,
             editor: TextState::new(),
-            picker: Some(gid_picker_binding()),
-            widget_binding: None,
+            widget_binding: Some(crate::config::widget::WidgetKind::Picker(
+                gid_picker_binding(),
+            )),
         };
         let mut app = bare_app(false);
         app.form = Some(EditForm {
@@ -658,7 +661,7 @@ mod tests {
     }
 
     #[test]
-    fn open_value_editor_opens_picker_for_single_value_lookup_field() {
+    fn open_value_editor_opens_picker_on_single_value_lookup_field() {
         // Trap 1: a scalar (multi=false) picker-bound field must still open a picker.
         let mut app = app_with_lookup_field();
         let s = empty_structure(); // root = dc=test
@@ -982,7 +985,6 @@ mod tests {
             kind: FieldKind::Text,
             widget: WidgetSpec::ReadOnlyText,
             editor: TextState::new().with_value(value.to_string()),
-            picker: None,
             widget_binding: Some(crate::config::widget::WidgetKind::Choice(widget.clone())),
         };
         let mut app = bare_app(false);

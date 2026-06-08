@@ -48,8 +48,9 @@ attribute.
 **Consequence:** eDAPtor **writes `member`, never `memberOf`.** When you tick a
 group in a user's membership picker, eDAPtor fans the change out by adding (or
 removing) that user's DN in the group's `member` attribute; the overlay then
-updates `memberOf` on its own. See [Pickers](../configuration/pickers.md) for the
-`fanout_attr` mechanism.
+updates `memberOf` on its own. See the
+[`membership` widget](../configuration/widgets.md#the-membership-kind) for the
+fan-out mechanism.
 
 ## No live change notification
 

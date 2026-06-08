@@ -21,11 +21,28 @@
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
-use edaptor::config::relation::{resolve_pickers, StoreKey};
-use edaptor::config::{AuthConfig, AuthMethod, Config, PasswordSource, ServerConfig, TlsConfig};
+use edaptor::config::relation::{PickerBinding, StoreKey};
+use edaptor::config::widget::{resolve_widgets, WidgetKind};
+use edaptor::config::{
+    AuthConfig, AuthMethod, Config, EntryProfile, PasswordSource, ServerConfig, TlsConfig,
+};
 use edaptor::ldap::worker::{Request, Response, SearchScope, WorkerHandle};
 use edaptor::samba::password::password_add_attrs;
 use edaptor::ui::picker::{build_member_filter, pick_value};
+
+/// Resolve the `[profile.widget.<attr>]` picker/membership binding for `attr`
+/// from the given profiles. Pickers are driven through the widget palette
+/// (`WidgetKind::Picker`) and resolved via `resolve_widgets`.
+fn picker_binding_for(profiles: &[EntryProfile], attr: &str) -> PickerBinding {
+    let widgets = resolve_widgets(profiles).expect("demo-config widgets resolve");
+    widgets
+        .into_iter()
+        .find_map(|w| match w.kind {
+            WidgetKind::Picker(b) if b.attr.eq_ignore_ascii_case(attr) => Some(b),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("{attr} picker must be resolved from demo config"))
+}
 
 /// Admin config + bind password for the test directory.
 fn admin_config(uri: String) -> (Config, String) {
@@ -506,14 +523,10 @@ fn picker_member_candidate_search_yields_user_dns() {
     // Load the demo-config pickers so we work from the real binding definitions.
     let cfg: edaptor::config::Config = toml::from_str(include_str!("../examples/demo-config.toml"))
         .expect("demo-config.toml parses");
-    let pickers = resolve_pickers(&cfg.profiles);
 
     // The `member` picker: owner = group profile, candidate = user.
-    let member_picker = pickers
-        .iter()
-        .find(|p| p.binding.attr == "member")
-        .expect("member picker must be in demo config");
-    let binding = &member_picker.binding;
+    let binding = picker_binding_for(&cfg.profiles, "member");
+    let binding = &binding;
 
     // Empty search term → objectClass-only filter (no term branch).
     let filter = build_member_filter(
@@ -590,13 +603,9 @@ fn picker_gidnumber_scalar_store_resolves_group_gidnumber() {
 
     let cfg: edaptor::config::Config = toml::from_str(include_str!("../examples/demo-config.toml"))
         .expect("demo-config.toml parses");
-    let pickers = resolve_pickers(&cfg.profiles);
 
-    let gid_picker = pickers
-        .iter()
-        .find(|p| p.binding.attr == "gidNumber")
-        .expect("gidNumber picker must be in demo config");
-    let binding = &gid_picker.binding;
+    let binding = picker_binding_for(&cfg.profiles, "gidNumber");
+    let binding = &binding;
 
     // Confirm the store key is a scalar attribute, not a DN.
     assert_eq!(
@@ -691,13 +700,9 @@ fn picker_memberuid_multi_scalar_round_trips_uids() {
     // --- Resolve the memberUid binding from demo-config. ---
     let cfg: edaptor::config::Config = toml::from_str(include_str!("../examples/demo-config.toml"))
         .expect("demo-config.toml parses");
-    let pickers = resolve_pickers(&cfg.profiles);
 
-    let memberuid_picker = pickers
-        .iter()
-        .find(|p| p.binding.attr == "memberUid")
-        .expect("memberUid picker must be in demo config");
-    let binding = &memberuid_picker.binding;
+    let binding = picker_binding_for(&cfg.profiles, "memberUid");
+    let binding = &binding;
 
     // Confirm the store key is a scalar uid attribute (not a DN).
     assert_eq!(
@@ -851,13 +856,9 @@ fn picker_memberuid_multi_scalar_round_trips_uids() {
 fn picker_memberof_binding_resolves_fanout_to_member() {
     let cfg: edaptor::config::Config = toml::from_str(include_str!("../examples/demo-config.toml"))
         .expect("demo-config.toml parses");
-    let pickers = resolve_pickers(&cfg.profiles);
 
-    let memberof = pickers
-        .iter()
-        .find(|p| p.binding.attr == "memberOf")
-        .expect("memberOf picker must be resolved from demo config");
-    let binding = &memberof.binding;
+    let binding = picker_binding_for(&cfg.profiles, "memberOf");
+    let binding = &binding;
 
     // Fan-out wiring: the synthetic back-ref writes `member` on each picked group.
     assert_eq!(

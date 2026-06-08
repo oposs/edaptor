@@ -26,9 +26,10 @@ carry, and it acts *across all five operations* of the base engine:
 - **Passwords** — a masked set-password popup on create/edit, with
   cleartext written to the directory and `********` shown in the LDIF preview
   (see [Widgets](../configuration/widgets.md#the-password-kind)).
-- **Memberships** — [pickers](../configuration/pickers.md) that turn a candidate
-  search into the right `member` / `memberUid` writes, including the fan-out that
-  maintains overlay-driven back-references like `memberOf`.
+- **Memberships** — [`picker` and `membership` widgets](../configuration/widgets.md#the-picker-kind)
+  that turn a candidate search into the right `member` / `memberUid` writes,
+  including the fan-out that maintains overlay-driven back-references like
+  `memberOf`.
 - **Samba** — the full lifecycle (NT-hash, synced Unix+Samba passwords, SID from
   the directory's `sambaDomain`) enabled per profile.
 

@@ -16,7 +16,6 @@ pub(crate) fn bare_profile(name: &str) -> EntryProfile {
         show: vec![],
         search_attrs: vec![],
         defaults: Default::default(),
-        pickers: Default::default(),
         widgets: Default::default(),
         label: None,
     }
@@ -55,7 +54,6 @@ pub(crate) fn create_user_profile() -> EntryProfile {
         show: vec!["uid".into()],
         search_attrs: vec![],
         defaults: Default::default(),
-        pickers: Default::default(),
         widgets: Default::default(),
         label: None,
     }

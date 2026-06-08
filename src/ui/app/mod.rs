@@ -19,7 +19,6 @@ use crossterm::event::{self, Event, KeyEventKind};
 use tui_prompts::{State, TextState};
 use tui_tree_widget::TreeState;
 
-use crate::config::relation::resolve_pickers;
 use crate::config::{Config, EntryProfile};
 use crate::form::changeset::ModOp;
 use crate::ldap::worker::{Request, Response, WorkerHandle};
@@ -111,9 +110,6 @@ pub struct App {
     pub overlay: Option<Overlay>,
     /// Transient status / error text.
     pub status: String,
-    /// Resolved picker bindings (built once from config profiles). Drives field
-    /// population.
-    pub pickers: Vec<crate::config::relation::ResolvedPicker>,
     /// Resolved choice-widget bindings (built once from config profiles). Tags
     /// fields that should render as a dropdown/choice widget.
     pub widgets: Vec<crate::config::widget::ResolvedWidget>,
@@ -134,7 +130,6 @@ pub fn run(config: Config, password: String) -> Result<()> {
     let read_only = config.is_read_only();
     let connection_encrypted = config.is_encrypted();
     let profiles = config.profiles.clone();
-    let pickers = resolve_pickers(&config.profiles);
     let widgets = crate::config::widget::resolve_widgets(&config.profiles)
         .map_err(|e| anyhow::anyhow!("config error: {e}"))?;
     // Compile the per-profile column-2 label rules and the attrs the scan must fetch.
@@ -199,7 +194,6 @@ pub fn run(config: Config, password: String) -> Result<()> {
         form_scroll: 0,
         overlay: None,
         status: String::new(),
-        pickers,
         widgets,
         label_rules: rules,
         tree_rules,
@@ -482,7 +476,6 @@ impl Ctx<'_> {
                             &model,
                             read_flow.schema(),
                             app.read_only,
-                            &app.pickers,
                             &app.widgets,
                         ));
                         app.form_focus = 0;

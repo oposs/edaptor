@@ -58,17 +58,18 @@ options = [
 ]
 
 # gidNumber resolves a posixGroup and stores that group's gidNumber scalar.
-[profile.picker.gidNumber]
+[profile.widget.gidNumber]
+kind      = "picker"
 candidate = "posixgroup"
 store     = "gidNumber"
 select    = "single"
 
 # memberOf is a synthetic back-ref: ticking a group writes `member` on it
 # (the memberOf attribute itself is overlay-maintained, never written directly).
-[profile.picker.memberOf]
-candidate   = "group"
-store       = "dn"
-fanout_attr = "member"
+[profile.widget.memberOf]
+kind      = "membership"
+candidate = "group"
+via       = "member"
 
 [[profile]]
 name           = "group"
@@ -79,7 +80,8 @@ show           = ["cn", "description"]
 label          = "{cn}"
 
 # member is a multi-select DN picker over users.
-[profile.picker.member]
+[profile.widget.member]
+kind      = "picker"
 candidate = "user"
 
 [[profile]]
@@ -91,6 +93,7 @@ show           = ["cn", "gidNumber", "memberUid", "description"]
 label          = "{cn}"
 
 # memberUid stores each picked user's `uid` (a multi-select user picker).
-[profile.picker.memberUid]
+[profile.widget.memberUid]
+kind      = "picker"
 candidate = "user"
 store     = "uid"

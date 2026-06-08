@@ -8,21 +8,26 @@ identical underlying link.
 
 ## Two views of one relationship
 
-Each side is just an attribute field driven by a [picker](../configuration/pickers.md):
+Each side is just an attribute field driven by a widget in the
+[widget palette](../configuration/widgets.md):
 
-- On a **group** entry, the `member` field is a picker over `user` candidates.
-  Each pick stores a user's DN in the group's `member` attribute (a normal
-  multi-valued attribute the group owns).
-- On a **user** entry, the `memberOf` field is a picker over `group` candidates.
-  But `memberOf` is **overlay-maintained** by OpenLDAP (the `memberof` overlay) —
-  eDAPtor must never write `memberOf` directly. So this field is configured as a
-  **fan-out**: ticking a group does not write `memberOf` on the user; instead it
-  adds (or removes) the user's DN in that group's `member` attribute.
+- On a **group** entry, the `member` field uses the
+  [`picker` widget](../configuration/widgets.md#the-picker-kind) over `user`
+  candidates. Each pick stores a user's DN in the group's `member` attribute (a
+  normal multi-valued attribute the group owns).
+- On a **user** entry, the `memberOf` field uses the
+  [`membership` widget](../configuration/widgets.md#the-membership-kind) over
+  `group` candidates. `memberOf` is **overlay-maintained** by OpenLDAP (the
+  `memberof` overlay) — eDAPtor must never write `memberOf` directly. So this
+  field is configured as a fan-out: ticking a group does not write `memberOf` on
+  the user; instead it adds (or removes) the user's DN in that group's `member`
+  attribute (the `via` key).
 
 The result is one consistent edit no matter which entry you start from. See
-[Pickers](../configuration/pickers.md) for the `[profile.picker.<attr>]`
-configuration behind both sides, including the `fanout_attr = "member"` binding
-that makes the `memberOf` view write the link onto the chosen groups.
+[Widgets](../configuration/widgets.md) for the `[profile.widget.<attr>]`
+configuration behind both sides, including the
+[`membership` kind](../configuration/widgets.md#the-membership-kind) that makes
+the `memberOf` view write the link onto the chosen groups.
 
 ## Editing memberships
 
@@ -47,7 +52,8 @@ to the server at all. Instead, for every group you ticked or unticked, eDAPtor
 adds or removes that user's DN in the group's `member` attribute. OpenLDAP's
 `memberof` overlay then keeps the user's `memberOf` values in sync automatically.
 
-This fan-out is the general mechanism behind any `fanout_attr` picker, not just
-membership — see [Pickers](../configuration/pickers.md) for the full
-configuration and for the other picker shapes (DN vs. scalar storage,
+This fan-out is the general mechanism behind any
+[`membership` widget](../configuration/widgets.md#the-membership-kind), not just
+`memberOf` — see [Widgets](../configuration/widgets.md) for the full
+configuration and for the other widget kinds (DN vs. scalar storage,
 single vs. multi select).

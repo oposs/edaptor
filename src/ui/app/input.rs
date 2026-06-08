@@ -528,7 +528,6 @@ mod tests {
                     kind: FieldKind::Text,
                     widget: WidgetSpec::ReadOnlyText,
                     editor: tui_prompts::TextState::new().with_value("/bin/bash".to_string()),
-                    picker: None,
                     widget_binding: Some(crate::config::widget::WidgetKind::Choice(
                         make_choice_widget(),
                     )),
@@ -544,7 +543,6 @@ mod tests {
                     kind: FieldKind::Text,
                     widget: WidgetSpec::ReadOnlyText,
                     editor: tui_prompts::TextState::new().with_value("Smith".to_string()),
-                    picker: None,
                     widget_binding: None,
                 },
             ],
@@ -588,7 +586,6 @@ mod tests {
         app.form = Some(build_new_entry_form(
             &user_schema(),
             &create_user_profile(),
-            &[],
             &[],
             0,
             "ou=people,dc=example,dc=org".to_string(),

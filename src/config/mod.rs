@@ -82,26 +82,6 @@ fn default_select() -> String {
     "auto".to_string()
 }
 
-/// Raw `[profile.picker.<attr>]` binding: how an attribute's field is populated
-/// from a live candidate search. Resolves (against the profile list) to a
-/// [`crate::config::relation::PickerBinding`].
-#[derive(Debug, Deserialize, Clone, PartialEq, Eq)]
-pub struct PickerSpec {
-    /// `[[profile]]` name supplying the candidate search scope.
-    pub candidate: String,
-    /// What to store per pick: the sentinel `"dn"` (default) or an attribute name.
-    #[serde(default = "default_store")]
-    pub store: String,
-    /// Cardinality: `"auto"` (from the attribute's schema arity), `"single"`, `"multi"`.
-    #[serde(default = "default_select")]
-    pub select: String,
-    /// Present ⇒ synthetic back-ref: the field is not written to the server; this
-    /// entry's DN is added/removed in `fanout_attr` on each picked candidate
-    /// (e.g. `memberOf` → write `member` on each picked group).
-    #[serde(default)]
-    pub fanout_attr: Option<String>,
-}
-
 /// One option in a `choice` widget: the stored token and its UI label.
 #[derive(Debug, Deserialize, Clone, PartialEq, Eq)]
 pub struct ChoiceOption {
@@ -109,6 +89,28 @@ pub struct ChoiceOption {
     pub value: String,
     /// The human-facing label shown in the checklist and the summary.
     pub label: String,
+}
+
+/// A candidate source for a `picker`/`membership` widget: either the name of a
+/// declared `[[profile]]` (whose search scope is reused) or an inline scope.
+#[derive(Debug, Deserialize, Clone, PartialEq, Eq)]
+#[serde(untagged)]
+pub enum CandidateRef {
+    /// Name of a `[[profile]]` whose scope (base/object_classes/search_attrs/label) is reused.
+    Profile(String),
+    /// An inline candidate scope (pick from entries that have no managed profile).
+    Inline(InlineScope),
+}
+
+/// An inline `candidate = { … }` table for a picker/membership widget.
+#[derive(Debug, Deserialize, Clone, PartialEq, Eq)]
+pub struct InlineScope {
+    pub base: String,
+    pub object_classes: Vec<String>,
+    #[serde(default)]
+    pub search_attrs: Vec<String>,
+    #[serde(default)]
+    pub label: Option<String>,
 }
 
 /// A `[profile.widget.<attr>]` binding. `kind`-tagged so future widget kinds add
@@ -131,6 +133,24 @@ pub enum WidgetSpecCfg {
         /// When true, also write Samba NT-hash attributes alongside the LDAP password.
         #[serde(default)]
         samba: bool,
+    },
+    /// Pick candidate value(s) and store them in *this* entry's attribute
+    /// (covers value-lookup like `gidNumber` and DN/scalar lists like `member`).
+    Picker {
+        candidate: CandidateRef,
+        /// The sentinel `"dn"` (default), or a candidate attribute name to store.
+        #[serde(default = "default_store")]
+        store: String,
+        /// `"single"` | `"multi"` | `"auto"` (default; derive from schema arity).
+        #[serde(default = "default_select")]
+        select: String,
+    },
+    /// Fan *this* entry's DN out into a back-ref attr (`via`) on each picked
+    /// candidate (covers `memberOf`). Always multi-select; no `store`/`select`.
+    Membership {
+        candidate: CandidateRef,
+        /// The back-ref attribute written on each picked candidate (e.g. `member`).
+        via: String,
     },
 }
 
@@ -155,10 +175,6 @@ pub struct EntryProfile {
     /// Per-attribute default values for newly-created entries (`[profile.defaults]`).
     #[serde(default)]
     pub defaults: ProfileDefaults,
-    /// Per-attribute picker bindings (`[profile.picker.<attr>]`). Each declares how
-    /// the named attribute's field is populated from a candidate search.
-    #[serde(default, rename = "picker")]
-    pub pickers: std::collections::BTreeMap<String, PickerSpec>,
     /// Per-attribute rich-widget bindings (`[profile.widget.<attr>]`).
     #[serde(default, rename = "widget")]
     pub widgets: std::collections::BTreeMap<String, WidgetSpecCfg>,
@@ -475,33 +491,23 @@ mod tests {
     }
 
     #[test]
-    fn demo_config_parses_with_pickers() {
+    fn demo_config_parses_widget_pickers() {
         let toml = include_str!("../../examples/demo-config.toml");
         let cfg: Config = toml::from_str(toml).expect("demo config parses");
-        let pickers = crate::config::relation::resolve_pickers(&cfg.profiles);
-        // member (group) + memberOf, gidNumber (user) + memberUid (posixgroup) = 4.
-        assert_eq!(pickers.len(), 4);
-        // Spot-check the fan-out and scalar-store bindings resolved correctly.
-        let mof = pickers
+        let user = cfg
+            .profiles
             .iter()
-            .find(|p| p.binding.attr == "memberOf")
-            .expect("memberOf picker");
-        assert_eq!(mof.binding.fanout_attr.as_deref(), Some("member"));
-        let gid = pickers
-            .iter()
-            .find(|p| p.binding.attr == "gidNumber")
-            .expect("gidNumber picker");
-        assert_eq!(
-            gid.binding.store,
-            crate::config::relation::StoreKey::Attr("gidNumber".to_string())
-        );
-        let muid = pickers
-            .iter()
-            .find(|p| p.binding.attr == "memberUid")
-            .expect("memberUid picker");
-        assert_eq!(
-            muid.binding.store,
-            crate::config::relation::StoreKey::Attr("uid".to_string())
+            .find(|p| p.name == "user")
+            .expect("user profile");
+        // memberOf migrated to a membership widget fanning out via `member`.
+        match &user.widgets["memberOf"] {
+            WidgetSpecCfg::Membership { via, .. } => assert_eq!(via, "member"),
+            other => panic!("expected Membership for memberOf, got {other:?}"),
+        }
+        // gidNumber migrated to a picker widget.
+        assert!(
+            matches!(&user.widgets["gidNumber"], WidgetSpecCfg::Picker { .. }),
+            "expected Picker for gidNumber"
         );
     }
 
@@ -528,7 +534,6 @@ mod tests {
             show: vec!["uid".into(), "cn".into()],
             search_attrs: vec![],
             defaults: Default::default(),
-            pickers: Default::default(),
             widgets: Default::default(),
             label: None,
         };
@@ -764,6 +769,26 @@ options = [ { value = "/bin/bash", label = "Bash" } ]
                 .any(|w| matches!(&w.kind, crate::config::widget::WidgetKind::Password(_))),
             "expected a WidgetKind::Password in demo-config widgets"
         );
+        // memberOf resolves to a membership picker fanning out via `member`.
+        let mof = widgets
+            .iter()
+            .find(|w| w.attr.eq_ignore_ascii_case("memberOf"))
+            .expect("memberOf widget");
+        match &mof.kind {
+            crate::config::widget::WidgetKind::Picker(b) => {
+                assert_eq!(b.fanout_attr.as_deref(), Some("member"))
+            }
+            other => panic!("expected Picker for memberOf, got {other:?}"),
+        }
+        // gidNumber resolves to a plain picker (no fan-out).
+        let gid = widgets
+            .iter()
+            .find(|w| w.attr.eq_ignore_ascii_case("gidNumber"))
+            .expect("gidNumber widget");
+        match &gid.kind {
+            crate::config::widget::WidgetKind::Picker(b) => assert_eq!(b.fanout_attr, None),
+            other => panic!("expected Picker for gidNumber, got {other:?}"),
+        }
     }
 
     #[test]
@@ -827,44 +852,118 @@ samba = true
     }
 
     #[test]
-    fn parses_profile_picker_block() {
-        let cfg: Config = toml::from_str(
-            r#"
+    fn widget_picker_parses_inline_candidate_scope() {
+        // The risky path: an untagged CandidateRef (inline table) nested in the
+        // internally-tagged WidgetSpecCfg. Must parse to Inline, not error.
+        let toml = r#"
         [server]
-        uri = "ldaps://x"
+        uri = "ldap://x"
         base_dn = "dc=x"
         [auth]
+
         [[profile]]
-        name = "group"
-        object_classes = ["groupOfNames"]
-        [profile.picker.member]
-        candidate = "user"
-        [profile.picker.memberOf]
-        candidate = "group"
+        name = "user"
+        object_classes = ["inetOrgPerson"]
+
+        [profile.widget.secretary]
+        kind = "picker"
         store = "dn"
-        fanout_attr = "member"
-        [profile.picker.gidNumber]
+        select = "single"
+        candidate = { base = "ou=people,dc=example,dc=org", object_classes = ["inetOrgPerson"], search_attrs = ["cn", "uid"], label = "{cn} ({uid})" }
+    "#;
+        let cfg: Config = toml::from_str(toml).expect("parses inline candidate scope");
+        let spec = &cfg.profiles[0].widgets["secretary"];
+        match spec {
+            WidgetSpecCfg::Picker {
+                candidate,
+                store,
+                select,
+            } => {
+                assert_eq!(store, "dn");
+                assert_eq!(select, "single");
+                match candidate {
+                    CandidateRef::Inline(s) => {
+                        assert_eq!(s.base, "ou=people,dc=example,dc=org");
+                        assert_eq!(s.object_classes, vec!["inetOrgPerson".to_string()]);
+                        assert_eq!(s.search_attrs, vec!["cn".to_string(), "uid".to_string()]);
+                        assert_eq!(s.label.as_deref(), Some("{cn} ({uid})"));
+                    }
+                    other => panic!("expected inline scope, got {other:?}"),
+                }
+            }
+            other => panic!("expected Picker variant, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn widget_picker_and_membership_parse_profile_ref_candidate() {
+        let toml = r#"
+        [server]
+        uri = "ldap://x"
+        base_dn = "dc=x"
+        [auth]
+
+        [[profile]]
+        name = "user"
+        object_classes = ["inetOrgPerson"]
+
+        [profile.widget.gidNumber]
+        kind = "picker"
         candidate = "posixgroup"
         store = "gidNumber"
         select = "single"
-        "#,
-        )
-        .unwrap();
-        let p = &cfg.profiles[0];
-        let member = p.pickers.get("member").expect("member picker");
-        assert_eq!(member.candidate, "user");
-        assert_eq!(member.store, "dn");
-        assert_eq!(member.select, "auto");
-        assert_eq!(member.fanout_attr, None);
-        let mof = p.pickers.get("memberOf").expect("memberOf picker");
-        assert_eq!(mof.fanout_attr.as_deref(), Some("member"));
-        assert_eq!(mof.candidate, "group");
-        assert_eq!(mof.store, "dn");
-        assert_eq!(mof.select, "auto");
-        let gid = p.pickers.get("gidNumber").expect("gidNumber picker");
-        assert_eq!(gid.store, "gidNumber");
-        assert_eq!(gid.select, "single");
-        assert_eq!(gid.candidate, "posixgroup");
-        assert_eq!(gid.fanout_attr, None);
+
+        [profile.widget.memberOf]
+        kind = "membership"
+        candidate = "group"
+        via = "member"
+    "#;
+        let cfg: Config = toml::from_str(toml).expect("parses");
+        let w = &cfg.profiles[0].widgets;
+        match &w["gidNumber"] {
+            WidgetSpecCfg::Picker {
+                candidate,
+                store,
+                select,
+            } => {
+                assert_eq!(candidate, &CandidateRef::Profile("posixgroup".into()));
+                assert_eq!(store, "gidNumber");
+                assert_eq!(select, "single");
+            }
+            other => panic!("expected Picker, got {other:?}"),
+        }
+        match &w["memberOf"] {
+            WidgetSpecCfg::Membership { candidate, via } => {
+                assert_eq!(candidate, &CandidateRef::Profile("group".into()));
+                assert_eq!(via, "member");
+            }
+            other => panic!("expected Membership, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn widget_picker_store_and_select_default() {
+        let toml = r#"
+        [server]
+        uri = "ldap://x"
+        base_dn = "dc=x"
+        [auth]
+
+        [[profile]]
+        name = "user"
+        object_classes = ["inetOrgPerson"]
+
+        [profile.widget.member]
+        kind = "picker"
+        candidate = "user"
+    "#;
+        let cfg: Config = toml::from_str(toml).expect("parses");
+        match &cfg.profiles[0].widgets["member"] {
+            WidgetSpecCfg::Picker { store, select, .. } => {
+                assert_eq!(store, "dn"); // default_store
+                assert_eq!(select, "auto"); // default_select
+            }
+            other => panic!("expected Picker, got {other:?}"),
+        }
     }
 }

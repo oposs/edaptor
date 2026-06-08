@@ -81,31 +81,33 @@ uidNumber     = "{next:10000-60000}"
 kind  = "password"
 samba = false
 
-# Picker bindings: `[profile.picker.<attr>]` declares how an attribute's field is
-# populated from a live candidate search. Four knobs:
-#   candidate   (required) — a [[profile]] `name` supplying the candidate search scope.
+# Picker widget: `[profile.widget.<attr>]` with `kind = "picker"` populates an
+# attribute from a live candidate search. Key options:
+#   candidate   (required) — a [[profile]] `name` (or inline scope table) supplying
+#                 the candidate search scope.
 #   store       (default "dn") — "dn" stores the candidate's DN; any other value is
 #                 an attribute name whose scalar is stored.
 #   select      (default "auto") — cardinality: "auto" derives from the attribute's
 #                 schema arity; "single" or "multi" override it.
-#   fanout_attr (optional) — when set, the field is NOT written to the server;
-#                 instead this entry's DN is added/removed in `fanout_attr` on each
-#                 picked candidate (e.g. a user's memberOf fan-out writes `member`
-#                 on each picked group).
+#
+# Membership widget: `[profile.widget.<attr>]` with `kind = "membership"` fans
+# this entry's DN into `via` on each picked candidate. The field itself is
+# overlay-maintained and never written directly by edaptor.
 
 # gidNumber: single-select picker over posixGroups; stores the chosen group's
 # gidNumber scalar into the field (not its DN).
-[profile.picker.gidNumber]
+[profile.widget.gidNumber]
+kind      = "picker"
 candidate = "posixgroup"
 store     = "gidNumber"
 select    = "single"
 
 # memberOf: synthetic back-ref — ticking a group writes `member` on it. The
 # memberOf attribute itself is overlay-maintained; edaptor never writes it directly.
-[profile.picker.memberOf]
-candidate   = "group"
-store       = "dn"
-fanout_attr = "member"
+[profile.widget.memberOf]
+kind      = "membership"
+candidate = "group"
+via       = "member"
 
 [[profile]]
 name           = "group"
@@ -116,7 +118,8 @@ show           = ["cn", "description"]
 label          = "{cn}"
 
 # member: multi-select DN picker over users (cardinality from schema, typically multi).
-[profile.picker.member]
+[profile.widget.member]
+kind      = "picker"
 candidate = "user"
 
 [[profile]]
@@ -128,7 +131,8 @@ show           = ["cn", "gidNumber", "memberUid", "description"]
 label          = "{cn}"
 
 # memberUid: multi-select picker; stores each picked user's `uid` scalar (not DN).
-[profile.picker.memberUid]
+[profile.widget.memberUid]
+kind      = "picker"
 candidate = "user"
 store     = "uid"
 ```
@@ -157,19 +161,22 @@ RDN, a `label` template, and three sub-tables —
 [`[profile.defaults]`](defaults.md) (literal `loginShell`, templated
 `homeDirectory`, auto-numbered `uidNumber`),
 [`[profile.widget.userPassword]`](widgets.md#the-password-kind) (the masked
-set-password popup), and two [`[profile.picker.<attr>]`](pickers.md) bindings
-(`gidNumber` stores a scalar; `memberOf` fans out to `member`). See
+set-password popup), a [`[profile.widget.gidNumber]`](widgets.md#the-picker-kind)
+picker binding (stores a scalar), and a
+[`[profile.widget.memberOf]`](widgets.md#the-membership-kind) membership binding
+(fans out to `member` on each picked group). See
 [Entry Profiles](entry-profiles.md).
 
 ### The `group` profile
 
 A `groupOfNames` group whose `member` attribute is filled by a multi-select
-[picker](pickers.md) over the `user` profile (storing DNs). See
-[Entry Profiles](entry-profiles.md).
+[picker widget](widgets.md#the-picker-kind) over the `user` profile (storing
+DNs). See [Entry Profiles](entry-profiles.md).
 
 ### The `posixgroup` profile
 
 A `posixGroup` whose `memberUid` attribute is filled by a multi-select
-[picker](pickers.md) over the `user` profile, storing each user's `uid`
-**scalar** rather than a DN. Its `gidNumber` is what the `user` profile's
-`gidNumber` picker consumes. See [Entry Profiles](entry-profiles.md).
+[picker widget](widgets.md#the-picker-kind) over the `user` profile, storing
+each user's `uid` **scalar** rather than a DN. Its `gidNumber` is what the
+`user` profile's `gidNumber` picker widget consumes. See
+[Entry Profiles](entry-profiles.md).
