@@ -31,7 +31,7 @@ pub enum StoreKey {
     Attr(String),
 }
 
-/// A `[profile.picker.<attr>]` binding resolved against the profile list.
+/// A `[profile.widget.<attr>]` picker/membership binding resolved against the profile list.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PickerBinding {
     /// The attribute this binds (e.g. `memberUid`).
