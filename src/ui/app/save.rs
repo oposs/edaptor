@@ -68,6 +68,8 @@ pub(crate) fn prepare_edit_save(
         ),
         None => (Vec::new(), Vec::new()),
     };
+    let orphaned: Vec<String> = form.orphaned_labels();
+    let orphaned_refs: Vec<&str> = orphaned.iter().map(|s| s.as_str()).collect();
     Ok(prepare_save(
         schema,
         &original,
@@ -75,6 +77,7 @@ pub(crate) fn prepare_edit_save(
         &object_classes,
         &password_mods,
         &mask_attrs,
+        &orphaned_refs,
     ))
 }
 
@@ -231,7 +234,9 @@ fn plan_combined_save(
         None => (Vec::new(), Vec::new()),
     };
 
-    let errors = validate(&edited, schema, &oc_refs);
+    let orphaned: Vec<String> = form.orphaned_labels();
+    let orphaned_refs: Vec<&str> = orphaned.iter().map(|s| s.as_str()).collect();
+    let errors = validate(&edited, schema, &oc_refs, &orphaned_refs);
     if !errors.is_empty() {
         return CombinedPlan::Invalid(errors);
     }

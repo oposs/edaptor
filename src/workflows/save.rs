@@ -63,9 +63,10 @@ pub fn prepare_save(
     object_classes: &[String],
     password_mods: &[ModOp],
     mask_attrs: &[String],
+    orphaned_attrs: &[&str],
 ) -> PrepareSave {
     let oc_refs: Vec<&str> = object_classes.iter().map(|s| s.as_str()).collect();
-    let errors = validate(edited, schema, &oc_refs);
+    let errors = validate(edited, schema, &oc_refs, orphaned_attrs);
     if !errors.is_empty() {
         return PrepareSave::Invalid(errors);
     }
@@ -341,6 +342,7 @@ mod tests {
             &["testUser".to_string()],
             &pw_mods,
             &mask,
+            &[],
         ) {
             PrepareSave::Ready { plan, ldif, .. } => {
                 // Preview masks both secrets, never the cleartext or hash.
@@ -381,7 +383,8 @@ mod tests {
                 &entry,
                 &["testUser".to_string()],
                 &[],
-                &[]
+                &[],
+                &[],
             ),
             PrepareSave::NoChanges
         ));

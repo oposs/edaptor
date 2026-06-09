@@ -46,7 +46,7 @@ pub fn plan_create(
         dn: dn.clone(),
         attrs: attrs.clone(),
     };
-    let errors = validate(&full, schema, &oc_refs);
+    let errors = validate(&full, schema, &oc_refs, &[]);
     if !errors.is_empty() {
         return CreatePrep::Error(format_validation_errors(&errors));
     }

@@ -40,12 +40,17 @@ pub fn validate(
     edited: &EditEntry,
     schema: &SchemaModel,
     object_classes: &[&str],
+    orphaned_attrs: &[&str],
 ) -> Vec<ValidationError> {
     let mut errors = Vec::new();
     let resolved = schema.effective_attributes(object_classes);
 
     // MUST checks: each required attr must have a non-empty value.
+    // Orphaned attrs are being deleted — skip the MUST check for them.
     for must in &resolved.must {
+        if orphaned_attrs.iter().any(|a| a.eq_ignore_ascii_case(must)) {
+            continue; // attribute is being deleted — not required to be filled
+        }
         let has_value = edited
             .attrs
             .iter()
@@ -209,7 +214,7 @@ mod tests {
     fn missing_must_attr_flagged() {
         // sn is MUST but absent.
         let e = entry("cn=A,dc=x", &[("cn", &["A"]), ("objectClass", &["person"])]);
-        let errs = validate(&e, &schema(), &["person"]);
+        let errs = validate(&e, &schema(), &["person"], &[]);
         assert!(errs.contains(&ValidationError::MissingMust("sn".to_string())));
     }
 
@@ -220,7 +225,7 @@ mod tests {
             "cn=A,dc=x",
             &[("cn", &["A"]), ("sn", &[""]), ("objectClass", &["person"])],
         );
-        let errs = validate(&e, &schema(), &["person"]);
+        let errs = validate(&e, &schema(), &["person"], &[]);
         assert!(errs.contains(&ValidationError::MissingMust("sn".to_string())));
     }
 
@@ -235,7 +240,7 @@ mod tests {
                 ("objectClass", &["demoPerson"]),
             ],
         );
-        let errs = validate(&e, &schema(), &["demoPerson"]);
+        let errs = validate(&e, &schema(), &["demoPerson"], &[]);
         assert!(errs.contains(&ValidationError::MultiValueOnSingle(
             "employeeNumber".to_string()
         )));
@@ -252,7 +257,7 @@ mod tests {
                 ("objectClass", &["demoPerson"]),
             ],
         );
-        let errs = validate(&e, &schema(), &["demoPerson"]);
+        let errs = validate(&e, &schema(), &["demoPerson"], &[]);
         assert!(errs.iter().any(|err| matches!(
             err,
             ValidationError::SyntaxInvalid { attr, .. } if attr == "employeeNumber"
@@ -270,7 +275,7 @@ mod tests {
                 ("objectClass", &["demoPerson"]),
             ],
         );
-        let errs = validate(&e, &schema(), &["demoPerson"]);
+        let errs = validate(&e, &schema(), &["demoPerson"], &[]);
         assert!(errs.iter().any(|err| matches!(
             err,
             ValidationError::SyntaxInvalid { attr, .. } if attr == "manager"
@@ -289,7 +294,7 @@ mod tests {
                 ("objectClass", &["demoPerson"]),
             ],
         );
-        let errs = validate(&e, &schema(), &["demoPerson"]);
+        let errs = validate(&e, &schema(), &["demoPerson"], &[]);
         assert!(errs.is_empty(), "errs={errs:?}");
     }
 
@@ -365,5 +370,33 @@ mod tests {
         let out = format_validation_errors(&errs);
         assert!(out.contains("missing required attribute: sn"));
         assert!(out.contains("attribute is single-valued: cn"));
+    }
+
+    #[test]
+    fn orphaned_must_attr_is_not_flagged() {
+        // sn is MUST for person, but it is orphaned (will be deleted).
+        // validate() must skip the MUST check for orphaned attrs.
+        let e = entry(
+            "cn=A,dc=x",
+            &[("cn", &["A"]), ("objectClass", &["person"])],
+            // sn is absent — but it is in orphaned_attrs
+        );
+        let errs = validate(&e, &schema(), &["person"], &["sn"]);
+        assert!(
+            !errs
+                .iter()
+                .any(|err| matches!(err, ValidationError::MissingMust(a) if a == "sn")),
+            "orphaned MUST attr must not be flagged as missing"
+        );
+    }
+
+    #[test]
+    fn non_orphaned_must_attr_still_flagged() {
+        let e = entry("cn=A,dc=x", &[("objectClass", &["person"])]);
+        // cn and sn are both MUST, neither is orphaned
+        let errs = validate(&e, &schema(), &["person"], &[]);
+        assert!(errs
+            .iter()
+            .any(|err| matches!(err, ValidationError::MissingMust(a) if a == "sn")));
     }
 }
