@@ -421,6 +421,14 @@ fn navigate_to(
 /// result fills the form). No dirty guard yet (that is P4).
 impl super::Ctx<'_> {
     pub(crate) fn reconcile(&mut self, structure: &Structure) {
+        // Dispatch pending objectClass schema sync (from OC picker commit).
+        if self.app.objectclass_sync_pending {
+            self.app.objectclass_sync_pending = false;
+            if let Some(form) = self.app.form.as_mut() {
+                form.sync_schema_fields(self.read_flow.schema());
+            }
+        }
+
         let app = &mut *self.app;
         let worker = self.worker;
         let read_flow = &mut *self.read_flow;

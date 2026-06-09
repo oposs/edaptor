@@ -971,6 +971,7 @@ mod tests {
             tree_rules: Vec::new(),
             picker_search_id: None,
             picker_last_query: String::new(),
+            objectclass_sync_pending: false,
         }
     }
 
@@ -1129,6 +1130,7 @@ mod tests {
             tree_rules: Vec::new(),
             picker_search_id: None,
             picker_last_query: String::new(),
+            objectclass_sync_pending: false,
         }
     }
 

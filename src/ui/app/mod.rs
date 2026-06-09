@@ -122,6 +122,10 @@ pub struct App {
     pub picker_search_id: Option<u64>,
     /// The picker search term last submitted (delta detection in the loop).
     pub picker_last_query: String,
+    /// Set to `true` after an objectClass picker commits; cleared by `reconcile`
+    /// after calling `EditForm::sync_schema_fields`. Schema access is only
+    /// available in `Ctx::reconcile`, so the sync is deferred via this flag.
+    pub objectclass_sync_pending: bool,
 }
 
 /// Spawn the worker, fetch the schema + eager structure, then run the TUI.
@@ -199,6 +203,7 @@ pub fn run(config: Config, password: String) -> Result<()> {
         tree_rules,
         picker_search_id: None,
         picker_last_query: String::new(),
+        objectclass_sync_pending: false,
     };
 
     let mut terminal = ratatui::init();
@@ -295,7 +300,7 @@ fn event_loop(
         }
 
         // 4) Service picker type-ahead (runs regardless of reconcile gate).
-        service_picker_search(cx.app, cx.worker);
+        service_picker_search(cx.app, cx.worker, cx.read_flow.schema());
 
         if cx.app.should_quit {
             return Ok(());

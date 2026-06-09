@@ -103,6 +103,26 @@ fn picker_editor_key(app: &mut App, key: KeyEvent) {
             app.picker_last_query.clear();
         }
         KeyCode::Char('s') | KeyCode::Char('S') if alt => {
+            // ObjectClass picker commit: write selected OC names to the multi-valued field.
+            if let Some(Overlay::ValueEditor(ve)) = app.overlay.take() {
+                if ve.objectclass {
+                    let values: Vec<String> = ve
+                        .picker
+                        .as_ref()
+                        .map(|p| p.selected_values())
+                        .unwrap_or_default();
+                    if let Some(field) = app.form.as_mut().and_then(|f| f.fields.get_mut(ve.field))
+                    {
+                        field.values = values;
+                    }
+                    app.objectclass_sync_pending = true;
+                    app.picker_search_id = None;
+                    app.picker_last_query.clear();
+                    return;
+                }
+                // Not an OC picker: put back for the binding-based commit path below.
+                app.overlay = Some(Overlay::ValueEditor(ve));
+            }
             // A choice widget commits the assembled (lossless merge-from-original)
             // encoded string into the inline editor — a single-valued field reads
             // `current_values()` from `editor`, NOT `values`.
@@ -319,7 +339,47 @@ pub(crate) fn value_editor_key(app: &mut App, key: KeyEvent) {
 /// empty term still searches — `build_member_filter` produces an objectClass-only
 /// filter that loads up to `PICKER_SEARCH_CAP` candidates (so the picker is
 /// populated on open). Mirrors the leaf incremental search.
-pub(crate) fn service_picker_search(app: &mut App, worker: &WorkerHandle) {
+pub(crate) fn service_picker_search(
+    app: &mut App,
+    worker: &WorkerHandle,
+    schema: &crate::schema::SchemaModel,
+) {
+    // ObjectClass picker: client-side filter from schema OC names.
+    // Check this BEFORE the binding check since OC picker has no binding.
+    let (is_oc, oc_query) = {
+        let Some(Overlay::ValueEditor(ve)) = app.overlay.as_ref() else {
+            return;
+        };
+        (
+            ve.objectclass && ve.picker.is_some(),
+            ve.search.value().to_string(),
+        )
+    };
+    if is_oc {
+        if oc_query == app.picker_last_query {
+            return;
+        }
+        app.picker_last_query = oc_query.clone();
+        let query_lower = oc_query.to_lowercase();
+        let candidates: Vec<crate::ui::picker::Candidate> = schema
+            .object_class_names()
+            .into_iter()
+            .filter(|name| oc_query.is_empty() || name.to_lowercase().contains(&query_lower))
+            .map(|name| crate::ui::picker::Candidate {
+                dn: name.clone(),
+                label: name.clone(),
+                store_value: name,
+            })
+            .collect();
+        if let Some(Overlay::ValueEditor(ve)) = app.overlay.as_mut() {
+            if let Some(picker) = ve.picker.as_mut() {
+                picker.results = candidates;
+                picker.search_active = !oc_query.is_empty();
+            }
+        }
+        return;
+    }
+
     let Some(Overlay::ValueEditor(ve)) = app.overlay.as_ref() else {
         return;
     };
@@ -449,6 +509,7 @@ mod tests {
             tree_rules: Vec::new(),
             picker_search_id: None,
             picker_last_query: String::new(),
+            objectclass_sync_pending: false,
         }
     }
 
@@ -1123,6 +1184,55 @@ mod tests {
             app.picker_last_query, PICKER_INIT_QUERY,
             "PICKER_INIT_QUERY sentinel set"
         );
+    }
+
+    #[test]
+    fn objectclass_picker_alt_s_commits_and_sets_sync_pending() {
+        use crate::ui::picker::Candidate;
+        let mut app = app_with_objectclass_field();
+        // Open the picker
+        app.overlay = Some(Overlay::ValueEditor(ValueEditor::open_objectclass(
+            0,
+            &app.form.as_ref().unwrap().fields[0],
+        )));
+        // Seed the picker with two OC candidates; set selected
+        if let Some(Overlay::ValueEditor(ve)) = app.overlay.as_mut() {
+            let picker = ve.picker.as_mut().unwrap();
+            picker.set_results(vec![
+                Candidate {
+                    dn: "inetOrgPerson".into(),
+                    label: "inetOrgPerson".into(),
+                    store_value: "inetOrgPerson".into(),
+                },
+                Candidate {
+                    dn: "sambaSamAccount".into(),
+                    label: "sambaSamAccount".into(),
+                    store_value: "sambaSamAccount".into(),
+                },
+            ]);
+            picker.selected = vec![
+                Candidate {
+                    dn: "inetOrgPerson".into(),
+                    label: "inetOrgPerson".into(),
+                    store_value: "inetOrgPerson".into(),
+                },
+                Candidate {
+                    dn: "sambaSamAccount".into(),
+                    label: "sambaSamAccount".into(),
+                    store_value: "sambaSamAccount".into(),
+                },
+            ];
+        }
+        // Alt+S commits
+        value_editor_key(&mut app, alt(KeyCode::Char('s')));
+        assert!(app.overlay.is_none(), "overlay closes on commit");
+        assert!(
+            app.objectclass_sync_pending,
+            "pending sync flag set after OC picker commit"
+        );
+        let field = &app.form.as_ref().unwrap().fields[0];
+        assert!(field.values.contains(&"inetOrgPerson".to_string()));
+        assert!(field.values.contains(&"sambaSamAccount".to_string()));
     }
 
     #[test]
