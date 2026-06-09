@@ -382,6 +382,84 @@ impl EditForm {
             .collect()
     }
 
+    /// Re-derive the field list from the current objectClass values:
+    /// - inject new empty `EditField`s for attrs entering MUST∪MAY that aren't present;
+    /// - mark existing fields `orphaned = true` when they leave MUST∪MAY (will be deleted);
+    /// - update `must` flags on surviving fields;
+    /// - re-sort via `order_fields()`.
+    ///
+    /// Called after the objectClass picker commits (via App::objectclass_sync_pending).
+    /// The objectClass field itself is never marked orphaned.
+    pub fn sync_schema_fields(&mut self, schema: &crate::schema::SchemaModel) {
+        // 1. Read current objectClass values.
+        let oc_values: Vec<String> = self
+            .fields
+            .iter()
+            .find(|f| f.label.eq_ignore_ascii_case("objectClass"))
+            .map(|f| f.values.clone())
+            .unwrap_or_default();
+        let oc_refs: Vec<&str> = oc_values.iter().map(|s| s.as_str()).collect();
+
+        // 2. Resolve effective MUST∪MAY for those object classes.
+        let resolved = schema.effective_attributes(&oc_refs);
+        // allowed = MUST ∪ MAY ∪ {objectClass}
+        let allowed: std::collections::BTreeSet<String> = resolved
+            .must
+            .iter()
+            .chain(resolved.may.iter())
+            .map(|s| s.to_lowercase())
+            .chain(std::iter::once("objectclass".to_string()))
+            .collect();
+
+        // 3. Update orphaned + must flags on existing fields.
+        for field in &mut self.fields {
+            let key = field.label.to_lowercase();
+            if key == "objectclass" {
+                field.orphaned = false; // objectClass is never orphaned
+                continue;
+            }
+            let in_allowed = allowed.contains(&key);
+            field.orphaned = !in_allowed;
+            if in_allowed {
+                field.must = resolved
+                    .must
+                    .iter()
+                    .any(|m| m.eq_ignore_ascii_case(&field.label));
+            } else {
+                field.must = false; // orphaned fields are not required
+            }
+        }
+
+        // 4. Inject new fields for attrs in MUST∪MAY not already present.
+        let existing_labels: std::collections::HashSet<String> =
+            self.fields.iter().map(|f| f.label.to_lowercase()).collect();
+        for attr in resolved.must.iter().chain(resolved.may.iter()) {
+            if existing_labels.contains(&attr.to_lowercase()) {
+                continue; // already present
+            }
+            let is_must = resolved.must.contains(attr);
+            let multi = !schema.is_single_value(attr);
+            let kind = schema.field_kind(attr);
+            self.fields.push(EditField {
+                label: attr.clone(),
+                must: is_must,
+                editable: true,
+                multi,
+                secret: crate::form::changeset::is_secret_attr(attr),
+                ordered: crate::form::changeset::is_x_ordered(attr),
+                values: Vec::new(),
+                kind,
+                widget: crate::ui::form::WidgetSpec::ReadOnlyText,
+                editor: tui_prompts::TextState::new(),
+                widget_binding: None,
+                orphaned: false,
+            });
+        }
+
+        // 5. Re-sort so orphaned fields fall to the bottom.
+        order_fields(self);
+    }
+
     /// Whether any field's current value SET differs from its baseline SET.
     ///
     /// Set-wise / order-insensitive, matching `changeset::diff`'s `value_set_eq`
@@ -1185,6 +1263,118 @@ mod tests {
             .collect();
         assert!(selected_names.contains(&"top"));
         assert!(selected_names.contains(&"person"));
+    }
+
+    fn sync_schema() -> crate::schema::SchemaModel {
+        SchemaModel::from_raw(&RawSubschema {
+            object_classes: vec![
+                "( 2.5.6.0 NAME 'top' ABSTRACT MUST objectClass )".to_string(),
+                "( 2.5.6.6 NAME 'person' SUP top STRUCTURAL MUST ( sn $ cn ) MAY description )"
+                    .to_string(),
+                "( 1.2.3 NAME 'sambaSamAccount' AUXILIARY MUST (sambaSID) MAY sambaAcctFlags )"
+                    .to_string(),
+            ],
+            attribute_types: vec![
+                "( 2.5.4.3 NAME 'cn' SYNTAX 1.3.6.1.4.1.1466.115.121.1.15 SINGLE-VALUE )"
+                    .to_string(),
+                "( 2.5.4.4 NAME 'sn' SYNTAX 1.3.6.1.4.1.1466.115.121.1.15 SINGLE-VALUE )"
+                    .to_string(),
+                "( 1.2 NAME 'sambaSID' SYNTAX 1.3.6.1.4.1.1466.115.121.1.15 SINGLE-VALUE )"
+                    .to_string(),
+                "( 1.3 NAME 'sambaAcctFlags' SYNTAX 1.3.6.1.4.1.1466.115.121.1.15 )".to_string(),
+                "( 1.4 NAME 'description' SYNTAX 1.3.6.1.4.1.1466.115.121.1.15 )".to_string(),
+            ],
+            ldap_syntaxes: vec![],
+        })
+    }
+
+    fn mk_field(label: &str, must: bool, values: Vec<&str>) -> EditField {
+        let seed = values.first().map(|s| s.to_string()).unwrap_or_default();
+        EditField {
+            label: label.into(),
+            must,
+            editable: true,
+            multi: values.len() > 1,
+            secret: false,
+            ordered: false,
+            values: values.into_iter().map(String::from).collect(),
+            kind: crate::schema::FieldKind::Text,
+            widget: crate::ui::form::WidgetSpec::ReadOnlyText,
+            editor: TextState::new().with_value(seed),
+            widget_binding: None,
+            orphaned: false,
+        }
+    }
+
+    #[test]
+    fn sync_schema_adding_objectclass_injects_attrs() {
+        let schema = sync_schema();
+        let mut form = EditForm {
+            dn: "uid=alice,dc=example,dc=org".into(),
+            fields: vec![
+                mk_field("cn", true, vec!["Alice"]),
+                mk_field(
+                    "objectClass",
+                    true,
+                    vec!["top", "person", "sambaSamAccount"],
+                ),
+                mk_field("sn", true, vec!["Adams"]),
+            ],
+            baseline: Default::default(),
+            mode: FormMode::Edit,
+            pending_password: None,
+        };
+        form.sync_schema_fields(&schema);
+
+        let find = |label: &str| form.fields.iter().find(|f| f.label == label);
+
+        // sambaSID (MUST for sambaSamAccount) must be injected
+        let samba_sid = find("sambaSID").expect("sambaSID must be injected");
+        assert!(samba_sid.must, "sambaSID is MUST for sambaSamAccount");
+        assert!(!samba_sid.orphaned, "sambaSID must not be orphaned");
+
+        // sambaAcctFlags (MAY) must also be injected
+        assert!(
+            find("sambaAcctFlags").is_some(),
+            "sambaAcctFlags (MAY) must be injected"
+        );
+
+        // objectClass must not be orphaned
+        let oc = find("objectClass").expect("objectClass present");
+        assert!(!oc.orphaned, "objectClass must not be orphaned");
+    }
+
+    #[test]
+    fn sync_schema_removing_objectclass_orphans_exclusive_attrs() {
+        let schema = sync_schema();
+        let mut form = EditForm {
+            dn: "uid=alice,dc=example,dc=org".into(),
+            fields: vec![
+                mk_field("cn", true, vec!["Alice"]),
+                // sambaSamAccount removed from objectClass
+                mk_field("objectClass", true, vec!["top", "person"]),
+                mk_field("sn", true, vec!["Adams"]),
+                mk_field("sambaSID", true, vec!["S-1-2-3"]),
+            ],
+            baseline: Default::default(),
+            mode: FormMode::Edit,
+            pending_password: None,
+        };
+        form.sync_schema_fields(&schema);
+
+        let find = |label: &str| form.fields.iter().find(|f| f.label == label);
+
+        // sambaSID is no longer permitted → must be orphaned
+        let samba_sid = find("sambaSID").expect("sambaSID still present");
+        assert!(
+            samba_sid.orphaned,
+            "sambaSID must be orphaned after OC removal"
+        );
+        assert!(!samba_sid.must, "orphaned fields are not required");
+
+        // cn and sn are still in person MUST → must not be orphaned
+        assert!(!find("cn").unwrap().orphaned, "cn must not be orphaned");
+        assert!(!find("sn").unwrap().orphaned, "sn must not be orphaned");
     }
 
     #[test]
