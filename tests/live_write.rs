@@ -245,3 +245,47 @@ fn delete_non_leaf_reports_human_error() {
         other => panic!("expected a WriteError, got {}", describe(&other)),
     }
 }
+
+/// Discovery path for the sambaSID auto-generate widget: a subtree search for
+/// `(objectClass=sambaDomain)` must return the seeded domain entry, and the pure
+/// `parse_samba_domain` must extract its SID + RID base. Mirrors the exact filter
+/// and attrs used by `ui::app::discover_samba_domain` (which is private), so it
+/// guards the real end-to-end path against the seed data.
+#[test]
+fn discovers_samba_domain_sid() {
+    let uri = match std::env::var("EDAPTOR_TEST_LDAP_URI") {
+        Ok(uri) => uri,
+        Err(_) => {
+            eprintln!("SKIP discovers_samba_domain_sid: set EDAPTOR_TEST_LDAP_URI to run");
+            return;
+        }
+    };
+    let (config, password) = test_config(uri);
+    let worker = WorkerHandle::spawn(config, password).expect("spawn worker");
+
+    worker
+        .submit(Request::Search {
+            id: 70,
+            base: "dc=example,dc=org".to_string(),
+            scope: SearchScope::Subtree,
+            filter: "(objectClass=sambaDomain)".to_string(),
+            attrs: vec![
+                "sambaSID".to_string(),
+                "sambaAlgorithmicRidBase".to_string(),
+            ],
+            size_limit: Some(5),
+        })
+        .expect("submit search");
+
+    match poll_for_id(&worker, 70, Duration::from_secs(10)) {
+        Some(Response::Entries { entries, .. }) => {
+            let info = entries
+                .iter()
+                .find_map(|e| edaptor::samba::sid::parse_samba_domain(&e.attrs))
+                .expect("a sambaDomain entry must parse");
+            assert_eq!(info.domain_sid, "S-1-5-21-1234567890-987654321-1122334455");
+            assert_eq!(info.algorithmic_rid_base, 1000);
+        }
+        other => panic!("expected Entries, got {}", describe(&other)),
+    }
+}

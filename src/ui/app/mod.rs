@@ -21,7 +21,7 @@ use tui_tree_widget::TreeState;
 
 use crate::config::{Config, EntryProfile};
 use crate::form::changeset::ModOp;
-use crate::ldap::worker::{Request, Response, WorkerHandle};
+use crate::ldap::worker::{Request, Response, SearchScope, WorkerHandle};
 use crate::schema::SchemaModel;
 use crate::ui::edit_form::EditForm;
 use crate::ui::picker::PICKER_SEARCH_CAP;
@@ -126,10 +126,40 @@ pub struct App {
     /// after calling `EditForm::sync_schema_fields`. Schema access is only
     /// available in `Ctx::reconcile`, so the sync is deferred via this flag.
     pub objectclass_sync_pending: bool,
-    /// Resolved Samba domain context (from the `[samba]` config table), when a
-    /// `domain_sid` is configured. Drives the `sambaSID` auto-generate widget;
-    /// `None` disables that feature entirely.
+    /// Resolved Samba domain context — discovered from a live `sambaDomain`
+    /// entry, or the `[samba].domain_sid` config fallback. Drives the `sambaSID`
+    /// auto-generate widget; `None` disables that feature entirely.
     pub samba: Option<crate::samba::SambaDomainInfo>,
+}
+
+/// Discover the Samba domain context from a live `sambaDomain` entry under
+/// `base`. Returns the first entry that parses (via the pure
+/// [`crate::samba::sid::parse_samba_domain`]); `None` when none is found, the
+/// search fails, or access is denied — callers fall back to the config
+/// `domain_sid`. Best-effort: a missing/unreadable `sambaDomain` is not an error.
+fn discover_samba_domain(
+    worker: &WorkerHandle,
+    base: &str,
+) -> Option<crate::samba::SambaDomainInfo> {
+    let resp = worker
+        .request(Request::Search {
+            id: 0,
+            base: base.to_string(),
+            scope: SearchScope::Subtree,
+            filter: "(objectClass=sambaDomain)".to_string(),
+            attrs: vec![
+                "sambaSID".to_string(),
+                "sambaAlgorithmicRidBase".to_string(),
+            ],
+            size_limit: Some(5),
+        })
+        .ok()?;
+    let Response::Entries { entries, .. } = resp else {
+        return None;
+    };
+    entries
+        .iter()
+        .find_map(|e| crate::samba::sid::parse_samba_domain(&e.attrs))
 }
 
 /// Spawn the worker, fetch the schema + eager structure, then run the TUI.
@@ -138,11 +168,11 @@ pub fn run(config: Config, password: String) -> Result<()> {
     let read_only = config.is_read_only();
     let connection_encrypted = config.is_encrypted();
     let profiles = config.profiles.clone();
-    // Resolve the Samba domain context for the sambaSID auto-generate widget.
-    // Only the static config fallback is wired today (no live sambaDomain
-    // discovery); `None` when `[samba].domain_sid` is unset, which disables the
-    // feature.
-    let samba = config
+    // Static `[samba].domain_sid` fallback for the sambaSID auto-generate widget,
+    // captured before `config` is moved into the worker. Live discovery (below,
+    // once the worker is up) takes precedence; this fills in when no `sambaDomain`
+    // entry is found. `None` here + no discovery → feature disabled.
+    let samba_fallback = config
         .samba
         .domain_sid
         .as_ref()
@@ -166,6 +196,11 @@ pub fn run(config: Config, password: String) -> Result<()> {
         _ => return Err(anyhow!("unexpected response to FetchSubschema")),
     };
     let schema = SchemaModel::from_raw(&raw);
+
+    // Resolve the Samba domain context: a live `sambaDomain` entry in the
+    // directory wins; the static config `domain_sid` is the fallback. `None`
+    // disables the sambaSID auto-generate widget entirely.
+    let samba = discover_samba_domain(&worker, &base_dn).or(samba_fallback);
 
     let nodes = match worker.request(Request::LoadStructure {
         id: 0,

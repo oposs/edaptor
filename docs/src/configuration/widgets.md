@@ -324,10 +324,15 @@ the server's current state.
 
 ## `sambaSID` auto-generate (auto-injected)
 
-When a Samba domain SID is configured (the `[samba]` table's `domain_sid` key),
-the `sambaSID` field gains a one-key auto-generate action. This is most useful
-right after adding the `sambaSamAccount` objectClass, which makes `sambaSID` a
-new mandatory field.
+When a Samba domain context is available, the `sambaSID` field gains a one-key
+auto-generate action. This is most useful right after adding the
+`sambaSamAccount` objectClass, which makes `sambaSID` a new mandatory field.
+
+The domain SID is resolved at startup: edaptor first looks for a live
+`sambaDomain` entry in the directory (reading its `sambaSID` and
+`sambaAlgorithmicRidBase`); if none is found, it falls back to the `[samba]`
+table's `domain_sid` / `algorithmic_rid_base` keys. When neither is available the
+feature is disabled.
 
 While the field is empty it shows the affordance **`⟨Enter to auto-generate⟩`**.
 Pressing **Enter** computes the value from the entry's `uidNumber` and the domain
@@ -347,6 +352,3 @@ If a prerequisite is missing, an error overlay explains what to fix:
 The field remains a plain editor: you can also type a `sambaSID` by hand to
 override the generated value. The `[samba]` configuration keys (`domain_sid`,
 `algorithmic_rid_base`) are documented in the example configs.
-
-> Note: only the static `[samba].domain_sid` fallback is used today; live
-> `sambaDomain` discovery from the directory is not yet wired.

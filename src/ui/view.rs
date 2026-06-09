@@ -1031,6 +1031,37 @@ mod tests {
         );
     }
 
+    #[test]
+    fn render_form_shows_samba_sid_autogenerate_hint_when_empty() {
+        // An empty sambaSID field tagged with the auto-generate widget renders the
+        // affordance hint instead of a blank value cell.
+        let mut app = app_with_value("anything"); // value replaced below
+        if let Some(form) = app.form.as_mut() {
+            let f = &mut form.fields[0];
+            f.label = "sambaSID".to_string();
+            f.editable = true;
+            f.editor = TextState::new(); // empty
+            f.values = vec![];
+            f.widget_binding = Some(crate::config::widget::WidgetKind::SambaSid);
+        }
+        let w = 60;
+        let backend = TestBackend::new(w, 6);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| render_form(f, &mut app, Rect::new(0, 0, w, 6)))
+            .expect("render must not panic");
+        let buffer = terminal.backend().buffer();
+        let mut all = String::new();
+        for y in 0..6 {
+            all.push_str(&row_text(buffer, 0, y, w));
+            all.push('\n');
+        }
+        assert!(
+            all.contains("Enter to auto-generate"),
+            "empty sambaSID must render the auto-generate hint, got:\n{all}"
+        );
+    }
+
     /// Collect the visible text of buffer row `y` over `[x0, x0+w)` as a String.
     fn row_text(buffer: &ratatui::buffer::Buffer, x0: u16, y: u16, w: u16) -> String {
         let mut s = String::new();
