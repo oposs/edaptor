@@ -120,6 +120,14 @@ pub(crate) fn build_new_entry_form(
     // Tag choice/picker/password/membership widget fields.
     let ocs = object_classes_of(&form);
     crate::ui::edit_form::tag_widget_fields(&mut form, widgets, &ocs, false);
+    // Auto-inject ObjectClassPicker on the objectClass field.
+    if let Some(f) = form
+        .fields
+        .iter_mut()
+        .find(|f| f.label.eq_ignore_ascii_case("objectClass") && f.editable)
+    {
+        f.widget_binding = Some(crate::config::widget::WidgetKind::ObjectClassPicker);
+    }
     // Final step: order fields after injection/tagging set secret/picker flags.
     crate::ui::edit_form::order_fields(&mut form);
     form

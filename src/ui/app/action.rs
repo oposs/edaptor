@@ -498,6 +498,16 @@ pub(crate) fn build_loaded_form(
     // Tag choice/picker/password/membership widget fields.
     let ocs = object_classes_of(&form);
     crate::ui::edit_form::tag_widget_fields(&mut form, widgets, &ocs, read_only);
+    // Auto-inject ObjectClassPicker on the objectClass field (never configurable).
+    if !read_only {
+        if let Some(f) = form
+            .fields
+            .iter_mut()
+            .find(|f| f.label.eq_ignore_ascii_case("objectClass") && f.editable)
+        {
+            f.widget_binding = Some(crate::config::widget::WidgetKind::ObjectClassPicker);
+        }
+    }
     // Final step: order fields after injection/tagging set secret/picker flags.
     crate::ui::edit_form::order_fields(&mut form);
     form
@@ -508,6 +518,76 @@ mod tests {
     use super::*;
     use crate::ui::app::build_new_entry_form;
     use crate::ui::app::test_support::*;
+
+    #[test]
+    fn build_loaded_form_injects_objectclass_picker() {
+        use crate::config::widget::WidgetKind;
+        use crate::schema::FieldKind;
+        use crate::ui::form::{FormField, FormModel, WidgetSpec};
+
+        // Build a FormModel that contains an editable objectClass field.
+        // build_edit_form maps FormModel fields verbatim; field_is_editable is true
+        // for a plain text (ReadOnlyText) non-secret field, so editable=true when
+        // read_only=false.
+        let model = FormModel {
+            title: "uid=alice,ou=people,dc=example,dc=org".into(),
+            fields: vec![FormField {
+                label: "objectClass".into(),
+                kind: FieldKind::Text,
+                is_must: true,
+                values: vec!["top".into(), "testUser".into()],
+                widget: WidgetSpec::ReadOnlyText,
+            }],
+        };
+        let form = build_loaded_form(&model, &user_schema(), false, &[]);
+        let oc_field = form
+            .fields
+            .iter()
+            .find(|f| f.label.eq_ignore_ascii_case("objectClass"))
+            .expect("objectClass field must be present in the built form");
+        assert!(
+            oc_field.editable,
+            "objectClass field must be editable in writable mode"
+        );
+        assert_eq!(
+            oc_field.widget_binding,
+            Some(WidgetKind::ObjectClassPicker),
+            "build_loaded_form must inject ObjectClassPicker on the objectClass field"
+        );
+    }
+
+    #[test]
+    fn build_loaded_form_does_not_inject_objectclass_picker_in_read_only_mode() {
+        use crate::config::widget::WidgetKind;
+        use crate::schema::FieldKind;
+        use crate::ui::form::{FormField, FormModel, WidgetSpec};
+
+        let model = FormModel {
+            title: "uid=alice,ou=people,dc=example,dc=org".into(),
+            fields: vec![FormField {
+                label: "objectClass".into(),
+                kind: FieldKind::Text,
+                is_must: true,
+                values: vec!["top".into(), "testUser".into()],
+                widget: WidgetSpec::ReadOnlyText,
+            }],
+        };
+        let form = build_loaded_form(&model, &user_schema(), true, &[]);
+        let oc_field = form
+            .fields
+            .iter()
+            .find(|f| f.label.eq_ignore_ascii_case("objectClass"))
+            .expect("objectClass field present in read-only form");
+        assert!(
+            !oc_field.editable,
+            "objectClass field must not be editable in read-only mode"
+        );
+        assert_ne!(
+            oc_field.widget_binding,
+            Some(WidgetKind::ObjectClassPicker),
+            "ObjectClassPicker must not be injected when read_only=true"
+        );
+    }
 
     #[test]
     fn should_install_blocks_a_late_read_over_a_create_form() {
