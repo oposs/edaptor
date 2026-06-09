@@ -51,11 +51,15 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
     let config_path = cli.config.clone().unwrap_or_else(default_config_path);
     let config = Config::load(&config_path)?;
-    let password = config
-        .auth
-        .password_source
-        .resolve()
-        .context("resolving bind password")?;
+    let password = if config.auth.needs_password() {
+        config
+            .auth
+            .password_source
+            .resolve()
+            .context("resolving bind password")?
+    } else {
+        String::new()
+    };
 
     match cli.command {
         None => run_tui(config, password)?,

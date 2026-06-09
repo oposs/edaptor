@@ -7,15 +7,21 @@ directory is, how to trust its TLS certificate, and how to bind.
 
 ```toml
 [server]
-uri          = "ldaps://ldap.example.com"   # ldap:// or ldaps://
+uri          = "ldaps://ldap.example.com"   # ldap://, ldaps://, or ldapi:///
 base_dn      = "dc=example,dc=com"
 start_tls    = false                          # true upgrades an ldap:// connection; do NOT combine with ldaps://
 read_only    = false                          # true disables all write actions in the TUI
 timeout_secs = 10                             # bound the TCP connect so an unreachable server cannot hang
 ```
 
-- **`uri`** — the directory URL. Use `ldap://` for a plaintext connection (often
-  combined with `start_tls`) or `ldaps://` for implicit TLS on the LDAPS port.
+- **`uri`** — the directory URL:
+  - `ldap://` — plaintext TCP, usually combined with `start_tls = true`.
+  - `ldaps://` — implicit TLS on the LDAPS port (636).
+  - `ldapi:///` — Unix domain socket on the local host (OpenLDAP only). Connects
+    to the default slapd socket at `/var/run/slapd/ldapi`. The socket path can be
+    URL-encoded into the URI if it differs from the default, e.g.
+    `ldapi://%2Ftmp%2Fslapd.sock`. Use with `auth.method = "external"` for
+    password-free root access.
 - **`base_dn`** — the root of the subtree eDAPtor loads and browses.
 - **`start_tls`** — when `true`, an `ldap://` connection is upgraded to TLS with
   StartTLS after connecting. **Do not combine `start_tls = true` with an
@@ -56,7 +62,7 @@ build or run time.
 
 ```toml
 [auth]
-method          = "simple"                    # simple bind (SASL EXTERNAL/GSSAPI are a later milestone)
+method          = "simple"                    # "simple" or "external"
 bind_dn         = "cn=ldapmanager,dc=example,dc=com"
 # The password is NEVER stored in this file. Choose a source:
 #   "prompt"            -> ask interactively at startup (no echo)
@@ -65,14 +71,34 @@ bind_dn         = "cn=ldapmanager,dc=example,dc=com"
 password_source = "prompt"
 ```
 
-- **`method`** — currently `"simple"` (a simple bind with a DN and password).
-  SASL `EXTERNAL`/`GSSAPI` authentication is planned for a later milestone.
-- **`bind_dn`** — the DN to bind as. To create users and auto-number `uidNumber`
-  reliably, bind as an identity with a high (or unlimited) server size limit so
-  the directory scan is not truncated — see [Defaults](defaults.md).
-- **`password_source`** — where the bind password comes from. **The password is
-  never stored in this file.** Choose one of:
+- **`method`** — how to authenticate after connecting:
+  - `"simple"` — a simple bind with a DN and password. Requires `bind_dn` and
+    `password_source`.
+  - `"external"` — SASL EXTERNAL bind. Used with `ldapi:///` for password-free
+    root access; the identity is taken from the OS user (or the server's
+    `olcAuthzRegexp` mapping). No `bind_dn` or `password_source` needed.
+  - GSSAPI/Kerberos is not yet supported.
+- **`bind_dn`** — the DN to bind as (`"simple"` only). To create users and
+  auto-number `uidNumber` reliably, bind as an identity with a high (or
+  unlimited) server size limit so the directory scan is not truncated — see
+  [Defaults](defaults.md).
+- **`password_source`** — where the bind password comes from (`"simple"` only).
+  **The password is never stored in this file.** Choose one of:
   - `"prompt"` — ask interactively at startup (no echo).
   - `"env:VAR"` — read the environment variable named `VAR`.
   - `"command:some cmd"` — run `some cmd` and read its standard output (e.g. a
     secret-manager helper such as `command:pass show ldap/manager`).
+
+### Unix domain socket example
+
+When running on the slapd host as root (or a user mapped to rootdn), skip TLS
+and passwords entirely:
+
+```toml
+[server]
+uri     = "ldapi:///"
+base_dn = "dc=example,dc=com"
+
+[auth]
+method = "external"
+```

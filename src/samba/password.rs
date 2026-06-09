@@ -12,15 +12,12 @@ use crate::form::changeset::ModOp;
 
 use super::nthash::{nt_hash, samba_pwd_last_set};
 
-/// True when the server connection is encrypted: an `ldaps://` URI or StartTLS.
-/// Password actions are refused (by the caller) when this is false.
+/// True when the server connection is secured against eavesdropping: LDAPS,
+/// StartTLS, or a Unix-domain socket (`ldapi://`) — the latter is local-only
+/// and carries no network exposure, so no TLS layer is required.
 pub fn is_secure(server: &ServerConfig) -> bool {
-    server
-        .uri
-        .trim_start()
-        .to_ascii_lowercase()
-        .starts_with("ldaps://")
-        || server.start_tls
+    let uri = server.uri.trim_start().to_ascii_lowercase();
+    uri.starts_with("ldaps://") || uri.starts_with("ldapi://") || server.start_tls
 }
 
 /// Attribute (name, values) pairs to inject into an `Add` for a new entry's
@@ -124,6 +121,11 @@ mod tests {
     #[test]
     fn is_secure_false_for_plain_ldap() {
         assert!(!is_secure(&server("ldap://ldap.example.com:389", false)));
+    }
+
+    #[test]
+    fn is_secure_true_for_ldapi() {
+        assert!(is_secure(&server("ldapi:///", false)));
     }
 
     #[test]

@@ -316,12 +316,13 @@ fn connect_and_bind(config: &Config, password: &str) -> Result<LdapConn> {
                 .context("LDAP rejected the bind credentials")?;
         }
         AuthMethod::External => {
-            return Err(anyhow!(
-                "auth.method = external is not implemented until M6"
-            ));
+            conn.sasl_external_bind()
+                .context("sending SASL EXTERNAL bind")?
+                .success()
+                .context("LDAP rejected the EXTERNAL bind")?;
         }
         AuthMethod::Gssapi => {
-            return Err(anyhow!("auth.method = gssapi is not implemented until M6"));
+            return Err(anyhow!("auth.method = gssapi is not yet implemented"));
         }
     }
     Ok(conn)

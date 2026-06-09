@@ -8,6 +8,15 @@ All notable changes to eDAPtor are documented here. The format follows
 
 ### New
 
+- `examples/oposs-openldap.toml` — ready-to-use config template for directories
+  managed by the [oposs.openldap](https://github.com/oposs/oposs.openldap)
+  Ansible role (POSIX users, groupOfNames + posixGroup, Samba and mailAccount
+  optional blocks).
+- **`auth.method = "external"`** — SASL EXTERNAL bind over a Unix domain socket
+  (`ldapi:///`). Allows password-free root access when running on the slapd
+  host; no TLS required. `ldapi://` connections are also treated as secure for
+  password-change operations.
+
 ### Changed
 
 ### Fixed

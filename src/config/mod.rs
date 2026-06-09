@@ -275,6 +275,11 @@ impl AuthConfig {
             .unwrap_or("")
             .is_empty()
     }
+
+    /// True when the auth method requires a password to be resolved at startup.
+    pub fn needs_password(&self) -> bool {
+        self.method == AuthMethod::Simple
+    }
 }
 
 impl Config {

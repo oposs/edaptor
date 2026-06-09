@@ -1,0 +1,184 @@
+# edaptor config template — oposs.openldap Ansible role
+#
+# The role creates this directory structure:
+#   ou=people     user accounts (inetOrgPerson + posixAccount + shadowAccount)
+#   ou=groups     DN-groups (groupOfNames) and/or UID-groups (posixGroup)
+#   ou=services   service accounts — ldapmanager, nssclient, sambamanager
+#   ou=computers  host and workstation accounts
+#
+# Two connection modes are supported — choose one:
+#
+# A) Network bind (remote or local via TLS)
+#    ACLs require TLS (SSF≥128) for all network writes. Use ldaps:// or
+#    start_tls = true with a service account (cn=ldapmanager,...).
+#
+# B) Unix domain socket / root bind (on the slapd host itself)
+#    The role enables ldapi:/// in SLAPD_SERVICES and grants root full access
+#    regardless of SSF via SASL EXTERNAL — no password needed, no TLS required.
+#    Run edaptor as root (or as a user mapped to rootdn via olcAuthzRegexp).
+#
+# Replace dc=example,dc=com with oposs_openldap.base_dn from your host_vars.
+
+# ---------------------------------------------------------------------------
+# Mode A — network, bind as ldapmanager (default for remote access)
+# ---------------------------------------------------------------------------
+[server]
+uri          = "ldaps://ldap.example.com"   # or "ldap://..." + start_tls = true below
+base_dn      = "dc=example,dc=com"          # oposs_openldap.base_dn
+start_tls    = false                         # true upgrades ldap://; do NOT combine with ldaps://
+read_only    = false
+timeout_secs = 10
+
+[server.tls]
+verify = true
+# ca_cert = "/path/to/ca.pem"               # trust a custom CA; omit to use the system store
+
+[auth]
+method   = "simple"
+bind_dn  = "cn=ldapmanager,ou=services,dc=example,dc=com"
+# Never store the password here. Choose one of:
+#   "prompt"           — ask interactively at startup (no echo)
+#   "env:VAR"          — read environment variable VAR
+#   "command:some cmd" — take the first line of stdout
+password_source = "prompt"
+
+# ---------------------------------------------------------------------------
+# Mode B — Unix domain socket on the slapd host, password-free root bind
+# Uncomment this block and comment out Mode A above.
+# ---------------------------------------------------------------------------
+# [server]
+# uri       = "ldapi:///"           # connects to /var/run/slapd/ldapi (the default)
+# base_dn   = "dc=example,dc=com"   # oposs_openldap.base_dn
+# read_only = false
+#
+# [auth]
+# method = "external"               # SASL EXTERNAL — no bind_dn or password needed
+
+# ---------------------------------------------------------------------------
+# Samba integration
+# Only needed when oposs_openldap.samba_password is configured in Ansible
+# (creates cn=sambamanager,ou=services,...). When active, also add
+# "sambaSamAccount" to the user profile's object_classes and flip samba = true
+# on the password widget.
+# ---------------------------------------------------------------------------
+# [samba]
+# edaptor auto-discovers the SID from sambaDomainName=<DOMAIN>,dc=example,dc=com.
+# Set domain_sid only as a static fallback if that entry does not exist yet.
+# domain_sid           = "S-1-5-21-..."
+# algorithmic_rid_base = 1000
+
+# ---------------------------------------------------------------------------
+# Profile: user
+# POSIX + shadow accounts in ou=people. The role also ships the samba.ldif and
+# a custom mail.schema — see the commented blocks below to activate them.
+# ---------------------------------------------------------------------------
+[[profile]]
+name           = "user"
+object_classes = ["inetOrgPerson", "posixAccount", "shadowAccount"]
+# Samba variant: add "sambaSamAccount" and flip samba = true on the password widget
+# Mail variant:  add "mailAccount" and uncomment the mail widget blocks below
+rdn_attr       = "uid"
+search_base    = "ou=people,dc=example,dc=com"
+show           = ["uid", "cn", "sn", "givenName", "mail", "uidNumber", "gidNumber",
+                  "homeDirectory", "loginShell"]
+search_attrs   = ["cn", "uid", "mail"]
+label          = "{cn} ({uid})"
+
+[profile.defaults]
+loginShell    = "/bin/bash"
+homeDirectory = "/home/{uid}"
+uidNumber     = "{next:10000-60000}"
+
+# Password widget. Set samba = true when "sambaSamAccount" is in object_classes.
+[profile.widget.userPassword]
+kind  = "password"
+samba = false
+
+[profile.widget.loginShell]
+kind   = "choice"
+select = "single"
+format = "plain"
+options = [
+  { value = "/bin/bash",     label = "Bash" },
+  { value = "/bin/sh",       label = "POSIX sh" },
+  { value = "/bin/zsh",      label = "Zsh" },
+  { value = "/sbin/nologin", label = "No login" },
+  { value = "/bin/false",    label = "Disabled" },
+]
+
+# Samba account control flags — uncomment when "sambaSamAccount" is active.
+# [profile.widget.sambaAcctFlags]
+# kind   = "choice"
+# select = "multi"
+# format = "bracketed"
+# options = [
+#   { value = "D", label = "Disabled" },
+#   { value = "X", label = "Password never expires" },
+#   { value = "N", label = "No password required" },
+# ]
+
+# Primary group: resolves a posixGroup entry and stores its gidNumber scalar.
+[profile.widget.gidNumber]
+kind      = "picker"
+candidate = "posixgroup"
+store     = "gidNumber"
+select    = "single"
+
+# Group membership via the memberOf overlay. Ticking a group writes `member` on
+# that group; the memberOf attribute itself is overlay-maintained and never written
+# by edaptor directly.
+[profile.widget.memberOf]
+kind      = "membership"
+candidate = "group"
+via       = "member"
+
+# mail.schema attributes — uncomment when "mailAccount" is in object_classes.
+# [profile.widget.mailEnabled]
+# kind   = "choice"
+# select = "single"
+# format = "plain"
+# options = [
+#   { value = "TRUE",  label = "Enabled" },
+#   { value = "FALSE", label = "Disabled" },
+# ]
+
+# ---------------------------------------------------------------------------
+# Profile: group
+# DN-based groups (groupOfNames) in ou=groups. The role's memberOf overlay keeps
+# memberOf on user entries in sync when `member` changes here.
+# ---------------------------------------------------------------------------
+[[profile]]
+name           = "group"
+object_classes = ["groupOfNames"]
+rdn_attr       = "cn"
+search_base    = "ou=groups,dc=example,dc=com"
+show           = ["cn", "description"]
+label          = "{cn}"
+
+# member: multi-value DN picker over users; cardinality from the schema.
+[profile.widget.member]
+kind      = "picker"
+candidate = "user"
+
+# ---------------------------------------------------------------------------
+# Profile: posixgroup
+# UID-based groups (posixGroup) in ou=groups — read by NSS/PAM via nssclient.
+# May share a cn with a groupOfNames entry when both DN- and UID-style
+# membership are needed on the same logical group.
+# ---------------------------------------------------------------------------
+[[profile]]
+name           = "posixgroup"
+object_classes = ["posixGroup"]
+rdn_attr       = "cn"
+search_base    = "ou=groups,dc=example,dc=com"
+show           = ["cn", "gidNumber", "memberUid", "description"]
+label          = "{cn}"
+
+[profile.defaults]
+gidNumber = "{next:5000-9999}"
+
+# memberUid: stores each picked user's uid scalar (not the DN).
+[profile.widget.memberUid]
+kind      = "picker"
+candidate = "user"
+store     = "uid"
