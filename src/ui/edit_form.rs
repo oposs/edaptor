@@ -461,6 +461,10 @@ pub fn tag_widget_fields(
                     }
                 }
             }
+            WidgetKind::ObjectClassPicker => {
+                // Auto-injected; no tagging action needed — the injection already
+                // set widget_binding = Some(ObjectClassPicker) on the field.
+            }
         }
     }
 }

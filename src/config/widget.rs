@@ -41,6 +41,9 @@ pub enum WidgetKind {
     /// A unified candidate picker (covers `kind = "picker"` and `"membership"`).
     /// `fanout_attr = Some(_)` marks a membership/fan-out binding.
     Picker(crate::config::relation::PickerBinding),
+    /// Auto-injected on the objectClass field. Candidates come from the schema
+    /// at open-time; no LDAP search is performed. Never written to config.
+    ObjectClassPicker,
 }
 
 /// A resolved widget bound to its owning profile's object classes (for matching).
