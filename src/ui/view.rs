@@ -228,13 +228,24 @@ fn render_form(f: &mut Frame, app: &mut App, area: Rect) {
         let is_focused_field = focused && is_current;
         let sel = selection_style(focused);
 
-        // Label cell, with a `*` MUST marker.
-        let label_style = if is_current {
-            sel.add_modifier(Modifier::BOLD)
+        // Label cell — orphaned fields render CROSSED_OUT+DIM with no `*` marker.
+        let (star, label_style) = if fld.orphaned {
+            let base_orphaned = if is_current {
+                sel.add_modifier(Modifier::CROSSED_OUT)
+                    .add_modifier(Modifier::DIM)
+            } else {
+                base.add_modifier(Modifier::CROSSED_OUT)
+                    .add_modifier(Modifier::DIM)
+            };
+            (" ", base_orphaned)
         } else {
-            base
+            let style = if is_current {
+                sel.add_modifier(Modifier::BOLD)
+            } else {
+                base
+            };
+            (if fld.must { "*" } else { " " }, style)
         };
-        let star = if fld.must { "*" } else { " " };
         f.render_widget(
             Paragraph::new(format!("{star}{}", fld.label)).style(label_style),
             Rect::new(inner.x, y, label_w, 1),
@@ -243,7 +254,15 @@ fn render_form(f: &mut Frame, app: &mut App, area: Rect) {
         // Value cell — rendered via Paragraph (grapheme-clipped, never sliced).
         let val_rect = Rect::new(inner.x + label_w, y, inner.width.saturating_sub(label_w), 1);
         let display = field_display_value(fld);
-        let vstyle = if is_current {
+        let vstyle = if fld.orphaned {
+            if is_current {
+                sel.add_modifier(Modifier::CROSSED_OUT)
+                    .add_modifier(Modifier::DIM)
+            } else {
+                base.add_modifier(Modifier::CROSSED_OUT)
+                    .add_modifier(Modifier::DIM)
+            }
+        } else if is_current {
             sel
         } else if fld.multi {
             base.fg(Color::DarkGray)
@@ -253,8 +272,8 @@ fn render_form(f: &mut Frame, app: &mut App, area: Rect) {
         f.render_widget(Paragraph::new(display).style(vstyle), val_rect);
 
         // Cursor for the focused, editable single-value field (P2+; read-only
-        // mode and read-only kinds never get one).
-        if is_focused_field && fld.editable && !fld.multi {
+        // mode, read-only kinds, and orphaned fields never get one).
+        if is_focused_field && fld.editable && !fld.multi && !fld.orphaned {
             let col = (fld.editor.position() as u16).min(val_rect.width.saturating_sub(1));
             f.set_cursor_position((val_rect.x + col, y));
         }
@@ -1380,6 +1399,33 @@ mod tests {
         assert!(
             all.contains("[ ] Disabled"),
             "choice options listed with checkbox markers, got:\n{all}"
+        );
+    }
+
+    #[test]
+    fn render_form_renders_orphaned_field_with_strikethrough_style() {
+        let mut app = app_with_value("S-1-2-3");
+        // Mark the field as orphaned
+        app.form.as_mut().unwrap().fields[0].label = "sambaSID".to_string();
+        app.form.as_mut().unwrap().fields[0].orphaned = true;
+
+        let w = 60u16;
+        let backend = TestBackend::new(w, 6);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| render_form(f, &mut app, Rect::new(0, 0, w, 6)))
+            .expect("render must not panic");
+        let buffer = terminal.backend().buffer();
+
+        use ratatui::style::Modifier;
+        // inner.x = 1 (left border), label rendered at col 1 as " sambaSID"
+        // (leading space because orphaned suppresses '*'), so col 2 = 's'.
+        // The whole label Paragraph gets label_style with CROSSED_OUT.
+        let cell = &buffer[(2, 1)];
+        assert!(
+            cell.modifier.contains(Modifier::CROSSED_OUT),
+            "orphaned field must render with CROSSED_OUT modifier, got: {:?}",
+            cell.modifier
         );
     }
 
