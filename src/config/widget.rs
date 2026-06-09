@@ -48,6 +48,13 @@ pub enum WidgetKind {
     /// configured. Enter on the (empty) field auto-generates the SID from the
     /// entry's `uidNumber` and the domain context. Never written to config.
     SambaSid,
+    /// Auto-injected on a create-form field whose `[profile.defaults]` value is
+    /// `{next:MIN-MAX}`. Enter on the (empty) field allocates the next free
+    /// number in range via a directory scan. Never written to config.
+    NextNumber {
+        min: u64,
+        max: u64,
+    },
 }
 
 /// A resolved widget bound to its owning profile's object classes (for matching).

@@ -128,6 +128,9 @@ pub(crate) fn build_new_entry_form(
     {
         f.widget_binding = Some(crate::config::widget::WidgetKind::ObjectClassPicker);
     }
+    // Auto-inject NextNumber on fields whose default is `{next:MIN-MAX}` so Enter
+    // allocates the value at create time (otherwise it only resolves at save).
+    crate::ui::edit_form::tag_next_number_fields(&mut form, &profile.defaults);
     // Final step: order fields after injection/tagging set secret/picker flags.
     crate::ui::edit_form::order_fields(&mut form);
     form

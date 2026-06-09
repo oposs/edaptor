@@ -612,6 +612,39 @@ pub fn tag_widget_fields(
                 // Auto-injected (see `tag_samba_sid_field`); never resolved from
                 // config, so it cannot appear here.
             }
+            WidgetKind::NextNumber { .. } => {
+                // Auto-injected (see `tag_next_number_fields`); never resolved
+                // from config, so it cannot appear here.
+            }
+        }
+    }
+}
+
+/// Tag each create-form field whose `[profile.defaults]` value is a
+/// `{next:MIN-MAX}` autonumber with the auto-injected
+/// [`WidgetKind::NextNumber`] binding, so Enter allocates the next free number.
+/// Editable fields only (read-only mode never auto-numbers). The field stays a
+/// plain editor for manual override; only the Enter action and the empty-field
+/// hint key off this binding.
+pub fn tag_next_number_fields(
+    form: &mut EditForm,
+    defaults: &crate::config::defaults::ProfileDefaults,
+) {
+    use crate::config::defaults::DefaultValue;
+    for f in form.fields.iter_mut() {
+        if !f.editable || f.widget_binding.is_some() {
+            continue;
+        }
+        let range = defaults
+            .entries
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case(&f.label))
+            .and_then(|(_, dv)| match dv {
+                DefaultValue::AutoNumber { min, max } => Some((*min, *max)),
+                _ => None,
+            });
+        if let Some((min, max)) = range {
+            f.widget_binding = Some(crate::config::widget::WidgetKind::NextNumber { min, max });
         }
     }
 }
@@ -1398,6 +1431,79 @@ mod tests {
         assert!(
             matches!(sid.widget_binding, Some(WidgetKind::SambaSid)),
             "sambaSID tagged with SambaSid after enabled tag"
+        );
+    }
+
+    #[test]
+    fn tag_next_number_fields_tags_autonumber_defaults() {
+        use crate::config::defaults::{DefaultValue, ProfileDefaults};
+        use crate::config::widget::WidgetKind;
+        let mut defaults = ProfileDefaults::default();
+        defaults.entries.insert(
+            "uidNumber".into(),
+            DefaultValue::AutoNumber {
+                min: 10000,
+                max: 60000,
+            },
+        );
+        defaults.entries.insert(
+            "homeDirectory".into(),
+            DefaultValue::Literal("/home/x".into()),
+        );
+        let mut form = EditForm {
+            dn: "uid=new,dc=example,dc=org".into(),
+            fields: vec![
+                mk_field("uidNumber", true, vec![]),
+                mk_field("homeDirectory", true, vec![]),
+                mk_field("cn", true, vec![]),
+            ],
+            baseline: Default::default(),
+            mode: FormMode::Edit,
+            pending_password: None,
+        };
+        tag_next_number_fields(&mut form, &defaults);
+        let find = |l: &str| form.fields.iter().find(|f| f.label == l).unwrap();
+        assert!(
+            matches!(
+                find("uidNumber").widget_binding,
+                Some(WidgetKind::NextNumber {
+                    min: 10000,
+                    max: 60000
+                })
+            ),
+            "uidNumber tagged NextNumber with its range"
+        );
+        assert!(
+            find("homeDirectory").widget_binding.is_none(),
+            "a literal default is not a next-number field"
+        );
+        assert!(
+            find("cn").widget_binding.is_none(),
+            "no default → no binding"
+        );
+    }
+
+    #[test]
+    fn tag_next_number_fields_skips_already_bound_and_readonly() {
+        use crate::config::defaults::{DefaultValue, ProfileDefaults};
+        let mut defaults = ProfileDefaults::default();
+        defaults.entries.insert(
+            "uidNumber".into(),
+            DefaultValue::AutoNumber { min: 1, max: 9 },
+        );
+        let mut ro = mk_field("uidNumber", true, vec![]);
+        ro.editable = false;
+        let mut form = EditForm {
+            dn: "uid=new,dc=example,dc=org".into(),
+            fields: vec![ro],
+            baseline: Default::default(),
+            mode: FormMode::Edit,
+            pending_password: None,
+        };
+        tag_next_number_fields(&mut form, &defaults);
+        assert!(
+            form.fields[0].widget_binding.is_none(),
+            "read-only field must not be tagged"
         );
     }
 

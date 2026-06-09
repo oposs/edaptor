@@ -34,6 +34,12 @@ All notable changes to eDAPtor are documented here. The format follows
   empty/non-numeric `uidNumber`) surface a specific error. The field stays
   editable for manual override. The domain SID is discovered at startup from a
   live `sambaDomain` entry, falling back to `[samba].domain_sid` in the config.
+- **Next-number allocation on demand**: in a create form, a field whose default
+  is `{next:MIN-MAX}` (e.g. `uidNumber`, `gidNumber`) now shows
+  `⟨Enter to allocate⟩`. Pressing Enter scans the directory and fills the next
+  free number immediately, so dependent widgets (like `sambaSID` auto-generate)
+  can use it before save. Skipping it still works — the value is allocated at
+  save time as before. The field stays editable for manual override.
 
 ### Changed
 

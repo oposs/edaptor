@@ -124,7 +124,14 @@ pub(crate) fn dispatch_key(
                 // Enter opens the value-editor popup: free-text rows for a plain
                 // multi-value field, or a picker for a picker-bound field
                 // (single- or multi-select). Plain single fields: a no-op.
-                KeyCode::Enter => open_value_editor(app, structure),
+                // A NextNumber field instead allocates via the worker, so it
+                // round-trips through the action handler.
+                KeyCode::Enter => {
+                    if let Some(field_idx) = next_number_field_focused(app) {
+                        return Some(UiAction::AllocateNextNumber { field_idx });
+                    }
+                    open_value_editor(app, structure);
+                }
                 // Esc cancels a create form (parity with the old modal's Esc); on
                 // an edit form Esc is a no-op (Alt+C reverts edits).
                 KeyCode::Esc if app.form.as_ref().map(|f| f.is_new()).unwrap_or(false) => {
@@ -144,17 +151,40 @@ fn edit_focused_field(app: &mut App, key: KeyEvent) {
     let focus = app.form_focus;
     if let Some(form) = app.form.as_mut() {
         if let Some(field) = form.fields.get_mut(focus) {
-            // The sambaSID auto-generate widget is still a plain editor — Enter
-            // generates, but the user may also type a value to override.
+            // The sambaSID / next-number auto-fill widgets are still plain
+            // editors — Enter fills, but the user may also type to override.
             let inline_editable = field.widget_binding.is_none()
                 || matches!(
                     field.widget_binding,
-                    Some(crate::config::widget::WidgetKind::SambaSid)
+                    Some(
+                        crate::config::widget::WidgetKind::SambaSid
+                            | crate::config::widget::WidgetKind::NextNumber { .. }
+                    )
                 );
             if field.editable && !field.multi && inline_editable {
                 field.editor.handle_key_event(key);
             }
         }
+    }
+}
+
+/// The focused form field's index if it is bound to a [`WidgetKind::NextNumber`]
+/// and currently empty. An already-filled field is left alone (Enter is a no-op,
+/// like any plain single field) so a re-press cannot silently re-scan to a
+/// different number; clear it to re-allocate. Used by the form Enter handler to
+/// route allocation through the action layer.
+fn next_number_field_focused(app: &App) -> Option<usize> {
+    let form = app.form.as_ref()?;
+    let idx = app.form_focus;
+    let field = form.fields.get(idx)?;
+    let is_next_number = matches!(
+        field.widget_binding,
+        Some(crate::config::widget::WidgetKind::NextNumber { .. })
+    );
+    if is_next_number && field.editable && field.editor.value().trim().is_empty() {
+        Some(idx)
+    } else {
+        None
     }
 }
 
@@ -582,6 +612,86 @@ mod tests {
         assert_ne!(
             plain_value, "Smith",
             "plain editable field MUST accept inline key input"
+        );
+    }
+
+    /// A create form whose only field is an empty, NextNumber-bound `uidNumber`,
+    /// focused in the form pane.
+    fn app_with_next_number_field() -> App {
+        use crate::config::widget::WidgetKind;
+        use crate::schema::FieldKind;
+        use crate::ui::edit_form::{EditField, EditForm, FormMode};
+        use crate::ui::form::WidgetSpec;
+        use tui_prompts::TextState;
+        let field = EditField {
+            label: "uidNumber".into(),
+            must: true,
+            editable: true,
+            multi: false,
+            secret: false,
+            ordered: false,
+            values: vec![],
+            kind: FieldKind::Text,
+            widget: WidgetSpec::ReadOnlyText,
+            editor: TextState::new(),
+            widget_binding: Some(WidgetKind::NextNumber {
+                min: 10000,
+                max: 60000,
+            }),
+            orphaned: false,
+        };
+        let mut app = bare_app(false);
+        app.focus = Pane::Form;
+        app.form = Some(EditForm {
+            dn: "uid=new,ou=people,dc=example,dc=org".into(),
+            fields: vec![field],
+            baseline: Default::default(),
+            mode: FormMode::Create {
+                profile_idx: 0,
+                container: "ou=people,dc=example,dc=org".into(),
+            },
+            pending_password: None,
+        });
+        app.form_focus = 0;
+        app
+    }
+
+    #[test]
+    fn enter_on_empty_next_number_field_requests_allocation() {
+        let s = empty_structure();
+        let mut app = app_with_next_number_field();
+        assert_eq!(
+            dispatch_key(&mut app, key(KeyCode::Enter), &s),
+            Some(UiAction::AllocateNextNumber { field_idx: 0 }),
+            "Enter on an empty next-number field requests allocation"
+        );
+    }
+
+    #[test]
+    fn enter_on_filled_next_number_field_does_not_reallocate() {
+        use tui_prompts::TextState;
+        let s = empty_structure();
+        let mut app = app_with_next_number_field();
+        // Simulate an already-allocated value.
+        if let Some(f) = app.form.as_mut().and_then(|fm| fm.fields.get_mut(0)) {
+            f.editor = TextState::new().with_value("10001".to_string());
+        }
+        assert_eq!(
+            dispatch_key(&mut app, key(KeyCode::Enter), &s),
+            None,
+            "a filled next-number field does not re-allocate on Enter"
+        );
+    }
+
+    #[test]
+    fn typing_overrides_a_next_number_field_inline() {
+        let s = empty_structure();
+        let mut app = app_with_next_number_field();
+        dispatch_key(&mut app, key(KeyCode::Char('7')), &s);
+        assert_eq!(
+            app.form.as_ref().unwrap().fields[0].editor.value(),
+            "7",
+            "typing edits the next-number field inline (manual override)"
         );
     }
 

@@ -19,6 +19,13 @@ pub enum UiAction {
     FormCancel,
     /// Re-run the eager structure scan (Alt+R).
     Refresh,
+    /// Allocate the next free number into a create-form field bound to a
+    /// `{next:MIN-MAX}` autonumber (Enter on the field; needs the worker for the
+    /// directory scan, so it round-trips through the action handler).
+    AllocateNextNumber {
+        /// Index of the focused field within the form.
+        field_idx: usize,
+    },
     /// Nothing actionable.
     None,
 }

@@ -253,19 +253,15 @@ fn render_form(f: &mut Frame, app: &mut App, area: Rect) {
 
         // Value cell — rendered via Paragraph (grapheme-clipped, never sliced).
         let val_rect = Rect::new(inner.x + label_w, y, inner.width.saturating_sub(label_w), 1);
-        // An empty sambaSID auto-generate field shows the affordance hint (dim
-        // italic) instead of a blank, so the user knows Enter populates it.
-        let samba_sid_hint = matches!(
-            fld.widget_binding,
-            Some(crate::config::widget::WidgetKind::SambaSid)
-        ) && !fld.orphaned
-            && fld.editor.value().trim().is_empty();
-        let display = if samba_sid_hint {
-            "⟨Enter to auto-generate⟩".to_string()
+        // An empty auto-fill field (sambaSID / next-number) shows an affordance
+        // hint (dim italic) instead of a blank, so the user knows Enter fills it.
+        let auto_fill_hint = empty_auto_fill_hint(fld);
+        let display = if let Some(hint) = auto_fill_hint {
+            hint.to_string()
         } else {
             field_display_value(fld)
         };
-        let vstyle = if samba_sid_hint {
+        let vstyle = if auto_fill_hint.is_some() {
             let s = if is_current { sel } else { base };
             s.add_modifier(Modifier::DIM).add_modifier(Modifier::ITALIC)
         } else if fld.orphaned {
@@ -317,6 +313,22 @@ fn selection_style(active: bool) -> Style {
         Color::Rgb(221, 221, 221) // light grey — selected row in an unfocused column
     };
     Style::default().bg(bg).fg(Color::Black)
+}
+
+/// The affordance hint for an empty auto-fill field (`sambaSID` auto-generate or
+/// a `{next:…}` next-number), or `None` when the field has a value, is orphaned,
+/// or carries no such binding. Rendered dim-italic in place of the blank value so
+/// the user knows Enter fills it.
+fn empty_auto_fill_hint(fld: &EditField) -> Option<&'static str> {
+    use crate::config::widget::WidgetKind;
+    if fld.orphaned || !fld.editor.value().trim().is_empty() {
+        return None;
+    }
+    match fld.widget_binding {
+        Some(WidgetKind::SambaSid) => Some("⟨Enter to auto-generate⟩"),
+        Some(WidgetKind::NextNumber { .. }) => Some("⟨Enter to allocate⟩"),
+        _ => None,
+    }
 }
 
 /// The display string for a field:
@@ -1059,6 +1071,38 @@ mod tests {
         assert!(
             all.contains("Enter to auto-generate"),
             "empty sambaSID must render the auto-generate hint, got:\n{all}"
+        );
+    }
+
+    #[test]
+    fn render_form_shows_next_number_allocate_hint_when_empty() {
+        let mut app = app_with_value("anything");
+        if let Some(form) = app.form.as_mut() {
+            let f = &mut form.fields[0];
+            f.label = "uidNumber".to_string();
+            f.editable = true;
+            f.editor = TextState::new(); // empty
+            f.values = vec![];
+            f.widget_binding = Some(crate::config::widget::WidgetKind::NextNumber {
+                min: 10000,
+                max: 60000,
+            });
+        }
+        let w = 60;
+        let backend = TestBackend::new(w, 6);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| render_form(f, &mut app, Rect::new(0, 0, w, 6)))
+            .expect("render must not panic");
+        let buffer = terminal.backend().buffer();
+        let mut all = String::new();
+        for y in 0..6 {
+            all.push_str(&row_text(buffer, 0, y, w));
+            all.push('\n');
+        }
+        assert!(
+            all.contains("Enter to allocate"),
+            "empty next-number field must render the allocate hint, got:\n{all}"
         );
     }
 

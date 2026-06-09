@@ -49,6 +49,17 @@ uidNumber = "{next:10000-60000}"
 To compute the next free value, eDAPtor scans the directory for existing values
 of the attribute and picks the lowest unused number in range.
 
+### Allocating during create (Enter to allocate)
+
+By default an auto-numbered field is resolved at **save** time. In a create form
+the field is initially empty and shows the affordance **`⟨Enter to allocate⟩`**;
+pressing **Enter** runs the scan immediately and fills in the number. This is
+useful when another field depends on the value before save — for example the
+[`sambaSID` auto-generate](widgets.md#sambasid-auto-generate-auto-injected)
+widget needs a concrete `uidNumber`. Skipping it is fine: the value is still
+allocated automatically at save. The field stays editable, so you can also type a
+number by hand to override.
+
 ### Size-limit caveat
 
 The auto-number scan is only safe if it sees **every** existing value. OpenLDAP

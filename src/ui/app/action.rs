@@ -128,7 +128,41 @@ impl super::Ctx<'_> {
                 }
             }
             UiAction::Refresh => refresh_structure(app, worker, structure, base_dn),
+            UiAction::AllocateNextNumber { field_idx } => {
+                allocate_next_number(app, worker, base_dn, field_idx)
+            }
             UiAction::None => {}
+        }
+    }
+}
+
+/// Allocate the next free number into a [`WidgetKind::NextNumber`] create-form
+/// field via a synchronous directory scan ([`allocate_number`]), filling its
+/// editor on success or surfacing the allocator's error overlay (e.g. a
+/// truncated scan or an exhausted pool). The uniqueness scan spans the whole
+/// `base_dn`, matching the save-time allocation path.
+fn allocate_next_number(app: &mut App, worker: &WorkerHandle, base_dn: &str, field_idx: usize) {
+    use crate::config::widget::WidgetKind;
+    let Some((attr, min, max)) = app.form.as_ref().and_then(|f| {
+        f.fields
+            .get(field_idx)
+            .and_then(|fld| match fld.widget_binding {
+                Some(WidgetKind::NextNumber { min, max }) => Some((fld.label.clone(), min, max)),
+                _ => None,
+            })
+    }) else {
+        return;
+    };
+    match crate::ui::app::allocate_number(worker, base_dn, &attr, min, max) {
+        Ok(n) => {
+            let value = n.to_string();
+            if let Some(fld) = app.form.as_mut().and_then(|f| f.fields.get_mut(field_idx)) {
+                fld.editor = TextState::new().with_value(value.clone());
+                fld.values = vec![value];
+            }
+        }
+        Err(text) => {
+            app.overlay = Some(Overlay::Error { text });
         }
     }
 }
