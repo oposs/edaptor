@@ -44,6 +44,7 @@ fn admin_config(uri: String) -> (Config, String) {
             password_source: PasswordSource::Env("EDAPTOR_TEST_ADMIN_PW".to_string()),
         },
         profiles: Vec::new(),
+        meta: Default::default(),
         samba: Default::default(),
         tree: Default::default(),
     };
@@ -70,6 +71,7 @@ fn user_config(uri: String, bind_dn: &str, password: &str) -> (Config, String) {
             password_source: PasswordSource::Prompt,
         },
         profiles: Vec::new(),
+        meta: Default::default(),
         samba: Default::default(),
         tree: Default::default(),
     };

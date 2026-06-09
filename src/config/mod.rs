@@ -13,8 +13,16 @@ use anyhow::{Context, Result};
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
 
+#[derive(Debug, Default, Deserialize)]
+pub struct MetaConfig {
+    pub name: Option<String>,
+    pub description: Option<String>,
+}
+
 #[derive(Debug, Deserialize)]
 pub struct Config {
+    #[serde(default)]
+    pub meta: MetaConfig,
     pub server: ServerConfig,
     pub auth: AuthConfig,
     /// Entry profiles drive the menu and read-form ordering. A minimal slice is
@@ -970,5 +978,69 @@ samba = true
             }
             other => panic!("expected Picker, got {other:?}"),
         }
+    }
+}
+
+#[cfg(test)]
+mod meta_tests {
+    use super::*;
+
+    #[test]
+    fn meta_config_parses_both_fields() {
+        let cfg: Config = toml::from_str(
+            r#"
+            [meta]
+            name        = "carbo-link production"
+            description = "dc=carbo-link,dc=com via ldapi"
+            [server]
+            uri     = "ldap://x"
+            base_dn = "dc=x"
+            [auth]
+            method  = "simple"
+            bind_dn = "cn=admin,dc=x"
+            "#,
+        )
+        .unwrap();
+        assert_eq!(cfg.meta.name.as_deref(), Some("carbo-link production"));
+        assert_eq!(
+            cfg.meta.description.as_deref(),
+            Some("dc=carbo-link,dc=com via ldapi")
+        );
+    }
+
+    #[test]
+    fn meta_config_absent_gives_none_fields() {
+        let cfg: Config = toml::from_str(
+            r#"
+            [server]
+            uri     = "ldap://x"
+            base_dn = "dc=x"
+            [auth]
+            method  = "simple"
+            bind_dn = "cn=admin,dc=x"
+            "#,
+        )
+        .unwrap();
+        assert!(cfg.meta.name.is_none());
+        assert!(cfg.meta.description.is_none());
+    }
+
+    #[test]
+    fn meta_config_partial_fields_allowed() {
+        let cfg: Config = toml::from_str(
+            r#"
+            [meta]
+            name = "only a name"
+            [server]
+            uri     = "ldap://x"
+            base_dn = "dc=x"
+            [auth]
+            method  = "simple"
+            bind_dn = "cn=admin,dc=x"
+            "#,
+        )
+        .unwrap();
+        assert_eq!(cfg.meta.name.as_deref(), Some("only a name"));
+        assert!(cfg.meta.description.is_none());
     }
 }
