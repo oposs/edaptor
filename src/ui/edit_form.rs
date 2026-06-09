@@ -260,10 +260,11 @@ impl ValueEditor {
                 store_value: v.clone(),
             })
             .collect();
+        let saved = selected.iter().map(|c| c.store_value.clone()).collect();
         let picker = PickerState {
             selected,
             results: Vec::new(), // populated by service_picker_search on first tick
-            saved: Vec::new(),
+            saved,
             cursor: 0,
             scroll: 0,
             search_active: false,

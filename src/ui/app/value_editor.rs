@@ -374,7 +374,10 @@ pub(crate) fn service_picker_search(
         if let Some(Overlay::ValueEditor(ve)) = app.overlay.as_mut() {
             if let Some(picker) = ve.picker.as_mut() {
                 picker.results = candidates;
-                picker.search_active = !oc_query.is_empty();
+                // OC picker always keeps selected entries at the top regardless
+                // of search term — search_active reordering is for membership
+                // pickers, not OC pickers.
+                picker.search_active = false;
             }
         }
         return;
