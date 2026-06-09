@@ -6,6 +6,7 @@
 //! stays testable without a terminal and the TUI backend stays swappable.
 
 pub mod app;
+pub mod config_picker;
 pub mod edit_form;
 pub mod form;
 pub mod form_state;
