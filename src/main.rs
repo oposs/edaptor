@@ -12,8 +12,10 @@ use edaptor::SchemaReport;
 #[derive(Parser)]
 #[command(name = "edaptor", about = "TUI for editing OpenLDAP directories")]
 struct Cli {
-    /// Path to the configuration file
-    /// (default: $XDG_CONFIG_HOME/edaptor/config.toml or ~/.config/edaptor/config.toml).
+    /// Path to the configuration file.
+    /// Without this flag, edaptor searches ~/.config/edaptor/ and /etc/edaptor/
+    /// for *.toml files. If exactly one is found it is used automatically;
+    /// if multiple are found a picker is shown.
     #[arg(long, global = true, value_name = "PATH")]
     config: Option<PathBuf>,
 
@@ -39,17 +41,25 @@ enum Command {
     },
 }
 
-fn default_config_path() -> PathBuf {
-    if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME") {
-        return PathBuf::from(xdg).join("edaptor/config.toml");
-    }
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-    PathBuf::from(home).join(".config/edaptor/config.toml")
-}
-
 fn main() -> Result<()> {
     let cli = Cli::parse();
-    let config_path = cli.config.clone().unwrap_or_else(default_config_path);
+    let Cli { config, command } = cli;
+    let config_path: PathBuf = if let Some(p) = config {
+        p
+    } else {
+        let candidates = edaptor::config::discovery::discover_configs();
+        match candidates.len() {
+            0 => anyhow::bail!(
+                "no config found in ~/.config/edaptor/ or /etc/edaptor/; \
+                 use --config to specify one"
+            ),
+            1 => candidates.into_iter().next().unwrap().path,
+            _ => match edaptor::ui::config_picker::pick_config(candidates)? {
+                Some(p) => p,
+                None => return Ok(()),
+            },
+        }
+    };
     let config = Config::load(&config_path)?;
     let password = if config.auth.needs_password() {
         config
@@ -61,7 +71,7 @@ fn main() -> Result<()> {
         String::new()
     };
 
-    match cli.command {
+    match command {
         None => run_tui(config, password)?,
         Some(Command::Check) => {
             let summary = edaptor::run_check(config, password)?;
