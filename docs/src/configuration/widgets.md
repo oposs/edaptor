@@ -17,6 +17,9 @@ configuration:
 | [`picker`](#the-picker-kind) | a live candidate search; stores the picked value(s) in this entry | value lookup (`gidNumber`) and DN/scalar lists (`member`, `memberUid`) |
 | [`membership`](#the-membership-kind) | a live candidate search; fans this entry's DN into a back-ref attr on each pick | back-reference views (`memberOf`) |
 
+Additionally, the **`objectClass` field** receives an [auto-injected picker](#objectclass-picker-auto-injected)
+with no configuration required — it is always present when editing any entry.
+
 A widget is declared as a sub-table of an [entry profile](entry-profiles.md),
 keyed by the attribute it edits, e.g. `[profile.widget.loginShell]`.
 
@@ -293,3 +296,28 @@ automatically.
 
 The membership *workflow* — editing from either side, incremental search, the
 fan-out write model — is described in [Membership Editing](../usage/membership.md).
+
+## `objectClass` Picker (auto-injected)
+
+The `objectClass` field automatically receives a schema-seeded picker. No
+configuration is needed — it is always present when editing any entry. When you
+press Enter on the `objectClass` field, a multi-select popup opens listing all
+objectClass names known from the server's subschema. Tick or untick classes; press
+**Alt+S** to commit.
+
+After committing, the edit form immediately reflects the schema change:
+
+- **New attributes appear** for all MUST and MAY attributes introduced by the
+  newly added classes.
+- **Existing attributes are orphaned** (shown **crossed out** and dimmed) if they
+  are no longer permitted by any of the remaining classes. Orphaned attributes
+  are automatically deleted when the entry is saved.
+
+All changes — objectClass modifications, new attribute values, and orphaned
+attribute deletions — are sent as a single atomic LDAP `ModifyRequest`.
+
+### Reverting objectClass changes
+
+To abandon objectClass changes without saving, press **Alt+C** in the edit
+form — the popup closes, all injected fields disappear, and the form returns to
+the server's current state.

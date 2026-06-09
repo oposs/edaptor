@@ -22,6 +22,12 @@ All notable changes to eDAPtor are documented here. The format follows
   discovery as before.
 - **`[meta]` table** in config files — optional `name` and `description` fields
   displayed in the startup picker.
+- **ObjectClass-driven attributes**: When the `objectClass` field is edited via
+  the new schema-seeded picker, the edit form immediately injects fields for all
+  MUST and MAY attributes introduced by the new class, and marks attributes no
+  longer permitted by any remaining class as _orphaned_ (shown crossed out). All
+  changes — objectClass modification, new attribute values, and attribute deletions
+  — are sent as a single atomic LDAP `ModifyRequest`.
 
 ### Changed
 
