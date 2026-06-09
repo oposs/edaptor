@@ -276,13 +276,17 @@ pub enum AuthMethod {
 }
 
 impl AuthConfig {
-    /// True when no bind DN is configured (anonymous bind).
+    /// True when the auth is an anonymous simple bind (no bind DN, no SASL method).
+    /// SASL methods (External, Gssapi) are never anonymous — the identity comes
+    /// from the transport credential, not a bind DN.
     pub fn is_anonymous(&self) -> bool {
-        self.bind_dn
-            .as_deref()
-            .map(str::trim)
-            .unwrap_or("")
-            .is_empty()
+        self.method == AuthMethod::Simple
+            && self
+                .bind_dn
+                .as_deref()
+                .map(str::trim)
+                .unwrap_or("")
+                .is_empty()
     }
 
     /// True when the auth method requires a password to be resolved at startup.
@@ -502,6 +506,20 @@ mod tests {
         let cfg: Config = toml::from_str(toml).unwrap();
         assert!(cfg.auth.is_anonymous());
         assert!(cfg.is_read_only());
+    }
+
+    #[test]
+    fn external_auth_without_bind_dn_is_not_anonymous() {
+        let toml = r#"
+            [server]
+            uri = "ldapi://%2Fvar%2Frun%2Fslapd%2Fldapi"
+            base_dn = "dc=x"
+            [auth]
+            method = "external"
+        "#;
+        let cfg: Config = toml::from_str(toml).unwrap();
+        assert!(!cfg.auth.is_anonymous());
+        assert!(!cfg.is_read_only());
     }
 
     #[test]

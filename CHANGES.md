@@ -31,7 +31,13 @@ All notable changes to eDAPtor are documented here. The format follows
 
 ### Changed
 
+- `j`/`k` accepted as aliases for ↓/↑ in the tree pane, profile-chooser overlay,
+  and config-discovery picker.
+
 ### Fixed
+
+- `auth.method = "external"` (SASL EXTERNAL / ldapi) no longer forces read-only
+  mode. Only a `simple` bind with no `bind_dn` is treated as anonymous.
 
 ## 0.3.0 - 2026-06-09
 

@@ -81,10 +81,10 @@ pub(crate) fn dispatch_key(
 
     match app.focus {
         Pane::Tree => match key.code {
-            KeyCode::Up => {
+            KeyCode::Up | KeyCode::Char('k') => {
                 app.tree_state.key_up();
             }
-            KeyCode::Down => {
+            KeyCode::Down | KeyCode::Char('j') => {
                 app.tree_state.key_down();
             }
             KeyCode::Left => {
@@ -198,11 +198,11 @@ fn choose_profile_key(app: &mut App, key: KeyEvent) -> Option<PendingAction> {
         return None;
     };
     match key.code {
-        KeyCode::Up => {
+        KeyCode::Up | KeyCode::Char('k') => {
             *sel = sel.saturating_sub(1);
             None
         }
-        KeyCode::Down => {
+        KeyCode::Down | KeyCode::Char('j') => {
             *sel = (*sel + 1).min(entries.len().saturating_sub(1));
             None
         }

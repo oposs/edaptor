@@ -53,9 +53,7 @@ pub(crate) fn collect_from_dirs(dirs: &[&Path]) -> Vec<ConfigCandidate> {
 
     for dir in dirs {
         let mut dir_candidates = toml_files_in(dir);
-        dir_candidates.sort_by(|a, b| {
-            a.path.file_name().cmp(&b.path.file_name())
-        });
+        dir_candidates.sort_by(|a, b| a.path.file_name().cmp(&b.path.file_name()));
         candidates.extend(dir_candidates);
     }
 

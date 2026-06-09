@@ -62,8 +62,7 @@ fn render(f: &mut Frame, candidates: &[ConfigCandidate], selected: usize) {
         .borders(Borders::ALL)
         .title(" Select configuration ")
         .title_bottom(
-            Line::from(" ↑↓ navigate  Enter select  q quit ")
-                .alignment(Alignment::Center),
+            Line::from(" ↑↓ navigate  Enter select  q quit ").alignment(Alignment::Center),
         );
     let inner = block.inner(area);
     f.render_widget(block, area);
@@ -82,7 +81,11 @@ fn render(f: &mut Frame, candidates: &[ConfigCandidate], selected: usize) {
         let prefix = if is_selected { "▶ " } else { "  " };
 
         let name_style = if is_selected { selected_style } else { bold };
-        let text_style = if is_selected { selected_style } else { Style::default() };
+        let text_style = if is_selected {
+            selected_style
+        } else {
+            Style::default()
+        };
         let path_style = if is_selected { selected_style } else { dim };
 
         lines.push(Line::from(vec![
