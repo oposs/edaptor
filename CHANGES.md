@@ -28,6 +28,11 @@ All notable changes to eDAPtor are documented here. The format follows
   longer permitted by any remaining class as _orphaned_ (shown crossed out). All
   changes — objectClass modification, new attribute values, and attribute deletions
   — are sent as a single atomic LDAP `ModifyRequest`.
+- **`sambaSID` auto-generate**: when `[samba].domain_sid` is configured, an empty
+  `sambaSID` field shows `⟨Enter to auto-generate⟩`. Pressing Enter computes the
+  SID from the entry's `uidNumber` and the domain context; missing prerequisites
+  (no domain SID, empty/non-numeric `uidNumber`) surface a specific error. The
+  field stays editable for manual override.
 
 ### Changed
 

@@ -144,7 +144,14 @@ fn edit_focused_field(app: &mut App, key: KeyEvent) {
     let focus = app.form_focus;
     if let Some(form) = app.form.as_mut() {
         if let Some(field) = form.fields.get_mut(focus) {
-            if field.editable && !field.multi && field.widget_binding.is_none() {
+            // The sambaSID auto-generate widget is still a plain editor — Enter
+            // generates, but the user may also type a value to override.
+            let inline_editable = field.widget_binding.is_none()
+                || matches!(
+                    field.widget_binding,
+                    Some(crate::config::widget::WidgetKind::SambaSid)
+                );
+            if field.editable && !field.multi && inline_editable {
                 field.editor.handle_key_event(key);
             }
         }

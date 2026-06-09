@@ -29,6 +29,38 @@ pub fn group_sid(domain_sid: &str, gid: u64, base: u32) -> String {
     format!("{domain_sid}-{}", group_rid(gid, base))
 }
 
+/// Generate a user's `sambaSID` from the resolved domain context and a raw
+/// `uidNumber` value, returning a user-facing error string when generation is
+/// not possible. Drives the interactive "press Enter to auto-generate" action on
+/// the `sambaSID` field: `Ok(sid)` fills the field; `Err(msg)` is shown in an
+/// error overlay. Kept pure (no UI/IO) so the branches are unit-testable.
+pub fn generate_user_sid(
+    domain: Option<&SambaDomainInfo>,
+    uid_value: Option<&str>,
+) -> Result<String, String> {
+    let domain = domain.ok_or_else(|| {
+        "No Samba domain SID configured. Add `domain_sid` to the [samba] section \
+         of your config."
+            .to_string()
+    })?;
+    let uid = uid_value
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| {
+            "uidNumber has no value yet — fill it in first, then press Enter here \
+             again."
+                .to_string()
+        })?;
+    let parsed: u64 = uid
+        .parse()
+        .map_err(|_| format!("uidNumber `{uid}` is not a number."))?;
+    Ok(user_sid(
+        &domain.domain_sid,
+        parsed,
+        domain.algorithmic_rid_base,
+    ))
+}
+
 /// Parse a discovered `sambaDomain` entry's attribute map into a
 /// [`SambaDomainInfo`]. Reads `sambaSID` (required — the domain SID) and
 /// `sambaAlgorithmicRidBase` (optional, defaults to 1000 when absent or
@@ -96,5 +128,53 @@ mod tests {
     fn parse_samba_domain_none_without_sid() {
         let attrs: BTreeMap<String, Vec<String>> = BTreeMap::new();
         assert!(parse_samba_domain(&attrs).is_none());
+    }
+
+    fn domain() -> SambaDomainInfo {
+        SambaDomainInfo {
+            domain_sid: DOMAIN.into(),
+            algorithmic_rid_base: 1000,
+        }
+    }
+
+    #[test]
+    fn generate_user_sid_golden() {
+        let d = domain();
+        assert_eq!(
+            generate_user_sid(Some(&d), Some("1000")),
+            Ok("S-1-5-21-1-2-3-3000".to_string())
+        );
+    }
+
+    #[test]
+    fn generate_user_sid_trims_whitespace() {
+        let d = domain();
+        assert_eq!(
+            generate_user_sid(Some(&d), Some("  1000  ")),
+            Ok("S-1-5-21-1-2-3-3000".to_string())
+        );
+    }
+
+    #[test]
+    fn generate_user_sid_errors_without_domain() {
+        let err = generate_user_sid(None, Some("1000")).unwrap_err();
+        assert!(err.contains("domain_sid"), "err={err}");
+    }
+
+    #[test]
+    fn generate_user_sid_errors_without_uid() {
+        let d = domain();
+        // None and blank both count as "no value yet".
+        let err = generate_user_sid(Some(&d), None).unwrap_err();
+        assert!(err.contains("uidNumber has no value"), "err={err}");
+        let err = generate_user_sid(Some(&d), Some("   ")).unwrap_err();
+        assert!(err.contains("uidNumber has no value"), "err={err}");
+    }
+
+    #[test]
+    fn generate_user_sid_errors_on_non_numeric_uid() {
+        let d = domain();
+        let err = generate_user_sid(Some(&d), Some("abc")).unwrap_err();
+        assert!(err.contains("not a number"), "err={err}");
     }
 }

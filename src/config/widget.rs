@@ -44,6 +44,10 @@ pub enum WidgetKind {
     /// Auto-injected on the objectClass field. Candidates come from the schema
     /// at open-time; no LDAP search is performed. Never written to config.
     ObjectClassPicker,
+    /// Auto-injected on the `sambaSID` field when a Samba domain SID is
+    /// configured. Enter on the (empty) field auto-generates the SID from the
+    /// entry's `uidNumber` and the domain context. Never written to config.
+    SambaSid,
 }
 
 /// A resolved widget bound to its owning profile's object classes (for matching).

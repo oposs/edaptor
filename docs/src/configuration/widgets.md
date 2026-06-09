@@ -321,3 +321,32 @@ attribute deletions — are sent as a single atomic LDAP `ModifyRequest`.
 To abandon objectClass changes without saving, press **Alt+C** in the edit
 form — the popup closes, all injected fields disappear, and the form returns to
 the server's current state.
+
+## `sambaSID` auto-generate (auto-injected)
+
+When a Samba domain SID is configured (the `[samba]` table's `domain_sid` key),
+the `sambaSID` field gains a one-key auto-generate action. This is most useful
+right after adding the `sambaSamAccount` objectClass, which makes `sambaSID` a
+new mandatory field.
+
+While the field is empty it shows the affordance **`⟨Enter to auto-generate⟩`**.
+Pressing **Enter** computes the value from the entry's `uidNumber` and the domain
+context:
+
+```
+sambaSID = {domain_sid}-{uidNumber * 2 + algorithmic_rid_base}
+```
+
+If a prerequisite is missing, an error overlay explains what to fix:
+
+- no `domain_sid` configured → add it to the `[samba]` table;
+- `uidNumber` still empty → fill it in first (for a new entry, set or auto-number
+  `uidNumber`, then return to `sambaSID`);
+- `uidNumber` not numeric.
+
+The field remains a plain editor: you can also type a `sambaSID` by hand to
+override the generated value. The `[samba]` configuration keys (`domain_sid`,
+`algorithmic_rid_base`) are documented in the example configs.
+
+> Note: only the static `[samba].domain_sid` fallback is used today; live
+> `sambaDomain` discovery from the directory is not yet wired.

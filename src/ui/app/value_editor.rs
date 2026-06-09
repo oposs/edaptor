@@ -43,6 +43,34 @@ pub(crate) fn open_value_editor(app: &mut App, _structure: &Structure) {
         return;
     }
 
+    // sambaSID auto-generate — Enter computes the SID from the entry's uidNumber
+    // and the configured domain context, filling the field. Any missing input
+    // (no domain / no uidNumber / non-numeric) surfaces as an error overlay
+    // explaining what to fix. The field stays inline-editable for manual override.
+    if matches!(
+        field.widget_binding,
+        Some(crate::config::widget::WidgetKind::SambaSid)
+    ) && field.editable
+    {
+        let uid_value = form
+            .fields
+            .iter()
+            .find(|f| f.label.eq_ignore_ascii_case("uidNumber"))
+            .and_then(|f| f.current_values().into_iter().next());
+        match crate::samba::sid::generate_user_sid(app.samba.as_ref(), uid_value.as_deref()) {
+            Ok(sid) => {
+                if let Some(f) = app.form.as_mut().and_then(|fm| fm.fields.get_mut(focus)) {
+                    f.editor = TextState::new().with_value(sid.clone());
+                    f.values = vec![sid];
+                }
+            }
+            Err(msg) => {
+                app.overlay = Some(Overlay::Error { text: msg });
+            }
+        }
+        return;
+    }
+
     // A password-bound field opens the dedicated set-password popup (the field is
     // read-only; the new value is staged into `pending_password`, not the editor).
     // Read the binding kind, drop the `form` borrow, then re-enter via the popup.
@@ -513,6 +541,7 @@ mod tests {
             picker_search_id: None,
             picker_last_query: String::new(),
             objectclass_sync_pending: false,
+            samba: None,
         }
     }
 
@@ -1236,6 +1265,100 @@ mod tests {
         let field = &app.form.as_ref().unwrap().fields[0];
         assert!(field.values.contains(&"inetOrgPerson".to_string()));
         assert!(field.values.contains(&"sambaSamAccount".to_string()));
+    }
+
+    /// App with a `uidNumber` (single, editable) and an empty `sambaSID` field
+    /// tagged with the auto-generate widget. `samba` carries the domain context.
+    fn app_with_samba_sid_field(uid: &str, samba: Option<crate::samba::SambaDomainInfo>) -> App {
+        use crate::config::widget::WidgetKind;
+        use crate::schema::FieldKind;
+        use crate::ui::edit_form::{EditField, EditForm, FormMode};
+        use crate::ui::form::WidgetSpec;
+        let mk = |label: &str, val: &str, binding: Option<WidgetKind>| EditField {
+            label: label.into(),
+            must: true,
+            editable: true,
+            multi: false,
+            secret: false,
+            ordered: false,
+            values: if val.is_empty() {
+                vec![]
+            } else {
+                vec![val.into()]
+            },
+            kind: FieldKind::Text,
+            widget: WidgetSpec::ReadOnlyText,
+            editor: TextState::new().with_value(val.to_string()),
+            widget_binding: binding,
+            orphaned: false,
+        };
+        let mut app = bare_app(false);
+        app.samba = samba;
+        app.form = Some(EditForm {
+            dn: "uid=alice,ou=people,dc=test".into(),
+            fields: vec![
+                mk("uidNumber", uid, None),
+                mk("sambaSID", "", Some(WidgetKind::SambaSid)),
+            ],
+            baseline: Default::default(),
+            mode: FormMode::Edit,
+            pending_password: None,
+        });
+        app.form_focus = 1; // focus the sambaSID field
+        app
+    }
+
+    fn samba_domain() -> crate::samba::SambaDomainInfo {
+        crate::samba::SambaDomainInfo {
+            domain_sid: "S-1-5-21-1-2-3".into(),
+            algorithmic_rid_base: 1000,
+        }
+    }
+
+    #[test]
+    fn samba_sid_enter_generates_from_uidnumber() {
+        let mut app = app_with_samba_sid_field("1000", Some(samba_domain()));
+        let s = empty_structure();
+        open_value_editor(&mut app, &s);
+        assert!(app.overlay.is_none(), "no overlay — value filled inline");
+        let f = &app.form.as_ref().unwrap().fields[1];
+        assert_eq!(f.editor.value(), "S-1-5-21-1-2-3-3000");
+        assert_eq!(f.current_values(), vec!["S-1-5-21-1-2-3-3000".to_string()]);
+    }
+
+    #[test]
+    fn samba_sid_enter_errors_without_domain() {
+        let mut app = app_with_samba_sid_field("1000", None);
+        let s = empty_structure();
+        open_value_editor(&mut app, &s);
+        match &app.overlay {
+            Some(Overlay::Error { text }) => assert!(text.contains("domain_sid"), "text={text}"),
+            _ => panic!("expected an error overlay"),
+        }
+        // Field stays empty.
+        assert_eq!(app.form.as_ref().unwrap().fields[1].editor.value(), "");
+    }
+
+    #[test]
+    fn samba_sid_enter_errors_without_uidnumber() {
+        let mut app = app_with_samba_sid_field("", Some(samba_domain()));
+        let s = empty_structure();
+        open_value_editor(&mut app, &s);
+        match &app.overlay {
+            Some(Overlay::Error { text }) => {
+                assert!(text.contains("uidNumber has no value"), "text={text}")
+            }
+            _ => panic!("expected an error overlay"),
+        }
+    }
+
+    #[test]
+    fn samba_sid_inline_typing_overrides() {
+        // The sambaSID field stays a plain editor: typing a digit lands in it.
+        let mut app = app_with_samba_sid_field("1000", Some(samba_domain()));
+        app.focus = Pane::Form;
+        crate::ui::app::dispatch_key(&mut app, key(KeyCode::Char('9')), &empty_structure());
+        assert_eq!(app.form.as_ref().unwrap().fields[1].editor.value(), "9");
     }
 
     #[test]

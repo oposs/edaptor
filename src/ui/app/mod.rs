@@ -126,6 +126,10 @@ pub struct App {
     /// after calling `EditForm::sync_schema_fields`. Schema access is only
     /// available in `Ctx::reconcile`, so the sync is deferred via this flag.
     pub objectclass_sync_pending: bool,
+    /// Resolved Samba domain context (from the `[samba]` config table), when a
+    /// `domain_sid` is configured. Drives the `sambaSID` auto-generate widget;
+    /// `None` disables that feature entirely.
+    pub samba: Option<crate::samba::SambaDomainInfo>,
 }
 
 /// Spawn the worker, fetch the schema + eager structure, then run the TUI.
@@ -134,6 +138,19 @@ pub fn run(config: Config, password: String) -> Result<()> {
     let read_only = config.is_read_only();
     let connection_encrypted = config.is_encrypted();
     let profiles = config.profiles.clone();
+    // Resolve the Samba domain context for the sambaSID auto-generate widget.
+    // Only the static config fallback is wired today (no live sambaDomain
+    // discovery); `None` when `[samba].domain_sid` is unset, which disables the
+    // feature.
+    let samba = config
+        .samba
+        .domain_sid
+        .as_ref()
+        .filter(|s| !s.trim().is_empty())
+        .map(|sid| crate::samba::SambaDomainInfo {
+            domain_sid: sid.trim().to_string(),
+            algorithmic_rid_base: config.samba.algorithmic_rid_base,
+        });
     let widgets = crate::config::widget::resolve_widgets(&config.profiles)
         .map_err(|e| anyhow::anyhow!("config error: {e}"))?;
     // Compile the per-profile column-2 label rules and the attrs the scan must fetch.
@@ -204,6 +221,7 @@ pub fn run(config: Config, password: String) -> Result<()> {
         picker_search_id: None,
         picker_last_query: String::new(),
         objectclass_sync_pending: false,
+        samba,
     };
 
     let mut terminal = ratatui::init();
@@ -477,12 +495,17 @@ impl Ctx<'_> {
                     // installation while an editing overlay (create / value editor) is
                     // open, so a late base-read cannot replace `app.form` under it.
                     if should_install_form(app, &model.title) {
-                        app.form = Some(build_loaded_form(
+                        let mut form = build_loaded_form(
                             &model,
                             read_flow.schema(),
                             app.read_only,
                             &app.widgets,
-                        ));
+                        );
+                        crate::ui::edit_form::tag_samba_sid_field(
+                            &mut form,
+                            app.samba.is_some() && !app.read_only,
+                        );
+                        app.form = Some(form);
                         app.form_focus = 0;
                         app.form_scroll = 0;
                         app.status.clear();

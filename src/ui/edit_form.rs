@@ -608,7 +608,31 @@ pub fn tag_widget_fields(
                 // Auto-injected; no tagging action needed — the injection already
                 // set widget_binding = Some(ObjectClassPicker) on the field.
             }
+            WidgetKind::SambaSid => {
+                // Auto-injected (see `tag_samba_sid_field`); never resolved from
+                // config, so it cannot appear here.
+            }
         }
+    }
+}
+
+/// Tag the `sambaSID` field with the auto-injected [`WidgetKind::SambaSid`]
+/// binding so Enter triggers SID auto-generation. A no-op when `enabled` is
+/// false (no Samba domain configured, or read-only mode) or the form has no
+/// editable `sambaSID` field. Idempotent — safe to re-run after
+/// [`EditForm::sync_schema_fields`] re-injects the field. The field stays a
+/// plain single-value editor for inline override; only the Enter action and the
+/// empty-field hint key off this binding.
+pub fn tag_samba_sid_field(form: &mut EditForm, enabled: bool) {
+    if !enabled {
+        return;
+    }
+    if let Some(f) = form
+        .fields
+        .iter_mut()
+        .find(|f| f.label.eq_ignore_ascii_case("sambaSID") && f.editable)
+    {
+        f.widget_binding = Some(crate::config::widget::WidgetKind::SambaSid);
     }
 }
 
@@ -1343,6 +1367,54 @@ mod tests {
         // objectClass must not be orphaned
         let oc = find("objectClass").expect("objectClass present");
         assert!(!oc.orphaned, "objectClass must not be orphaned");
+    }
+
+    #[test]
+    fn tag_samba_sid_field_tags_after_sync_injects_it() {
+        use crate::config::widget::WidgetKind;
+        let schema = sync_schema();
+        let mut form = EditForm {
+            dn: "uid=alice,dc=example,dc=org".into(),
+            fields: vec![
+                mk_field("cn", true, vec!["Alice"]),
+                mk_field(
+                    "objectClass",
+                    true,
+                    vec!["top", "person", "sambaSamAccount"],
+                ),
+            ],
+            baseline: Default::default(),
+            mode: FormMode::Edit,
+            pending_password: None,
+        };
+        // sync injects sambaSID with no binding (mirrors the reconcile path).
+        form.sync_schema_fields(&schema);
+        let sid = form.fields.iter().find(|f| f.label == "sambaSID").unwrap();
+        assert!(sid.widget_binding.is_none(), "injected with no binding");
+
+        // Tagging (enabled) attaches the auto-generate widget.
+        tag_samba_sid_field(&mut form, true);
+        let sid = form.fields.iter().find(|f| f.label == "sambaSID").unwrap();
+        assert!(
+            matches!(sid.widget_binding, Some(WidgetKind::SambaSid)),
+            "sambaSID tagged with SambaSid after enabled tag"
+        );
+    }
+
+    #[test]
+    fn tag_samba_sid_field_disabled_is_noop() {
+        let mut form = EditForm {
+            dn: "uid=alice,dc=example,dc=org".into(),
+            fields: vec![mk_field("sambaSID", true, vec![])],
+            baseline: Default::default(),
+            mode: FormMode::Edit,
+            pending_password: None,
+        };
+        tag_samba_sid_field(&mut form, false);
+        assert!(
+            form.fields[0].widget_binding.is_none(),
+            "disabled tag must not bind anything"
+        );
     }
 
     #[test]

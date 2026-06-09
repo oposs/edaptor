@@ -37,6 +37,7 @@ pub(crate) fn bare_app(read_only: bool) -> App {
         picker_search_id: None,
         picker_last_query: String::new(),
         objectclass_sync_pending: false,
+        samba: None,
     }
 }
 

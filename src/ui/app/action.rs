@@ -430,8 +430,12 @@ impl super::Ctx<'_> {
         // Dispatch pending objectClass schema sync (from OC picker commit).
         if self.app.objectclass_sync_pending {
             self.app.objectclass_sync_pending = false;
+            let samba_enabled = self.app.samba.is_some() && !self.app.read_only;
             if let Some(form) = self.app.form.as_mut() {
                 form.sync_schema_fields(self.read_flow.schema());
+                // sync_schema_fields re-injects sambaSID with no binding when
+                // sambaSamAccount was just added; re-tag it for auto-generate.
+                crate::ui::edit_form::tag_samba_sid_field(form, samba_enabled);
             }
             // Reset focus to 0 after re-sort; the previous index may now point
             // to a different field (order_fields reorders after injection/orphaning).

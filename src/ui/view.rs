@@ -253,8 +253,22 @@ fn render_form(f: &mut Frame, app: &mut App, area: Rect) {
 
         // Value cell — rendered via Paragraph (grapheme-clipped, never sliced).
         let val_rect = Rect::new(inner.x + label_w, y, inner.width.saturating_sub(label_w), 1);
-        let display = field_display_value(fld);
-        let vstyle = if fld.orphaned {
+        // An empty sambaSID auto-generate field shows the affordance hint (dim
+        // italic) instead of a blank, so the user knows Enter populates it.
+        let samba_sid_hint = matches!(
+            fld.widget_binding,
+            Some(crate::config::widget::WidgetKind::SambaSid)
+        ) && !fld.orphaned
+            && fld.editor.value().trim().is_empty();
+        let display = if samba_sid_hint {
+            "⟨Enter to auto-generate⟩".to_string()
+        } else {
+            field_display_value(fld)
+        };
+        let vstyle = if samba_sid_hint {
+            let s = if is_current { sel } else { base };
+            s.add_modifier(Modifier::DIM).add_modifier(Modifier::ITALIC)
+        } else if fld.orphaned {
             if is_current {
                 sel.add_modifier(Modifier::CROSSED_OUT)
                     .add_modifier(Modifier::DIM)
@@ -991,6 +1005,7 @@ mod tests {
             picker_search_id: None,
             picker_last_query: String::new(),
             objectclass_sync_pending: false,
+            samba: None,
         }
     }
 
@@ -1150,6 +1165,7 @@ mod tests {
             picker_search_id: None,
             picker_last_query: String::new(),
             objectclass_sync_pending: false,
+            samba: None,
         }
     }
 
