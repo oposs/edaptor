@@ -47,8 +47,8 @@ password_source = "prompt"
 # Uncomment this block and comment out Mode A above.
 # ---------------------------------------------------------------------------
 # [server]
-# uri       = "ldapi:///"           # connects to /var/run/slapd/ldapi (the default)
-# base_dn   = "dc=example,dc=com"   # oposs_openldap.base_dn
+# uri       = "ldapi://%2Fvar%2Frun%2Fslapd%2Fldapi"   # /var/run/slapd/ldapi, percent-encoded
+# base_dn   = "dc=example,dc=com"                        # oposs_openldap.base_dn
 # read_only = false
 #
 # [auth]

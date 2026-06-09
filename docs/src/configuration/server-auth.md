@@ -17,11 +17,10 @@ timeout_secs = 10                             # bound the TCP connect so an unre
 - **`uri`** — the directory URL:
   - `ldap://` — plaintext TCP, usually combined with `start_tls = true`.
   - `ldaps://` — implicit TLS on the LDAPS port (636).
-  - `ldapi:///` — Unix domain socket on the local host (OpenLDAP only). Connects
-    to the default slapd socket at `/var/run/slapd/ldapi`. The socket path can be
-    URL-encoded into the URI if it differs from the default, e.g.
-    `ldapi://%2Ftmp%2Fslapd.sock`. Use with `auth.method = "external"` for
-    password-free root access.
+  - `ldapi://` — Unix domain socket on the local host (OpenLDAP only). The socket
+    path goes in the **host** field, percent-encoded. For example, to connect to
+    `/var/run/slapd/ldapi` use `ldapi://%2Fvar%2Frun%2Fslapd%2Fldapi`. Use with
+    `auth.method = "external"` for password-free root access.
 - **`base_dn`** — the root of the subtree eDAPtor loads and browses.
 - **`start_tls`** — when `true`, an `ldap://` connection is upgraded to TLS with
   StartTLS after connecting. **Do not combine `start_tls = true` with an
@@ -96,7 +95,7 @@ and passwords entirely:
 
 ```toml
 [server]
-uri     = "ldapi:///"
+uri     = "ldapi://%2Fvar%2Frun%2Fslapd%2Fldapi"   # /var/run/slapd/ldapi, percent-encoded
 base_dn = "dc=example,dc=com"
 
 [auth]
