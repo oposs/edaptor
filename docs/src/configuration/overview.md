@@ -10,7 +10,30 @@ Pass it with:
 edaptor --config /path/to/config.toml
 ```
 
-When `--config` is omitted, eDAPtor looks for `~/.config/edaptor/config.toml`.
+## Config file locations
+
+Without `--config`, edaptor searches these directories for `*.toml` files:
+
+| Location | Notes |
+|----------|-------|
+| `$XDG_CONFIG_HOME/edaptor/` (or `~/.config/edaptor/`) | per-user configs |
+| `/etc/edaptor/` | system-wide configs |
+
+If exactly one file is found it is loaded automatically. If multiple files exist
+a picker is shown at startup. Use `--config /path/to/file.toml` to bypass
+discovery entirely.
+
+### Optional `[meta]` table
+
+Add a `[meta]` block to make a config identifiable in the picker:
+
+```toml
+[meta]
+name        = "carbo-link production"
+description = "dc=carbo-link,dc=com via ldapi (ds-carbo-feh)"
+```
+
+Both fields are optional.
 
 ## The config declares intent, not field layouts
 

@@ -16,6 +16,12 @@ All notable changes to eDAPtor are documented here. The format follows
   (`ldapi:///`). Allows password-free root access when running on the slapd
   host; no TLS required. `ldapi://` connections are also treated as secure for
   password-change operations.
+- **Config auto-discovery** — edaptor now searches `~/.config/edaptor/*.toml`
+  and `/etc/edaptor/*.toml` at startup. A single config is used silently;
+  multiple configs trigger a ratatui picker. The `--config` flag bypasses
+  discovery as before.
+- **`[meta]` table** in config files — optional `name` and `description` fields
+  displayed in the startup picker.
 
 ### Changed
 
