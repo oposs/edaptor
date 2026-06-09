@@ -8,6 +8,14 @@ All notable changes to eDAPtor are documented here. The format follows
 
 ### New
 
+### Changed
+
+### Fixed
+
+## 0.3.0 - 2026-06-09
+
+### New
+
 - **Configurable widget palette** via `[profile.widget.<attr>]` — bind an
   attribute to a richer editor than a plain text box:
   - `kind = "choice"` — pick from a fixed vocabulary and (de)serialize a single
@@ -26,7 +34,6 @@ All notable changes to eDAPtor are documented here. The format follows
   - `kind = "membership"` — fan this entry's DN into a back-reference attribute
     (`via`) on each picked candidate (e.g. `memberOf` writes `member` on each
     chosen group).
-
 ### Changed
 
 - **Pickers are now configured with `[profile.widget.<attr>] kind = "picker"` /
