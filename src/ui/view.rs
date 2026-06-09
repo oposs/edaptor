@@ -761,6 +761,7 @@ mod tests {
             binding: None,
             choice: None,
             choice_original: String::new(),
+            objectclass: false,
         }
     }
 
@@ -847,6 +848,7 @@ mod tests {
             binding: None,
             choice: None,
             choice_original: String::new(),
+            objectclass: false,
         };
         let (w, h) = (70u16, 20u16);
         let backend = TestBackend::new(w, h);
@@ -891,6 +893,7 @@ mod tests {
             binding: None,
             choice: None,
             choice_original: String::new(),
+            objectclass: false,
         };
         let (w, h) = (60u16, 20u16);
         let backend = TestBackend::new(w, h);
@@ -1262,6 +1265,7 @@ mod tests {
             binding: None,
             choice: None,
             choice_original: String::new(),
+            objectclass: false,
         };
         let (w, h) = (70u16, 20u16);
         let backend = TestBackend::new(w, h);
@@ -1352,6 +1356,7 @@ mod tests {
             binding: None,
             choice: Some(widget),
             choice_original: "[U          ]".to_string(),
+            objectclass: false,
         };
         let (w, h) = (70u16, 20u16);
         let backend = TestBackend::new(w, h);

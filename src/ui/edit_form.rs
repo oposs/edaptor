@@ -127,6 +127,10 @@ pub struct ValueEditor {
     pub choice: Option<crate::config::widget::ChoiceWidget>,
     /// The field's original value, for the lossless merge-from-original commit.
     pub choice_original: String,
+    /// True when this editor manages the objectClass field (schema-seeded picker;
+    /// no LDAP search). Triggers `sync_schema_fields` on commit via
+    /// `App::objectclass_sync_pending`.
+    pub objectclass: bool,
 }
 
 impl ValueEditor {
@@ -151,6 +155,7 @@ impl ValueEditor {
             binding: None,
             choice: None,
             choice_original: String::new(),
+            objectclass: false,
         }
     }
 
@@ -183,6 +188,7 @@ impl ValueEditor {
             binding: Some(Box::new(binding.clone())),
             choice: None,
             choice_original: String::new(),
+            objectclass: false,
         }
     }
 
@@ -237,6 +243,47 @@ impl ValueEditor {
             binding: None,
             choice: Some(widget.clone()),
             choice_original: original,
+            objectclass: false,
+        }
+    }
+
+    /// Open the objectClass picker. Candidates are empty on open; `service_picker_search`
+    /// populates them from the schema on the first tick via `PICKER_INIT_QUERY` sentinel.
+    /// The currently-selected OC names are pre-ticked in the picker's `selected` list.
+    pub fn open_objectclass(field_idx: usize, field: &EditField) -> Self {
+        let selected: Vec<Candidate> = field
+            .values
+            .iter()
+            .map(|v| Candidate {
+                dn: v.clone(),
+                label: v.clone(),
+                store_value: v.clone(),
+            })
+            .collect();
+        let picker = PickerState {
+            selected,
+            results: Vec::new(), // populated by service_picker_search on first tick
+            saved: Vec::new(),
+            cursor: 0,
+            scroll: 0,
+            search_active: false,
+            truncated: false,
+            key_ci: true, // OC names are case-insensitive
+        };
+        ValueEditor {
+            field: field_idx,
+            label: field.label.clone(),
+            ordered: false,
+            secret: false,
+            rows: Vec::new(),
+            sel: 0,
+            scroll: 0,
+            picker: Some(picker),
+            search: TextState::new(),
+            binding: None,
+            choice: None,
+            choice_original: String::new(),
+            objectclass: true,
         }
     }
 
@@ -1089,6 +1136,55 @@ mod tests {
             form.is_dirty(),
             "orphaned field with non-empty baseline is dirty"
         );
+    }
+
+    #[test]
+    fn open_objectclass_seeds_picker_from_field_values() {
+        use crate::ldap::worker::RawSubschema;
+        let raw = RawSubschema {
+            object_classes: vec![
+                "( 2.5.6.0 NAME 'top' ABSTRACT MUST objectClass )".to_string(),
+                "( 2.5.6.6 NAME 'person' SUP top STRUCTURAL MUST ( sn $ cn ) )".to_string(),
+                "( 1.2 NAME 'org' STRUCTURAL MAY ou )".to_string(),
+            ],
+            attribute_types: vec![],
+            ldap_syntaxes: vec![],
+        };
+        let _ = SchemaModel::from_raw(&raw); // verify the raw parses; not passed to open_objectclass
+        let field = EditField {
+            label: "objectClass".into(),
+            must: true,
+            editable: true,
+            multi: true,
+            secret: false,
+            ordered: false,
+            values: vec!["top".into(), "person".into()],
+            kind: crate::schema::FieldKind::Text,
+            widget: crate::ui::form::WidgetSpec::ReadOnlyText,
+            editor: TextState::new(),
+            widget_binding: None,
+            orphaned: false,
+        };
+        let ve = ValueEditor::open_objectclass(0, &field);
+        assert!(ve.objectclass, "objectclass flag set");
+        assert!(ve.binding.is_none(), "no LDAP binding for OC picker");
+        assert!(ve.choice.is_none(), "not a choice editor");
+        let picker = ve.picker.as_ref().expect("picker present");
+        // The initial results are empty (populated by service_picker_search on first tick)
+        assert!(picker.results.is_empty(), "results start empty");
+        // selected should be seeded from field.values
+        assert_eq!(
+            picker.selected.len(),
+            2,
+            "two currently-selected OCs pre-ticked"
+        );
+        let selected_names: Vec<&str> = picker
+            .selected
+            .iter()
+            .map(|c| c.store_value.as_str())
+            .collect();
+        assert!(selected_names.contains(&"top"));
+        assert!(selected_names.contains(&"person"));
     }
 
     #[test]

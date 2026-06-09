@@ -412,6 +412,7 @@ mod tests {
             binding: None,
             choice: None,
             choice_original: String::new(),
+            objectclass: false,
         };
         App {
             focus: Pane::Form,
@@ -539,6 +540,7 @@ mod tests {
             binding: Some(Box::new(member_dn_binding())),
             choice: None,
             choice_original: String::new(),
+            objectclass: false,
         }
     }
 
