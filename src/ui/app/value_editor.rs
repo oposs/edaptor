@@ -30,6 +30,19 @@ pub(crate) fn open_value_editor(app: &mut App, _structure: &Structure) {
         return;
     };
 
+    // ObjectClass picker — schema-seeded, client-side filter, no LDAP search.
+    if matches!(
+        field.widget_binding,
+        Some(crate::config::widget::WidgetKind::ObjectClassPicker)
+    ) && field.editable
+    {
+        let ve = ValueEditor::open_objectclass(focus, field);
+        app.overlay = Some(Overlay::ValueEditor(ve));
+        app.picker_last_query = PICKER_INIT_QUERY.to_string();
+        app.picker_search_id = None;
+        return;
+    }
+
     // A password-bound field opens the dedicated set-password popup (the field is
     // read-only; the new value is staged into `pending_password`, not the editor).
     // Read the binding kind, drop the `form` borrow, then re-enter via the popup.
@@ -1058,6 +1071,58 @@ mod tests {
         let f = &app.form.as_ref().unwrap().fields[0];
         assert_eq!(f.editor.value(), "/bin/sh");
         assert_eq!(f.current_values(), vec!["/bin/sh".to_string()]);
+    }
+
+    /// Build an App whose single field is the objectClass field, tagged ObjectClassPicker.
+    fn app_with_objectclass_field() -> App {
+        use crate::config::widget::WidgetKind;
+        use crate::schema::FieldKind;
+        use crate::ui::edit_form::{EditField, EditForm, FormMode};
+        use crate::ui::form::WidgetSpec;
+        let field = EditField {
+            label: "objectClass".into(),
+            must: true,
+            editable: true,
+            multi: true,
+            secret: false,
+            ordered: false,
+            values: vec!["inetOrgPerson".into()],
+            kind: FieldKind::Text,
+            widget: WidgetSpec::ReadOnlyText,
+            editor: TextState::new(),
+            widget_binding: Some(WidgetKind::ObjectClassPicker),
+            orphaned: false,
+        };
+        let mut app = bare_app(false);
+        app.form = Some(EditForm {
+            dn: "uid=alice,ou=people,dc=test".into(),
+            fields: vec![field],
+            baseline: Default::default(),
+            mode: FormMode::Edit,
+            pending_password: None,
+        });
+        app.form_focus = 0;
+        app
+    }
+
+    #[test]
+    fn open_value_editor_opens_objectclass_picker() {
+        let mut app = app_with_objectclass_field();
+        let s = empty_structure();
+        open_value_editor(&mut app, &s);
+        match &app.overlay {
+            Some(Overlay::ValueEditor(ve)) => {
+                assert!(ve.objectclass, "objectclass flag must be set");
+                assert!(ve.picker.is_some(), "picker state must be present");
+                assert!(ve.binding.is_none(), "no LDAP binding for OC picker");
+            }
+            _ => panic!("expected ValueEditor overlay"),
+        }
+        // Sentinel triggers initial population from service_picker_search.
+        assert_eq!(
+            app.picker_last_query, PICKER_INIT_QUERY,
+            "PICKER_INIT_QUERY sentinel set"
+        );
     }
 
     #[test]
