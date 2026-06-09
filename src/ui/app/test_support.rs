@@ -58,6 +58,7 @@ pub(crate) fn with_form(mut app: App, dn: &str) -> App {
             widget: WidgetSpec::ReadOnlyText,
             editor: TextState::new().with_value("x".to_string()),
             widget_binding: None,
+            orphaned: false,
         }],
         baseline: Default::default(),
         mode: FormMode::Edit,

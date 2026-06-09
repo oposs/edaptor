@@ -712,6 +712,7 @@ mod tests {
             widget: WidgetSpec::ReadOnlyText,
             editor: TextState::new().with_value(value.to_string()),
             widget_binding: None,
+            orphaned: false,
         }
     }
 
@@ -937,6 +938,7 @@ mod tests {
             widget: WidgetSpec::ReadOnlyText,
             editor: TextState::new(),
             widget_binding: None,
+            orphaned: false,
         };
         App {
             focus: Pane::Form,
@@ -1148,6 +1150,7 @@ mod tests {
                 widget: WidgetSpec::ReadOnlyText,
                 editor: TextState::new().with_value(value.to_string()),
                 widget_binding: None,
+                orphaned: false,
             }],
             baseline,
             mode: FormMode::Edit,
@@ -1404,6 +1407,7 @@ mod tests {
                     },
                 ],
             })),
+            orphaned: false,
         };
         assert_eq!(field_display_value(&fld), "Disabled");
     }

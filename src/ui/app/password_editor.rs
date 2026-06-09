@@ -154,6 +154,7 @@ mod tests {
                 derived: vec![],
                 samba: false,
             })),
+            orphaned: false,
         };
         let mut app = bare_app(false);
         app.connection_encrypted = encrypted;

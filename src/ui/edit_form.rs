@@ -45,16 +45,23 @@ pub struct EditField {
     pub editor: TextState<'static>,
     /// `Some` when bound to a `[profile.widget.<attr>]` widget (choice or password).
     pub widget_binding: Option<crate::config::widget::WidgetKind>,
+    /// True when this attribute is no longer permitted by the current objectClasses.
+    /// Rendered CROSSED_OUT+DIM. current_values() returns [] → diff emits Delete.
+    pub orphaned: bool,
 }
 
 impl EditField {
     /// The field's value set as currently edited.
     ///
+    /// - orphaned field → `[]` (the diff will emit a Delete regardless of editor state);
     /// - multi field → `values` (the multi-value popup writes edits back there);
     /// - single + editable → the live editor, trimmed; an emptied field yields no
     ///   values so the diff emits a delete (not an empty value);
     /// - single + not editable → the original `values` (read-only kinds are kept).
     pub fn current_values(&self) -> Vec<String> {
+        if self.orphaned {
+            return vec![];
+        }
         if self.multi {
             self.values.clone()
         } else if self.editable {
@@ -319,6 +326,15 @@ impl EditForm {
             .collect()
     }
 
+    /// Labels of fields currently marked orphaned (will be deleted on save).
+    pub fn orphaned_labels(&self) -> Vec<String> {
+        self.fields
+            .iter()
+            .filter(|f| f.orphaned)
+            .map(|f| f.label.clone())
+            .collect()
+    }
+
     /// Whether any field's current value SET differs from its baseline SET.
     ///
     /// Set-wise / order-insensitive, matching `changeset::diff`'s `value_set_eq`
@@ -379,6 +395,7 @@ pub fn build_edit_form(model: &FormModel, schema: &SchemaModel, read_only: bool)
                 widget: f.widget.clone(),
                 editor: TextState::new().with_value(seed),
                 widget_binding: None,
+                orphaned: false,
             }
         })
         .collect();
@@ -554,6 +571,7 @@ mod tests {
                     select: None,
                     fanout_attr: fanout,
                 })),
+                orphaned: false,
             }],
             baseline: Default::default(),
             mode: FormMode::Edit,
@@ -766,6 +784,7 @@ mod tests {
                 widget: crate::ui::form::WidgetSpec::ReadOnlyText,
                 editor: TextState::new().with_value(seed),
                 widget_binding: None,
+                orphaned: false,
             }
         };
         let mut form = EditForm {
@@ -814,6 +833,7 @@ mod tests {
                 widget: crate::ui::form::WidgetSpec::ReadOnlyText,
                 editor: TextState::new().with_value(seed),
                 widget_binding: None,
+                orphaned: false,
             }
         };
         let mut form = EditForm {
@@ -845,6 +865,7 @@ mod tests {
             widget: WidgetSpec::ReadOnlyText,
             editor: TextState::new().with_value("1001"),
             widget_binding: None,
+            orphaned: false,
         };
         let binding = PickerBinding {
             attr: "gidNumber".into(),
@@ -885,6 +906,7 @@ mod tests {
             widget: crate::ui::form::WidgetSpec::ReadOnlyText,
             editor: TextState::new().with_value("/bin/bash".to_string()),
             widget_binding: None,
+            orphaned: false,
         });
         let widgets = vec![ResolvedWidget {
             owner_object_classes: vec!["demoPerson".into()],
@@ -935,6 +957,7 @@ mod tests {
             widget: WidgetSpec::ReadOnlyText,
             editor: TextState::new(),
             widget_binding: None,
+            orphaned: false,
         };
         let mk_form = || {
             let mut form = writable_form();
@@ -1032,6 +1055,43 @@ mod tests {
     }
 
     #[test]
+    fn orphaned_field_current_values_returns_empty() {
+        let mut form = writable_form();
+        let i = field_index(&form, "cn");
+        form.fields[i].orphaned = true;
+        // Even with a live value in the editor, orphaned returns [].
+        form.fields[i].editor = TextState::new().with_value("Alice");
+        assert!(
+            form.fields[i].current_values().is_empty(),
+            "orphaned field must return [] from current_values()"
+        );
+    }
+
+    #[test]
+    fn orphaned_labels_lists_orphaned_fields() {
+        let mut form = writable_form();
+        let i = field_index(&form, "cn");
+        form.fields[i].orphaned = true;
+        assert!(form.orphaned_labels().contains(&"cn".to_string()));
+        form.fields[i].orphaned = false;
+        assert!(form.orphaned_labels().is_empty());
+    }
+
+    #[test]
+    fn orphaned_field_makes_form_dirty() {
+        // An orphaned field with current_values()==[] but baseline ["Alice"] IS dirty
+        // (it will emit a Delete). Verify is_dirty() sees it.
+        let mut form = writable_form();
+        let i = field_index(&form, "cn");
+        // baseline has "Alice" for cn (set by writable_form via build_edit_form)
+        form.fields[i].orphaned = true;
+        assert!(
+            form.is_dirty(),
+            "orphaned field with non-empty baseline is dirty"
+        );
+    }
+
+    #[test]
     fn tag_widget_fields_tags_primary_and_derived_for_password() {
         use crate::config::widget::{PasswordWidget, ResolvedWidget, WidgetKind};
         // writable_form() is built from entry() which has a userPassword field,
@@ -1050,6 +1110,7 @@ mod tests {
             widget: crate::ui::form::WidgetSpec::ReadOnlyText,
             editor: TextState::new(),
             widget_binding: None,
+            orphaned: false,
         });
         let widgets = vec![ResolvedWidget {
             owner_object_classes: vec!["demoPerson".into()],

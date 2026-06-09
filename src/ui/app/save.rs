@@ -553,6 +553,7 @@ mod tests {
             widget: WidgetSpec::ReadOnlyText,
             editor: TextState::new().with_value("ann".to_string()),
             widget_binding: None,
+            orphaned: false,
         };
 
         let desc_field = EditField {
@@ -567,6 +568,7 @@ mod tests {
             widget: WidgetSpec::ReadOnlyText,
             editor: TextState::new(),
             widget_binding: None,
+            orphaned: false,
         };
 
         let memberof_field = EditField {
@@ -589,6 +591,7 @@ mod tests {
                     fanout_attr: Some("member".into()),
                 },
             )),
+            orphaned: false,
         };
 
         let mut baseline = BTreeMap::new();
@@ -630,6 +633,7 @@ mod tests {
             widget: WidgetSpec::ReadOnlyText,
             editor: TextState::new().with_value("bob".to_string()),
             widget_binding: None,
+            orphaned: false,
         };
 
         let memberof_field = EditField {
@@ -652,6 +656,7 @@ mod tests {
                     fanout_attr: Some("member".into()),
                 },
             )),
+            orphaned: false,
         };
 
         let mut baseline = BTreeMap::new();
@@ -767,6 +772,7 @@ mod tests {
             widget: WidgetSpec::ReadOnlyText,
             editor: TextState::new(),
             widget_binding: None,
+            orphaned: false,
         };
         let uid_field = EditField {
             label: "uid".into(),
@@ -780,6 +786,7 @@ mod tests {
             widget: WidgetSpec::ReadOnlyText,
             editor: TextState::new().with_value("ann".to_string()),
             widget_binding: None,
+            orphaned: false,
         };
         let mut baseline = BTreeMap::new();
         baseline.insert("objectClass".into(), vec!["testUser".into()]);

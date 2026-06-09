@@ -510,6 +510,7 @@ mod tests {
             widget_binding: Some(crate::config::widget::WidgetKind::Picker(
                 member_dn_binding(),
             )),
+            orphaned: false,
         };
         let mut app = bare_app(false);
         app.form = Some(EditForm {
@@ -647,6 +648,7 @@ mod tests {
             widget_binding: Some(crate::config::widget::WidgetKind::Picker(
                 gid_picker_binding(),
             )),
+            orphaned: false,
         };
         let mut app = bare_app(false);
         app.form = Some(EditForm {
@@ -986,6 +988,7 @@ mod tests {
             widget: WidgetSpec::ReadOnlyText,
             editor: TextState::new().with_value(value.to_string()),
             widget_binding: Some(crate::config::widget::WidgetKind::Choice(widget.clone())),
+            orphaned: false,
         };
         let mut app = bare_app(false);
         app.form = Some(EditForm {

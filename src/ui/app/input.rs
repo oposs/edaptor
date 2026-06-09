@@ -531,6 +531,7 @@ mod tests {
                     widget_binding: Some(crate::config::widget::WidgetKind::Choice(
                         make_choice_widget(),
                     )),
+                    orphaned: false,
                 },
                 EditField {
                     label: "sn".to_string(),
@@ -544,6 +545,7 @@ mod tests {
                     widget: WidgetSpec::ReadOnlyText,
                     editor: tui_prompts::TextState::new().with_value("Smith".to_string()),
                     widget_binding: None,
+                    orphaned: false,
                 },
             ],
             baseline: Default::default(),
