@@ -23,6 +23,16 @@ read-only / system attributes are shown but not editable.
    confirmation. If nothing actually changed, it reports that instead of writing.
 5. Press **`Alt+C`** to cancel, reverting the form to the last-read values.
 
+### Changing objectClasses
+
+The `objectClass` field opens a schema-seeded multi-select picker. Tick or untick
+classes and press **Alt+S** to commit. The form immediately updates: new
+MUST/MAY fields appear for the added classes, and any attribute no longer
+permitted by the remaining classes is shown **crossed out** (it will be deleted
+on save). Press **Alt+C** to discard the objectClass change and return to the
+server state. See [objectClass Picker](../configuration/widgets.md#objectclass-picker-auto-injected)
+for full details.
+
 ### The dirty-guard
 
 If you try to navigate away from — or quit while — a form has unsaved edits,

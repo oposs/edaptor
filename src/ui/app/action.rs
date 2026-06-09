@@ -433,6 +433,9 @@ impl super::Ctx<'_> {
             if let Some(form) = self.app.form.as_mut() {
                 form.sync_schema_fields(self.read_flow.schema());
             }
+            // Reset focus to 0 after re-sort; the previous index may now point
+            // to a different field (order_fields reorders after injection/orphaning).
+            self.app.form_focus = 0;
         }
 
         let app = &mut *self.app;
@@ -491,10 +494,21 @@ pub(crate) fn guard_if_dirty(app: &mut App, intent: GuardIntent) -> bool {
 /// The entry's objectClass values, read from a built form's baseline
 /// (case-insensitive). Needed by the write path's client-side validation.
 pub(crate) fn object_classes_of(form: &EditForm) -> Vec<String> {
-    form.baseline
+    // Prefer live field values so validation reflects objectClasses as they will
+    // be saved (including newly added ones from the objectClass picker).
+    // Fall back to baseline for forms that don't include an objectClass field
+    // (e.g. read-only or minimal test forms).
+    form.fields
         .iter()
-        .find(|(k, _)| k.eq_ignore_ascii_case("objectClass"))
-        .map(|(_, v)| v.clone())
+        .find(|f| f.label.eq_ignore_ascii_case("objectClass"))
+        .map(|f| f.current_values())
+        .filter(|v| !v.is_empty())
+        .or_else(|| {
+            form.baseline
+                .iter()
+                .find(|(k, _)| k.eq_ignore_ascii_case("objectClass"))
+                .map(|(_, v)| v.clone())
+        })
         .unwrap_or_default()
 }
 
