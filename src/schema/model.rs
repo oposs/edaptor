@@ -191,6 +191,19 @@ impl SchemaModel {
         }
         false
     }
+
+    /// All known objectClass primary names, sorted case-insensitively.
+    /// Used to seed the objectClass picker candidate list.
+    pub fn object_class_names(&self) -> Vec<String> {
+        let mut names: Vec<String> = self
+            .object_classes
+            .iter()
+            .filter_map(|oc| oc.name.first())
+            .map(|n| n.to_string())
+            .collect();
+        names.sort_by_key(|a| a.to_lowercase());
+        names
+    }
 }
 
 #[cfg(test)]
@@ -346,5 +359,31 @@ mod tests {
             "undefined attr in both sets; may={:?}",
             r.may
         );
+    }
+
+    #[test]
+    fn object_class_names_returns_sorted_primary_names() {
+        let m = SchemaModel::from_raw(&inheritance_raw());
+        let names = m.object_class_names();
+        // All four OCs in inheritance_raw: top, person, organizationalPerson, inetOrgPerson
+        assert_eq!(names.len(), 4);
+        // sorted case-insensitively
+        assert!(names
+            .windows(2)
+            .all(|w| w[0].to_lowercase() <= w[1].to_lowercase()));
+        // primary names present
+        assert!(names.iter().any(|n| n == "inetOrgPerson"));
+        assert!(names.iter().any(|n| n == "person"));
+        assert!(names.iter().any(|n| n == "top"));
+    }
+
+    #[test]
+    fn object_class_names_empty_schema() {
+        let m = SchemaModel::from_raw(&RawSubschema {
+            object_classes: vec![],
+            attribute_types: vec![],
+            ldap_syntaxes: vec![],
+        });
+        assert!(m.object_class_names().is_empty());
     }
 }
