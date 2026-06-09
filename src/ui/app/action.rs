@@ -190,7 +190,7 @@ pub(crate) fn should_install_form(app: &App, title: &str) -> bool {
 /// Revert every field to its baseline (Alt+C cancel): drop multi-value edits and
 /// reseed each single-value editor from the original values. An unsaved create
 /// form has no baseline to revert to, so cancel simply discards it.
-fn revert_form(app: &mut App) {
+pub(crate) fn revert_form(app: &mut App) {
     if app.form.as_ref().map(|f| f.is_new()).unwrap_or(false) {
         app.form = None;
         app.form_focus = 0;
@@ -206,7 +206,13 @@ fn revert_form(app: &mut App) {
             let base = form.baseline.get(&field.label).cloned().unwrap_or_default();
             field.editor = TextState::new().with_value(base.first().cloned().unwrap_or_default());
             field.values = base;
+            // Clear the orphaned flag — we are returning to the server state where
+            // this attribute was valid.
+            field.orphaned = false;
         }
+        // Remove fields that were injected by sync_schema_fields (not in baseline):
+        // they don't exist on the server and must not survive a cancel.
+        form.fields.retain(|f| form.baseline.contains_key(&f.label));
         // Drop any password staged by the PasswordEditor popup; otherwise the form
         // stays dirty after a revert and a later save would apply the discarded
         // password.
@@ -658,6 +664,109 @@ mod tests {
         assert!(
             !app.form.as_ref().unwrap().is_dirty(),
             "form is clean after reverting the staged password"
+        );
+    }
+
+    #[test]
+    fn revert_form_clears_orphaned_and_removes_injected_fields() {
+        use crate::schema::FieldKind;
+        use crate::ui::edit_form::{EditField, EditForm, FormMode};
+        use crate::ui::form::WidgetSpec;
+        use std::collections::BTreeMap;
+
+        // Build a form that simulates the state after sync_schema_fields was called:
+        //   - cn: in baseline with value "Alice", currently orphaned (OC removed it)
+        //   - sambaSID: NOT in baseline (injected by sync_schema_fields for a new OC)
+        //   - objectClass: in baseline, not orphaned
+        let mut baseline: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        baseline.insert("cn".to_string(), vec!["Alice".to_string()]);
+        baseline.insert(
+            "objectClass".to_string(),
+            vec!["top".to_string(), "inetOrgPerson".to_string()],
+        );
+
+        let cn_field = EditField {
+            label: "cn".to_string(),
+            must: true,
+            editable: true,
+            multi: false,
+            secret: false,
+            ordered: false,
+            values: vec!["Alice".to_string()],
+            kind: FieldKind::Text,
+            widget: WidgetSpec::ReadOnlyText,
+            editor: TextState::new().with_value("Alice".to_string()),
+            widget_binding: None,
+            orphaned: true, // marked orphaned by sync_schema_fields
+        };
+        let sambasid_field = EditField {
+            label: "sambaSID".to_string(),
+            must: false,
+            editable: true,
+            multi: false,
+            secret: false,
+            ordered: false,
+            values: vec![],
+            kind: FieldKind::Text,
+            widget: WidgetSpec::ReadOnlyText,
+            editor: TextState::new().with_value(String::new()),
+            widget_binding: None,
+            orphaned: false,
+        };
+        let oc_field = EditField {
+            label: "objectClass".to_string(),
+            must: true,
+            editable: true,
+            multi: true,
+            secret: false,
+            ordered: false,
+            values: vec!["top".to_string(), "sambaSamAccount".to_string()],
+            kind: FieldKind::Text,
+            widget: WidgetSpec::ReadOnlyText,
+            editor: TextState::new().with_value("top".to_string()),
+            widget_binding: None,
+            orphaned: false,
+        };
+
+        let mut app = bare_app(false);
+        app.form = Some(EditForm {
+            dn: "cn=Alice,dc=example,dc=org".to_string(),
+            fields: vec![cn_field, sambasid_field, oc_field],
+            baseline,
+            mode: FormMode::Edit,
+            pending_password: None,
+        });
+
+        revert_form(&mut app);
+
+        let form = app
+            .form
+            .as_ref()
+            .expect("form must still exist after revert");
+
+        // sambaSID must be removed (it was not in baseline)
+        assert!(
+            form.fields.iter().all(|f| f.label != "sambaSID"),
+            "sambaSID (injected by sync_schema_fields) must be removed on revert"
+        );
+
+        // cn must still be present, not orphaned, and reset to baseline value
+        let cn = form
+            .fields
+            .iter()
+            .find(|f| f.label == "cn")
+            .expect("cn must remain after revert");
+        assert!(!cn.orphaned, "cn.orphaned must be cleared on revert");
+        assert_eq!(
+            cn.values,
+            vec!["Alice".to_string()],
+            "cn.values must be reset to baseline"
+        );
+
+        // objectClass must still be present
+        assert!(
+            form.fields.iter().any(|f| f.label == "objectClass"),
+            "objectClass must remain after revert"
         );
     }
 }
