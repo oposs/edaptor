@@ -60,7 +60,7 @@ pub(crate) fn open_password_editor(app: &mut App) {
     };
     if !app.connection_encrypted {
         app.overlay = Some(Overlay::Error {
-            text: "Changing a password requires an encrypted connection (ldaps:// or start_tls)."
+            text: "Changing a password requires an encrypted connection (ldaps://, ldapi://, or start_tls)."
                 .to_string(),
         });
         return;

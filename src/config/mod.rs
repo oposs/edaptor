@@ -309,11 +309,13 @@ impl Config {
         self.server.read_only || self.auth.is_anonymous()
     }
 
-    /// Whether the LDAP connection is encrypted (LDAPS or StartTLS). Password
-    /// changes require this — `userPassword` is sent in clear for the server to
-    /// hash.
+    /// Whether the LDAP connection is safe for sending passwords in clear
+    /// (LDAPS, StartTLS, or a local Unix-domain socket `ldapi://`).
+    /// `userPassword` is sent in cleartext for the server to hash, so we
+    /// refuse the operation unless the channel cannot be intercepted.
     pub fn is_encrypted(&self) -> bool {
-        self.server.start_tls || self.server.uri.to_ascii_lowercase().starts_with("ldaps://")
+        let uri = self.server.uri.to_ascii_lowercase();
+        self.server.start_tls || uri.starts_with("ldaps://") || uri.starts_with("ldapi://")
     }
 }
 
@@ -856,6 +858,8 @@ options = [ { value = "/bin/bash", label = "Bash" } ]
         assert!(mk("ldaps://h:636", "false").is_encrypted());
         assert!(mk("ldap://h:389", "true").is_encrypted());
         assert!(mk("LDAPS://H", "false").is_encrypted()); // case-insensitive
+        assert!(mk("ldapi:///run/slapd/ldapi", "false").is_encrypted()); // unix socket
+        assert!(mk("LDAPI:///var/run/ldapi", "false").is_encrypted()); // case-insensitive
         assert!(!mk("ldap://h:389", "false").is_encrypted());
     }
 

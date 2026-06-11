@@ -217,7 +217,7 @@ fn plan_combined_save(
         Some(pw) => {
             if form.pending_password.is_some() && !connection_encrypted {
                 return CombinedPlan::Blocked(
-                    "Password change requires an encrypted connection (ldaps:// or start_tls)."
+                    "Password change requires an encrypted connection (ldaps://, ldapi://, or start_tls)."
                         .into(),
                 );
             }
