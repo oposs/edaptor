@@ -321,7 +321,15 @@ fn selection_style(active: bool) -> Style {
 /// the user knows Enter fills it.
 fn empty_auto_fill_hint(fld: &EditField) -> Option<&'static str> {
     use crate::config::widget::WidgetKind;
-    if fld.orphaned || !fld.editor.value().trim().is_empty() {
+    if fld.orphaned {
+        return None;
+    }
+    // Password widget with no stored value: invite the user to set one.
+    if matches!(&fld.widget_binding, Some(WidgetKind::Password(_))) && secret_len(fld) == 0 {
+        return Some("⟨Enter to modify⟩");
+    }
+    // Editor-based auto-fills: only show the hint when the editor is still empty.
+    if !fld.editor.value().trim().is_empty() {
         return None;
     }
     match fld.widget_binding {
