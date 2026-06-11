@@ -700,6 +700,21 @@ fn render_password_editor(
             Rect::new(inner.x, inner.y + normal_count as u16, inner.width, 1),
         );
     }
+
+    // Show the terminal cursor at the insertion point within the focused row.
+    // "> New password: " and "> Confirm:      " are both 16 columns wide.
+    const PREFIX: u16 = 16;
+    let (cursor_col, cursor_row) = match ed.focus {
+        PwField::New => {
+            let col = (PREFIX + ed.new.position() as u16).min(inner.width.saturating_sub(1));
+            (inner.x + col, inner.y)
+        }
+        PwField::Confirm => {
+            let col = (PREFIX + ed.confirm.position() as u16).min(inner.width.saturating_sub(1));
+            (inner.x + col, inner.y + 1)
+        }
+    };
+    f.set_cursor_position((cursor_col, cursor_row));
 }
 
 /// Center a `w`×`h` rect within `area` (clamped to fit). (Spike `centered`,
