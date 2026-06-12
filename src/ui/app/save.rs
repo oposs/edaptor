@@ -342,10 +342,11 @@ fn reload_form_sync(app: &mut App, worker: &WorkerHandle, read_flow: &ReadFlow, 
     }) {
         if let Some(entry) = entries.first() {
             let model = read_flow.form_for(entry, &[]);
-            let mut form =
-                build_loaded_form(&model, read_flow.schema(), app.read_only, &app.widgets);
-            crate::ui::edit_form::tag_samba_sid_field(
-                &mut form,
+            let form = build_loaded_form(
+                &model,
+                read_flow.schema(),
+                app.read_only,
+                &app.widgets,
                 app.samba.is_some() && !app.read_only,
             );
             app.form = Some(form);

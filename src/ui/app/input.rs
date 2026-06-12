@@ -708,6 +708,7 @@ mod tests {
             &[],
             0,
             "ou=people,dc=example,dc=org".to_string(),
+            false,
         ));
         assert_eq!(
             dispatch_key(&mut app, key(KeyCode::Esc), &s),

@@ -530,14 +530,11 @@ impl Ctx<'_> {
                     // installation while an editing overlay (create / value editor) is
                     // open, so a late base-read cannot replace `app.form` under it.
                     if should_install_form(app, &model.title) {
-                        let mut form = build_loaded_form(
+                        let form = build_loaded_form(
                             &model,
                             read_flow.schema(),
                             app.read_only,
                             &app.widgets,
-                        );
-                        crate::ui::edit_form::tag_samba_sid_field(
-                            &mut form,
                             app.samba.is_some() && !app.read_only,
                         );
                         app.form = Some(form);

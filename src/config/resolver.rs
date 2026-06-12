@@ -96,10 +96,7 @@ impl<'a> WidgetResolver<'a> {
             }
             WidgetSpecCfg::Password { samba } => {
                 let derived = if *samba {
-                    vec![
-                        "sambaNTPassword".to_string(),
-                        "sambaPwdLastSet".to_string(),
-                    ]
+                    vec!["sambaNTPassword".to_string(), "sambaPwdLastSet".to_string()]
                 } else {
                     Vec::new()
                 };
@@ -192,11 +189,7 @@ impl<'a> WidgetResolver<'a> {
                     "_posix_account_" => Some("posixAccount"),
                     "_any_" => None,
                     other => {
-                        return self
-                            .profiles
-                            .iter()
-                            .find(|p| p.name == other)
-                            .map(scope_of);
+                        return self.profiles.iter().find(|p| p.name == other).map(scope_of);
                     }
                 };
                 match target_oc {
@@ -204,11 +197,7 @@ impl<'a> WidgetResolver<'a> {
                     Some(oc) => self
                         .profiles
                         .iter()
-                        .find(|p| {
-                            p.object_classes
-                                .iter()
-                                .any(|o| o.eq_ignore_ascii_case(oc))
-                        })
+                        .find(|p| p.object_classes.iter().any(|o| o.eq_ignore_ascii_case(oc)))
                         .map(scope_of),
                 }
             }
@@ -252,11 +241,9 @@ mod tests {
     fn schema_no_user_modification_wins_over_nothing() {
         let raw = RawSubschema {
             object_classes: vec![],
-            attribute_types: vec![
-                "( 1.1 NAME 'opAttr' SYNTAX 1.3.6.1.4.1.1466.115.121.1.24 \
+            attribute_types: vec!["( 1.1 NAME 'opAttr' SYNTAX 1.3.6.1.4.1.1466.115.121.1.24 \
                  SINGLE-VALUE NO-USER-MODIFICATION USAGE directoryOperation )"
-                    .into(),
-            ],
+                .into()],
             ldap_syntaxes: vec![],
         };
         let schema = SchemaModel::from_raw(&raw);

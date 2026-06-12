@@ -467,9 +467,17 @@ impl super::Ctx<'_> {
             let samba_enabled = self.app.samba.is_some() && !self.app.read_only;
             if let Some(form) = self.app.form.as_mut() {
                 form.sync_schema_fields(self.read_flow.schema());
-                // sync_schema_fields re-injects sambaSID with no binding when
-                // sambaSamAccount was just added; re-tag it for auto-generate.
-                crate::ui::edit_form::tag_samba_sid_field(form, samba_enabled);
+                // sync_schema_fields re-injects fields (e.g. sambaSID) with no
+                // binding when a new objectClass was added; inject resolver-driven
+                // kinds (Readonly / SambaSid / XOrdered) for the updated field set.
+                let ocs = object_classes_of(form);
+                let resolver = crate::config::resolver::WidgetResolver::new(
+                    self.read_flow.schema(),
+                    &[],
+                    &self.app.widgets,
+                    samba_enabled,
+                );
+                crate::ui::edit_form::inject_resolver_kinds(form, &resolver, &ocs);
             }
             // Reset focus to 0 after re-sort; the previous index may now point
             // to a different field (order_fields reorders after injection/orphaning).
@@ -559,11 +567,19 @@ pub(crate) fn build_loaded_form(
     schema: &SchemaModel,
     read_only: bool,
     widgets: &[crate::config::widget::ResolvedWidget],
+    samba_enabled: bool,
 ) -> EditForm {
     let mut form = build_edit_form(model, schema, read_only);
     // Tag choice/picker/password/membership widget fields.
     let ocs = object_classes_of(&form);
     crate::ui::edit_form::tag_widget_fields(&mut form, widgets, &ocs, read_only);
+    // Inject resolver-driven kinds (Readonly / SambaSid / XOrdered) for fields
+    // not yet bound by an explicit profile widget.
+    if !read_only {
+        let resolver =
+            crate::config::resolver::WidgetResolver::new(schema, &[], widgets, samba_enabled);
+        crate::ui::edit_form::inject_resolver_kinds(&mut form, &resolver, &ocs);
+    }
     // Auto-inject ObjectClassPicker on the objectClass field (never configurable).
     if !read_only {
         if let Some(f) = form
@@ -605,7 +621,7 @@ mod tests {
                 widget: WidgetSpec::ReadOnlyText,
             }],
         };
-        let form = build_loaded_form(&model, &user_schema(), false, &[]);
+        let form = build_loaded_form(&model, &user_schema(), false, &[], false);
         let oc_field = form
             .fields
             .iter()
@@ -638,7 +654,7 @@ mod tests {
                 widget: WidgetSpec::ReadOnlyText,
             }],
         };
-        let form = build_loaded_form(&model, &user_schema(), true, &[]);
+        let form = build_loaded_form(&model, &user_schema(), true, &[], false);
         let oc_field = form
             .fields
             .iter()
@@ -665,6 +681,7 @@ mod tests {
             &[],
             0,
             "ou=people,dc=example,dc=org".to_string(),
+            false,
         ));
         // A base-read for the prior selection must NOT clobber the create form.
         assert!(!should_install_form(
@@ -694,6 +711,7 @@ mod tests {
             &[],
             0,
             "ou=people,dc=example,dc=org".to_string(),
+            false,
         ));
         revert_form(&mut app);
         assert!(app.form.is_none(), "create form discarded on cancel");

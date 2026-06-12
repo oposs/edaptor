@@ -12,7 +12,7 @@ use crate::workflows::create::{
 use crate::workflows::read_flow::ReadFlow;
 
 use super::overlay::{Overlay, PendingAction};
-use super::{allocate_number, object_classes_of, App, Pane};
+use super::{allocate_number, App, Pane};
 
 pub(crate) fn prepare_create(
     app: &mut App,
@@ -105,6 +105,7 @@ pub(crate) fn build_new_entry_form(
     widgets: &[crate::config::widget::ResolvedWidget],
     profile_idx: usize,
     container: String,
+    samba_enabled: bool,
 ) -> EditForm {
     let model = empty_form_for_profile(schema, profile);
     let mut form = build_edit_form(&model, schema, false);
@@ -117,9 +118,15 @@ pub(crate) fn build_new_entry_form(
         profile_idx,
         container,
     };
-    // Tag choice/picker/password/membership widget fields.
-    let ocs = object_classes_of(&form);
-    crate::ui::edit_form::tag_widget_fields(&mut form, widgets, &ocs, false);
+    // The create form has no objectClass field (filtered by empty_form_for_profile),
+    // so use the profile's declared object classes for widget resolution.
+    let ocs = &profile.object_classes;
+    crate::ui::edit_form::tag_widget_fields(&mut form, widgets, ocs, false);
+    // Inject resolver-driven kinds (Readonly / SambaSid / XOrdered) for fields
+    // not yet bound by an explicit profile widget. Use profile OCs as above.
+    let resolver =
+        crate::config::resolver::WidgetResolver::new(schema, &[], widgets, samba_enabled);
+    crate::ui::edit_form::inject_resolver_kinds(&mut form, &resolver, ocs);
     // Auto-inject ObjectClassPicker on the objectClass field.
     if let Some(f) = form
         .fields
@@ -153,8 +160,14 @@ pub(crate) fn open_create_form(
     } else {
         profile.search_base.clone()
     };
-    let mut form = build_new_entry_form(read_flow.schema(), profile, &app.widgets, i, container);
-    crate::ui::edit_form::tag_samba_sid_field(&mut form, app.samba.is_some() && !app.read_only);
+    let form = build_new_entry_form(
+        read_flow.schema(),
+        profile,
+        &app.widgets,
+        i,
+        container,
+        app.samba.is_some() && !app.read_only,
+    );
     app.form = Some(form);
     app.form_focus = 0;
     app.form_scroll = 0;
@@ -181,6 +194,7 @@ mod tests {
             &[],
             0,
             "ou=people,dc=example,dc=org".to_string(),
+            false,
         );
         assert!(form.is_new());
         match &form.mode {

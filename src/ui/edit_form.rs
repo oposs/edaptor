@@ -611,8 +611,10 @@ pub fn tag_widget_fields(
             WidgetKind::SambaSid => {
                 // A samba_sid config binding reaches here when a profile declares
                 // kind = "samba_sid" explicitly, but effective injection is deferred
-                // to tag_samba_sid_field which gates on Samba domain availability.
-                // Task 5 will replace this with resolver-driven injection.
+                // The resolver-driven injection in `inject_resolver_kinds` handles
+                // SambaSid for builtin bundles; explicit `kind = "samba_sid"` in
+                // a profile widget reaches here but is intentionally ignored —
+                // resolver injection (gated on `samba_enabled`) is the only path.
             }
             WidgetKind::NextNumber { .. } => {
                 // Auto-injected (see `tag_next_number_fields`); never resolved
@@ -675,23 +677,41 @@ pub fn tag_next_number_fields(
     }
 }
 
-/// Tag the `sambaSID` field with the auto-injected [`WidgetKind::SambaSid`]
-/// binding so Enter triggers SID auto-generation. A no-op when `enabled` is
-/// false (no Samba domain configured, or read-only mode) or the form has no
-/// editable `sambaSID` field. Idempotent — safe to re-run after
-/// [`EditForm::sync_schema_fields`] re-injects the field. The field stays a
-/// plain single-value editor for inline override; only the Enter action and the
-/// empty-field hint key off this binding.
-pub fn tag_samba_sid_field(form: &mut EditForm, enabled: bool) {
-    if !enabled {
-        return;
-    }
-    if let Some(f) = form
-        .fields
-        .iter_mut()
-        .find(|f| f.label.eq_ignore_ascii_case("sambaSID") && f.editable)
-    {
-        f.widget_binding = Some(crate::config::widget::WidgetKind::SambaSid);
+/// Inject widget bindings derived from the three-layer [`WidgetResolver`] for
+/// fields that have no binding yet (`widget_binding.is_none()`). Handles the
+/// builtin/schema-derived kinds that are not covered by explicit profile widgets:
+///
+/// - [`WidgetKind::Readonly`]  → sets `editable = false` (e.g. `memberOf`).
+/// - [`WidgetKind::SambaSid`]  → enables SID auto-generation (gated on
+///   `samba_enabled` inside the resolver; no-op when Samba is disabled).
+/// - [`WidgetKind::XOrdered`]  → sets `ordered = true` (e.g. `olcAccess`).
+///
+/// Idempotent — safe to call after [`EditForm::sync_schema_fields`] re-injects
+/// fields. `NextNumber` and `ObjectClassPicker` are never emitted by the resolver
+/// and are therefore unaffected.
+pub fn inject_resolver_kinds(
+    form: &mut EditForm,
+    resolver: &crate::config::resolver::WidgetResolver<'_>,
+    object_classes: &[String],
+) {
+    use crate::config::widget::WidgetKind;
+    for f in &mut form.fields {
+        if f.widget_binding.is_some() {
+            continue;
+        }
+        match resolver.resolve_kind(&f.label, object_classes) {
+            Some(WidgetKind::Readonly) => {
+                f.widget_binding = Some(WidgetKind::Readonly);
+                f.editable = false;
+            }
+            Some(WidgetKind::SambaSid) if f.editable => {
+                f.widget_binding = Some(WidgetKind::SambaSid);
+            }
+            Some(WidgetKind::XOrdered) => {
+                f.ordered = true;
+            }
+            _ => {}
+        }
     }
 }
 
@@ -715,12 +735,13 @@ pub fn order_fields(form: &mut EditForm) {
     });
 }
 
-/// Port of the facade's editability rule: `memberOf` is server-maintained and
-/// binary / boolean-checkbox kinds are not free-text, so none of them edit.
+/// Port of the facade's editability rule: binary / boolean-checkbox kinds are
+/// not free-text, so they do not allow inline editing.
+///
+/// Note: `memberOf` editability is no longer hardcoded here — it is handled by
+/// [`inject_resolver_kinds`] which marks fields `Readonly` based on the entry's
+/// objectClasses (e.g. `inetOrgPerson`, `posixAccount`).
 fn field_is_editable(field: &FormField) -> bool {
-    if field.label.eq_ignore_ascii_case("memberOf") {
-        return false;
-    }
     // Secret/hash attributes are managed by the password flow (the injected
     // userPassword + confirm fields derive `sambaNTPassword` via the NT hash) —
     // never hand-edited inline. A raw edit of `sambaNTPassword`/`sambaLMPassword`
@@ -1429,7 +1450,8 @@ mod tests {
     }
 
     #[test]
-    fn tag_samba_sid_field_tags_after_sync_injects_it() {
+    fn inject_resolver_kinds_tags_samba_sid_after_sync_injects_it() {
+        use crate::config::resolver::WidgetResolver;
         use crate::config::widget::WidgetKind;
         let schema = sync_schema();
         let mut form = EditForm {
@@ -1451,12 +1473,14 @@ mod tests {
         let sid = form.fields.iter().find(|f| f.label == "sambaSID").unwrap();
         assert!(sid.widget_binding.is_none(), "injected with no binding");
 
-        // Tagging (enabled) attaches the auto-generate widget.
-        tag_samba_sid_field(&mut form, true);
+        // Resolver injection (samba enabled) attaches the auto-generate widget.
+        let ocs: Vec<String> = vec!["top".into(), "person".into(), "sambaSamAccount".into()];
+        let resolver = WidgetResolver::new(&schema, &[], &[], true);
+        inject_resolver_kinds(&mut form, &resolver, &ocs);
         let sid = form.fields.iter().find(|f| f.label == "sambaSID").unwrap();
         assert!(
             matches!(sid.widget_binding, Some(WidgetKind::SambaSid)),
-            "sambaSID tagged with SambaSid after enabled tag"
+            "sambaSID tagged with SambaSid after resolver injection with samba enabled"
         );
     }
 
@@ -1534,7 +1558,9 @@ mod tests {
     }
 
     #[test]
-    fn tag_samba_sid_field_disabled_is_noop() {
+    fn inject_resolver_kinds_samba_disabled_is_noop_for_samba_sid() {
+        use crate::config::resolver::WidgetResolver;
+        let schema = sync_schema();
         let mut form = EditForm {
             dn: "uid=alice,dc=example,dc=org".into(),
             fields: vec![mk_field("sambaSID", true, vec![])],
@@ -1542,10 +1568,42 @@ mod tests {
             mode: FormMode::Edit,
             pending_password: None,
         };
-        tag_samba_sid_field(&mut form, false);
+        let ocs: Vec<String> = vec!["sambaSamAccount".into()];
+        // samba_enabled = false → resolver returns None for sambaSID.
+        let resolver = WidgetResolver::new(&schema, &[], &[], false);
+        inject_resolver_kinds(&mut form, &resolver, &ocs);
         assert!(
             form.fields[0].widget_binding.is_none(),
-            "disabled tag must not bind anything"
+            "samba disabled must not bind sambaSID"
+        );
+    }
+
+    #[test]
+    fn inject_resolver_kinds_marks_memberof_readonly_for_inetorgperson() {
+        use crate::config::resolver::WidgetResolver;
+        use crate::config::widget::WidgetKind;
+        let schema = empty_schema();
+        let mut form = EditForm {
+            dn: "uid=alice,dc=example,dc=org".into(),
+            fields: vec![{
+                let mut f = mk_field("memberOf", true, vec![]);
+                f.editable = true; // would be editable without resolver injection
+                f
+            }],
+            baseline: Default::default(),
+            mode: FormMode::Edit,
+            pending_password: None,
+        };
+        let ocs: Vec<String> = vec!["inetOrgPerson".into()];
+        let resolver = WidgetResolver::new(&schema, &[], &[], false);
+        inject_resolver_kinds(&mut form, &resolver, &ocs);
+        assert!(
+            matches!(form.fields[0].widget_binding, Some(WidgetKind::Readonly)),
+            "memberOf must be tagged Readonly for inetOrgPerson"
+        );
+        assert!(
+            !form.fields[0].editable,
+            "memberOf must not be editable for inetOrgPerson"
         );
     }
 
