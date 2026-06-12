@@ -161,6 +161,15 @@ pub enum WidgetSpecCfg {
         /// The back-ref attribute written on each picked candidate (e.g. `member`).
         via: String,
     },
+    /// Display-only; the attribute is excluded from the changeset.
+    Readonly,
+    /// OpenLDAP X-ORDERED attribute: strips/regenerates `{n}` ordering prefixes.
+    #[serde(rename = "x_ordered")]
+    XOrdered,
+    /// Generates the Samba SID from `uidNumber` + domain SID when Samba is
+    /// configured. Has no effect when no Samba domain is available.
+    #[serde(rename = "samba_sid")]
+    SambaSid,
 }
 
 /// A minimal entry profile (M3 slice). Richer metadata (password/membership/
@@ -975,6 +984,23 @@ samba = true
             }
             other => panic!("expected Membership, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn deserialize_readonly_x_ordered_samba_sid() {
+        let s = r#"
+[a]
+kind = "readonly"
+[b]
+kind = "x_ordered"
+[c]
+kind = "samba_sid"
+"#;
+        let m: std::collections::HashMap<String, WidgetSpecCfg> =
+            toml::from_str(s).unwrap();
+        assert!(matches!(m["a"], WidgetSpecCfg::Readonly));
+        assert!(matches!(m["b"], WidgetSpecCfg::XOrdered));
+        assert!(matches!(m["c"], WidgetSpecCfg::SambaSid));
     }
 
     #[test]

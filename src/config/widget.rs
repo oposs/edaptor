@@ -55,6 +55,12 @@ pub enum WidgetKind {
         min: u64,
         max: u64,
     },
+    /// The attribute is displayed but excluded from the changeset. Used for
+    /// overlay-maintained back-references and NO-USER-MODIFICATION attributes.
+    Readonly,
+    /// OpenLDAP X-ORDERED multi-value attribute. The `{n}` ordering prefix is
+    /// stripped for display and reconstructed on save.
+    XOrdered,
 }
 
 /// A resolved widget bound to its owning profile's object classes (for matching).
@@ -183,6 +189,30 @@ pub fn resolve_widgets(profiles: &[EntryProfile]) -> Result<Vec<ResolvedWidget>,
                         select: Some(Cardinality::Multi),
                         fanout_attr: Some(via.clone()),
                     })
+                }
+                WidgetSpecCfg::Readonly => {
+                    out.push(ResolvedWidget {
+                        owner_object_classes: owner.object_classes.clone(),
+                        attr: attr.clone(),
+                        kind: WidgetKind::Readonly,
+                    });
+                    continue;
+                }
+                WidgetSpecCfg::XOrdered => {
+                    out.push(ResolvedWidget {
+                        owner_object_classes: owner.object_classes.clone(),
+                        attr: attr.clone(),
+                        kind: WidgetKind::XOrdered,
+                    });
+                    continue;
+                }
+                WidgetSpecCfg::SambaSid => {
+                    out.push(ResolvedWidget {
+                        owner_object_classes: owner.object_classes.clone(),
+                        attr: attr.clone(),
+                        kind: WidgetKind::SambaSid,
+                    });
+                    continue;
                 }
             };
             out.push(ResolvedWidget {

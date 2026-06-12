@@ -616,6 +616,30 @@ pub fn tag_widget_fields(
                 // Auto-injected (see `tag_next_number_fields`); never resolved
                 // from config, so it cannot appear here.
             }
+            WidgetKind::Readonly => {
+                // Mark the field non-editable regardless of the global read_only flag.
+                if let Some(f) = form
+                    .fields
+                    .iter_mut()
+                    .find(|f| f.label.eq_ignore_ascii_case(&rw.attr))
+                {
+                    f.editable = false;
+                    f.widget_binding = Some(rw.kind.clone());
+                }
+            }
+            WidgetKind::XOrdered => {
+                if read_only {
+                    continue;
+                }
+                if let Some(f) = form
+                    .fields
+                    .iter_mut()
+                    .find(|f| f.label.eq_ignore_ascii_case(&rw.attr))
+                {
+                    f.widget_binding = Some(rw.kind.clone());
+                    f.editable = true;
+                }
+            }
         }
     }
 }
