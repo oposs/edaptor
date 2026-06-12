@@ -603,6 +603,7 @@ pub fn tag_widget_fields(
                 for f in form.fields.iter_mut() {
                     if targets.iter().any(|t| t.eq_ignore_ascii_case(&f.label)) {
                         f.widget_binding = Some(rw.kind.clone());
+                        f.secret = true;
                     }
                 }
             }
