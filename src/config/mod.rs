@@ -1,10 +1,12 @@
 //! Configuration: connection properties + auth. (Entry profiles arrive in M4.)
 
+pub mod builtin;
 pub mod defaults;
 pub mod discovery;
 pub mod label;
 pub mod password;
 pub mod relation;
+pub mod resolver;
 pub mod tree_label;
 pub mod widget;
 pub use password::PasswordSource;
@@ -996,8 +998,7 @@ kind = "x_ordered"
 [c]
 kind = "samba_sid"
 "#;
-        let m: std::collections::HashMap<String, WidgetSpecCfg> =
-            toml::from_str(s).unwrap();
+        let m: std::collections::HashMap<String, WidgetSpecCfg> = toml::from_str(s).unwrap();
         assert!(matches!(m["a"], WidgetSpecCfg::Readonly));
         assert!(matches!(m["b"], WidgetSpecCfg::XOrdered));
         assert!(matches!(m["c"], WidgetSpecCfg::SambaSid));

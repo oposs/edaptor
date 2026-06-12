@@ -1,0 +1,92 @@
+# posixAccount (RFC 2307)
+[posixAccount.loginShell]
+kind = "choice"
+select = "single"
+format = "plain"
+options = [
+  { value = "/bin/bash",     label = "Bash" },
+  { value = "/bin/sh",       label = "POSIX sh" },
+  { value = "/bin/zsh",      label = "Zsh" },
+  { value = "/bin/false",    label = "Disabled (false)" },
+  { value = "/sbin/nologin", label = "Disabled (nologin)" },
+]
+
+[posixAccount.gidNumber]
+kind = "picker"
+candidate = "_posix_group_"
+store = "gidNumber"
+select = "single"
+
+[posixAccount.memberOf]
+kind = "readonly"
+
+# posixGroup (RFC 2307)
+[posixGroup.memberUid]
+kind = "picker"
+candidate = "_posix_account_"
+store = "uid"
+select = "multi"
+
+[posixGroup.memberOf]
+kind = "readonly"
+
+# shadowAccount (RFC 2307)
+[shadowAccount.shadowPassword]
+kind = "password"
+
+# sambaSamAccount (Samba schema)
+[sambaSamAccount.userPassword]
+kind = "password"
+samba = true
+
+[sambaSamAccount.sambaNTPassword]
+kind = "readonly"
+
+[sambaSamAccount.sambaLMPassword]
+kind = "readonly"
+
+[sambaSamAccount.sambaSID]
+kind = "samba_sid"
+
+# groupOfNames (RFC 2256)
+[groupOfNames.member]
+kind = "picker"
+candidate = "_any_"
+store = "dn"
+select = "multi"
+
+[groupOfNames.memberOf]
+kind = "readonly"
+
+# groupOfUniqueNames (RFC 2256)
+[groupOfUniqueNames.uniqueMember]
+kind = "picker"
+candidate = "_any_"
+store = "dn"
+select = "multi"
+
+[groupOfUniqueNames.memberOf]
+kind = "readonly"
+
+# inetOrgPerson (RFC 2798)
+[inetOrgPerson.memberOf]
+kind = "readonly"
+
+# OpenLDAP cn=config
+[olcGlobal.olcAccess]
+kind = "x_ordered"
+
+[olcDatabaseConfig.olcDbIndex]
+kind = "x_ordered"
+
+[olcDatabaseConfig.olcSuffix]
+kind = "x_ordered"
+
+[olcDatabaseConfig.olcRootDN]
+kind = "x_ordered"
+
+[olcDatabaseConfig.olcLimits]
+kind = "x_ordered"
+
+[olcDatabaseConfig.olcSyncrepl]
+kind = "x_ordered"
