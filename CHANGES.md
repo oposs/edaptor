@@ -8,6 +8,14 @@ All notable changes to eDAPtor are documented here. The format follows
 
 ### New
 
+### Changed
+
+### Fixed
+
+## 0.4.0 - 2026-06-12
+
+### New
+
 - **Space toggles/selects in choice widgets.** In a fixed checkbox/radio list
   (e.g. `loginShell`, `sambaAcctFlags`), pressing Space now toggles a multi-select
   option or radio-selects a single-select option — the same as Enter. Search
@@ -50,7 +58,6 @@ All notable changes to eDAPtor are documented here. The format follows
   free number immediately, so dependent widgets (like `sambaSID` auto-generate)
   can use it before save. Skipping it still works — the value is allocated at
   save time as before. The field stays editable for manual override.
-
 ### Changed
 
 - Widget configuration is now auto-applied for standard LDAP schemas
