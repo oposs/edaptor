@@ -404,11 +404,14 @@ mod tests {
                  SYNTAX 1.3.6.1.4.1.1466.115.121.1.24 \
                  SINGLE-VALUE NO-USER-MODIFICATION USAGE directoryOperation )"
                     .into(),
+                // defined but user-modifiable — distinguishes from is_some() behavior
+                "( 2.5.4.3 NAME 'cn' SUP name )".into(),
             ],
             ldap_syntaxes: vec![],
         };
         let m = SchemaModel::from_raw(&raw);
-        assert!(m.is_readonly_attr("createTimestamp"));
-        assert!(!m.is_readonly_attr("cn")); // unknown → false
+        assert!(m.is_readonly_attr("createTimestamp")); // flag present
+        assert!(!m.is_readonly_attr("cn")); // defined but modifiable
+        assert!(!m.is_readonly_attr("unknownAttr")); // unknown → false
     }
 }
