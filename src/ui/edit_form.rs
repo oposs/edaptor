@@ -14,7 +14,7 @@ use std::collections::BTreeMap;
 use tui_prompts::{State, TextState};
 
 use crate::config::relation::{PickerBinding, StoreKey};
-use crate::form::changeset::{is_secret_attr, is_x_ordered, EditEntry};
+use crate::form::changeset::{is_secret_attr, EditEntry};
 use crate::schema::{FieldKind, SchemaModel};
 use crate::ui::form::{FormField, FormModel, WidgetSpec};
 use crate::ui::picker::{Candidate, PickerState};
@@ -447,7 +447,7 @@ impl EditForm {
                 editable: true,
                 multi,
                 secret: crate::form::changeset::is_secret_attr(attr),
-                ordered: crate::form::changeset::is_x_ordered(attr),
+                ordered: false,
                 values: Vec::new(),
                 kind,
                 widget: crate::ui::form::WidgetSpec::ReadOnlyText,
@@ -498,7 +498,8 @@ pub(crate) fn value_set_eq(a: &[String], b: &[String]) -> bool {
 ///   [`field_is_editable`]). Picker/membership widgets are tagged separately by
 ///   [`tag_widget_fields`] at the call seams, which may override editability.
 /// - `secret`   = a password attribute ([`crate::form::changeset::is_secret_attr`]);
-/// - `ordered`  = an X-ORDERED config attribute ([`is_x_ordered`]).
+/// - `ordered`  = an X-ORDERED config attribute (set to `false` here; the
+///   `inject_resolver_kinds()` pass sets it to `true` when appropriate).
 ///
 /// P1 uses the result purely for display. The single-value `editor` is seeded
 /// from `values[0]` so P2's editing has its starting point.
@@ -515,7 +516,7 @@ pub fn build_edit_form(model: &FormModel, schema: &SchemaModel, read_only: bool)
                 editable,
                 multi: !schema.is_single_value(&f.label),
                 secret: is_secret_attr(&f.label),
-                ordered: is_x_ordered(&f.label),
+                ordered: false,
                 values: f.values.clone(),
                 kind: f.kind,
                 widget: f.widget.clone(),
