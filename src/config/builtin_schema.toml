@@ -31,7 +31,7 @@ select = "multi"
 kind = "readonly"
 
 # shadowAccount (RFC 2307)
-[shadowAccount.shadowPassword]
+[shadowAccount.userPassword]
 kind = "password"
 
 # sambaSamAccount (Samba schema)

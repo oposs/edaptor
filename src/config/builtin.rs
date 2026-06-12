@@ -72,4 +72,13 @@ mod tests {
             WidgetSpecCfg::XOrdered
         ));
     }
+
+    #[test]
+    fn shadowaccount_userpassword_is_password() {
+        let bs = builtin_schema();
+        assert!(matches!(
+            bs["shadowaccount"]["userpassword"],
+            WidgetSpecCfg::Password { samba: false }
+        ));
+    }
 }
