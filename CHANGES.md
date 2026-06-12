@@ -8,6 +8,12 @@ All notable changes to eDAPtor are documented here. The format follows
 
 ### New
 
+- **`edaptor passwd` accepts a bare username**, not just a full DN. A username
+  (any argument without an `=`) is resolved to a DN by searching every configured
+  profile's `search_base` for `(<rdn_attr>=<username>)`. The lookup runs **before**
+  the password prompt, so an unknown or ambiguous username fails immediately
+  (with the matching DNs listed on ambiguity) instead of after typing the
+  password twice. The resolved DN is printed before the prompt for confirmation.
 - `examples/oposs-openldap.toml` — ready-to-use config template for directories
   managed by the [oposs.openldap](https://github.com/oposs/oposs.openldap)
   Ansible role (POSIX users, groupOfNames + posixGroup, Samba and mailAccount

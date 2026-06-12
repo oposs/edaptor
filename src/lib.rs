@@ -5,6 +5,7 @@ pub mod app;
 pub mod config;
 pub mod form;
 pub mod ldap;
+pub mod passwd;
 pub mod samba;
 pub mod schema;
 pub mod testdata;
@@ -149,11 +150,85 @@ fn is_samba_account(object_classes: &[String]) -> bool {
 ///
 /// Factored out of `main` (no `rpassword`, no terminal) so the live test can drive
 /// it with a known password.
+/// Search `base` (subtree/base scope per `scope`) for `filter`, returning the
+/// matching entries with their `objectClass` values. The shared LDAP round-trip
+/// behind both passwd-target resolution branches.
+fn search_object_classes(
+    worker: &WorkerHandle,
+    base: &str,
+    scope: SearchScope,
+    filter: &str,
+) -> Result<Vec<crate::ldap::worker::LdapEntry>> {
+    match worker.request(Request::Search {
+        id: 1,
+        base: base.to_string(),
+        scope,
+        filter: filter.to_string(),
+        attrs: vec!["objectClass".to_string()],
+        size_limit: None,
+    })? {
+        Response::Entries { entries, .. } => Ok(entries),
+        Response::SearchError { msg, .. } => Err(anyhow!("searching {base}: {msg}")),
+        other => Err(anyhow!(
+            "unexpected response searching {base}: {}",
+            describe_response(&other)
+        )),
+    }
+}
+
+/// Resolve the `passwd` argument to a concrete `(dn, objectClass values)`. A DN
+/// argument is base-read to confirm it exists; a bare username is searched across
+/// every configured profile's `search_base`, requiring a single match.
+fn resolve_passwd_target(
+    worker: &WorkerHandle,
+    profiles: &[crate::config::EntryProfile],
+    arg: &str,
+) -> Result<(String, Vec<String>)> {
+    if passwd::looks_like_dn(arg) {
+        let entry = search_object_classes(worker, arg, SearchScope::Base, "(objectClass=*)")?
+            .into_iter()
+            .next()
+            .ok_or_else(|| anyhow!("entry not found: {arg}"))?;
+        let ocs = entry.attrs.get("objectClass").cloned().unwrap_or_default();
+        return Ok((entry.dn, ocs));
+    }
+
+    // Bare username: gather candidates across every profile's search base.
+    let mut matched: Vec<crate::ldap::worker::LdapEntry> = Vec::new();
+    for (base, filter) in passwd::username_searches(profiles, arg) {
+        matched.extend(search_object_classes(
+            worker,
+            &base,
+            SearchScope::Subtree,
+            &filter,
+        )?);
+    }
+    let dns = matched.iter().map(|e| e.dn.clone()).collect();
+    match passwd::resolve_outcome(dns) {
+        passwd::Resolution::Unique(dn) => {
+            let ocs = matched
+                .into_iter()
+                .find(|e| e.dn.eq_ignore_ascii_case(&dn))
+                .and_then(|e| e.attrs.get("objectClass").cloned())
+                .unwrap_or_default();
+            Ok((dn, ocs))
+        }
+        passwd::Resolution::NotFound => Err(anyhow!(
+            "no entry found for username \"{arg}\" in any configured profile; \
+             pass a full DN instead"
+        )),
+        passwd::Resolution::Ambiguous(dns) => Err(anyhow!(
+            "username \"{arg}\" matches multiple entries:\n  {}\npass a full DN instead",
+            dns.join("\n  ")
+        )),
+    }
+}
+
 pub fn run_passwd(
     config: Config,
     bind_password: String,
-    target_dn: &str,
-    new_password: &str,
+    target_arg: &str,
+    prompt: impl FnOnce(&str) -> Result<String>,
 ) -> Result<String> {
     // TLS gate FIRST — before spawning the worker or touching the network.
     if !samba::password::is_secure(&config.server) {
@@ -163,34 +238,20 @@ pub fn run_passwd(
         ));
     }
 
+    // Profiles are needed for username resolution after `config` moves into the
+    // worker, so capture them first.
+    let profiles = config.profiles.clone();
     let worker = WorkerHandle::spawn(config, bind_password)?;
 
-    // Read the target's objectClass values to detect a sambaSamAccount.
-    let object_classes = match worker.request(Request::Search {
-        id: 1,
-        base: target_dn.to_string(),
-        scope: SearchScope::Base,
-        filter: "(objectClass=*)".to_string(),
-        attrs: vec!["objectClass".to_string()],
-        size_limit: None,
-    })? {
-        Response::Entries { entries, .. } => entries
-            .into_iter()
-            .next()
-            .ok_or_else(|| anyhow!("entry not found: {target_dn}"))?
-            .attrs
-            .get("objectClass")
-            .cloned()
-            .unwrap_or_default(),
-        Response::SearchError { msg, .. } => return Err(anyhow!(msg)),
-        other => {
-            return Err(anyhow!(
-                "unexpected response reading {target_dn}: {}",
-                describe_response(&other)
-            ))
-        }
-    };
+    // Resolve the target to a concrete DN (and its objectClass values, used for
+    // samba detection) BEFORE prompting for the new password, so an unknown or
+    // ambiguous username fails fast instead of after two password entries.
+    let (target_dn, object_classes) = resolve_passwd_target(&worker, &profiles, target_arg)?;
     let is_samba = is_samba_account(&object_classes);
+
+    // Now that the target is known, prompt for the new password.
+    let new_password = prompt(&target_dn)?;
+    let target_dn = target_dn.as_str();
 
     // Domain discovery is intentionally omitted from the password path:
     // `build_password_mods` derives `sambaNTPassword` from the cleartext alone and
@@ -198,7 +259,7 @@ pub fn run_passwd(
     // *creating* a samba account, not when re-setting its password). Keeping the
     // flow free of best-effort discovery keeps it correct and simple.
 
-    let mods = samba::password::build_password_mods(new_password, is_samba, now_unix_secs()?);
+    let mods = samba::password::build_password_mods(&new_password, is_samba, now_unix_secs()?);
 
     match worker.request(Request::Modify {
         id: 2,

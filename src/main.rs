@@ -36,8 +36,10 @@ enum Command {
     /// new password twice; updates `userPassword` and, for a `sambaSamAccount`,
     /// `sambaNTPassword` + `sambaPwdLastSet` in one atomic MODIFY.
     Passwd {
-        /// Target entry DN, e.g. uid=alice,ou=people,dc=example,dc=org
-        dn: String,
+        /// Target username or full DN, e.g. `alice` or
+        /// `uid=alice,ou=people,dc=example,dc=org`. A bare username is resolved
+        /// against the configured profiles' search bases.
+        user: String,
     },
 }
 
@@ -88,9 +90,11 @@ fn main() -> Result<()> {
             let report: SchemaReport = edaptor::run_schema(config, password, &object_class)?;
             print_schema(&report);
         }
-        Some(Command::Passwd { dn }) => {
-            let new_password = prompt_new_password()?;
-            let confirmation = edaptor::run_passwd(config, password, &dn, &new_password)?;
+        Some(Command::Passwd { user }) => {
+            let confirmation = edaptor::run_passwd(config, password, &user, |dn| {
+                println!("Setting password for {dn}");
+                prompt_new_password()
+            })?;
             println!("{confirmation}");
         }
     }

@@ -32,20 +32,33 @@ Samba credentials in sync in the same atomic change:
 The result is a single password change that updates both the Unix
 (`userPassword`) and Samba (`sambaNTPassword`) credentials together.
 
-## The `edaptor passwd <dn>` CLI
+## The `edaptor passwd <user>` CLI
 
-To set a password without entering the TUI, use the `passwd` subcommand:
+To set a password without entering the TUI, use the `passwd` subcommand. It
+accepts either a **bare username** or a **full DN**:
 
 ```bash
-edaptor passwd uid=alice,ou=people,dc=example,dc=org
+edaptor passwd alice                                   # resolved via the configured profiles
+edaptor passwd uid=alice,ou=people,dc=example,dc=org   # explicit DN
 ```
 
-It prompts for the new password twice (no echo), and on a match performs a
-single atomic MODIFY that updates `userPassword` and — when the target is a
+A bare username (anything without an `=`) is resolved to a DN by searching every
+configured profile's `search_base` for `(<rdn_attr>=<username>)` — e.g.
+`(uid=alice)` under `ou=people`. The lookup happens **before** the password
+prompt, so an unknown or ambiguous username fails immediately instead of after
+you type the password:
+
+- **no match** → `no entry found for username "alice" …`;
+- **more than one match** (e.g. the same name under two profiles) → the matching
+  DNs are listed and you are asked to pass a full DN instead.
+
+Once the target is resolved, edaptor prints which DN it is about to change, then
+prompts for the new password twice (no echo). On a match it performs a single
+atomic MODIFY that updates `userPassword` and — when the target is a
 `sambaSamAccount` — `sambaNTPassword` and `sambaPwdLastSet`. This command is
 **TLS-only** (it refuses to send a cleartext password over an unencrypted
-connection), so the configured server must be reachable over `ldaps://` or with
-StartTLS.
+connection), so the configured server must be reachable over `ldaps://`, with
+StartTLS, or over `ldapi://`.
 
 ## Known gap: no standalone in-TUI "Set Password"
 
@@ -53,5 +66,5 @@ There is currently **no standalone "Set Password" action inside the TUI** for an
 arbitrary entry. Passwords can be set in the TUI only through the **set-password popup**
 on the create/edit form of entries whose profile declares a password widget.
 For any other entry — or to (re)set a password outside that form — use the
-**`edaptor passwd <dn>`** CLI described above.
+**`edaptor passwd <user>`** CLI described above.
 
