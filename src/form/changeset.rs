@@ -20,16 +20,6 @@ pub struct EditEntry {
     pub attrs: BTreeMap<String, Vec<String>>,
 }
 
-/// Whether `attr` holds a secret (password / hash) that must never be shown in
-/// clear or hand-edited inline. Case-insensitive. Domain-owned (consumed by the
-/// UI's `secret`/editability rules AND by [`crate::workflows::save`]'s preview
-/// masking) so the layering stays `ui -> form` and `workflows -> form`, never a
-/// `workflows -> ui` import. Conservative minimal set; extend as needed.
-pub fn is_secret_attr(attr: &str) -> bool {
-    const SECRET: &[&str] = &["userPassword", "sambaNTPassword", "sambaLMPassword"];
-    SECRET.iter().any(|a| a.eq_ignore_ascii_case(attr))
-}
-
 /// A single LDAP MODIFY operation on one attribute.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ModOp {

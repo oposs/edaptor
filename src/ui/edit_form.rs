@@ -14,7 +14,7 @@ use std::collections::BTreeMap;
 use tui_prompts::{State, TextState};
 
 use crate::config::relation::{PickerBinding, StoreKey};
-use crate::form::changeset::{is_secret_attr, EditEntry};
+use crate::form::changeset::EditEntry;
 use crate::schema::{FieldKind, SchemaModel};
 use crate::ui::form::{FormField, FormModel, WidgetSpec};
 use crate::ui::picker::{Candidate, PickerState};
@@ -446,7 +446,7 @@ impl EditForm {
                 must: is_must,
                 editable: true,
                 multi,
-                secret: crate::form::changeset::is_secret_attr(attr),
+                secret: false, // set by inject_resolver_kinds after form construction
                 ordered: false,
                 values: Vec::new(),
                 kind,
@@ -497,7 +497,8 @@ pub(crate) fn value_set_eq(a: &[String], b: &[String]) -> bool {
 ///   (binary / boolean-checkbox / and normally `memberOf` stay static —
 ///   [`field_is_editable`]). Picker/membership widgets are tagged separately by
 ///   [`tag_widget_fields`] at the call seams, which may override editability.
-/// - `secret`   = a password attribute ([`crate::form::changeset::is_secret_attr`]);
+/// - `secret`   = initially `false`; set to `true` by [`inject_resolver_kinds`] for
+///   Password-kind attributes (e.g. `userPassword`);
 /// - `ordered`  = an X-ORDERED config attribute (set to `false` here; the
 ///   `inject_resolver_kinds()` pass sets it to `true` when appropriate).
 ///
@@ -515,7 +516,7 @@ pub fn build_edit_form(model: &FormModel, schema: &SchemaModel, read_only: bool)
                 must: f.is_must,
                 editable,
                 multi: !schema.is_single_value(&f.label),
-                secret: is_secret_attr(&f.label),
+                secret: false, // set by inject_resolver_kinds after form construction
                 ordered: false,
                 values: f.values.clone(),
                 kind: f.kind,
@@ -697,10 +698,27 @@ pub fn inject_resolver_kinds(
 ) {
     use crate::config::widget::WidgetKind;
     for f in &mut form.fields {
+        // Derive secret from the resolver regardless of whether a widget binding
+        // is already set. `tag_widget_fields` may have already attached a Password
+        // binding (e.g. from `sambaSamAccount.userPassword`), but `secret` must
+        // still be set for the masking / ordering / save paths to work correctly.
+        f.secret = matches!(
+            resolver.resolve_kind(&f.label, object_classes),
+            Some(WidgetKind::Password(_))
+        );
+
         if f.widget_binding.is_some() {
             continue;
         }
         match resolver.resolve_kind(&f.label, object_classes) {
+            Some(WidgetKind::Password(_)) => {
+                // Password attrs are managed by the password popup — never edited
+                // inline. Mark non-editable; the widget_binding is NOT set here
+                // because `tag_widget_fields` handles Password bindings from the
+                // profile widget list; builtin-schema-derived passwords (person,
+                // inetOrgPerson, posixAccount) only need secret=true + editable=false.
+                f.editable = false;
+            }
             Some(WidgetKind::Readonly) => {
                 f.widget_binding = Some(WidgetKind::Readonly);
                 f.editable = false;
@@ -743,16 +761,9 @@ pub fn order_fields(form: &mut EditForm) {
 /// [`inject_resolver_kinds`] which marks fields `Readonly` based on the entry's
 /// objectClasses (e.g. `inetOrgPerson`, `posixAccount`).
 fn field_is_editable(field: &FormField) -> bool {
-    // Secret/hash attributes are managed by the password flow (the injected
-    // userPassword + confirm fields derive `sambaNTPassword` via the NT hash) —
-    // never hand-edited inline. A raw edit of `sambaNTPassword`/`sambaLMPassword`
-    // would be written verbatim (no hashing), storing a broken/cleartext value,
-    // and would leak into the confirm preview. So they are display-only (masked).
-    // The injected password fields set `editable: true` directly, so they are
-    // unaffected; change passwords there or via the `passwd` subcommand.
-    if is_secret_attr(&field.label) {
-        return false;
-    }
+    // Binary and boolean-checkbox fields are not free-text, so they do not allow
+    // inline editing. Secret/password attributes are handled by inject_resolver_kinds
+    // which sets editable=false based on the resolver's Password kind detection.
     !matches!(
         field.widget,
         WidgetSpec::BinaryNote(_) | WidgetSpec::DisabledCheckBox(_)
@@ -873,8 +884,15 @@ mod tests {
 
     #[test]
     fn flags_are_set_from_schema_and_rules() {
-        let model = build_form_model(&schema(), &["demoPerson"], &entry(), &[]);
-        let form = build_edit_form(&model, &schema(), false);
+        use crate::config::resolver::WidgetResolver;
+        let sc = schema();
+        let model = build_form_model(&sc, &["demoPerson"], &entry(), &[]);
+        let mut form = build_edit_form(&model, &sc, false);
+        // secret is derived from the resolver pass; use "person" (SUP of demoPerson)
+        // since builtin_schema maps person.userPassword → Password.
+        let ocs = vec!["person".to_string()];
+        let resolver = WidgetResolver::new(&sc, &[], &[], false);
+        inject_resolver_kinds(&mut form, &resolver, &ocs);
         let field = |name: &str| form.fields.iter().find(|f| f.label == name).unwrap();
 
         assert!(!field("cn").multi, "cn is single-valued");
@@ -886,13 +904,18 @@ mod tests {
 
     #[test]
     fn secret_fields_are_not_editable() {
-        // Password/hash attributes (userPassword, sambaNTPassword, sambaLMPassword)
-        // are managed by the password flow — never hand-edited inline. A direct
-        // edit would be written verbatim (no NT-hash) and leak into the confirm
-        // preview, so they render masked + read-only. The injected password
-        // fields stay editable independently (they set `editable: true` directly).
-        let model = build_form_model(&schema(), &["demoPerson"], &entry(), &[]);
-        let form = build_edit_form(&model, &schema(), false);
+        // Password/hash attributes are managed by the password popup — never
+        // hand-edited inline (inject_resolver_kinds sets editable=false for
+        // Password attrs). The injected password fields stay editable independently
+        // (they set `editable: true` directly).
+        use crate::config::resolver::WidgetResolver;
+        let sc = schema();
+        let model = build_form_model(&sc, &["demoPerson"], &entry(), &[]);
+        let mut form = build_edit_form(&model, &sc, false);
+        // Apply the resolver pass; "person" is the parent OC in the builtin schema.
+        let ocs = vec!["person".to_string()];
+        let resolver = WidgetResolver::new(&sc, &[], &[], false);
+        inject_resolver_kinds(&mut form, &resolver, &ocs);
         let field = |name: &str| form.fields.iter().find(|f| f.label == name).unwrap();
         assert!(field("userPassword").secret);
         assert!(

@@ -1,4 +1,15 @@
+# person (RFC 4519) — base structural class; userPassword is standard MAY
+[person.userPassword]
+kind = "password"
+
+# inetOrgPerson (RFC 2798)
+[inetOrgPerson.userPassword]
+kind = "password"
+
 # posixAccount (RFC 2307)
+[posixAccount.userPassword]
+kind = "password"
+
 [posixAccount.loginShell]
 kind = "choice"
 select = "single"
