@@ -70,6 +70,18 @@ pub(crate) fn prepare_edit_save(
     };
     let orphaned: Vec<String> = form.orphaned_labels();
     let orphaned_refs: Vec<&str> = orphaned.iter().map(|s| s.as_str()).collect();
+    let x_ordered_attrs: std::collections::HashSet<String> = form
+        .fields
+        .iter()
+        .filter(|f| f.ordered)
+        .map(|f| f.label.clone())
+        .collect();
+    let secret_attrs: Vec<String> = form
+        .fields
+        .iter()
+        .filter(|f| f.secret)
+        .map(|f| f.label.clone())
+        .collect();
     Ok(prepare_save(
         schema,
         &original,
@@ -77,7 +89,9 @@ pub(crate) fn prepare_edit_save(
         &object_classes,
         &password_mods,
         &mask_attrs,
+        &secret_attrs,
         &orphaned_refs,
+        &x_ordered_attrs,
     ))
 }
 
@@ -240,7 +254,19 @@ fn plan_combined_save(
     if !errors.is_empty() {
         return CombinedPlan::Invalid(errors);
     }
-    let mut own_cs = match diff(&original, &edited) {
+    let x_ordered_attrs: std::collections::HashSet<String> = form
+        .fields
+        .iter()
+        .filter(|f| f.ordered)
+        .map(|f| f.label.clone())
+        .collect();
+    let secret_attrs: Vec<String> = form
+        .fields
+        .iter()
+        .filter(|f| f.secret)
+        .map(|f| f.label.clone())
+        .collect();
+    let mut own_cs = match diff(&original, &edited, &x_ordered_attrs) {
         Ok(c) => c,
         Err(e) => return CombinedPlan::DiffError(e.to_string()),
     };
@@ -259,7 +285,7 @@ fn plan_combined_save(
     if !own_cs.is_empty() {
         // Mask the password values in the preview only; `own_mods` keeps the real
         // cleartext/hash for the apply.
-        preview_sets.push(mask_changeset_secrets(&own_cs, &mask_attrs));
+        preview_sets.push(mask_changeset_secrets(&own_cs, &mask_attrs, &secret_attrs));
     }
     for f in form.fields.iter().filter(|f| fanout.contains(&f.label)) {
         let Some(attr) = crate::ui::edit_form::fanout_attr_of(f).map(|s| s.to_string()) else {

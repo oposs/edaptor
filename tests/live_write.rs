@@ -151,7 +151,7 @@ fn add_modify_modrdn_delete_round_trip() {
         dn: dn.clone(),
         attrs: edited_attrs,
     };
-    let cs = diff(&original, &edited).expect("diff");
+    let cs = diff(&original, &edited, &Default::default()).expect("diff");
     assert!(cs.modrdn.is_none(), "description change is not a rename");
     let mods = match plan_save(cs) {
         SavePlan::Modify(mods) => mods,

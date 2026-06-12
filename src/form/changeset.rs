@@ -20,28 +20,6 @@ pub struct EditEntry {
     pub attrs: BTreeMap<String, Vec<String>>,
 }
 
-/// Whether `attr` is an OpenLDAP **X-ORDERED** attribute, where the `{n}` value
-/// prefix makes order significant (so a reorder is a real change and the
-/// set-wise diff is wrong for it). The schema parser does not expose an
-/// X-ORDERED flag, so this is a conservative hardcoded known-attr list (these
-/// live under `cn=config` and essentially never appear in a user/group
-/// directory). Extend the list if a config-editing profile is ever added; a
-/// future schema-parser enhancement could replace it with a real flag.
-///
-/// Domain-owned (consumed by [`diff`] in P5 and by the UI's `ordered` field
-/// flag) so the layering stays `ui -> form`, never the reverse.
-pub fn is_x_ordered(attr: &str) -> bool {
-    const ORDERED: &[&str] = &[
-        "olcAccess",
-        "olcDbIndex",
-        "olcSuffix",
-        "olcRootDN",
-        "olcLimits",
-        "olcSyncrepl",
-    ];
-    ORDERED.iter().any(|a| a.eq_ignore_ascii_case(attr))
-}
-
 /// Whether `attr` holds a secret (password / hash) that must never be shown in
 /// clear or hand-edited inline. Case-insensitive. Domain-owned (consumed by the
 /// UI's `secret`/editability rules AND by [`crate::workflows::save`]'s preview
@@ -171,7 +149,11 @@ fn values_for<'a>(entry: &'a EditEntry, attr: &str) -> Option<&'a Vec<String>> {
 /// value, a [`ModRdn`] is emitted with `new_rdn = "<attr>=<newvalue>"` and the
 /// RDN attribute is excluded from `mods` (OpenLDAP updates it as part of MODRDN).
 /// Multi-valued original RDNs are refused.
-pub fn diff(original: &EditEntry, edited: &EditEntry) -> Result<ChangeSet, ChangeSetError> {
+pub fn diff(
+    original: &EditEntry,
+    edited: &EditEntry,
+    x_ordered_attrs: &std::collections::HashSet<String>,
+) -> Result<ChangeSet, ChangeSetError> {
     if rdn_is_multivalued(&original.dn) {
         return Err(ChangeSetError::MultiValuedRdnUnsupported);
     }
@@ -240,7 +222,10 @@ pub fn diff(original: &EditEntry, edited: &EditEntry) -> Result<ChangeSet, Chang
         // a single Replace of the full new ordered list on any difference (an
         // ordered reorder cannot be expressed as Add/Delete). When either side is
         // empty, fall through to the set-wise logic below.
-        if is_x_ordered(attr) && !orig.is_empty() && !new.is_empty() {
+        if x_ordered_attrs.iter().any(|a| a.eq_ignore_ascii_case(attr))
+            && !orig.is_empty()
+            && !new.is_empty()
+        {
             if orig != new {
                 mods.push(ModOp::Replace {
                     attr: attr.clone(),
@@ -341,7 +326,7 @@ mod tests {
     #[test]
     fn diff_no_change_is_empty() {
         let e = entry("cn=Alice,dc=x", &[("cn", &["Alice"]), ("sn", &["Adams"])]);
-        let cs = diff(&e, &e).unwrap();
+        let cs = diff(&e, &e, &Default::default()).unwrap();
         assert!(cs.is_empty(), "cs={cs:?}");
     }
 
@@ -349,7 +334,7 @@ mod tests {
     fn diff_added_value_emits_add() {
         let orig = entry("uid=a,dc=x", &[("uid", &["a"]), ("mail", &["a@x"])]);
         let edited = entry("uid=a,dc=x", &[("uid", &["a"]), ("mail", &["a@x", "a2@x"])]);
-        let cs = diff(&orig, &edited).unwrap();
+        let cs = diff(&orig, &edited, &Default::default()).unwrap();
         assert_eq!(
             cs.mods,
             vec![ModOp::Add {
@@ -363,7 +348,7 @@ mod tests {
     fn diff_removed_value_emits_delete() {
         let orig = entry("uid=a,dc=x", &[("uid", &["a"]), ("mail", &["a@x", "a2@x"])]);
         let edited = entry("uid=a,dc=x", &[("uid", &["a"]), ("mail", &["a@x"])]);
-        let cs = diff(&orig, &edited).unwrap();
+        let cs = diff(&orig, &edited, &Default::default()).unwrap();
         assert_eq!(
             cs.mods,
             vec![ModOp::Delete {
@@ -377,7 +362,7 @@ mod tests {
     fn diff_new_attr_emits_add() {
         let orig = entry("uid=a,dc=x", &[("uid", &["a"])]);
         let edited = entry("uid=a,dc=x", &[("uid", &["a"]), ("description", &["hi"])]);
-        let cs = diff(&orig, &edited).unwrap();
+        let cs = diff(&orig, &edited, &Default::default()).unwrap();
         assert_eq!(
             cs.mods,
             vec![ModOp::Add {
@@ -391,7 +376,7 @@ mod tests {
     fn diff_cleared_attr_emits_delete_whole() {
         let orig = entry("uid=a,dc=x", &[("uid", &["a"]), ("description", &["hi"])]);
         let edited = entry("uid=a,dc=x", &[("uid", &["a"]), ("description", &[])]);
-        let cs = diff(&orig, &edited).unwrap();
+        let cs = diff(&orig, &edited, &Default::default()).unwrap();
         assert_eq!(
             cs.mods,
             vec![ModOp::Delete {
@@ -405,7 +390,7 @@ mod tests {
     fn diff_changed_single_value_emits_replace() {
         let orig = entry("uid=a,dc=x", &[("uid", &["a"]), ("sn", &["Adams"])]);
         let edited = entry("uid=a,dc=x", &[("uid", &["a"]), ("sn", &["Brown"])]);
-        let cs = diff(&orig, &edited).unwrap();
+        let cs = diff(&orig, &edited, &Default::default()).unwrap();
         assert_eq!(
             cs.mods,
             vec![ModOp::Replace {
@@ -429,7 +414,7 @@ mod tests {
         // NO modify op for cn.
         let orig = entry("cn=Alice,dc=x", &[("cn", &["Alice"]), ("sn", &["Adams"])]);
         let edited = entry("cn=Alice,dc=x", &[("cn", &["Bob"]), ("sn", &["Adams"])]);
-        let cs = diff(&orig, &edited).unwrap();
+        let cs = diff(&orig, &edited, &Default::default()).unwrap();
         assert_eq!(
             cs.modrdn,
             Some(ModRdn {
@@ -454,7 +439,7 @@ mod tests {
         // cn edited elsewhere (sn changes) but the RDN value is identical.
         let orig = entry("cn=Alice,dc=x", &[("cn", &["Alice"]), ("sn", &["Adams"])]);
         let edited = entry("cn=Alice,dc=x", &[("cn", &["Alice"]), ("sn", &["Brown"])]);
-        let cs = diff(&orig, &edited).unwrap();
+        let cs = diff(&orig, &edited, &Default::default()).unwrap();
         assert!(cs.modrdn.is_none(), "no rename expected; cs={cs:?}");
         assert_eq!(
             cs.mods,
@@ -474,7 +459,7 @@ mod tests {
             "cn=user01,ou=users,dc=x",
             &[("cn", &["User1", "user01"]), ("sn", &["Bar1"])],
         );
-        let cs = diff(&e, &e).unwrap();
+        let cs = diff(&e, &e, &Default::default()).unwrap();
         assert!(cs.modrdn.is_none(), "no rename expected; cs={cs:?}");
         assert!(
             cs.is_empty(),
@@ -488,7 +473,7 @@ mod tests {
         // not a rename.
         let orig = entry("cn=user01,dc=x", &[("cn", &["User1", "user01"])]);
         let edited = entry("cn=user01,dc=x", &[("cn", &["User1", "user01", "u1"])]);
-        let cs = diff(&orig, &edited).unwrap();
+        let cs = diff(&orig, &edited, &Default::default()).unwrap();
         assert!(cs.modrdn.is_none(), "no rename expected; cs={cs:?}");
         assert_eq!(
             cs.mods,
@@ -504,7 +489,7 @@ mod tests {
         let orig = entry("cn=x+uid=y,dc=x", &[("cn", &["x"]), ("uid", &["y"])]);
         let edited = entry("cn=x+uid=y,dc=x", &[("cn", &["z"]), ("uid", &["y"])]);
         assert_eq!(
-            diff(&orig, &edited),
+            diff(&orig, &edited, &Default::default()),
             Err(ChangeSetError::MultiValuedRdnUnsupported)
         );
     }
@@ -519,7 +504,7 @@ mod tests {
         // mail is not X-ORDERED: a pure reorder is set-equal -> no change.
         let orig = entry("uid=a,dc=x", &[("uid", &["a"]), ("mail", &["a@x", "b@x"])]);
         let edited = entry("uid=a,dc=x", &[("uid", &["a"]), ("mail", &["b@x", "a@x"])]);
-        let cs = diff(&orig, &edited).unwrap();
+        let cs = diff(&orig, &edited, &Default::default()).unwrap();
         assert!(cs.is_empty(), "pure reorder must be no change; cs={cs:?}");
     }
 
@@ -541,7 +526,8 @@ mod tests {
                 &["{1}to * by * none", "{0}to attrs=x by * read"],
             )],
         );
-        let cs = diff(&orig, &edited).unwrap();
+        let x_ordered: std::collections::HashSet<String> = ["olcAccess".into()].into();
+        let cs = diff(&orig, &edited, &x_ordered).unwrap();
         assert_eq!(
             cs.mods,
             vec![ModOp::Replace {
@@ -564,10 +550,42 @@ mod tests {
                 &["{0}to attrs=x by * read", "{1}to * by * none"],
             )],
         );
-        let cs = diff(&e, &e).unwrap();
+        let x_ordered: std::collections::HashSet<String> = ["olcAccess".into()].into();
+        let cs = diff(&e, &e, &x_ordered).unwrap();
         assert!(
             cs.is_empty(),
             "unchanged ordered list must be empty; cs={cs:?}"
+        );
+    }
+
+    #[test]
+    fn diff_x_ordered_replace_when_in_set() {
+        use std::collections::HashSet;
+        let mut orig = EditEntry {
+            dn: "cn=config".into(),
+            ..Default::default()
+        };
+        orig.attrs.insert(
+            "olcAccess".into(),
+            vec![
+                "{0}to * by * read".into(),
+                "{1}to dn.base='' by * read".into(),
+            ],
+        );
+        let mut edited = orig.clone();
+        edited.attrs.insert(
+            "olcAccess".into(),
+            vec![
+                "{0}to dn.base='' by * read".into(),
+                "{1}to * by * read".into(),
+            ],
+        );
+        let x_ordered: HashSet<String> = ["olcAccess".into()].into();
+        let cs = diff(&orig, &edited, &x_ordered).unwrap();
+        // A reorder must produce a Replace (not Add+Delete).
+        assert_eq!(cs.mods.len(), 1);
+        assert!(
+            matches!(&cs.mods[0], crate::form::changeset::ModOp::Replace { attr, .. } if attr == "olcAccess")
         );
     }
 }
