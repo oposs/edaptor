@@ -30,10 +30,6 @@ select = "multi"
 [posixGroup.memberOf]
 kind = "readonly"
 
-# shadowAccount (RFC 2307)
-[shadowAccount.userPassword]
-kind = "password"
-
 # sambaSamAccount (Samba schema)
 [sambaSamAccount.userPassword]
 kind = "password"

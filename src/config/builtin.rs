@@ -74,11 +74,16 @@ mod tests {
     }
 
     #[test]
-    fn shadowaccount_userpassword_is_password() {
+    fn shadowaccount_has_no_userpassword_entry() {
+        // shadowAccount.userPassword was removed to avoid clobbering the
+        // samba=true entry when both shadowAccount and sambaSamAccount are
+        // present on the same entry (alphabetical walk, last wins).
         let bs = builtin_schema();
-        assert!(matches!(
-            bs["shadowaccount"]["userpassword"],
-            WidgetSpecCfg::Password { samba: false }
-        ));
+        assert!(
+            bs.get("shadowaccount")
+                .and_then(|m| m.get("userpassword"))
+                .is_none(),
+            "shadowAccount.userPassword must not be in the builtin schema"
+        );
     }
 }

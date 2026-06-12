@@ -319,4 +319,20 @@ mod tests {
             "expected SambaSid when samba enabled"
         );
     }
+
+    #[test]
+    fn posix_group_picker_degrades_when_no_matching_profile() {
+        let schema = empty_schema();
+        let profiles = no_profiles();
+        let widgets = no_widgets();
+        // No profiles → no posixGroup profile → gidNumber picker sentinel
+        // _posix_group_ cannot resolve → spec_to_kind returns None → result stays None.
+        let resolver = WidgetResolver::new(&schema, &profiles, &widgets, false);
+        assert!(
+            resolver
+                .resolve_kind("gidNumber", &["posixAccount".into()])
+                .is_none(),
+            "expected None when no posixGroup profile exists"
+        );
+    }
 }
