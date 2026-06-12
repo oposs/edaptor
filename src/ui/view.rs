@@ -499,9 +499,9 @@ fn render_value_editor(f: &mut Frame, ve: &mut ValueEditor, single: bool, area: 
             .border_type(BorderType::Double)
             .title(format!(" {} ", label))
             .title_bottom(match (is_choice, single, picker.truncated) {
-                // Static choice editor: no search; Enter selects (single) / toggles (multi).
-                (true, true, _) => " ↑↓ move · Enter select · Alt+S save · Alt+C cancel ",
-                (true, false, _) => " ↑↓ move · Enter toggle · Alt+S save · Alt+C cancel ",
+                // Static choice editor: no search; Enter/Space selects (single) / toggles (multi).
+                (true, true, _) => " ↑↓ move · Enter/Space select · Alt+S save · Alt+C cancel ",
+                (true, false, _) => " ↑↓ move · Enter/Space toggle · Alt+S save · Alt+C cancel ",
                 // Single-select picker: Enter radio-selects the highlighted row.
                 (false, true, true) => {
                     " ↑↓ move · Enter select · Alt+S save · Alt+C cancel · type to search · more match — narrow search "

@@ -8,6 +8,10 @@ All notable changes to eDAPtor are documented here. The format follows
 
 ### New
 
+- **Space toggles/selects in choice widgets.** In a fixed checkbox/radio list
+  (e.g. `loginShell`, `sambaAcctFlags`), pressing Space now toggles a multi-select
+  option or radio-selects a single-select option — the same as Enter. Search
+  pickers are unchanged: Space there is still a literal search character.
 - **`edaptor passwd` accepts a bare username**, not just a full DN. A username
   (any argument without an `=`) is resolved to a DN by searching every configured
   profile's `search_base` for `(<rdn_attr>=<username>)`. The lookup runs **before**

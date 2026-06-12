@@ -113,12 +113,60 @@ pub(crate) fn open_value_editor(app: &mut App, _structure: &Structure) {
 ///   commits that candidate's scalar value into the field; Alt+Space is a
 ///   no-op (nothing to toggle in single-select mode).
 ///
-/// In BOTH modes bare Space is a literal search character (group names may
-/// contain spaces). ↑↓ move the cursor; Alt+C / Esc cancel. Any other key edits
-/// the search box (the tick-based `service_picker_search` turns a changed query
-/// into a live search).
+/// In a search picker bare Space is a literal search character (group names may
+/// contain spaces). In a fixed choice list — which has no search box — Space
+/// instead toggles/selects the highlighted option, the same as Enter. ↑↓ move the
+/// cursor; Alt+C / Esc cancel. Any other key edits the search box (the tick-based
+/// `service_picker_search` turns a changed query into a live search).
+/// Toggle (multi-select) or radio-select (single-select) the highlighted picker
+/// candidate. Shared by Enter and — in a fixed choice list — Space.
+fn picker_toggle_or_select(app: &mut App) {
+    // Read the field arity into a local FIRST so we can mutably borrow the
+    // overlay (which also borrows `app`) without a second `app.form` borrow.
+    let field_single = app
+        .overlay
+        .as_ref()
+        .and_then(|o| match o {
+            Overlay::ValueEditor(ve) => Some(ve.field),
+            _ => None,
+        })
+        .and_then(|fi| {
+            app.form
+                .as_ref()
+                .and_then(|f| f.fields.get(fi))
+                .map(|f| !f.multi)
+        })
+        .unwrap_or(false);
+    if let Some(Overlay::ValueEditor(ve)) = app.overlay.as_mut() {
+        // A choice widget drives cardinality from its own `select`; a picker uses
+        // the binding's select with an `auto` field-arity fallback.
+        let single = if let Some(w) = ve.choice.as_ref() {
+            matches!(w.select, crate::config::relation::Cardinality::Single)
+        } else {
+            match ve.binding.as_deref().and_then(|b| b.select) {
+                Some(crate::config::relation::Cardinality::Single) => true,
+                Some(crate::config::relation::Cardinality::Multi) => false,
+                None => field_single,
+            }
+        };
+        if let Some(p) = ve.picker.as_mut() {
+            if single {
+                let chosen = p.visible().get(p.cursor).map(|row| row.candidate.clone());
+                if let Some(c) = chosen {
+                    p.selected = vec![c];
+                }
+            } else {
+                p.toggle_cursor();
+            }
+        }
+    }
+}
+
 fn picker_editor_key(app: &mut App, key: KeyEvent) {
     let alt = key.modifiers.contains(KeyModifiers::ALT);
+    // A fixed choice list has no search box, so Space is free to act as a
+    // toggle/select alias for Enter there; a search picker keeps Space literal.
+    let is_choice = matches!(&app.overlay, Some(Overlay::ValueEditor(ve)) if ve.choice.is_some());
     match key.code {
         KeyCode::Esc => {
             app.overlay = None;
@@ -220,52 +268,10 @@ fn picker_editor_key(app: &mut App, key: KeyEvent) {
                 app.picker_last_query.clear();
             }
         }
-        KeyCode::Enter => {
-            // Enter "checks" the highlighted candidate: toggle it in/out of a
-            // membership selection (multi-select), or set it as the single radio
-            // selection for a value-lookup picker. (Alt+Space is avoided — it is a
-            // desktop hotkey.) Alt+S then commits.
-            // Read the field arity into a local FIRST so we can mutably borrow the
-            // overlay (which also borrows `app`) without a second `app.form` borrow.
-            let field_single = app
-                .overlay
-                .as_ref()
-                .and_then(|o| match o {
-                    Overlay::ValueEditor(ve) => Some(ve.field),
-                    _ => None,
-                })
-                .and_then(|fi| {
-                    app.form
-                        .as_ref()
-                        .and_then(|f| f.fields.get(fi))
-                        .map(|f| !f.multi)
-                })
-                .unwrap_or(false);
-            if let Some(Overlay::ValueEditor(ve)) = app.overlay.as_mut() {
-                // A choice widget drives cardinality from its own `select`; a
-                // picker uses the binding's select with an `auto` field-arity
-                // fallback.
-                let single = if let Some(w) = ve.choice.as_ref() {
-                    matches!(w.select, crate::config::relation::Cardinality::Single)
-                } else {
-                    match ve.binding.as_deref().and_then(|b| b.select) {
-                        Some(crate::config::relation::Cardinality::Single) => true,
-                        Some(crate::config::relation::Cardinality::Multi) => false,
-                        None => field_single,
-                    }
-                };
-                if let Some(p) = ve.picker.as_mut() {
-                    if single {
-                        let chosen = p.visible().get(p.cursor).map(|row| row.candidate.clone());
-                        if let Some(c) = chosen {
-                            p.selected = vec![c];
-                        }
-                    } else {
-                        p.toggle_cursor();
-                    }
-                }
-            }
-        }
+        // Enter "checks" the highlighted candidate; in a fixed choice list Space
+        // does the same (it has no search box to type into).
+        KeyCode::Enter => picker_toggle_or_select(app),
+        KeyCode::Char(' ') if is_choice && !alt => picker_toggle_or_select(app),
         KeyCode::Up => {
             if let Some(Overlay::ValueEditor(ve)) = app.overlay.as_mut() {
                 if let Some(p) = ve.picker.as_mut() {
@@ -1164,6 +1170,62 @@ mod tests {
         let f = &app.form.as_ref().unwrap().fields[0];
         assert_eq!(f.editor.value(), "/bin/sh");
         assert_eq!(f.current_values(), vec!["/bin/sh".to_string()]);
+    }
+
+    #[test]
+    fn choice_space_toggles_like_enter() {
+        // In a fixed choice list (no search box) Space toggles the highlighted
+        // option exactly like Enter.
+        use crate::config::relation::Cardinality;
+        use crate::config::widget::{ChoiceFormat, ChoiceWidget};
+        use crate::config::ChoiceOption;
+        let widget = ChoiceWidget {
+            select: Cardinality::Multi,
+            format: ChoiceFormat::Bracketed,
+            options: vec![ChoiceOption {
+                value: "D".into(),
+                label: "Disabled".into(),
+            }],
+        };
+        let mut app = app_with_choice_field("sambaAcctFlags", "[U          ]", &widget);
+        open_value_editor(&mut app, &empty_structure());
+        value_editor_key(&mut app, key(KeyCode::Char(' '))); // Space toggles D in
+        value_editor_key(&mut app, alt(KeyCode::Char('s'))); // commit
+        let f = &app.form.as_ref().unwrap().fields[0];
+        assert_eq!(f.editor.value(), "[DU         ]");
+    }
+
+    #[test]
+    fn choice_single_space_radio_selects_like_enter() {
+        // Single-select choice: Space radio-selects the highlighted option (the
+        // same as Enter). Asserted on selection state because a single-select
+        // Alt+S falls back to the cursor row and would mask a missing select.
+        use crate::config::relation::Cardinality;
+        use crate::config::widget::{ChoiceFormat, ChoiceWidget};
+        use crate::config::ChoiceOption;
+        let widget = ChoiceWidget {
+            select: Cardinality::Single,
+            format: ChoiceFormat::Plain,
+            options: vec![
+                ChoiceOption {
+                    value: "/bin/bash".into(),
+                    label: "Bash".into(),
+                },
+                ChoiceOption {
+                    value: "/bin/sh".into(),
+                    label: "POSIX sh".into(),
+                },
+            ],
+        };
+        let mut app = app_with_choice_field("loginShell", "/bin/bash", &widget);
+        open_value_editor(&mut app, &empty_structure());
+        value_editor_key(&mut app, key(KeyCode::Down)); // highlight POSIX sh
+        value_editor_key(&mut app, key(KeyCode::Char(' '))); // Space radio-selects it
+        let Some(Overlay::ValueEditor(ve)) = &app.overlay else {
+            panic!("expected ValueEditor overlay");
+        };
+        let selected = ve.picker.as_ref().unwrap().selected_values();
+        assert_eq!(selected, vec!["/bin/sh".to_string()]);
     }
 
     /// Build an App whose single field is the objectClass field, tagged ObjectClassPicker.
