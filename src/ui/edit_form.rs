@@ -609,8 +609,10 @@ pub fn tag_widget_fields(
                 // set widget_binding = Some(ObjectClassPicker) on the field.
             }
             WidgetKind::SambaSid => {
-                // Auto-injected (see `tag_samba_sid_field`); never resolved from
-                // config, so it cannot appear here.
+                // A samba_sid config binding reaches here when a profile declares
+                // kind = "samba_sid" explicitly, but effective injection is deferred
+                // to tag_samba_sid_field which gates on Samba domain availability.
+                // Task 5 will replace this with resolver-driven injection.
             }
             WidgetKind::NextNumber { .. } => {
                 // Auto-injected (see `tag_next_number_fields`); never resolved
