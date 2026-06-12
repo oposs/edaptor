@@ -192,6 +192,14 @@ impl SchemaModel {
         false
     }
 
+    /// Returns `true` if the server marks this attribute type `NO-USER-MODIFICATION`
+    /// (e.g. operational attributes maintained by overlays). Unknown attrs → `false`.
+    pub fn is_readonly_attr(&self, attr_name: &str) -> bool {
+        self.attribute_type(attr_name)
+            .map(|at| at.no_user_modification)
+            .unwrap_or(false)
+    }
+
     /// All known objectClass primary names, sorted case-insensitively.
     /// Used to seed the objectClass picker candidate list.
     pub fn object_class_names(&self) -> Vec<String> {
@@ -385,5 +393,22 @@ mod tests {
             ldap_syntaxes: vec![],
         });
         assert!(m.object_class_names().is_empty());
+    }
+
+    #[test]
+    fn is_readonly_attr_no_user_modification() {
+        let raw = RawSubschema {
+            object_classes: vec![],
+            attribute_types: vec![
+                "( 2.5.18.1 NAME 'createTimestamp' \
+                 SYNTAX 1.3.6.1.4.1.1466.115.121.1.24 \
+                 SINGLE-VALUE NO-USER-MODIFICATION USAGE directoryOperation )"
+                    .into(),
+            ],
+            ldap_syntaxes: vec![],
+        };
+        let m = SchemaModel::from_raw(&raw);
+        assert!(m.is_readonly_attr("createTimestamp"));
+        assert!(!m.is_readonly_attr("cn")); // unknown → false
     }
 }
