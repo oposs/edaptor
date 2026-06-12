@@ -72,6 +72,9 @@ kind = "readonly"
 [olcGlobal.olcAccess]
 kind = "x_ordered"
 
+[olcDatabaseConfig.olcAccess]
+kind = "x_ordered"
+
 [olcDatabaseConfig.olcDbIndex]
 kind = "x_ordered"
 
