@@ -297,6 +297,37 @@ automatically.
 The membership *workflow* — editing from either side, incremental search, the
 fan-out write model — is described in [Membership Editing](../usage/membership.md).
 
+### `readonly`
+
+Marks the attribute as display-only. It is rendered in the form but excluded from
+the save changeset — the user cannot edit it. Use this for overlay-maintained
+back-references or any attribute your schema generates automatically.
+
+```toml
+[profile.widget.myOverlayAttr]
+kind = "readonly"
+```
+
+Built-in assignments: `memberOf` (all standard object classes), `sambaNTPassword`,
+`sambaLMPassword`. Additionally, any attribute the server marks
+`NO-USER-MODIFICATION` in the subschema is treated as readonly automatically.
+
+### `x_ordered`
+
+For OpenLDAP **X-ORDERED** multi-value attributes (e.g. `olcAccess`,
+`olcDbIndex`). The `{n}` ordering prefix is stripped for display and
+reconstructed on save. Changing the set of values or their order produces a
+single `REPLACE` operation.
+
+```toml
+[profile.widget.myOrderedAttr]
+kind = "x_ordered"
+```
+
+Built-in assignments: `olcAccess`, `olcDbIndex`, `olcSuffix`, `olcRootDN`,
+`olcLimits`, `olcSyncrepl` (all under the `olcGlobal` / `olcDatabaseConfig`
+object classes).
+
 ## `objectClass` Picker (auto-injected)
 
 The `objectClass` field automatically receives a schema-seeded picker. No

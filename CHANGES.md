@@ -43,6 +43,20 @@ All notable changes to eDAPtor are documented here. The format follows
 
 ### Changed
 
+- Widget configuration is now auto-applied for standard LDAP schemas
+  (posixAccount, posixGroup, shadowAccount, sambaSamAccount, groupOfNames,
+  groupOfUniqueNames, inetOrgPerson, OpenLDAP cn=config). A typical deployment
+  no longer needs `[profile.widget]` entries for these well-known attributes.
+- Attributes flagged `NO-USER-MODIFICATION` in the server's subschema are
+  automatically rendered read-only, even without explicit widget config.
+- `userPassword` is now automatically treated as a password field for entries
+  with `person`, `inetOrgPerson`, or `posixAccount` objectClasses.
+- New widget kind `readonly`: marks an attribute display-only (excluded from
+  the changeset). Available in user config for custom schemas.
+- New widget kind `x_ordered`: handles OpenLDAP X-ORDERED attributes
+  (`{n}` prefix management). Available in user config for custom schemas.
+- `memberOf`, `sambaNTPassword`, `sambaLMPassword` are now read-only by
+  default via the built-in schema bundle (previously hardcoded).
 - `j`/`k` accepted as aliases for ↓/↑ in the tree pane, profile-chooser overlay,
   and config-discovery picker.
 
