@@ -15,7 +15,7 @@
 - **Containers use podman**, not docker.
 - **Do NOT modify anything under `src/ui`.** It remains the shipping UI and the fallback. The spike is additive and isolated behind the `spike-tv` feature.
 - **Do NOT import `edaptor::ui::*`** from the spike — those are tty-facing / `pub(crate)`. Reimplement the trivial `StructureNodeRaw → StructureInput` conversion inline.
-- **`tvision-rs` is consumed as a path dependency** to a local sibling checkout so findings → tvision-rs edits flow back immediately during co-development.
+- **`tvision-rs` is consumed as the published crate** (`tvision-rs = "0.1"` from crates.io). Do NOT use a path dependency for the spike itself. If the spike surfaces a tvision-rs fix, make it in a *separate local clone* and submit a PR upstream; only after it ships in a release does edaptor bump the version. (If the published `0.1.0` turns out to lag the APIs this plan relies on — it was cut from `main` — the fallback is a git dependency pinned to the upstream repo, still official/unmodified, never a local path.)
 - **Demo server auth:** `EDAPTOR_TEST_ADMIN_PW=adminpassword`; config at `examples/demo-config.toml`.
 - The spike is a **throwaway probe** — no production polish required.
 - **`make check` must still pass** with the feature OFF (the default), since the spike code is feature-gated out.
@@ -45,12 +45,12 @@ Stand up the feature-gated binary and prove edaptor's domain layer boots and yie
 
 - [ ] **Step 1: Add the dependency, feature, and bin entry to `Cargo.toml`**
 
-Append to `[dependencies]` (path points at a sibling checkout — clone `git@github.com:oetiker/tvision-rs.git` next to `edaptor` first):
+Append to `[dependencies]` (the published crate from crates.io — no local path):
 
 ```toml
 # Spike only: our own Turbo Vision port, aliased `tv` per its house style.
 # Pulled in only with --features spike-tv so the default build is unaffected.
-tvision-rs = { package = "tvision-rs", path = "../tvision-rs", optional = true }
+tvision-rs = { version = "0.1", optional = true }
 ```
 
 Add a features section (edaptor has none yet) and the bin entry:
@@ -68,7 +68,7 @@ required-features = ["spike-tv"]
 - [ ] **Step 2: Verify the feature is wired and OFF by default**
 
 Run: `cargo build -j4` then `cargo build -j4 --features spike-tv 2>&1 | head -20`
-Expected: the plain build does NOT pull `tvision-rs` (not in `cargo tree -j4`); the featured build resolves the path dep (it may fail to *compile* the not-yet-written bin — that's fine, we only check resolution here). If the path is wrong, fix it before continuing.
+Expected: the plain build does NOT pull `tvision-rs` (not in `cargo tree -j4`); the featured build resolves `tvision-rs 0.1.x` from crates.io (it may fail to *compile* the not-yet-written bin — that's fine, we only check resolution here). **If the published `0.1.0` is missing APIs this plan uses** (e.g. `set_on_idle`, `Splitter`, `Outline::new` arity) — discovered now or at first compile in Task 2/3 — switch the dep to a git pin on the upstream repo (`tvision-rs = { git = "https://github.com/oetiker/tvision-rs", optional = true }`) and record the version gap as a findings-doc entry (the crate needs a release). Never substitute a local path.
 
 - [ ] **Step 3: Write the bootstrap + headless main in `src/bin/spike-tv.rs`**
 
