@@ -98,15 +98,20 @@ are in the findings doc.
   §7); CI guard:
   `! grep -rl "use tvision_rs" src | grep -vE "^src/(tui|bin)/"` and
   `! grep -rl "use ratatui\|use tui_" src | grep -vE "^src/ui/"`.
-- **Relocate the neutral form model into the domain layer.** The field-derivation
-  logic is already framework-agnostic but lives under `src/ui/` today
-  (`FormModel`/`build_form_model` in `src/ui/form.rs`; `EditForm`/`build_edit_form`/
-  `tag_widget_fields`/`inject_resolver_kinds`/`order_fields`/`current_values`/
-  `is_dirty`/`to_edit_entry` in `src/ui/edit_form.rs` — only the `TextState`
-  editor field + rendering are ratatui-coupled). These move into the domain layer
-  (`src/form/`), so **both** UIs consume them and share *no* UI module — only the
-  domain beneath them. The label engines (`config/label.rs`, `config/tree_label.rs`)
-  are **already** framework-neutral in `config/` and need no move.
+- **Relocate the neutral form model out of `src/ui/`.** The read-only form model
+  is already framework-agnostic but misplaced under `src/ui/` today
+  (`FormModel`/`FormField`/`WidgetSpec`/`build_form_model` in `src/ui/form.rs`).
+  It moves to **`src/workflows/form_model.rs`** (module `workflows::form_model`) —
+  *not* `src/form/`, because `build_form_model` takes `&LdapEntry` and `src/form/`
+  forbids importing `ldap::worker` by design. workflows is the orchestration layer
+  already allowed to touch ldap+schema, and both current importers (`read_flow.rs`,
+  `create.rs`) live there — fixing a real layering violation (domain importing
+  `crate::ui`). Both UIs then consume `workflows::form_model` and share *no* UI
+  module. The editable `EditForm` pipeline (`src/ui/edit_form.rs`) is relocated
+  later, in **M2**, when the tvision UI needs editable fields (only its `TextState`
+  editor field + rendering are ratatui-coupled). The label engines
+  (`config/label.rs`, `config/tree_label.rs`) are **already** framework-neutral in
+  `config/` and need no move.
 
 - **Dependency.** Published `tvision-rs = "0.1"` from crates.io (resolves to
   **0.1.2**, the current release); alias as `tv` (`tv = { package = "tvision-rs" }`).
@@ -201,8 +206,8 @@ tui/labels.rs         thin adapters over the neutral config/label + config/tree_
 tui/startup.rs        config-discovery / config-picker (tvision Dialog before run_app)
 ```
 
-The form model + field derivation are **not** in this tree — they live in the
-domain layer (`src/form/`, relocated in M1) and are consumed by both UIs.
+The form model + field derivation are **not** in this tree — they live in
+`workflows::form_model` (relocated in M1) and are consumed by both UIs.
 
 Files stay focused and small; when a module grows past a couple hundred lines it is
 a signal it is doing too much (the opposite of today's `value_editor.rs`).
@@ -216,7 +221,8 @@ write-path integration spine and the ObjectClass picker — while keeping a work
 demonstrable app at each step.
 
 ### M1 — Three-pane read core + widget framework skeleton
-Relocate the neutral form model (`FormModel`/derivation) into `src/form/`. Add the
+Relocate the neutral form model (`FormModel`/derivation) into
+`src/workflows/form_model.rs`. Add the
 `tvision-rs` dep + `src/tui/` module + a dev binary `src/bin/edaptor-tv.rs` (the
 spike's role; ratatui stays the `edaptor` binary). Build Splitter + Outline +
 ListBox/search + form `Group`, driven by `ReadFlow` / `FormModel` (not raw
