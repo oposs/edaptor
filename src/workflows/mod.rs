@@ -7,6 +7,7 @@
 
 pub mod create;
 pub mod form_model;
+pub mod labels;
 pub mod read_flow;
 pub mod save;
 pub mod structure;

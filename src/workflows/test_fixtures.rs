@@ -5,7 +5,6 @@
 use crate::config::EntryProfile;
 use crate::ldap::worker::RawSubschema;
 use crate::schema::SchemaModel;
-use std::collections::BTreeMap;
 
 pub(crate) fn bare_profile(name: &str) -> EntryProfile {
     EntryProfile {
@@ -19,13 +18,6 @@ pub(crate) fn bare_profile(name: &str) -> EntryProfile {
         widgets: Default::default(),
         label: None,
     }
-}
-
-pub(crate) fn attr_map(pairs: &[(&str, &[&str])]) -> BTreeMap<String, Vec<String>> {
-    pairs
-        .iter()
-        .map(|(k, vs)| (k.to_string(), vs.iter().map(|s| s.to_string()).collect()))
-        .collect()
 }
 
 /// Minimal schema for user (inetOrgPerson-like) with uid, description, memberOf.

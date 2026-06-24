@@ -8,9 +8,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 // Domain-pure fixtures now live in the shared module; re-export them so existing
 // ui tests that `use crate::ui::app::test_support::*` keep compiling unchanged.
-pub(crate) use crate::workflows::test_fixtures::{
-    attr_map, bare_profile, create_user_profile, user_schema,
-};
+pub(crate) use crate::workflows::test_fixtures::{create_user_profile, user_schema};
 
 /// A bare App (no form) with the given read-only flag, for dispatch tests.
 pub(crate) fn bare_app(read_only: bool) -> App {
@@ -111,13 +109,6 @@ pub(crate) fn structure() -> Structure {
             },
         ],
     )
-}
-
-pub(crate) fn rule(ocs: &[&str], tmpl: &str) -> LabelRule {
-    LabelRule {
-        object_classes: ocs.iter().map(|s| s.to_string()).collect(),
-        template: crate::config::label::parse_label_template(tmpl),
-    }
 }
 
 pub(crate) fn key(code: KeyCode) -> KeyEvent {
