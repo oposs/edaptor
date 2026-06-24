@@ -3,6 +3,7 @@
 //! Only this module tree (and `src/bin/edaptor-tv.rs`) may `use tvision_rs`.
 
 mod state;
+pub mod widget;
 
 use std::cell::RefCell;
 use std::rc::Rc;
