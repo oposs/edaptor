@@ -69,6 +69,32 @@ impl UiState {
     }
 }
 
+impl UiState {
+    /// (label, dn) rows for the current branch, filtered by `search`, using the
+    /// configured column-2 label rules. Empty when no branch is selected.
+    pub fn leaf_rows(&self) -> Vec<(String, String)> {
+        match &self.current_branch {
+            Some(b) => crate::workflows::labels::compute_rows(
+                &self.structure,
+                b,
+                &self.search,
+                &self.label_rules,
+            ),
+            None => Vec::new(),
+        }
+    }
+}
+
+/// First profile whose declared object_classes are all present on the entry.
+pub fn profile_for<'a>(profiles: &'a [EntryProfile], ocs: &[String]) -> Option<&'a EntryProfile> {
+    profiles.iter().find(|p| {
+        !p.object_classes.is_empty()
+            && p.object_classes
+                .iter()
+                .all(|need| ocs.iter().any(|have| have.eq_ignore_ascii_case(need)))
+    })
+}
+
 /// Blocking startup: spawn the worker, fetch schema + eager structure, build the
 /// compiled label rules and the ReadFlow. Mirrors `ui::app::run`'s bootstrap.
 pub(crate) fn bootstrap(config: Config, password: String) -> Result<UiState> {
@@ -131,6 +157,26 @@ mod tests {
             object_classes: vec![],
             attrs: BTreeMap::new(),
         }
+    }
+
+    #[test]
+    fn test_profile_for_matches_all_ocs() {
+        let mut p = crate::config::EntryProfile {
+            name: "user".into(),
+            object_classes: vec!["inetOrgPerson".into()],
+            rdn_attr: String::new(),
+            search_base: String::new(),
+            show: vec![],
+            search_attrs: vec![],
+            defaults: Default::default(),
+            widgets: Default::default(),
+            label: None,
+        };
+        let profiles = vec![p.clone()];
+        assert!(profile_for(&profiles, &["inetOrgPerson".into(), "top".into()]).is_some());
+        assert!(profile_for(&profiles, &["organizationalUnit".into()]).is_none());
+        p.object_classes.clear();
+        assert!(profile_for(&[p], &["anything".into()]).is_none());
     }
 
     #[test]
