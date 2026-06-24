@@ -1,58 +1,13 @@
-//! The field-widget plugin contract. M1 implements the read-only `present()`
-//! surface; editing (`activate`/`CommitOutcome`) lands in M2.
+//! Field-value presenter for read-only display. `present_field` renders each
+//! form row's value cell. M2 will extend this with an activation / commit
+//! contract (widget editors, `FieldWidget` trait, `CommitOutcome`).
 
 use crate::workflows::form_model::{FormField, WidgetSpec};
-
-/// What data a widget's editor needs (used by M2 dispatch; declared now).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Capability {
-    Static,
-    NeedsSchema,
-    NeedsWorkerSearch,
-}
-
-/// Typed result an editor returns to the form (consumed in M2).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum CommitOutcome {
-    SetValues(Vec<String>),
-    StageSecret {
-        attrs: Vec<String>,
-        cleartext: String,
-    },
-    SetValuesThenResyncSchema(Vec<String>),
-    Cancelled,
-}
-
-/// How a field is edited (M2 adds `Modal`/`Immediate`).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Activation {
-    Inline,
-}
-
-/// One plugin per widget kind. M1 uses only `present`.
-pub trait FieldWidget {
-    fn capability(&self) -> Capability;
-    /// The read-only value-cell text for `field`.
-    fn present(&self, field: &FormField) -> String;
-}
-
-/// The default plain presenter: schema/value-driven read-only rendering.
-pub struct PlainWidget;
-
-impl FieldWidget for PlainWidget {
-    fn capability(&self) -> Capability {
-        Capability::Static
-    }
-
-    fn present(&self, field: &FormField) -> String {
-        present_field(field)
-    }
-}
 
 /// Registry entry point M1 uses for read-only display. Renders a field's value
 /// cell from its `WidgetSpec` and value cardinality. (M2 swaps this for a
 /// registry keyed by `WidgetKind` that also dispatches `activate`.)
-pub fn present_field(field: &FormField) -> String {
+pub(crate) fn present_field(field: &FormField) -> String {
     // Multi-value summary takes precedence over per-value formatting.
     if field.values.len() > 1 {
         return format!("‹{} values›", field.values.len());
@@ -72,6 +27,7 @@ pub fn present_field(field: &FormField) -> String {
 mod tests {
     use super::*;
     use crate::schema::FieldKind;
+    use crate::workflows::form_model::FormField;
 
     fn field(values: &[&str], widget: WidgetSpec) -> FormField {
         FormField {
@@ -120,10 +76,5 @@ mod tests {
             present_field(&field(&[], WidgetSpec::BinaryNote(2048))),
             "<2048 bytes>"
         );
-    }
-
-    #[test]
-    fn test_plain_widget_capability_is_static() {
-        assert_eq!(PlainWidget.capability(), Capability::Static);
     }
 }

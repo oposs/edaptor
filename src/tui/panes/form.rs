@@ -33,7 +33,11 @@ impl FormPane {
         let mut rows = Vec::new();
         for i in 0..FORM_ROWS {
             let y = i as i32;
-            let il = InputLine::with_limit(Rect::new(0, y, w, y + 1), 1024);
+            let mut il = InputLine::with_limit(Rect::new(0, y, w, y + 1), 1024);
+            // Make the field read-only: disabled views are skipped by Tab focus
+            // (group.rs `focus_next`) and by mouse-down auto-select; they still
+            // draw their text normally via `InputLine::draw`.
+            il.state.state.disabled = true;
             rows.push(group.insert(Box::new(il)));
         }
         FormPane { group, rows, state }
@@ -70,6 +74,38 @@ mod tests {
     use super::*;
     use crate::schema::FieldKind;
     use crate::workflows::form_model::{FormField, WidgetSpec};
+
+    /// Minimal test state: no worker, no form.
+    fn make_state() -> Shared {
+        use crate::ldap::worker::RawSubschema;
+        use crate::tui::UiState;
+        use crate::workflows::structure::Structure;
+        use std::cell::RefCell;
+        use std::rc::Rc;
+        let schema = crate::schema::SchemaModel::from_raw(&RawSubschema::default());
+        let structure = Structure::build("dc=x", vec![]);
+        Rc::new(RefCell::new(UiState::new_for_test(
+            structure,
+            schema,
+            "dc=x".into(),
+            Vec::new(),
+            Vec::new(),
+        )))
+    }
+
+    #[test]
+    fn test_form_rows_are_disabled() {
+        let bounds = Rect::new(0, 0, 80, FORM_ROWS as i32);
+        let mut pane = FormPane::new(bounds, make_state());
+        // All FORM_ROWS children must be disabled so none receive Tab focus or clicks.
+        for &id in &pane.rows {
+            let child = pane.group.child_mut(id).expect("row exists");
+            assert!(
+                child.state().state.disabled,
+                "form row {id:?} must be disabled (read-only)"
+            );
+        }
+    }
 
     #[test]
     fn test_render_rows_labels_and_must_marker() {

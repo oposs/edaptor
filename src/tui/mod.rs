@@ -6,7 +6,7 @@ mod app;
 pub(crate) mod panes;
 pub(crate) mod pump;
 mod state;
-pub mod widget;
+pub(crate) mod widget;
 
 use std::cell::RefCell;
 use std::rc::Rc;
