@@ -27,6 +27,9 @@ tui-tree-widget = "0.24"
 tui-prompts = "0.6"
 crossterm = "0.29"
 unicode-width = "0.2"
+# tvision-rs UI (migration target). During M1-M4 it ships only via the
+# edaptor-tv dev binary; the default edaptor binary stays ratatui until M5.
+tvision-rs = "0.1"
 
 [dev-dependencies]
 tempfile = "3"
@@ -38,6 +41,10 @@ path = "src/main.rs"
 [[bin]]
 name = "gen-testdata"
 path = "src/bin/gen-testdata.rs"
+
+[[bin]]
+name = "edaptor-tv"
+path = "src/bin/edaptor-tv.rs"
 
 [lib]
 name = "edaptor"

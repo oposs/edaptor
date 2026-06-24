@@ -9,6 +9,7 @@ pub mod passwd;
 pub mod samba;
 pub mod schema;
 pub mod testdata;
+pub mod tui;
 pub mod ui;
 pub mod workflows;
 
