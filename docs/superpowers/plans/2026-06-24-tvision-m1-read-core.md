@@ -39,6 +39,7 @@ cargo fmt --check
 | File | Responsibility | Task |
 |---|---|---|
 | `src/workflows/form_model.rs` | Relocated read-only form model (`FormModel`/`FormField`/`WidgetSpec`/`build_form_model`) | 1 |
+| `src/workflows/labels.rs` | Relocated pure structure/label helpers (`LabelRule`, `label_rules`, `compute_rows`, `structure_scan_attrs`, `structure_inputs`, …) | 1 |
 | `Cargo.toml` | Add `tvision-rs` dep + `edaptor-tv` bin | 2 |
 | `src/tui/mod.rs` | Facade: `run()`, `UiState`, `Shared`, `REFRESH`, bootstrap | 2,3 |
 | `src/bin/edaptor-tv.rs` | Dev binary entry (config + password → `tui::run`) | 2 |
@@ -52,22 +53,43 @@ cargo fmt --check
 
 ---
 
-## Task 1: Relocate the read-only form model into `workflows::form_model`
+## Task 1: Relocate the neutral read + label logic into `workflows`
 
-Pure refactor. Moves `src/ui/form.rs` → `src/workflows/form_model.rs`, fixing a layering violation (`workflows::read_flow` and `workflows::create` currently import `crate::ui::form`). The ratatui UI and all existing tests must stay green.
+Two pure refactors that move framework-agnostic logic out of `src/ui/` so both
+UIs share it. **Part A:** the read-only form model. **Part B:** the pure
+structure/label helpers currently stranded in the `tui_tree_widget`-coupled,
+private `src/ui/app/structure_view.rs`. Each part is its own atomic commit. The
+ratatui UI and all existing tests must stay green throughout.
 
-**Files:**
+### Part A — form model → `workflows::form_model`
+
+Moves `src/ui/form.rs` → `src/workflows/form_model.rs`, fixing a layering violation (`workflows::read_flow` and `workflows::create` currently import `crate::ui::form`).
+
+**Files (Part A):**
 - Move: `src/ui/form.rs` → `src/workflows/form_model.rs`
 - Modify: `src/workflows/mod.rs` (add `pub mod form_model;`, fix doc link)
 - Modify: `src/ui/mod.rs:11` (remove `pub mod form;`)
 - Modify (import path `crate::ui::form` → `crate::workflows::form_model`): `src/workflows/read_flow.rs:16`, `src/workflows/create.rs:12`, `src/ui/edit_form.rs` (lines 3,19,453,778,837,1039,1088,1161,1371,1432,1684), `src/ui/view.rs:21,761`, `src/ui/app/action.rs:566,608,645,744`, `src/ui/app/input.rs:532,624`, `src/ui/app/test_support.rs:48`, `src/ui/app/value_editor.rs:611,750,1092,1236,1338`, `src/ui/app/password_editor.rs:135`, `src/ui/app/save.rs:562`
 
+**Files (Part B):**
+- Create: `src/workflows/labels.rs` (the nine pure items + their moved tests)
+- Modify: `src/workflows/mod.rs` (add `pub mod labels;`)
+- Modify: `src/ui/app/structure_view.rs` (delete moved items + their tests; import them from `crate::workflows::labels`; keep `build_tree_items`)
+- Note: other `crate::ui::app::structure_view::{label_rules,compute_rows,…}` callers in `src/ui/app/mod.rs` will need their paths updated to `crate::workflows::labels::…` — let the compiler enumerate them.
+
 **Interfaces:**
-- Produces (unchanged signatures, new path `crate::workflows::form_model`):
+- Produces (Part A — unchanged signatures, new path `crate::workflows::form_model`):
   - `pub struct FormModel { pub title: String, pub fields: Vec<FormField> }`
   - `pub struct FormField { pub label: String, pub kind: FieldKind, pub is_must: bool, pub values: Vec<String>, pub widget: WidgetSpec }`
   - `pub enum WidgetSpec { ReadOnlyText, ReadOnlyInt, ReadOnlyDn, ReadOnlyTime, DisabledCheckBox(bool), BinaryNote(usize) }`
   - `pub fn build_form_model(schema: &SchemaModel, object_classes: &[&str], entry: &LdapEntry, profile_show: &[String]) -> FormModel`
+- Produces (Part B — new path `crate::workflows::labels`, signatures unchanged):
+  - `pub(crate) struct LabelRule { pub object_classes: Vec<String>, pub template: Vec<crate::config::label::LabelSeg> }`
+  - `pub(crate) fn label_rules(profiles: &[EntryProfile]) -> Vec<LabelRule>`
+  - `pub(crate) fn structure_scan_attrs(rules: &[LabelRule], tree_rules: &[CompiledTreeRule]) -> Vec<String>`
+  - `pub(crate) fn compute_rows(structure: &Structure, branch: &str, search: &str, rules: &[LabelRule]) -> Vec<(String, String)>`
+  - `pub(crate) fn structure_inputs(nodes: Vec<StructureNodeRaw>) -> Vec<StructureInput>`
+  - (also `label_rule_attrs`, `render_node_label`, `structure_input_from_attrs`, `node_label`)
 
 - [ ] **Step 1: Move the file and register the module**
 
@@ -133,7 +155,7 @@ cargo fmt
 ```
 Expected: no `crate::ui::` in `src/workflows/`; clippy clean.
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 6: Commit Part A**
 
 ```bash
 git add -A
@@ -143,6 +165,106 @@ Moves the framework-agnostic read-only form model out of src/ui into the
 workflows orchestration layer, fixing the layering violation where
 workflows::{read_flow,create} imported crate::ui::form. Pure move; no
 behaviour change. Prepares the model to be shared by both UIs.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
+```
+
+### Part B — structure/label helpers → `workflows::labels`
+
+`src/ui/app/structure_view.rs` is a private module that imports `tui_tree_widget`,
+yet most of its contents are pure (no ratatui). Move the pure cluster into a new
+neutral `src/workflows/labels.rs` so `src/tui` (and the domain) can use it without
+a `tui→ui` dependency. Only `build_tree_items` (returns `tui_tree_widget::TreeItem`)
+stays in `structure_view.rs`.
+
+**Move (verbatim, change `pub(crate)` visibility as needed so callers in both
+`src/ui` and `src/tui` reach them):** `struct LabelRule`, `fn label_rules`,
+`fn label_rule_attrs`, `fn structure_scan_attrs`, `fn render_node_label`,
+`fn compute_rows`, `fn structure_input_from_attrs`, `fn structure_inputs`,
+`fn node_label`. **Leave in `structure_view.rs`:** `fn build_tree_items` (it calls
+the moved `node_label`/`render_node_label` — import them).
+
+- [ ] **Step 7: Create `src/workflows/labels.rs` with the moved items**
+
+Cut the nine pure items (struct + 8 fns) listed above from `src/ui/app/structure_view.rs` into a new `src/workflows/labels.rs`. Keep their bodies verbatim. Their `use` lines become the module header (all neutral): `use std::collections::BTreeMap;`, `use crate::config::label::Piece;`, `use crate::config::tree_label::{eval_tree_label, fit_label, CompiledTreeRule, Segment};`, `use crate::config::EntryProfile;`, `use crate::ldap::worker::StructureNodeRaw;`, `use crate::workflows::structure::{Structure, StructureInput};`. Add a module doc line. Register it in `src/workflows/mod.rs`:
+
+```rust
+pub mod labels;
+```
+
+- [ ] **Step 8: Repoint `structure_view.rs` to import the moved items**
+
+In `src/ui/app/structure_view.rs`, delete the moved items and add at the top:
+
+```rust
+use crate::workflows::labels::{node_label, render_node_label, LabelRule};
+```
+
+(Add only the names `build_tree_items` and any remaining code actually reference; let the compiler tell you which. `build_tree_items` stays put.)
+
+- [ ] **Step 9: Move the pure-function tests into `workflows::labels`**
+
+The unit tests for the moved functions (`compute_rows_*`, `label_rules_*`, `render_node_label_*` in `structure_view.rs`'s `#[cfg(test)] mod tests`) move with them into a `#[cfg(test)] mod tests` in `src/workflows/labels.rs`. They currently use `crate::ui::app::test_support::*` (which is ratatui-coupled). Replace that dependency with minimal **local** neutral builders in the labels test module — the data they need is simple. For example:
+
+```rust
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn rule(ocs: &[&str], tmpl: &str) -> LabelRule {
+        LabelRule {
+            object_classes: ocs.iter().map(|s| s.to_string()).collect(),
+            template: crate::config::label::parse_label_template(tmpl),
+        }
+    }
+
+    fn input(dn: &str, attrs: &[(&str, &str)]) -> StructureInput {
+        let mut m: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        for (k, v) in attrs {
+            m.entry(k.to_string()).or_default().push(v.to_string());
+        }
+        StructureInput {
+            dn: dn.into(),
+            cn: m.get("cn").and_then(|v| v.first().cloned()),
+            description: None,
+            object_classes: m.get("objectClass").cloned().unwrap_or_default(),
+            attrs: m,
+        }
+    }
+
+    // ... the moved compute_rows_* / label_rules_* / render_node_label_* tests,
+    //     rewritten to build their Structure via Structure::build(root, vec![input(..)])
+    //     and their rules via rule(..). Keep every assertion identical.
+}
+```
+
+Tests that exercise `build_tree_items`/`node_label` rendering specifically stay in `structure_view.rs` with `test_support` if they need `App`-level helpers.
+
+- [ ] **Step 10: Verify build, tests, lints, and that the tui→ui smell is gone**
+
+Run:
+```bash
+cargo build -j4
+cargo test -j4
+cargo clippy -j4 --all-targets -- -D warnings
+grep -rn "tui_tree_widget" src/workflows/   # expected: no matches (labels is pure)
+cargo fmt
+```
+Expected: builds; full suite green (the moved tests pass in their new home, identical assertions); clippy clean; `workflows/` has no `tui_tree_widget`.
+
+- [ ] **Step 11: Commit Part B**
+
+```bash
+git add -A
+git commit -m "refactor: relocate pure structure/label helpers to workflows::labels
+
+Moves LabelRule, label_rules, label_rule_attrs, structure_scan_attrs,
+render_node_label, compute_rows, structure_input_from_attrs,
+structure_inputs, node_label (and their unit tests, with neutral local
+builders) out of the tui_tree_widget-coupled, private
+ui::app::structure_view into a neutral workflows::labels. Only
+build_tree_items (TreeItem) stays in ui. Lets the new tvision UI consume
+the label/row logic with no tui->ui dependency. Pure move.
 
 Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 ```
@@ -334,7 +456,7 @@ use crate::config::tree_label::CompiledTreeRule;
 use crate::config::{Config, EntryProfile};
 use crate::ldap::worker::{Request, Response, WorkerHandle};
 use crate::schema::SchemaModel;
-use crate::ui::app::structure_view::LabelRule; // pure label rule (no ratatui)
+use crate::workflows::labels::LabelRule;
 use crate::workflows::read_flow::ReadFlow;
 use crate::workflows::form_model::FormModel;
 use crate::workflows::structure::{Structure, StructureInput};
@@ -394,24 +516,16 @@ impl UiState {
     }
 }
 
-/// `StructureNodeRaw` (worker) → `StructureInput` (structure model).
-fn to_input(n: crate::ldap::worker::StructureNodeRaw) -> StructureInput {
-    StructureInput {
-        dn: n.dn,
-        cn: n.cn,
-        description: n.description,
-        object_classes: n.object_classes,
-        attrs: n.attrs,
-    }
-}
-
 /// Blocking startup: spawn the worker, fetch schema + eager structure, build the
 /// compiled label rules and the ReadFlow. Mirrors `ui::app::run`'s bootstrap.
 pub(crate) fn bootstrap(config: Config, password: String) -> Result<UiState> {
+    use crate::workflows::labels::{label_rules, structure_inputs, structure_scan_attrs};
     let base_dn = config.server.base_dn.clone();
     let profiles = config.profiles.clone();
-    let label_rules = crate::ui::app::structure_view::label_rules(&profiles);
+    let label_rules = label_rules(&profiles);
     let tree_rules = crate::config::tree_label::compile_tree_rules(&config.tree);
+    // Fetch the attributes the label/tree templates reference, so labels render.
+    let scan_attrs = structure_scan_attrs(&label_rules, &tree_rules);
 
     let worker = WorkerHandle::spawn(config, password)?;
 
@@ -425,12 +539,12 @@ pub(crate) fn bootstrap(config: Config, password: String) -> Result<UiState> {
         id: 0,
         base: base_dn.clone(),
         page_size: 500,
-        attrs: vec![],
+        attrs: scan_attrs,
     })? {
         Response::StructureEntries { nodes, .. } => nodes,
         other => return Err(anyhow!("LoadStructure: unexpected {other:?}")),
     };
-    let structure = Structure::build(&base_dn, nodes.into_iter().map(to_input).collect());
+    let structure = Structure::build(&base_dn, structure_inputs(nodes));
 
     Ok(UiState {
         worker: Some(worker),
@@ -451,7 +565,7 @@ pub(crate) fn bootstrap(config: Config, password: String) -> Result<UiState> {
 }
 ```
 
-> NOTE on reuse: `LabelRule` and `label_rules()` live in `src/ui/app/structure_view.rs` and are pure (no ratatui). M1 imports them from there. They will move into `src/tui/labels.rs` when the ratatui tree is deleted at M5; for now reusing them avoids duplicating logic.
+> NOTE: `LabelRule`, `label_rules`, `structure_scan_attrs`, `structure_inputs`, and `compute_rows` now live in `crate::workflows::labels` (relocated in Task 1 Part B), so this module imports them from the neutral layer — no `tui→ui` dependency.
 
 - [ ] **Step 2: Wire `state` into `src/tui/mod.rs`**
 
@@ -547,7 +661,7 @@ cargo build -j4 && cargo build -j4 --bin edaptor-tv
 cargo clippy -j4 --all-targets -- -D warnings
 cargo fmt
 ```
-Expected: clean. (`label_rules`/`LabelRule` must be `pub` in `structure_view.rs` — the explorer confirmed `pub fn label_rules` and `pub struct LabelRule`. If `structure_view` itself is not `pub`, make the needed items reachable: `src/ui/app/mod.rs` already exposes `structure_view`; if not, add `pub use` — verify with the build.)
+Expected: clean. (`workflows::labels` is a `pub mod` and its items are `pub(crate)`, so they are reachable from `src/tui` — verified by the build.)
 
 - [ ] **Step 6: Commit**
 
@@ -558,8 +672,8 @@ git commit -m "feat(tui): UiState + blocking bootstrap (worker, schema, structur
 Ports the spike bootstrap into a real Rc<RefCell<UiState>>: spawn worker,
 fetch subschema -> SchemaModel, eager LoadStructure -> Structure, build
 ReadFlow and the compiled label/tree rules. Adds a worker-less test
-constructor. Reuses the pure LabelRule/label_rules from structure_view
-(moves to src/tui/labels.rs at M5).
+constructor. Uses the neutral workflows::labels helpers (label_rules,
+structure_scan_attrs, structure_inputs) relocated in Task 1.
 
 Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 ```
@@ -985,7 +1099,7 @@ A leaf list populated from `compute_rows` (with config column-2 labels and searc
 - Modify: `src/tui/state.rs` (add `profile_for` + `leaf_rows` helpers)
 
 **Interfaces:**
-- Consumes: `Shared`, `REFRESH`, `crate::ui::app::structure_view::compute_rows`, `ReadFlow::request_entry`, `UiState.{structure,current_branch,search,profiles,read_flow,worker,current_leaf,label_rules}`, `Structure::get` (for the selected leaf's objectClasses).
+- Consumes: `Shared`, `REFRESH`, `crate::workflows::labels::compute_rows`, `ReadFlow::request_entry`, `UiState.{structure,current_branch,search,profiles,read_flow,worker,current_leaf,label_rules}`, `Structure::get` (for the selected leaf's objectClasses).
 - Produces:
   - `UiState::leaf_rows(&self) -> Vec<(String, String)>` (label, dn)
   - `fn profile_for<'a>(profiles: &'a [EntryProfile], ocs: &[String]) -> Option<&'a EntryProfile>`
@@ -1001,7 +1115,7 @@ impl UiState {
     /// configured column-2 label rules. Empty when no branch is selected.
     pub fn leaf_rows(&self) -> Vec<(String, String)> {
         match &self.current_branch {
-            Some(b) => crate::ui::app::structure_view::compute_rows(
+            Some(b) => crate::workflows::labels::compute_rows(
                 &self.structure,
                 b,
                 &self.search,
@@ -1747,7 +1861,7 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 
 ## Self-Review (completed during planning)
 
-- **Spec coverage (M1 acceptance):** three-pane Splitter (T9); Outline DIT nav + tree labels (T5); ListBox+search + column-2 labels (T6); read-only form via ReadFlow/FormModel (T6 read trigger, T7 pump, T8 render); FieldWidget trait + registry + read-only present() (T4); relocate FormModel out of ui (T1); tvision dep + dev binary, ratatui still builds (T2); headless view tests (T3–T8); manual live acceptance (T9). All M1 spec bullets map to a task.
+- **Spec coverage (M1 acceptance):** three-pane Splitter (T9); Outline DIT nav + tree labels (T5); ListBox+search + column-2 labels (T6); read-only form via ReadFlow/FormModel (T6 read trigger, T7 pump, T8 render); FieldWidget trait + registry + read-only present() (T4); relocate FormModel + pure structure/label helpers out of ui into workflows (T1 Parts A/B); tvision dep + dev binary, ratatui still builds (T2); headless view tests (T3–T8); manual live acceptance (T9). All M1 spec bullets map to a task.
 - **Placeholder scan:** no TBD/TODO; every code step shows real code; tests have real assertions. Verification commands are exact.
 - **Type consistency:** `FormModel`/`FormField`/`WidgetSpec`/`FieldKind`, `ReadFlow::{request_entry,on_response}` → `ReadOutcome::{Form{model,object_classes},Error,Ignored}`, `WorkerHandle::{spawn,request,poll}`, `Structure::{build,branch_dns,get,…}`, `Outline::value()→FieldValue::Int`, `present_field` — all used consistently with the explored signatures.
 - **Verify-at-build caveats flagged inline** (downcast seam in T6; `Event::Broadcast` field names; `TreeConfig: Default`; `EntryProfile` literal) — each step says to confirm against the live source, which the implementer has.
