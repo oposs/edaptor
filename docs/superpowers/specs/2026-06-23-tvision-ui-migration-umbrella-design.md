@@ -270,9 +270,8 @@ docs (README/CHANGES/mdBook) updated to current behaviour.
 - **Top risk: ObjectClass picker** (multi-select + schema field-sync). Mitigated by
   the typed `SetValuesThenResyncSchema` outcome and M3 placement (early).
 - **Second risk: tvision API gaps.** Surface early (M1–M3); fallback is the
-  upstream git pin + separate-clone PR. Known minor gaps (no `Outline::value()`,
-  `Deferred` not at crate root, `ov_update` undocumented) are upstream-PR
-  candidates, not blockers.
+  upstream git pin + separate-clone PR. Known minor gaps feed the upstream
+  improvement side-stream (§10), not blockers.
 - **Execution style.** Subagent-driven (fresh subagent per task + spec-then-quality
   review). **One editor per working tree at a time** — never run a side agent on
   the same tree concurrently (caused a commit-bundling collision during the spike).
@@ -326,7 +325,45 @@ found (select, or cancel to exit), before the main TUI.
 
 ---
 
-## 10. Open items deferred to milestone specs
+## 10. Upstream tvision-rs improvements (a deliberate side-stream)
+
+The migration is also the best driver tvision-rs will get: we are its first
+real-application consumer, so every rough edge we hit is a contribution
+opportunity. We **improve tvision-rs as we go** — both docs and code — rather than
+just working around gaps silently.
+
+**Directive (how contributions are made).**
+- Work in a **separate clone** of upstream `https://github.com/oetiker/tvision-rs`,
+  one focused **PR per change**. Upstream stays unmodified by edaptor; we never
+  carry a local fork.
+- edaptor keeps depending on the **published `tvision-rs = "0.1"`** crate. A git
+  pin on upstream is the *only* fallback, and only if a release ever lacks an API a
+  milestone strictly needs.
+- **Non-blocking.** Do not gate migration progress on an upstream merge/release.
+  Keep the documented workaround in edaptor; adopt the upstream improvement
+  opportunistically once it lands in a release (then delete the workaround).
+
+**Backlog (from findings §2 doc-gaps and §3 feature-gaps).**
+
+| # | Kind | Improvement | Surfaces in | edaptor workaround until merged |
+|---|---|---|---|---|
+| U1 | docs | Document that `ov_update` is **mandatory** after `Outline` construction / tree swap, in the getting-started / README (not just the method doc) | M1 | seed `ov_update` on first event |
+| U2 | docs+example | Add a "bring-your-own-state / external data source" example: `Rc<RefCell<T>>` + `broadcast` + timer-pump (the pattern the spike invented) | M1 | the spike pattern, now in `ui/state.rs` + `ui/pump.rs` |
+| U3 | docs | Document that a standalone `InputLine` needs `state.state.selected = true` to receive keys in headless tests | M1 (tests) | set the field in test setup |
+| U4 | code | `pub use view::Deferred` at the crate root (ergonomics for headless `Context::new`) | M1 (tests) | use the `view::Deferred` two-segment path |
+| U5 | code | Implement `View::value()` for `Outline` → `FieldValue::Int(ov.foc)`, for parity with `ListBox` | M1 | read selection via `OutlineViewer::ov().foc` |
+| U6 | code | `Outline::set_root(root, ctx)` convenience wrapper (mirrors `ListBox::new_list`) | M1/M3 | write `outline.root` field + call `ov_update` |
+
+**Timing.** The cheap doc/ergonomic items (U1–U4) are worth submitting **early**
+(they smooth the rest of the migration and cost little). U5/U6 are nice-to-haves
+submitted opportunistically when M1/M3 touch that code. Any *new* gap a later
+milestone uncovers is added to this backlog and handled the same way.
+
+**Acceptance for this side-stream.** Each item is either submitted as an upstream
+PR (link recorded in the relevant milestone's notes) or explicitly deferred with a
+reason. Migration milestones never block on it.
+
+## 11. Open items deferred to milestone specs
 
 - Exact `UiState` field set and the `ReadFlow`/`FormModel` ⇄ form-row mapping (M1).
 - The precise `FieldWidget`/`FieldEditor` trait signatures and capability handle
