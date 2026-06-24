@@ -1,5 +1,12 @@
 # tvision-rs Migration Spike — Findings (2026-06-22)
 
+> **Historical snapshot.** Tested against `tvision-rs 0.1.0`. The doc gaps (§2)
+> and feature gaps (§3) below have since been **addressed upstream and released in
+> 0.1.1 / 0.1.2** (Outline auto-seed, `Outline::value()`, crate-root `Deferred`,
+> the `external_state` example). The migration targets 0.1.2 and drops the
+> workarounds described here — see §10 of the umbrella spec
+> (`2026-06-23-tvision-ui-migration-umbrella-design.md`) for current status.
+
 Spike branch: `spike/tvision-rs`. Three deliverable streams from the design spec
 (`docs/superpowers/specs/2026-06-22-tvision-rs-migration-spike-design.md`): worker
 pumping, documentation gaps, and framework feature gaps. Plus a migration effort

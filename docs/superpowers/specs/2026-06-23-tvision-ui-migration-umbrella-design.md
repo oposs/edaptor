@@ -83,11 +83,13 @@ are in the findings doc.
   `worker.submit`). Always: collect into locals → drop borrow → call. `REFRESH`
   broadcasts are deferred (queued, delivered next loop pass), but the rule stands.
 
-- **Outline gotcha.** `tv::ov_update(&mut outline, ctx)` is **mandatory** once
-  after construction and after any tree replacement (seed on first event via a
-  wrapper view), else `limit.y == 0` and navigation clamps focus to -1. Read
-  selection via `OutlineViewer::ov().foc` (`Outline` does not implement
-  `View::value()`; `ListBox` does).
+- **Outline (0.1.1+ behaviour).** `Outline` now **auto-seeds** its scrollbar
+  limits and focus on first display/interaction, so no manual seed-on-first-event
+  is needed after construction. `tv::ov_update(&mut outline, ctx)` is still
+  required **after mutating the tree** (swapping the `root` field, or programmatic
+  expand/collapse). Read selection via `Outline::value() -> FieldValue::Int(foc)`,
+  consistent with `ListBox` (implemented in 0.1.1; the old `OutlineViewer::ov().foc`
+  workaround is no longer needed).
 
 - **Facade boundary (enforced, the migration's core rule).** Only `src/ui/*` may
   `use tvision_rs`. The domain layer stays UI-framework-agnostic. CI guard:
@@ -97,9 +99,11 @@ are in the findings doc.
   ratatui-coupled `ui` code into framework-neutral modules; only
   rendering/input/editor-state is rewritten.
 
-- **Dependency.** Published `tvision-rs = "0.1"` from crates.io; alias as `tv`
-  (`tv = { package = "tvision-rs" }`). No path/git dependency. If a release ever
-  lacks a needed API, the fallback is a git pin on the **upstream**
+- **Dependency.** Published `tvision-rs = "0.1"` from crates.io (resolves to
+  **0.1.2**, the current release); alias as `tv` (`tv = { package = "tvision-rs" }`).
+  We rely on **0.1.1+** APIs (`Outline::value()`, crate-root `Deferred`, Outline
+  auto-seed, the `external_state` example pattern). No path/git dependency. If a
+  release ever lacks a needed API, the fallback is a git pin on the **upstream**
   `https://github.com/oetiker/tvision-rs`, never a local path; fixes go via a
   separate clone + upstream PR. tvision-rs is edition 2024, edaptor 2021 — fine.
 
@@ -175,7 +179,7 @@ ui/mod.rs            facade: run() entry, Shared, UiState, REFRESH command
 ui/app.rs            Program assembly: desktop, menu bar, status line, pump wiring
 ui/state.rs          UiState shape, dirty tracking, selection model, id correlation
 ui/pump.rs           PumpView (timer-driven worker drain)
-ui/panes/tree.rs     Outline (DIT) — branch nav, tree-label rules, ov_update seeding
+ui/panes/tree.rs     Outline (DIT) — branch nav, tree-label rules, ov_update on tree swap
 ui/panes/leaf.rs     ListBox + search box — column-2 label rules, leaf→form trigger
 ui/panes/form.rs     Group of per-attribute field rows; plugin present()/activate()
 ui/widget/mod.rs     FieldWidget trait, Activation, CommitOutcome, capabilities, registry
@@ -260,9 +264,11 @@ docs (README/CHANGES/mdBook) updated to current behaviour.
 
 - **Headless view tests (spike Path A).** Build a `Context` directly
   (`tvision_rs::view::Context::new(&mut out, &mut timers, 0, &mut deferred)` with
-  `TimerQueue::new()` and `view::Deferred`) to unit-test widget key handling
-  without a TTY. A standalone `InputLine` needs `il.state.state.selected = true`.
-  The umlaut/grapheme regression becomes a permanent form-field test.
+  `TimerQueue::new()` and crate-root `tvision_rs::Deferred`) to unit-test widget
+  key handling without a TTY. A standalone `InputLine` needs
+  `il.state.state.selected = true`. See upstream `examples/external_state.rs` for
+  the shared-state/pump pattern. The umlaut/grapheme regression becomes a permanent
+  form-field test.
 - **Live tests** gated by `EDAPTOR_TEST_LDAP_URI` (skip when unset); demo base
   `dc=example,dc=org`, `EDAPTOR_TEST_ADMIN_PW=adminpassword`, podman demo server.
 - **Interactive confirmation** per milestone needs a human at a terminal — agent
@@ -325,43 +331,41 @@ found (select, or cancel to exit), before the main TUI.
 
 ---
 
-## 10. Upstream tvision-rs improvements (a deliberate side-stream)
+## 10. Upstream tvision-rs improvements (mostly already landed)
 
-The migration is also the best driver tvision-rs will get: we are its first
-real-application consumer, so every rough edge we hit is a contribution
-opportunity. We **improve tvision-rs as we go** — both docs and code — rather than
-just working around gaps silently.
+The migration is the best driver tvision-rs gets — edaptor is its first
+real-application consumer, so every rough edge is a contribution opportunity. We
+**improve tvision-rs as we go** rather than working around gaps silently.
 
-**Directive (how contributions are made).**
-- Work in a **separate clone** of upstream `https://github.com/oetiker/tvision-rs`,
-  one focused **PR per change**. Upstream stays unmodified by edaptor; we never
-  carry a local fork.
-- edaptor keeps depending on the **published `tvision-rs = "0.1"`** crate. A git
-  pin on upstream is the *only* fallback, and only if a release ever lacks an API a
-  milestone strictly needs.
-- **Non-blocking.** Do not gate migration progress on an upstream merge/release.
-  Keep the documented workaround in edaptor; adopt the upstream improvement
-  opportunistically once it lands in a release (then delete the workaround).
+**Status: the spike's findings have already been addressed upstream and released
+in 0.1.1 / 0.1.2.** Confirmed against the published 0.1.2 source (2026-06-24):
 
-**Backlog (from findings §2 doc-gaps and §3 feature-gaps).**
+| # | Kind | Improvement | Status |
+|---|---|---|---|
+| U1 | behaviour | `Outline` auto-seeds scrollbar/focus on first display; no manual seed needed after construction (`ov_update` still required after a tree mutation) | ✅ **0.1.1** |
+| U2 | example | `examples/external_state.rs` — the canonical `Rc<RefCell<T>>` + `broadcast` + timer-pump (`PumpView`) recipe | ✅ **0.1.1** |
+| U4 | code | `tvision_rs::Deferred` re-exported at the crate root | ✅ **0.1.1** |
+| U5 | code | `Outline::value() -> Some(FieldValue::Int(foc))`, parity with `ListBox` | ✅ **0.1.1** |
+| U3 | docs | Note that a standalone `InputLine` needs `state.state.selected = true` for headless tests | ⚠️ still a doc gap (trivial; we set it in test setup) |
+| U6 | code | `Outline::set_root(root, ctx)` convenience wrapper (mirrors `ListBox::new_list`) | ❌ still absent (we use `outline.root = …; ov_update(ctx)`) |
 
-| # | Kind | Improvement | Surfaces in | edaptor workaround until merged |
-|---|---|---|---|---|
-| U1 | docs | Document that `ov_update` is **mandatory** after `Outline` construction / tree swap, in the getting-started / README (not just the method doc) | M1 | seed `ov_update` on first event |
-| U2 | docs+example | Add a "bring-your-own-state / external data source" example: `Rc<RefCell<T>>` + `broadcast` + timer-pump (the pattern the spike invented) | M1 | the spike pattern, now in `ui/state.rs` + `ui/pump.rs` |
-| U3 | docs | Document that a standalone `InputLine` needs `state.state.selected = true` to receive keys in headless tests | M1 (tests) | set the field in test setup |
-| U4 | code | `pub use view::Deferred` at the crate root (ergonomics for headless `Context::new`) | M1 (tests) | use the `view::Deferred` two-segment path |
-| U5 | code | Implement `View::value()` for `Outline` → `FieldValue::Int(ov.foc)`, for parity with `ListBox` | M1 | read selection via `OutlineViewer::ov().foc` |
-| U6 | code | `Outline::set_root(root, ctx)` convenience wrapper (mirrors `ListBox::new_list`) | M1/M3 | write `outline.root` field + call `ov_update` |
+So the migration **adopts 0.1.2 directly** — the seed-on-first-event,
+`ov().foc`, and two-segment `view::Deferred` workarounds the spike used are all
+obsolete and must NOT be carried into the new code.
 
-**Timing.** The cheap doc/ergonomic items (U1–U4) are worth submitting **early**
-(they smooth the rest of the migration and cost little). U5/U6 are nice-to-haves
-submitted opportunistically when M1/M3 touch that code. Any *new* gap a later
-milestone uncovers is added to this backlog and handled the same way.
+**Remaining contribution candidates (small, opportunistic, non-blocking):**
+- **U6** — an `Outline::set_root(root, ctx)` wrapper, if M1/M3 tree-swap code makes
+  the field-write+`ov_update` idiom feel rough. Otherwise leave it.
+- **U3** — a one-line doc note for headless `InputLine`.
+- Any **new** gap a milestone uncovers.
 
-**Acceptance for this side-stream.** Each item is either submitted as an upstream
-PR (link recorded in the relevant milestone's notes) or explicitly deferred with a
-reason. Migration milestones never block on it.
+**Directive when we do contribute.** Work in a **separate clone** of upstream
+`https://github.com/oetiker/tvision-rs`, one focused **PR per change**; upstream
+stays unmodified by edaptor, never a local fork. edaptor keeps depending on the
+**published** crate; a git pin is the only fallback, and only if a release lacks an
+API a milestone strictly needs. Never block a milestone on an upstream
+merge/release — keep the documented workaround and adopt the improvement once it
+ships.
 
 ## 11. Open items deferred to milestone specs
 
