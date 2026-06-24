@@ -45,7 +45,7 @@ pub(crate) fn bare_app(read_only: bool) -> App {
 pub(crate) fn with_form(mut app: App, dn: &str) -> App {
     use crate::schema::FieldKind;
     use crate::ui::edit_form::EditField;
-    use crate::ui::form::WidgetSpec;
+    use crate::workflows::form_model::WidgetSpec;
     app.form = Some(EditForm {
         dn: dn.to_string(),
         fields: vec![EditField {

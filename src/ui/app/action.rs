@@ -563,7 +563,7 @@ pub(crate) fn object_classes_of(form: &EditForm) -> Vec<String> {
 /// classes. The single edit-form build seam used by the read flow and the
 /// post-combined-save reload.
 pub(crate) fn build_loaded_form(
-    model: &crate::ui::form::FormModel,
+    model: &crate::workflows::form_model::FormModel,
     schema: &SchemaModel,
     read_only: bool,
     widgets: &[crate::config::widget::ResolvedWidget],
@@ -605,7 +605,7 @@ mod tests {
     fn build_loaded_form_injects_objectclass_picker() {
         use crate::config::widget::WidgetKind;
         use crate::schema::FieldKind;
-        use crate::ui::form::{FormField, FormModel, WidgetSpec};
+        use crate::workflows::form_model::{FormField, FormModel, WidgetSpec};
 
         // Build a FormModel that contains an editable objectClass field.
         // build_edit_form maps FormModel fields verbatim; field_is_editable is true
@@ -642,7 +642,7 @@ mod tests {
     fn build_loaded_form_does_not_inject_objectclass_picker_in_read_only_mode() {
         use crate::config::widget::WidgetKind;
         use crate::schema::FieldKind;
-        use crate::ui::form::{FormField, FormModel, WidgetSpec};
+        use crate::workflows::form_model::{FormField, FormModel, WidgetSpec};
 
         let model = FormModel {
             title: "uid=alice,ou=people,dc=example,dc=org".into(),
@@ -741,7 +741,7 @@ mod tests {
     fn revert_form_clears_orphaned_and_removes_injected_fields() {
         use crate::schema::FieldKind;
         use crate::ui::edit_form::{EditField, EditForm, FormMode};
-        use crate::ui::form::WidgetSpec;
+        use crate::workflows::form_model::WidgetSpec;
         use std::collections::BTreeMap;
 
         // Build a form that simulates the state after sync_schema_fields was called:

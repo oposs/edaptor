@@ -18,7 +18,7 @@ use tui_tree_widget::Tree;
 
 use crate::ui::app::{App, Overlay, Pane};
 use crate::ui::edit_form::{EditField, ValueEditor};
-use crate::ui::form::WidgetSpec;
+use crate::workflows::form_model::WidgetSpec;
 use crate::workflows::structure::Structure;
 
 /// The three-pane column split: branch tree | leaf list | edit form.
@@ -758,7 +758,7 @@ mod tests {
     use crate::schema::FieldKind;
     use crate::ui::app::{App, Pane};
     use crate::ui::edit_form::{EditField, EditForm, FormMode};
-    use crate::ui::form::WidgetSpec;
+    use crate::workflows::form_model::WidgetSpec;
     use ratatui::backend::TestBackend;
     use ratatui::layout::Rect;
     use ratatui::style::Color;

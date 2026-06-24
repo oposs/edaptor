@@ -608,7 +608,7 @@ mod tests {
     fn test_app_with_form_field_member() -> App {
         use crate::schema::FieldKind;
         use crate::ui::edit_form::EditField;
-        use crate::ui::form::WidgetSpec;
+        use crate::workflows::form_model::WidgetSpec;
         let field = EditField {
             label: "member".into(),
             must: false,
@@ -747,7 +747,7 @@ mod tests {
     fn app_with_lookup_field() -> App {
         use crate::schema::FieldKind;
         use crate::ui::edit_form::EditField;
-        use crate::ui::form::WidgetSpec;
+        use crate::workflows::form_model::WidgetSpec;
         let field = EditField {
             label: "gidNumber".into(),
             must: false,
@@ -1089,7 +1089,7 @@ mod tests {
     ) -> App {
         use crate::schema::FieldKind;
         use crate::ui::edit_form::EditField;
-        use crate::ui::form::WidgetSpec;
+        use crate::workflows::form_model::WidgetSpec;
         let field = EditField {
             label: attr.into(),
             must: false,
@@ -1233,7 +1233,7 @@ mod tests {
         use crate::config::widget::WidgetKind;
         use crate::schema::FieldKind;
         use crate::ui::edit_form::{EditField, EditForm, FormMode};
-        use crate::ui::form::WidgetSpec;
+        use crate::workflows::form_model::WidgetSpec;
         let field = EditField {
             label: "objectClass".into(),
             must: true,
@@ -1335,7 +1335,7 @@ mod tests {
         use crate::config::widget::WidgetKind;
         use crate::schema::FieldKind;
         use crate::ui::edit_form::{EditField, EditForm, FormMode};
-        use crate::ui::form::WidgetSpec;
+        use crate::workflows::form_model::WidgetSpec;
         let mk = |label: &str, val: &str, binding: Option<WidgetKind>| EditField {
             label: label.into(),
             must: true,

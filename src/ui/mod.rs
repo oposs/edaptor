@@ -8,7 +8,6 @@
 pub mod app;
 pub mod config_picker;
 pub mod edit_form;
-pub mod form;
 pub mod form_state;
 pub mod picker;
 pub mod view;

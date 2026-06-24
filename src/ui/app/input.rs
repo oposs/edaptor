@@ -529,7 +529,7 @@ mod tests {
         use crate::config::ChoiceOption;
         use crate::schema::FieldKind;
         use crate::ui::edit_form::{EditField, EditForm, FormMode};
-        use crate::ui::form::WidgetSpec;
+        use crate::workflows::form_model::WidgetSpec;
 
         let s = empty_structure();
 
@@ -621,7 +621,7 @@ mod tests {
         use crate::config::widget::WidgetKind;
         use crate::schema::FieldKind;
         use crate::ui::edit_form::{EditField, EditForm, FormMode};
-        use crate::ui::form::WidgetSpec;
+        use crate::workflows::form_model::WidgetSpec;
         use tui_prompts::TextState;
         let field = EditField {
             label: "uidNumber".into(),

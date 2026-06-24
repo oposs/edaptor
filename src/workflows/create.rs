@@ -9,7 +9,7 @@ use crate::form::changeset::EditEntry;
 use crate::form::validate::{format_validation_errors, validate};
 use crate::ldap::ldif::render_add;
 use crate::schema::SchemaModel;
-use crate::ui::form::{FormField, FormModel, WidgetSpec};
+use crate::workflows::form_model::{FormField, FormModel, WidgetSpec};
 
 /// Outcome of planning a create from a Create-mode form (pure).
 pub enum CreatePrep {

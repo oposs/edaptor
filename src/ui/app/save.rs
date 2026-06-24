@@ -559,7 +559,7 @@ mod tests {
 
     use crate::schema::FieldKind;
     use crate::ui::edit_form::{EditField, FormMode};
-    use crate::ui::form::WidgetSpec;
+    use crate::workflows::form_model::WidgetSpec;
 
     /// Build a user EditForm with:
     /// - own change: description baseline→["old desc"], values→["new desc"]

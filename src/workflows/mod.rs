@@ -2,10 +2,11 @@
 //! helpers, and their pure helpers.
 //!
 //! Everything here is tty-free domain logic. Rendering the [`structure::Structure`]
-//! and the [`crate::ui::form::FormModel`]s happens in the ratatui UI
+//! and the [`crate::workflows::form_model::FormModel`]s happens in the ratatui UI
 //! ([`crate::ui::view`]).
 
 pub mod create;
+pub mod form_model;
 pub mod read_flow;
 pub mod save;
 pub mod structure;

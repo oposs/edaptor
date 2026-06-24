@@ -4,7 +4,7 @@
 //! entry's objectClasses, the fetched [`LdapEntry`], and the active profile's
 //! `show` ordering, it produces a [`FormModel`] — an ordered list of
 //! [`FormField`]s, each tagged with a read-only widget hint. It is the source the
-//! editable [`crate::ui::edit_form::EditForm`] is built from; the UI renders it.
+//! editable form is built from; a UI renders it.
 
 use crate::ldap::worker::LdapEntry;
 use crate::schema::{FieldKind, SchemaModel};

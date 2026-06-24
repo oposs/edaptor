@@ -132,7 +132,7 @@ mod tests {
     use crate::ui::app::test_support::*;
     use crate::ui::app::Pane;
     use crate::ui::edit_form::{EditField, EditForm, FormMode};
-    use crate::ui::form::WidgetSpec;
+    use crate::workflows::form_model::WidgetSpec;
 
     /// An App with one focused, password-bound, read-only/secret field; the
     /// connection encryption flag is set from `encrypted`.

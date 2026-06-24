@@ -8,7 +8,7 @@ use std::collections::BTreeMap;
 
 use edaptor::ldap::worker::{LdapEntry, RawSubschema, Response};
 use edaptor::schema::SchemaModel;
-use edaptor::ui::form::{build_form_model, WidgetSpec};
+use edaptor::workflows::form_model::{build_form_model, WidgetSpec};
 use edaptor::workflows::read_flow::{ReadFlow, ReadOutcome};
 
 #[test]

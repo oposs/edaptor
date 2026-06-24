@@ -1,6 +1,6 @@
 //! The editable form model.
 //!
-//! `FormModel`/`FormField` (`crate::ui::form`) are read-only-oriented and carry
+//! `FormModel`/`FormField` (`crate::workflows::form_model`) are read-only-oriented and carry
 //! no edit state, so the editable shape is net-new here: [`EditField`] adds the
 //! `multi` / `secret` / `ordered` / `editable` flags and a `TextState` edit
 //! engine, and [`EditForm`] groups them under a DN.
@@ -16,8 +16,8 @@ use tui_prompts::{State, TextState};
 use crate::config::relation::{PickerBinding, StoreKey};
 use crate::form::changeset::EditEntry;
 use crate::schema::{FieldKind, SchemaModel};
-use crate::ui::form::{FormField, FormModel, WidgetSpec};
 use crate::ui::picker::{Candidate, PickerState};
+use crate::workflows::form_model::{FormField, FormModel, WidgetSpec};
 
 /// One field of the editable form.
 pub struct EditField {
@@ -450,7 +450,7 @@ impl EditForm {
                 ordered: false,
                 values: Vec::new(),
                 kind,
-                widget: crate::ui::form::WidgetSpec::ReadOnlyText,
+                widget: crate::workflows::form_model::WidgetSpec::ReadOnlyText,
                 editor: tui_prompts::TextState::new(),
                 widget_binding: None,
                 orphaned: false,
@@ -775,7 +775,7 @@ fn field_is_editable(field: &FormField) -> bool {
 mod tests {
     use super::*;
     use crate::ldap::worker::{LdapEntry, RawSubschema};
-    use crate::ui::form::build_form_model;
+    use crate::workflows::form_model::build_form_model;
     use std::collections::BTreeMap;
 
     fn empty_schema() -> SchemaModel {
@@ -834,7 +834,7 @@ mod tests {
 
     #[test]
     fn editform_mode_defaults_to_edit_and_reports_not_new() {
-        use crate::ui::form::FormModel;
+        use crate::workflows::form_model::FormModel;
         let model = FormModel {
             title: "cn=x,dc=example,dc=org".into(),
             fields: vec![],
@@ -1036,7 +1036,7 @@ mod tests {
                 ordered: false,
                 values: values.into_iter().map(String::from).collect(),
                 kind: crate::schema::FieldKind::Text,
-                widget: crate::ui::form::WidgetSpec::ReadOnlyText,
+                widget: crate::workflows::form_model::WidgetSpec::ReadOnlyText,
                 editor: TextState::new().with_value(seed),
                 widget_binding: None,
                 orphaned: false,
@@ -1085,7 +1085,7 @@ mod tests {
                 ordered: false,
                 values: values.into_iter().map(String::from).collect(),
                 kind: crate::schema::FieldKind::Text,
-                widget: crate::ui::form::WidgetSpec::ReadOnlyText,
+                widget: crate::workflows::form_model::WidgetSpec::ReadOnlyText,
                 editor: TextState::new().with_value(seed),
                 widget_binding: None,
                 orphaned: false,
@@ -1158,7 +1158,7 @@ mod tests {
             ordered: false,
             values: vec!["/bin/bash".into()],
             kind: crate::schema::FieldKind::Text,
-            widget: crate::ui::form::WidgetSpec::ReadOnlyText,
+            widget: crate::workflows::form_model::WidgetSpec::ReadOnlyText,
             editor: TextState::new().with_value("/bin/bash".to_string()),
             widget_binding: None,
             orphaned: false,
@@ -1368,7 +1368,7 @@ mod tests {
             ordered: false,
             values: vec!["top".into(), "person".into()],
             kind: crate::schema::FieldKind::Text,
-            widget: crate::ui::form::WidgetSpec::ReadOnlyText,
+            widget: crate::workflows::form_model::WidgetSpec::ReadOnlyText,
             editor: TextState::new(),
             widget_binding: None,
             orphaned: false,
@@ -1429,7 +1429,7 @@ mod tests {
             ordered: false,
             values: values.into_iter().map(String::from).collect(),
             kind: crate::schema::FieldKind::Text,
-            widget: crate::ui::form::WidgetSpec::ReadOnlyText,
+            widget: crate::workflows::form_model::WidgetSpec::ReadOnlyText,
             editor: TextState::new().with_value(seed),
             widget_binding: None,
             orphaned: false,
@@ -1681,7 +1681,7 @@ mod tests {
             ordered: false,
             values: vec!["DEAD".into()],
             kind: crate::schema::FieldKind::Text,
-            widget: crate::ui::form::WidgetSpec::ReadOnlyText,
+            widget: crate::workflows::form_model::WidgetSpec::ReadOnlyText,
             editor: TextState::new(),
             widget_binding: None,
             orphaned: false,

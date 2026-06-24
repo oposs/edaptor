@@ -13,7 +13,7 @@ use anyhow::Result;
 use crate::config::EntryProfile;
 use crate::ldap::worker::{LdapEntry, Request, Response, SearchScope, WorkerHandle};
 use crate::schema::SchemaModel;
-use crate::ui::form::{build_form_model, FormModel};
+use crate::workflows::form_model::{build_form_model, FormModel};
 
 /// Outcome of feeding a polled [`Response`] to the read flow.
 pub enum ReadOutcome {
