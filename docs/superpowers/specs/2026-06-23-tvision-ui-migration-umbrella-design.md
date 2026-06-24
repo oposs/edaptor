@@ -91,13 +91,22 @@ are in the findings doc.
   consistent with `ListBox` (implemented in 0.1.1; the old `OutlineViewer::ov().foc`
   workaround is no longer needed).
 
-- **Facade boundary (enforced, the migration's core rule).** Only `src/ui/*` may
-  `use tvision_rs`. The domain layer stays UI-framework-agnostic. CI guard:
-  `! grep -rl "use ratatui\|use tui_\|use tvision_rs" src | grep -vE "^src/ui/"`.
-  Framework-agnostic logic (schema→field derivation, label-rule evaluation,
-  changeset/validate) is reused from the domain layer or **lifted** out of
-  ratatui-coupled `ui` code into framework-neutral modules; only
-  rendering/input/editor-state is rewritten.
+- **Facade boundary (enforced, the migration's core rule).** Only the tvision UI
+  module may `use tvision_rs`; only the ratatui UI module may `use ratatui` /
+  `use tui_*`. The domain layer stays UI-framework-agnostic. During the transition
+  the new UI lives at **`src/tui/`** and the old ratatui UI stays at `src/ui/` (see
+  §7); CI guard:
+  `! grep -rl "use tvision_rs" src | grep -vE "^src/(tui|bin)/"` and
+  `! grep -rl "use ratatui\|use tui_" src | grep -vE "^src/ui/"`.
+- **Relocate the neutral form model into the domain layer.** The field-derivation
+  logic is already framework-agnostic but lives under `src/ui/` today
+  (`FormModel`/`build_form_model` in `src/ui/form.rs`; `EditForm`/`build_edit_form`/
+  `tag_widget_fields`/`inject_resolver_kinds`/`order_fields`/`current_values`/
+  `is_dirty`/`to_edit_entry` in `src/ui/edit_form.rs` — only the `TextState`
+  editor field + rendering are ratatui-coupled). These move into the domain layer
+  (`src/form/`), so **both** UIs consume them and share *no* UI module — only the
+  domain beneath them. The label engines (`config/label.rs`, `config/tree_label.rs`)
+  are **already** framework-neutral in `config/` and need no move.
 
 - **Dependency.** Published `tvision-rs = "0.1"` from crates.io (resolves to
   **0.1.2**, the current release); alias as `tv` (`tv = { package = "tvision-rs" }`).
@@ -172,22 +181,28 @@ changes**. The form must honour `EditField.widget_binding` from `config::widget`
 
 ---
 
-## 5. Target module layout for the new `src/ui/`
+## 5. Target module layout for the new tvision UI
+
+Built under `src/tui/` during the transition; renamed to `src/ui/` at the M5
+cutover when the ratatui tree is deleted (see §7).
 
 ```
-ui/mod.rs            facade: run() entry, Shared, UiState, REFRESH command
-ui/app.rs            Program assembly: desktop, menu bar, status line, pump wiring
-ui/state.rs          UiState shape, dirty tracking, selection model, id correlation
-ui/pump.rs           PumpView (timer-driven worker drain)
-ui/panes/tree.rs     Outline (DIT) — branch nav, tree-label rules, ov_update on tree swap
-ui/panes/leaf.rs     ListBox + search box — column-2 label rules, leaf→form trigger
-ui/panes/form.rs     Group of per-attribute field rows; plugin present()/activate()
-ui/widget/mod.rs     FieldWidget trait, Activation, CommitOutcome, capabilities, registry
-ui/widget/{plain,choice,password,picker,membership,objectclass,sambasid,nextnumber}.rs
-ui/dialog/{confirm,error,guard,profile_chooser,value_editor}.rs   (tvision Dialogs)
-ui/labels.rs         tree + column-2 label rule evaluation (lifted, framework-neutral)
-ui/startup.rs        config-discovery / config-picker (tvision Dialog before run_app)
+tui/mod.rs            facade: run() entry, Shared, UiState, REFRESH command
+tui/app.rs            Program assembly: desktop, menu bar, status line, pump wiring
+tui/state.rs          UiState shape, dirty tracking, selection model, id correlation
+tui/pump.rs           PumpView (timer-driven worker drain)
+tui/panes/tree.rs     Outline (DIT) — branch nav, tree-label rules, ov_update on tree swap
+tui/panes/leaf.rs     ListBox + search box — column-2 label rules, leaf→form trigger
+tui/panes/form.rs     Group of per-attribute field rows; plugin present()/activate()
+tui/widget/mod.rs     FieldWidget trait, Activation, CommitOutcome, capabilities, registry
+tui/widget/{plain,choice,password,picker,membership,objectclass,sambasid,nextnumber}.rs
+tui/dialog/{confirm,error,guard,profile_chooser,value_editor}.rs   (tvision Dialogs)
+tui/labels.rs         thin adapters over the neutral config/label + config/tree_label engines
+tui/startup.rs        config-discovery / config-picker (tvision Dialog before run_app)
 ```
+
+The form model + field derivation are **not** in this tree — they live in the
+domain layer (`src/form/`, relocated in M1) and are consumed by both UIs.
 
 Files stay focused and small; when a module grows past a couple hundred lines it is
 a signal it is doing too much (the opposite of today's `value_editor.rs`).
@@ -201,13 +216,17 @@ write-path integration spine and the ObjectClass picker — while keeping a work
 demonstrable app at each step.
 
 ### M1 — Three-pane read core + widget framework skeleton
-Splitter + Outline + ListBox/search + form `Group`, driven by `ReadFlow` /
-`FormModel` (not raw `LdapEntry`). Schema-driven field derivation; tree-label and
-column-2 label rules (lifted into `ui/labels.rs`). Define the `FieldWidget` trait +
-registry and implement **`present()`** for read-only display (plain / multi /
-secret-mask presenters).
-**Accept:** navigate DIT → select leaf → read a real entry; every field renders per
-schema and profile; labels match config rules. Headless view tests for tree/leaf
+Relocate the neutral form model (`FormModel`/derivation) into `src/form/`. Add the
+`tvision-rs` dep + `src/tui/` module + a dev binary `src/bin/edaptor-tv.rs` (the
+spike's role; ratatui stays the `edaptor` binary). Build Splitter + Outline +
+ListBox/search + form `Group`, driven by `ReadFlow` / `FormModel` (not raw
+`LdapEntry`). Schema-driven field derivation; tree-label and column-2 label rules
+via thin `tui/labels.rs` adapters over the existing neutral engines. Define the
+`FieldWidget` trait + registry and implement **`present()`** for read-only display
+(plain / multi / secret-mask presenters).
+**Accept:** `cargo run --bin edaptor-tv` navigates DIT → select leaf → reads a real
+entry; every field renders per schema and profile; labels match config rules. The
+`edaptor` (ratatui) binary still builds and runs. Headless view tests for tree/leaf
 navigation and presenters.
 
 ### M2 — Edit + write spine (walking skeleton)
@@ -237,21 +256,31 @@ encrypted connection; picker/membership search and select against real LDAP.
 
 ### M5 — Startup flow + cutover
 Config-discovery / config-picker as a tvision `Dialog` before `run_app`. Final
-polish, status-line/menu wiring, mouse. Delete `src/bin/spike-tv.rs`,
+polish, status-line/menu wiring, mouse. **Cutover:** point `main.rs` at the tvision
+UI, rename `src/tui/` → `src/ui/`, delete the old ratatui `src/ui` tree, delete the
+`src/bin/edaptor-tv.rs` dev binary, and remove the ratatui/tui-* deps
+(`ratatui`, `tui-tree-widget`, `tui-prompts`, `crossterm` if unused by tvision —
+note tvision pulls its own `crossterm`). Delete `src/bin/spike-tv.rs`,
 `tests/spike_tv_umlaut.rs` (umlaut asserts already folded into M2), and the
-`spike-tv` Cargo feature. Remove ratatui (`src/ui` old tree, ratatui/tui-* deps).
-Make tvision the default and only build.
-**Accept:** `make check` green; no ratatui/tui-* deps remain; spike artifacts gone;
-docs (README/CHANGES/mdBook) updated to current behaviour.
+`spike-tv` Cargo feature on the spike branch if merged.
+**Accept:** `make check` green; no ratatui/tui-* deps remain; spike + dev-binary
+artifacts gone; docs (README/CHANGES/mdBook) updated to current behaviour.
 
 ---
 
 ## 7. Rollout
 
-- **Long-lived branch off `main`** — `feat/tvision-ui` (this branch). **Hard
-  swap:** ratatui stays functional on `main` until the branch lands at full
-  parity, then `src/ui` is replaced wholesale and the branch merges. No dual-UI
-  maintenance, no parallel feature flag.
+- **Long-lived branch off `main`** — `feat/tvision-ui` (this branch). **Hard swap
+  at cutover, transitional source coexistence during the build.** The new UI is
+  built under `src/tui/` and run via a dev binary (`edaptor-tv`); the ratatui UI
+  stays at `src/ui/` and remains the `edaptor` binary throughout M1–M4. At M5 the
+  ratatui tree and the dev binary are deleted in one cutover (§6 M5). No runtime
+  dual-UI, no feature flag.
+- **Coexistence is proven and clean, not theoretical.** The spike already compiled
+  ratatui + tvision-rs together in this crate and ran live. They share no global
+  state; the only shared resource is the terminal, owned by one UI per process
+  (separate binaries, never concurrent). Both resolve to the **same `crossterm
+  0.29`** — a single backend copy in the tree, no duplication.
 - The umbrella spec + each milestone spec/plan live on this branch. The findings
   doc and handover are carried here so they survive independent of the spike
   branch (resolves handover open-gap #1).
