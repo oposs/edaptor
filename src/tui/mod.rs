@@ -6,7 +6,10 @@ mod app;
 pub(crate) mod panes;
 pub(crate) mod pump;
 mod state;
-pub(crate) mod widget;
+// Keep `pub`: the FieldWidget plugin contract is defined here for M1 and
+// consumed in M2. `pub` keeps the as-yet-unused contract types visible as
+// public API surface so they are NOT dead_code — no `#[allow]` needed.
+pub mod widget;
 
 use std::cell::RefCell;
 use std::rc::Rc;
