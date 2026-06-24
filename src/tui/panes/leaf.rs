@@ -10,7 +10,7 @@ use crate::tui::{Shared, REFRESH};
 /// A search `InputLine` (row 0) above a `ListBox`. Recomputes rows from the
 /// shared state on REFRESH and whenever the search text changes; submits a base
 /// read via ReadFlow when the selection moves to a new leaf.
-pub struct LeafPane {
+pub(crate) struct LeafPane {
     group: Group,
     search_id: tv::ViewId,
     list_id: tv::ViewId,
@@ -21,7 +21,7 @@ pub struct LeafPane {
 }
 
 impl LeafPane {
-    pub fn new(bounds: Rect, state: Shared) -> Self {
+    pub(crate) fn new(bounds: Rect, state: Shared) -> Self {
         let mut group = Group::new(bounds);
         let w = bounds.b.x - bounds.a.x;
         let search = InputLine::with_limit(Rect::new(0, 0, w, 1), 256);

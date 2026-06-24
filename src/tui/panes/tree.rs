@@ -10,7 +10,10 @@ use crate::tui::{Shared, REFRESH};
 /// structure's branch hierarchy. Only branches (nodes with ≥1 child) appear;
 /// leaves live in pane 2. Labels come from the compiled tree rules, width-fit to
 /// `width`. Pre-order matches the `foc` index `Outline` assigns.
-pub fn build_branch_nodes(state: &UiState, width: usize) -> (Option<Box<tv::Node>>, Vec<String>) {
+pub(crate) fn build_branch_nodes(
+    state: &UiState,
+    width: usize,
+) -> (Option<Box<tv::Node>>, Vec<String>) {
     use std::collections::HashSet;
     let branches: HashSet<String> = state.structure.branch_dns().into_iter().collect();
     let mut dns = Vec::new();
@@ -78,14 +81,14 @@ pub fn build_branch_nodes(state: &UiState, width: usize) -> (Option<Box<tv::Node
 /// Outline pane: updates `current_branch` + `list_dirty` and broadcasts REFRESH
 /// when the selected branch changes. (0.1.2 auto-seeds; read selection via
 /// `Outline::value()`; call `ov_update` only after a tree mutation — none here.)
-pub struct TreePane {
+pub(crate) struct TreePane {
     outline: tv::Outline,
     state: Shared,
     last_sel: i32,
 }
 
 impl TreePane {
-    pub fn new(bounds: Rect, root: Option<Box<tv::Node>>, state: Shared) -> Self {
+    pub(crate) fn new(bounds: Rect, root: Option<Box<tv::Node>>, state: Shared) -> Self {
         TreePane {
             outline: tv::Outline::new(bounds, None, None, root),
             state,

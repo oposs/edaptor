@@ -7,14 +7,14 @@ use crate::tui::{Shared, REFRESH};
 /// Arms a ~20Hz periodic timer on its first event, then drains the worker each
 /// tick. `Event::Timer` is broadcast-class in tvision-rs, so this zero-area,
 /// never-drawn view still receives every tick.
-pub struct PumpView {
+pub(crate) struct PumpView {
     vs: tv::ViewState,
     state: Shared,
     armed: bool,
 }
 
 impl PumpView {
-    pub fn new(state: Shared) -> Self {
+    pub(crate) fn new(state: Shared) -> Self {
         PumpView {
             vs: tv::ViewState::new(tv::Rect::new(0, 0, 0, 0)),
             state,

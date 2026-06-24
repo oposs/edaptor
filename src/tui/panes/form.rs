@@ -20,14 +20,14 @@ fn render_rows(model: &FormModel) -> Vec<String> {
         .collect()
 }
 
-pub struct FormPane {
+pub(crate) struct FormPane {
     group: Group,
     rows: Vec<tv::ViewId>,
     state: Shared,
 }
 
 impl FormPane {
-    pub fn new(bounds: Rect, state: Shared) -> Self {
+    pub(crate) fn new(bounds: Rect, state: Shared) -> Self {
         let mut group = Group::new(bounds);
         let w = bounds.b.x - bounds.a.x;
         let mut rows = Vec::new();
