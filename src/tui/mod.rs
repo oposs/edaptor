@@ -2,6 +2,19 @@
 //! run via the `edaptor-tv` dev binary; renamed to `src/ui/` at the M5 cutover.
 //! Only this module tree (and `src/bin/edaptor-tv.rs`) may `use tvision_rs`.
 
+mod state;
+
+use std::cell::RefCell;
+use std::rc::Rc;
+
+pub use state::UiState;
+
+/// Shared mutable app state, cloned into each pane factory closure.
+pub type Shared = Rc<RefCell<UiState>>;
+
+/// Broadcast command: re-render all panes from current `UiState`.
+pub const REFRESH: tv::Command = tv::Command::custom("edaptor.refresh");
+
 use anyhow::Result;
 use tvision_rs::{
     self as tv, alt, Command, CrosstermBackend, Desktop, Program, Rect, StatusDef, StatusLine,
@@ -43,8 +56,9 @@ fn init_menu_bar(r: Rect) -> Option<Box<dyn View>> {
 }
 
 /// Spawn the worker, fetch schema + structure, then run the TUI.
-/// (M1: bootstrap is added in Task 3; here it only opens an empty program.)
-pub fn run(_config: Config, _password: String) -> Result<()> {
+pub fn run(config: Config, password: String) -> Result<()> {
+    let state: Shared = Rc::new(RefCell::new(state::bootstrap(config, password)?));
+    let _ = &state; // used by init_desktop in Task 9
     let backend = Box::new(CrosstermBackend::new()?);
     let mut program = Program::new(
         backend,

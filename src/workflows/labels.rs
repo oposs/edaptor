@@ -11,9 +11,9 @@ use crate::ldap::worker::StructureNodeRaw;
 use crate::workflows::structure::{Structure, StructureInput};
 
 /// A compiled column-2 label rule: a profile's object classes + parsed template.
-pub(crate) struct LabelRule {
-    pub(crate) object_classes: Vec<String>,
-    pub(crate) template: Vec<crate::config::label::LabelSeg>,
+pub struct LabelRule {
+    pub object_classes: Vec<String>,
+    pub template: Vec<crate::config::label::LabelSeg>,
 }
 
 /// Compile the profiles that declare a `label` into rules (config order). Profiles
