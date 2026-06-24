@@ -70,6 +70,39 @@ impl UiState {
 }
 
 impl UiState {
+    /// Drain ready worker responses through ReadFlow; install a FormModel when a
+    /// pending read returns. Returns true if anything changed (caller broadcasts
+    /// REFRESH). No-op without a worker (test instances). Borrow-safe: collects
+    /// responses before touching read_flow.
+    pub fn pump_worker(&mut self) -> bool {
+        use crate::workflows::read_flow::ReadOutcome;
+        let mut resps = Vec::new();
+        if let Some(w) = self.worker.as_ref() {
+            while let Some(r) = w.poll() {
+                resps.push(r);
+            }
+        }
+        let mut changed = false;
+        for resp in &resps {
+            match self.read_flow.on_response(resp) {
+                ReadOutcome::Form { model, .. } => {
+                    self.form = Some(model);
+                    self.form_dirty = true;
+                    changed = true;
+                }
+                ReadOutcome::Error(msg) => {
+                    self.form = Some(error_form(&msg));
+                    self.form_dirty = true;
+                    changed = true;
+                }
+                ReadOutcome::Ignored => {}
+            }
+        }
+        changed
+    }
+}
+
+impl UiState {
     /// (label, dn) rows for the current branch, filtered by `search`, using the
     /// configured column-2 label rules. Empty when no branch is selected.
     pub fn leaf_rows(&self) -> Vec<(String, String)> {
@@ -82,6 +115,22 @@ impl UiState {
             ),
             None => Vec::new(),
         }
+    }
+}
+
+/// A one-field FormModel used to surface a read error in the form pane.
+fn error_form(msg: &str) -> crate::workflows::form_model::FormModel {
+    use crate::schema::FieldKind;
+    use crate::workflows::form_model::{FormField, FormModel, WidgetSpec};
+    FormModel {
+        title: "error".into(),
+        fields: vec![FormField {
+            label: "error".into(),
+            kind: FieldKind::Text,
+            is_must: false,
+            values: vec![msg.to_string()],
+            widget: WidgetSpec::ReadOnlyText,
+        }],
     }
 }
 
@@ -187,5 +236,15 @@ mod tests {
         assert!(st.current_leaf_dn().is_none());
         assert!(st.form.is_none());
         assert!(!st.list_dirty);
+    }
+
+    #[test]
+    fn test_pump_worker_noop_without_worker() {
+        let structure = Structure::build("dc=x", vec![si("dc=x", None)]);
+        let schema = SchemaModel::from_raw(&RawSubschema::default());
+        let mut st =
+            UiState::new_for_test(structure, schema, "dc=x".into(), Vec::new(), Vec::new());
+        assert!(!st.pump_worker());
+        assert!(st.form.is_none());
     }
 }

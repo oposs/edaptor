@@ -3,6 +3,7 @@
 //! Only this module tree (and `src/bin/edaptor-tv.rs`) may `use tvision_rs`.
 
 pub mod panes;
+pub mod pump;
 mod state;
 pub mod widget;
 
