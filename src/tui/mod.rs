@@ -2,6 +2,7 @@
 //! run via the `edaptor-tv` dev binary; renamed to `src/ui/` at the M5 cutover.
 //! Only this module tree (and `src/bin/edaptor-tv.rs`) may `use tvision_rs`.
 
+pub mod panes;
 mod state;
 pub mod widget;
 
