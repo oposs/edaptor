@@ -71,6 +71,24 @@ fn poll_for_id(worker: &WorkerHandle, want_id: u64, timeout: Duration) -> Option
     None
 }
 
+/// Poll until the `Subschema` reply arrives (it carries no correlation id, so it
+/// cannot use `poll_for_id`). Deadline loop with sleep, mirroring `poll_for_id`,
+/// so a momentarily-empty channel on a loaded server does not spuriously fail.
+fn poll_for_subschema(
+    worker: &WorkerHandle,
+    timeout: Duration,
+) -> Option<edaptor::ldap::worker::RawSubschema> {
+    let deadline = Instant::now() + timeout;
+    while Instant::now() < deadline {
+        match worker.poll() {
+            Some(Response::Subschema(raw)) => return Some(raw),
+            Some(_) => continue, // discard unrelated replies, like poll_for_id
+            None => std::thread::sleep(Duration::from_millis(20)),
+        }
+    }
+    None
+}
+
 /// Poll until any WriteOk or WriteError arrives (for WriteFlow-owned requests
 /// whose ids are allocated internally and not known to the caller).
 fn poll_any_write(worker: &WorkerHandle, timeout: Duration) -> Option<Response> {
@@ -150,10 +168,8 @@ fn edit_persists_and_rename_via_write_flow() {
     worker
         .submit(Request::FetchSubschema)
         .expect("submit FetchSubschema");
-    let raw = match worker.poll() {
-        Some(Response::Subschema(raw)) => raw,
-        other => panic!("expected Subschema, got {other:?}"),
-    };
+    let raw = poll_for_subschema(&worker, Duration::from_secs(10))
+        .expect("subschema should arrive within the deadline");
     let schema = SchemaModel::from_raw(&raw);
 
     // -----------------------------------------------------------------------
