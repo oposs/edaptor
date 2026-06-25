@@ -6,6 +6,7 @@
 //! ([`crate::ui::view`]).
 
 pub mod create;
+pub mod edit_form;
 pub mod form_model;
 pub mod labels;
 pub mod read_flow;
