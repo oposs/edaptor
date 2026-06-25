@@ -1,0 +1,26 @@
+//! Dismissible error dialog.
+
+use tvision_rs::{ButtonFlags, ButtonRowAlign, Command, Dialog, Rect, StaticText, View};
+
+/// Build the error dialog. Returns `Command::OK` on dismiss.
+pub fn build(text: &str) -> Box<dyn View> {
+    let mut dlg = Dialog::new(Rect::new(0, 0, 60, 12), Some("Error".to_string()));
+    dlg.state_mut().options.center_x = true;
+    dlg.state_mut().options.center_y = true;
+    dlg.insert_child(Box::new(StaticText::new(
+        Rect::new(2, 2, 58, 9),
+        text.to_string(),
+    )));
+    dlg.button_row(
+        &[(
+            "~O~K",
+            Command::OK,
+            ButtonFlags {
+                default: true,
+                ..ButtonFlags::new()
+            },
+        )],
+        ButtonRowAlign::Center,
+    );
+    Box::new(dlg)
+}

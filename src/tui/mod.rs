@@ -3,6 +3,9 @@
 //! Only this module tree (and `src/bin/edaptor-tv.rs`) may `use tvision_rs`.
 
 mod app;
+// Keep `pub`: builders and guard_decision are not yet called from non-test code
+// (wired in Task 8). `pub` suppresses the dead_code lint without `#[allow]`.
+pub mod dialog;
 pub(crate) mod panes;
 pub(crate) mod pump;
 mod state;
