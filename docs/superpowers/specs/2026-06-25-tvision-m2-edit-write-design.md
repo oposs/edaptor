@@ -29,8 +29,8 @@ exists (`form::changeset`, `form::validate`, `workflows::save`).
 - **MODIFY and MODRDN** execution from `SavePlan` (rename is reachable because the
   RDN attribute — typically `cn` — is a plain single-value editable field).
 - Confirm (LDIF preview) / Error / Guard (save/discard/stay) dialogs.
-- Dirty tracking + dirty-nav / dirty-focus-switch / dirty-quit guards, with
-  quit deferred until the write completes.
+- Dirty tracking + dirty-nav / dirty-quit guards, with quit deferred until the
+  write completes. (The dirty-focus-switch guard is deferred to M3 — see §8.)
 - The umlaut/grapheme edit regression test, folded from the spike.
 
 **Out of scope (later milestones).**
@@ -229,9 +229,11 @@ modal only for the **decision**; the write itself stays async via the pump).
 - **Dirty** = `edit_form.is_dirty()` (set-wise per field vs `baseline`,
   order-sensitive only for `ordered`). The status line shows the current DN + a
   dirty marker.
-- **Guard triggers** (only when the form is dirty): reselecting a leaf, switching
-  focus away from the form pane, and quitting. Each raises an `Intent`; the Guard
-  dialog (§7) resolves it.
+- **Guard triggers** (only when the form is dirty): reselecting a leaf and
+  quitting. Each raises an `Intent`; the Guard dialog (§7) resolves it. The
+  **focus-switch guard** (leaving a dirty form pane via Tab) needs focus-event
+  plumbing that pairs with M3's create-flow focus work and is **deferred to M3**;
+  it reuses the identical Guard dialog and `Intent::Focus` machinery.
 - **Read-only mode** (`read_only`) disables every editable row and the entire
   save path; no guard ever fires (nothing is dirty).
 
