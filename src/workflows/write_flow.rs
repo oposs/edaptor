@@ -77,28 +77,19 @@ impl WriteFlow {
     /// Validate + diff `form` into a [`PrepareSave`]. Pure (no worker, no clock).
     /// Password staging is M4, so `password_mods`/`mask_attrs` are empty here.
     pub fn prepare(&self, form: &EditForm, schema: &SchemaModel) -> PrepareSave {
-        // Inject objectClass into both sides so validate()'s MUST check for top's
-        // objectClass attribute is satisfied. The form tracks objectClasses
-        // separately from editable fields; they don't change during a plain edit,
-        // so adding them to both sides keeps the diff clean.
-        let mut original_attrs: std::collections::BTreeMap<String, Vec<String>> = form
-            .fields
-            .iter()
-            .map(|f| (f.label.clone(), f.baseline.clone()))
-            .collect();
-        original_attrs
-            .entry("objectClass".to_string())
-            .or_insert_with(|| form.object_classes.clone());
-
+        // Uniform field handling: the MUST objectClass attribute is itself a form
+        // field (build_form_model emits every MUST/MAY attr, and objectClass is
+        // MUST via top), so `original`/`edited` carry it like any other field —
+        // no attribute-specific special-casing in the neutral form core.
         let original = EditEntry {
             dn: form.dn.clone(),
-            attrs: original_attrs,
+            attrs: form
+                .fields
+                .iter()
+                .map(|f| (f.label.clone(), f.baseline.clone()))
+                .collect(),
         };
-        let mut edited = form.to_edit_entry();
-        edited
-            .attrs
-            .entry("objectClass".to_string())
-            .or_insert_with(|| form.object_classes.clone());
+        let edited = form.to_edit_entry();
         let secret_attrs: Vec<String> = form
             .fields
             .iter()
@@ -303,10 +294,30 @@ mod tests {
         }
     }
 
+    /// The MUST objectClass attribute is a real form field (multi-valued,
+    /// read-only in M2), exactly as `build_form_model` emits it.
+    fn oc_field() -> EditField {
+        EditField {
+            label: "objectClass".into(),
+            must: true,
+            editable: false,
+            multi: true,
+            secret: false,
+            ordered: false,
+            orphaned: false,
+            kind: FieldKind::Text,
+            widget: WidgetSpec::ReadOnlyText,
+            widget_binding: None,
+            values: vec!["top".into(), "person".into()],
+            baseline: vec!["top".into(), "person".into()],
+        }
+    }
+
     #[test]
     fn prepare_no_change_is_nochanges() {
         let wf = WriteFlow::new();
         let f = form_with(vec![
+            oc_field(),
             field("cn", "Alice", "Alice"),
             field("sn", "Adams", "Adams"),
         ]);
@@ -317,6 +328,7 @@ mod tests {
     fn prepare_modify_yields_ready() {
         let wf = WriteFlow::new();
         let f = form_with(vec![
+            oc_field(),
             field("cn", "Alice", "Alice"),
             field("sn", "Allen", "Adams"),
         ]);
