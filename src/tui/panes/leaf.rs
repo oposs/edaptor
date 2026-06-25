@@ -1,7 +1,7 @@
 //! Leaf list pane: a search box over a ListBox of the current branch's leaves.
 
 use tvision_rs::{
-    self as tv, delegate, Context, Event, FieldValue, Group, InputLine, ListBox, Rect, View,
+    self as tv, delegate, Context, Event, FieldValue, Group, InputLine, Key, ListBox, Rect, View,
 };
 
 use crate::tui::state::profile_for;
@@ -129,7 +129,23 @@ impl View for LeafPane {
             self.state.borrow_mut().list_dirty = false;
         }
 
-        self.group.handle_event(ev, ctx);
+        // Arrow/page keys navigate the LIST even while the search box holds text
+        // focus (the search-over-list idiom): forward them straight to the list so
+        // the user can move the selection while typing a filter. Tab is reserved for
+        // switching panes (consumed by the Splitter), so intra-pane navigation uses
+        // the arrows — exactly as the tree pane does.
+        let nav_key = matches!(
+            ev,
+            Event::KeyDown(k)
+                if matches!(k.key, Key::Up | Key::Down | Key::PageUp | Key::PageDown)
+        );
+        if nav_key {
+            if let Some(list) = self.group.child_mut(self.list_id) {
+                list.handle_event(ev, ctx);
+            }
+        } else {
+            self.group.handle_event(ev, ctx);
+        }
 
         // Sync search text from the InputLine into shared state; recompute on change.
         let cur = match self.group.child_mut(self.search_id).and_then(|v| v.value()) {
@@ -295,6 +311,72 @@ mod tests {
         assert_eq!(
             pane.last_sel, 1,
             "leaf pane must detect the new selection from value(), not the cleared key event"
+        );
+    }
+
+    #[test]
+    fn arrow_key_navigates_the_list() {
+        // Arrows are forwarded to the list (the search box keeps text focus), so a
+        // Down advances the list selection and submit_selected loads the new leaf.
+        let inputs = vec![
+            StructureInput {
+                dn: "dc=x".into(),
+                cn: None,
+                description: None,
+                object_classes: vec![],
+                attrs: BTreeMap::new(),
+            },
+            StructureInput {
+                dn: "ou=p,dc=x".into(),
+                cn: None,
+                description: None,
+                object_classes: vec![],
+                attrs: BTreeMap::new(),
+            },
+            StructureInput {
+                dn: "cn=a,ou=p,dc=x".into(),
+                cn: Some("a".into()),
+                description: None,
+                object_classes: vec![],
+                attrs: BTreeMap::new(),
+            },
+            StructureInput {
+                dn: "cn=b,ou=p,dc=x".into(),
+                cn: Some("b".into()),
+                description: None,
+                object_classes: vec![],
+                attrs: BTreeMap::new(),
+            },
+        ];
+        let structure = Structure::build("dc=x", inputs);
+        let schema = SchemaModel::from_raw(&RawSubschema::default());
+        let mut state =
+            UiState::new_for_test(structure, schema, "dc=x".into(), Vec::new(), Vec::new());
+        state.current_branch = Some("ou=p,dc=x".into());
+        let shared: Shared = Rc::new(RefCell::new(state));
+
+        let mut pane = LeafPane::new(Rect::new(0, 0, 30, 10), shared.clone());
+        let mut out: VecDeque<Event> = VecDeque::new();
+        let mut timers = tv::timer::TimerQueue::new();
+        let mut deferred: Vec<tv::Deferred> = Vec::new();
+        let mut ctx = tv::Context::new(&mut out, &mut timers, 0, &mut deferred);
+
+        // Seed (selection settles on row 0).
+        shared.borrow_mut().list_dirty = true;
+        let mut seed = Event::Broadcast {
+            command: REFRESH,
+            source: None,
+        };
+        pane.handle_event(&mut seed, &mut ctx);
+        assert_eq!(pane.last_sel, 0, "seeding selects row 0");
+
+        // A Down key is forwarded to the list (not the search box) and moves the
+        // selection, which submit_selected then picks up.
+        let mut down = Event::KeyDown(tv::KeyEvent::from(tv::Key::Down));
+        pane.handle_event(&mut down, &mut ctx);
+        assert_eq!(
+            pane.last_sel, 1,
+            "Down advances the list selection (forwarded to the list)"
         );
     }
 }

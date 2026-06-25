@@ -4,7 +4,9 @@
 //! `InputLine`s are synced into the shared `EditForm` so a `SAVE` sees current
 //! values, and the header's dirty marker is refreshed.
 
-use tvision_rs::{self as tv, delegate, Context, Event, FieldValue, Group, InputLine, Rect, View};
+use tvision_rs::{
+    self as tv, delegate, Context, Event, FieldValue, Group, InputLine, Key, Rect, View,
+};
 
 use crate::tui::widget::{inline_editable, present_field};
 use crate::tui::{Shared, REFRESH};
@@ -120,6 +122,46 @@ impl FormPane {
                 v.state_mut().state.disabled = !editable;
             }
         }
+
+        // Land focus on the first editable field so Tab-ing into this pane is
+        // immediately editable (Tab switches panes; Up/Down move between fields).
+        if let Some(first) = self.editable_value_ids().first().copied() {
+            self.group.focus_child(first, ctx);
+        }
+    }
+
+    /// The value-cell view ids of the inline-editable rows, in display order
+    /// (bounded by the fixed cell pool).
+    fn editable_value_ids(&self) -> Vec<tv::ViewId> {
+        let st = self.state.borrow();
+        match st.edit_form.as_ref() {
+            None => Vec::new(),
+            Some(form) => form
+                .fields
+                .iter()
+                .enumerate()
+                .take(FORM_ROWS)
+                .filter(|(_, f)| inline_editable(f))
+                .map(|(i, _)| self.value_ids[i])
+                .collect(),
+        }
+    }
+
+    /// Move focus to the prev/next editable field, wrapping. Focuses the first
+    /// editable when none is currently focused.
+    fn focus_field(&mut self, delta: i32, ctx: &mut Context) {
+        let ids = self.editable_value_ids();
+        if ids.is_empty() {
+            return;
+        }
+        let cur = self.group.current();
+        let pos = cur.and_then(|c| ids.iter().position(|id| *id == c));
+        let next = match pos {
+            Some(p) => (p as i32 + delta).rem_euclid(ids.len() as i32) as usize,
+            None if delta >= 0 => 0,
+            None => ids.len() - 1,
+        };
+        self.group.focus_child(ids[next], ctx);
     }
 
     /// Sync each editable value InputLine's text into `edit_form`; refresh header.
@@ -192,7 +234,17 @@ impl View for FormPane {
             self.render(ctx);
         }
         let _ = REFRESH; // REFRESH still drives other panes; retained import
-        self.group.handle_event(ev, ctx);
+
+        // Up/Down move focus between editable fields (Tab is reserved for switching
+        // panes, consumed by the Splitter). Consume the key so it stays in this pane.
+        let nav = matches!(ev, Event::KeyDown(k) if matches!(k.key, Key::Up | Key::Down));
+        if nav {
+            let down = matches!(ev, Event::KeyDown(k) if k.key == Key::Down);
+            self.focus_field(if down { 1 } else { -1 }, ctx);
+            ev.clear();
+        } else {
+            self.group.handle_event(ev, ctx);
+        }
         // Keep edit_form current with the on-screen editors.
         self.sync_into_form();
     }
@@ -249,6 +301,74 @@ mod tests {
         deferred: &'a mut Vec<tv::Deferred>,
     ) -> Context<'a> {
         Context::new(out, timers, 0, deferred)
+    }
+
+    #[test]
+    fn updown_cycles_focus_among_editable_fields() {
+        // Tab switches panes (consumed by the Splitter), so intra-pane field
+        // navigation uses Up/Down. Render focuses the first editable field; Up/Down
+        // cycle among editable rows, skipping read-only ones.
+        use crate::ldap::worker::RawSubschema;
+        let schema = SchemaModel::from_raw(&RawSubschema::default());
+        let structure = Structure::build("dc=x", vec![]);
+        let mut st =
+            UiState::new_for_test(structure, schema, "dc=x".into(), Vec::new(), Vec::new());
+        let mut cn = ef("cn", "a", true);
+        cn.multi = true; // multi-valued → not inline-editable
+        st.edit_form = Some(EditForm {
+            dn: "cn=a,dc=x".into(),
+            mode: FormMode::Edit,
+            object_classes: vec![],
+            fields: vec![cn, ef("gidNumber", "1001", true), ef("sn", "Bar", true)],
+        });
+        st.form_needs_render = true;
+        let shared: Shared = Rc::new(RefCell::new(st));
+        let mut pane = FormPane::new(Rect::new(0, 0, 80, FORM_ROWS as i32 + 1), shared.clone());
+        let mut out = VecDeque::new();
+        let mut timers = tv::timer::TimerQueue::new();
+        let mut deferred = Vec::new();
+        let mut ctx = headless_ctx(&mut out, &mut timers, &mut deferred);
+        let mut ev = Event::Broadcast {
+            command: REFRESH,
+            source: None,
+        };
+        pane.handle_event(&mut ev, &mut ctx); // render + focus first editable
+
+        let editable = pane.editable_value_ids();
+        assert_eq!(
+            editable.len(),
+            2,
+            "cn (multi) is not editable; gidNumber+sn are"
+        );
+        assert_eq!(
+            pane.group.current(),
+            Some(editable[0]),
+            "render focuses the first editable field"
+        );
+
+        let mut d = Event::KeyDown(tv::KeyEvent::from(tv::Key::Down));
+        pane.handle_event(&mut d, &mut ctx);
+        assert_eq!(
+            pane.group.current(),
+            Some(editable[1]),
+            "Down → next editable field"
+        );
+
+        let mut d = Event::KeyDown(tv::KeyEvent::from(tv::Key::Down));
+        pane.handle_event(&mut d, &mut ctx);
+        assert_eq!(
+            pane.group.current(),
+            Some(editable[0]),
+            "Down wraps to the first editable field"
+        );
+
+        let mut u = Event::KeyDown(tv::KeyEvent::from(tv::Key::Up));
+        pane.handle_event(&mut u, &mut ctx);
+        assert_eq!(
+            pane.group.current(),
+            Some(editable[1]),
+            "Up → previous editable field"
+        );
     }
 
     #[test]
@@ -339,7 +459,13 @@ mod tests {
         };
         pane.handle_event(&mut ev, &mut ctx);
         pane.set_value_text(0, "Müller-Lüdenscheidt".into());
-        let mut ev2 = Event::KeyDown(tv::KeyEvent::from(tv::Key::Char('x')));
+        // Trigger sync with a non-editing event (a live keystroke would land in the
+        // now-focused field and replace it — that is correct edit behaviour, not what
+        // this grapheme regression checks).
+        let mut ev2 = Event::Broadcast {
+            command: tv::Command::custom("test.noop"),
+            source: None,
+        };
         pane.handle_event(&mut ev2, &mut ctx);
         let st = shared.borrow();
         assert_eq!(
