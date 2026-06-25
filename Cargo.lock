@@ -2683,7 +2683,7 @@ dependencies = [
 [[package]]
 name = "tvision-rs"
 version = "0.1.2"
-source = "git+https://github.com/oetiker/tvision-rs.git?rev=8ba2b53e56ec7524f427b593a4fbb08b17bea72a#8ba2b53e56ec7524f427b593a4fbb08b17bea72a"
+source = "git+https://github.com/oetiker/tvision-rs.git?rev=9b898a7aa51bf60784b486e26d817707704c2aae#9b898a7aa51bf60784b486e26d817707704c2aae"
 dependencies = [
  "arboard",
  "crossterm",
@@ -2698,7 +2698,7 @@ dependencies = [
 [[package]]
 name = "tvision-rs-macros"
 version = "0.1.2"
-source = "git+https://github.com/oetiker/tvision-rs.git?rev=8ba2b53e56ec7524f427b593a4fbb08b17bea72a#8ba2b53e56ec7524f427b593a4fbb08b17bea72a"
+source = "git+https://github.com/oetiker/tvision-rs.git?rev=9b898a7aa51bf60784b486e26d817707704c2aae#9b898a7aa51bf60784b486e26d817707704c2aae"
 dependencies = [
  "proc-macro-crate",
  "proc-macro2",
