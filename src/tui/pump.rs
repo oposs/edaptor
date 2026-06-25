@@ -44,9 +44,15 @@ impl View for PumpView {
             );
         }
         if matches!(ev, Event::Timer(_)) {
-            let result = self.state.borrow_mut().pump_worker();
-            if result.changed {
+            let r = self.state.borrow_mut().pump_worker();
+            if r.changed {
                 ctx.broadcast(REFRESH, None);
+            }
+            if r.error {
+                ctx.post(crate::tui::SHOW_ERROR);
+            }
+            if r.quit {
+                ctx.post(tv::Command::QUIT);
             }
         }
     }

@@ -22,6 +22,12 @@ pub type Shared = Rc<RefCell<UiState>>;
 /// Broadcast command: re-render all panes from current `UiState`.
 pub const REFRESH: tv::Command = tv::Command::custom("edaptor.refresh");
 
+/// App-level commands routed to `app::dispatch` via `run_app`.
+pub const SAVE: tv::Command = tv::Command::custom("edaptor.save");
+pub const REQUEST_QUIT: tv::Command = tv::Command::custom("edaptor.request_quit");
+pub const GUARD_NAV: tv::Command = tv::Command::custom("edaptor.guard_nav");
+pub const SHOW_ERROR: tv::Command = tv::Command::custom("edaptor.show_error");
+
 use anyhow::Result;
 use tvision_rs::{self as tv, CrosstermBackend};
 
