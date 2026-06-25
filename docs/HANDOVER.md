@@ -1,239 +1,273 @@
 # edaptor — Session Handover
 
 Carries the **current concerns** into the next session. Not a project history —
-for that see git log, the specs under `docs/superpowers/specs/`, and project
-memory (`…/memory/MEMORY.md`).
+for that see git log, the specs under `docs/superpowers/specs/`, the SDD ledger
+(`.superpowers/sdd/progress.md`), and project memory (`…/memory/MEMORY.md`).
 
-**Date:** 2026-06-23 · **Purpose of next session: start the FULL UI migration
-from ratatui to `tvision-rs`.** The de-risking spike is **complete and is a GO**
-(all spec success criteria met, including live interactive confirmation).
+**Date:** 2026-06-26 · **Where we are: the tvision-rs UI migration is mid-flight.
+M1 (read core) and M2 (edit + write spine) are COMPLETE and reviewed. Next is M3
+(ObjectClass picker + create flow).**
 
 `edaptor` is a Rust TUI for administering an OpenLDAP directory. It introspects
 live schema (`cn=subschema`) and generates edit forms from `objectClass`
 definitions; a TOML config declares connection settings plus *entry profiles* and
 a **widget palette** (`[profile.widget.<attr>]` kinds: `choice` / `password` /
-`picker` / `membership`). The shipping UI is **ratatui** (`src/ui/*`, ~10k LOC).
+`picker` / `membership`). Two UIs coexist during the migration: the shipping
+**ratatui** UI (`src/ui/*`, ~10k LOC, the `edaptor` binary) and the new
+**tvision-rs** UI (`src/tui/*`, the `edaptor-tv` dev binary).
 
 ---
 
-## Git topology (read this before you branch)
+## Git topology (read before you branch)
 
-- **`origin/main` = `2185b2e`** (Release v0.4.0). Local `main` is **unpushed**.
-- **Local `main` = `dec196b`** — 3 unpushed doc commits ahead of origin: the spike
-  **design spec** and **implementation plan** live here (no code).
-- **Branch `spike/tvision-rs` = `b520cf5`** — 18 commits ahead of `main`. Holds the
-  **spike code** (`src/bin/spike-tv.rs`, `tests/spike_tv_umlaut.rs`, the Cargo
-  feature) **and the findings doc**. Kept as-is (not merged) by user choice.
-- Current `Cargo.toml` version is `0.4.0`.
+- **Branch `feat/tvision-ui` = `da3f828`** — the long-lived migration branch. ALL
+  migration work lives here. **It does NOT merge to `main` until the M5 cutover**
+  (umbrella §7) — the ratatui UI stays the shipping `edaptor` binary through M1–M4.
+- `main` is behind/unpushed (origin at v0.4.0). Pushing / CI / release are a
+  separate concern, not gated by the migration.
+- `Cargo.toml` version is `0.4.0`. Dependency: **`tvision-rs = "0.2"`** from
+  crates.io (a plain release dep — no git pin, no patch).
 
-**The findings doc currently exists only on `spike/tvision-rs`.** It is the most
-important reference for the migration — see "First steps" for how to keep it handy.
-
----
-
-## What the spike proved (the GO)
-
-The full report — read it first — is on `spike/tvision-rs` at
-[`docs/superpowers/research/2026-06-22-tvision-rs-spike-findings.md`](superpowers/research/2026-06-22-tvision-rs-spike-findings.md).
-Headlines:
-
-1. **The original blocker is gone.** `tvision-rs 0.1` `InputLine` is grapheme-correct
-   for German text — proven by automated test (`tests/spike_tv_umlaut.rs`: type
-   `"Zü"`, backspace → `"Z"`, no panic, no byte-split). This was the explicit
-   pre-condition (edaptor *left* Turbo Vision because the old third-party
-   `turbo-vision` crate byte-sliced UTF-8 and panicked on an umlaut — a DIFFERENT
-   crate; `tvision-rs` is our own independent port).
-2. **The off-thread LDAP worker bridges into tvision-rs views with NO library
-   change** (spec §5 resolved): a zero-area `PumpView` + `Context::set_timer(50ms)`
-   periodic `Event::Timer` → drain `worker.poll()` → `ctx.broadcast(REFRESH)`.
-3. **The needed widgets exist** on the published `0.1` crate: `Splitter` (resizable
-   panes), `Outline` (DIT tree), `ListBox`, `Group`+`InputLine`+`Label`+`Button`,
-   `Menu`/`StatusLine`/`Dialog`/colour picker.
-4. **The domain layer ports cleanly.** The spike drives the **unchanged** edaptor
-   domain layer (`config`, `ldap::worker`, `schema`, `workflows::{structure,
-   read_flow}`) from a separate binary — confirming the migration is "rewrite
-   `src/ui` against tvision-rs; everything else untouched."
-5. **Live-confirmed by user (2026-06-23):** three-pane render, branch→leaf→form
-   navigation against real LDAP, and splitter resize all work.
-
-Use the published crate **`tvision-rs = "0.1"`** from crates.io. Do NOT use a
-path/git dependency. If a needed API is ever missing from a release, the fallback
-is a git pin on `https://github.com/oetiker/tvision-rs` (upstream, unmodified) —
-never a local path. (User directive: fixes to tvision-rs go via a separate clone +
-upstream PR.)
+The migration is governed by the **umbrella design**:
+[`docs/superpowers/specs/2026-06-23-tvision-ui-migration-umbrella-design.md`](superpowers/specs/2026-06-23-tvision-ui-migration-umbrella-design.md)
+— read §6 (milestone sequence) and §4 (the FieldWidget plugin contract) first.
+Each milestone gets its own spec → plan → implement cycle.
 
 ---
 
-## Load-bearing tvision-rs facts (so you don't rediscover them)
+## What's done
 
-All verified against the `0.1.0` source during the spike; details + file:line in
-the findings doc.
+**M1 — three-pane read core** (plan `plans/2026-06-24-tvision-m1-read-core.md`).
+DIT `Outline` (tree) | leaf `ListBox`+search | read-only form `Group`, driven by
+the unchanged domain layer via `workflows::read_flow`/`form_model`. The
+`FieldWidget` trait + registry skeleton (`src/tui/widget.rs`), `present()` only.
 
-- **App skeleton:** `Program::new(backend, clock, theme, init_desktop,
-  init_status_line, init_menu_bar)` then `program.run_app(|prog, cmd| { … })`. The
-  three `init_*` factories are `impl FnOnce(Rect) -> Option<Box<dyn View>>` — they
-  **accept capturing closures**, so app state (an `Rc<RefCell<…>>`) reaches the
-  view tree without a `thread_local` hack.
-- **`Outline` REQUIRES `tv::ov_update(&mut outline, ctx)` once after
-  construction/insert.** Skip it and `limit.y == 0`, so arrow-down clamps focus to
-  `-1` and the selection vanishes. Seed it once via a wrapper view's first
-  `handle_event` (same idiom as `ListBox::new_list`). **This is undocumented
-  upstream — easy to miss.**
-- **Reading selection is inconsistent between widgets:** `ListBox` implements
-  `View::value() -> Some(FieldValue::Int(focused))`; `Outline` does **not** — read
-  `outline.ov().foc` via the `OutlineViewer` trait (import it).
-- **Dynamic content after insert:** `ListBox::new_list(items, ctx)` (needs a live
-  `Context`; seed on first event). `Outline` tree replacement: replace the `pub
-  root` field and call `ov_update` (documented at `outline.rs:1385`).
-- **Mutating form fields:** `Group::child_mut(ViewId) -> Option<&mut dyn View>`
-  exists; `InputLine::set_value(FieldValue::Text(s))` works.
-- **`Event::Broadcast` (from `ctx.broadcast`) is DEFERRED**, not synchronous — it
-  is queued and delivered on a later loop pass. So a `RefCell` borrow in one pane's
-  `handle_event` can never collide with another pane re-entering on the broadcast.
-  Still follow the rule: **collect into locals, drop the borrow, then call**
-  `broadcast`/`new_list`/`set_value`/`worker.submit`.
-- **Headless view testing works (Path A):** build a `Context` directly —
-  `tvision_rs::view::Context::new(&mut out, &mut timers, 0, &mut deferred)` with
-  `tvision_rs::timer::TimerQueue::new()` and `tvision_rs::view::Deferred` (all
-  `pub`). A standalone `InputLine` needs `il.state.state.selected = true` to
-  receive keys. (`Deferred` is NOT re-exported at the crate root — use the
-  `view::` path.)
+**M2 — edit + write spine** (spec `specs/2026-06-25-tvision-m2-edit-write-design.md`,
+plan `plans/2026-06-25-tvision-m2-edit-write.md`). 9 tasks, subagent-driven,
+reviewed clean (whole-branch review verdict READY). Delivered:
+- `workflows::edit_form` — neutral editable model (values + baseline + set-wise
+  dirty + `to_edit_entry`). A FRESH parity copy of `ui::edit_form`; **dedup at M5**
+  (the duplication is intentional — do not "fix" it).
+- `workflows::write_flow` — `WriteFlow::{prepare,submit,on_response,submit_followup}`:
+  validate+diff via `workflows::save::prepare_save`, submit to the worker, correlate
+  `WriteOk`/`WriteError`; **MODIFY + MODRDN** (incl. rename-then-modify two-step).
+  `prepare`/`on_response` are pure; submit is a thin worker wrapper.
+- `tui::widget` — `present(&EditField)`, `activate()→Inline`, `inline_editable` gate.
+- `tui::state` — `UiState` holds `edit_form`/`write_flow`; `pump_worker` routes
+  reads then writes → `PumpResult{changed,quit,error}`.
+- `tui::panes::form` — editable pane; `tui::dialog::{confirm,error,guard}` +
+  `guard_decision`; `tui::app` — the single `run_app` dispatch closure (the only
+  `exec_view` site) wiring Save/Exit, dirty-nav guard, deferred-quit.
+- Gated live test `tests/tv_edit_write.rs` (skips unless `EDAPTOR_TEST_LDAP_URI`).
 
----
+**Post-M2 navigation fixes** (found in the first live tmux acceptance pass — M1's
+navigation had never been driven interactively):
+- DIT `branch_dns` were built in reversed sibling order → wrong leaves shown. Fixed.
+- Leaf pane gated the read on a key the `ListBox` had already consumed → selecting
+  a leaf never loaded the form. Now detects the change via `value()`. Fixed.
+- Form pane indexed past the 32-cell pool for entries with >32 attrs (panic). Now
+  `take(FORM_ROWS)`-bounded (graceful truncation). Fixed.
+- `edaptor-tv` now accepts `--config <path>` (was positional-only).
+- **Intra-pane keyboard nav**: arrows navigate within a pane (leaf list while the
+  search box keeps focus; form fields). Tab switches between panes/widgets.
 
-## The migration: scope, approach, estimate
-
-**Approach (proven by the spike): rewrite `src/ui/*` against tvision-rs; leave the
-domain layer (`form`, `workflows`, `config`, `schema`, `ldap`, `samba`) untouched.**
-The facade boundary flips from ratatui to tvision-rs (see Conventions).
-
-**Bootstrap sequence to reuse** (verbatim from the spike, all public APIs):
-`Config::load(path)` → `WorkerHandle::spawn(config, password)` →
-`worker.request(Request::FetchSubschema)` → `SchemaModel::from_raw` →
-`worker.request(Request::LoadStructure{..})` → `Structure::build` →
-`ReadFlow::new(schema)`. Branch→leaf is synchronous from `Structure::leaves_of`;
-leaf→form needs the async worker (use the `Request::Search{scope: Base}` /
-`ReadFlow::request_entry` path + the timer-pump pattern).
-
-**Layers to build (rough estimate ~5–8 weeks; see findings §4):**
-1. Three-pane core (Splitter + Outline + ListBox + form Group) — **already
-   prototyped in the spike**; productionize it (use `ReadFlow`/`FormModel` instead
-   of the spike's raw `LdapEntry` display, and dynamic per-attribute widgets).
-2. Overlays → tvision `Dialog`s: Confirm (LDIF preview), Error, Guard
-   (save/discard/stay), Alt+N profile chooser, multi-value `ValueEditor`.
-3. The rich widgets: Choice, Password (samba, TLS-gated), Picker, Membership,
-   **ObjectClassPicker — flagged the RISKIEST piece** (schema-driven dynamic field
-   regeneration; the spike did not touch it).
-4. Save / validate / changeset wiring (the `form::{changeset,validate}` domain
-   layer already exists and is UI-agnostic — wire the tvision dialogs to it).
-5. Config-driven column-2 label rules + DIT tree-label rules.
-6. Config-discovery / config-picker startup flow.
-
-**The spike binary is REFERENCE ONLY — throwaway.** Do not grow the real UI inside
-`src/bin/spike-tv.rs`. Build the real thing in `src/ui/*`. When the tvision UI
-ships, delete `src/bin/spike-tv.rs`, `tests/spike_tv_umlaut.rs` (fold its umlaut
-assertions into the real edit-field tests), and the `spike-tv` Cargo feature.
-
-**Upstream tvision-rs PRs worth doing first** (small, make the migration smoother;
-via a separate clone + PR per user directive): document that `ov_update` is
-mandatory after `Outline` construction; implement `Outline::value()` for parity
-with `ListBox`; re-export `Deferred` at the crate root; add a "bring-your-own-state
-/ external data source" example.
+**tvision-rs upstream improvement** (oetiker's repo; edaptor is its first real
+consumer). The pane-focus gap (panes nested in a Splitter were unreachable by Tab)
+was fixed UPSTREAM as **hierarchical Tab focus traversal** — Tab/Shift-Tab walk the
+focusable-leaf tree across nested groups. Shipped in **tvision-rs 0.2.0**; edaptor
+depends on the release. PR #5 (merged). The Splitter is now transparent to focus.
 
 ---
 
-## First steps for the migration session
+## The one open M2 item: live acceptance of SAVE + GUARDS
 
-1. **Pull / sync** (this repo commits directly to `main`): `git pull --ff-only`.
-   Note local `main` has unpushed spike spec+plan commits.
-2. **Read the findings doc** (on `spike/tvision-rs`). To keep it on trunk so it
-   survives, consider cherry-picking just that doc onto `main`, or `git show
-   spike/tvision-rs:docs/superpowers/research/2026-06-22-tvision-rs-spike-findings.md`.
-   Also re-read the spec & plan (already on `main`).
-3. **Run the spike once** for orientation (see Build/run) — it shows the target UX.
-4. **Brainstorm → write the full-migration plan** (use the brainstorming →
-   writing-plans flow). The spike's spec/plan cover only the spike; the full
-   migration needs its own spec+plan. Decompose by the 6 layers above; consider
-   shipping the three-pane core behind a feature flag first, ratatui as fallback,
-   then swap the default once parity is reached.
-5. **Execute subagent-driven** (fresh subagent per task + spec-then-quality review),
-   as the spike was. ⚠ One subagent edits the tree at a time — do not run a side
-   agent on the same working tree concurrently (it caused a commit-bundling
-   collision during the spike).
+M2's edit/dirty/nav was verified live (tmux), but the **save round-trip and the
+guard dialogs were NOT yet driven interactively** — that is M2's remaining accept
+gate (umbrella §6 M2: "edit and persist one real entry end-to-end; guard fires on
+dirty nav and quit; LDIF preview correct"). **Do this first next session** (it's
+cheap and de-risks M3, which builds on the write spine). Drive in tmux (see
+"Live-driving the TUI"): edit a plain attr → **Alt-S** → LDIF confirm dialog →
+Save → persists → re-read clears the dirty `*`; then dirty-nav and Alt-X guards
+(Save/Discard/Stay). If save/guards misbehave, fix before M3.
+
+---
+
+## ⭐ Live-driving the TUI from an agent session (tmux)
+
+**The old handover said interactive checks need a human — that is SUPERSEDED.** You
+can drive the real TUI yourself over a PTY with tmux (no human needed):
+
+```bash
+scripts/test-ldap.sh start                       # podman demo server (idempotent if up)
+tmux kill-session -t edtv 2>/dev/null
+tmux new-session -d -s edtv -x 210 -y 50         # wide enough for 3 panes
+tmux send-keys -t edtv 'export EDAPTOR_TEST_ADMIN_PW=adminpassword' Enter
+tmux send-keys -t edtv '/home/oetiker/scratch/cargo-target/debug/edaptor-tv --config examples/demo-config.toml' Enter
+sleep 4
+tmux send-keys -t edtv Down       # keys: Down/Up/Tab/Enter, or a literal like 7 / 'User2'
+sleep 0.4
+tmux capture-pane -t edtv -p | sed -n '2,14p'   # read the screen
+tmux kill-session -t edtv         # clean up (the run holds an LDAP bind)
+```
+Notes: build the binary first (`cargo build -j4 --bin edaptor-tv`) so the run is
+fast; the binary is at `/home/oetiker/scratch/cargo-target/debug/edaptor-tv` (NOT
+`./target`). For modals (Confirm/Guard) send the button hotkey or arrows+Enter.
+Do NOT trigger destructive saves carelessly against the demo data; prefer a temp
+entry, or edit-then-Discard. Insert `sleep` between keystrokes (async reads land
+via the 50ms pump).
+
+---
+
+## Next: M3 — ObjectClass picker + create flow (the riskiest milestone, done early)
+
+Per umbrella §6 M3: ObjectClass plugin (schema-seeded multi-select over `ListBox`,
+client-side substring filter, `SetValuesThenResyncSchema` driving schema-based
+field regeneration); Alt+N profile chooser dialog; single-profile fast path;
+create-mode form; objectClass auto-injection on create. **Accept:** create a new
+entry from a profile; editing objectClass adds/orphans fields live; the typed
+resync outcome (no global flag) works end-to-end.
+
+Start with the **brainstorming → writing-plans** flow (own spec + plan), then
+**subagent-driven-development** (fresh subagent per task + spec-then-quality review,
+final whole-branch review on opus). Same machinery as M2 — the SDD ledger at
+`.superpowers/sdd/progress.md` has the full M1/M2 record and is the durable
+progress map (check it after any compaction; resume at the first task not marked
+complete).
+
+**Riskiest part:** the schema-driven field regeneration on objectClass change.
+M2 already made `SetValuesThenResyncSchema` a typed `CommitOutcome` (no global
+flag) and `EditForm` has the orphan/`sync_schema_fields` shape to build on (the
+ratatui `ui::edit_form::sync_schema_fields` is the reference behaviour).
+
+---
+
+## Deferred to M3 / cleanup (logged from M2 reviews)
+
+- **Focus-switch guard** — M2 ships dirty-nav + dirty-quit guards; the
+  dirty-FOCUS-switch guard (leaving a dirty form pane via Tab) was deferred to M3
+  (needs focus-event plumbing that pairs with create-flow focus work). Spec §8.
+- **Scrollable form** — `FORM_ROWS = 32` truncates entries with >32 attributes
+  (rendered/editable only for the first 32). M3 should add form scrolling.
+- **Leaf `last_sel` sticky-retry** — after a dirty-nav "Stay", re-selecting the
+  SAME leaf row is a no-op until you move off and back. The clean fix is
+  selection-revert-on-Stay (needs a ListBox set-focus call), deferred to M3. The
+  obvious reorder was DECLINED (it makes a background REFRESH spuriously re-pop the
+  guard). M2 acceptance is unaffected.
+- Minor/cosmetic: `value_set_eq` duplicate-value false-positive (shared with
+  ratatui; fix at M5 dedup); `EditForm::set_value` has no `!multi` guard (only
+  single-value callers in M2); read-error shows a stale form (status-only); a few
+  `let _ = ctx/REFRESH` import/param silencers in `form.rs`; dialog module/builders
+  are `pub` (could tighten to `pub(crate)` now that `app::dispatch` consumes them).
 
 ---
 
 ## Build / test / run
 
-**⚠ Cap parallelism at 4 cores** (shared 128-core box). Cargo target dir is
-`/home/oetiker/scratch/cargo-target` (binary NOT under `./target`).
+**⚠ Cap parallelism at 4 cores** (shared box). Target dir `/home/oetiker/scratch/cargo-target`.
 
 ```bash
-# Default build/tests — spike is feature-gated OUT (must stay clean):
-cargo build -j4
-cargo test -j4
+cargo build -j4                 # both bins (edaptor ratatui + edaptor-tv tvision)
+cargo build -j4 --bin edaptor-tv
+cargo test  -j4                 # ~490 lib tests + gated integration (skip w/o env)
 cargo clippy -j4 --all-targets -- -D warnings
 cargo fmt --check
+make check                      # fmt + clippy + tests
 
-# The spike (only on branch spike/tvision-rs):
-cargo test  -j4 --features spike-tv --test spike_tv_umlaut       # 2 grapheme tests
-cargo clippy -j4 --features spike-tv --all-targets -- -D warnings
-
-# Live demo server (podman) + run the spike TUI in a REAL terminal:
-scripts/test-ldap.sh start              # ~600 users / ~25 groups, ldap://localhost:1389
+# Live LDAP demo (podman): ~600 users / ~25 groups, ldap://localhost:1389
+scripts/test-ldap.sh start
 export EDAPTOR_TEST_ADMIN_PW=adminpassword
-cargo run -j4 --features spike-tv --bin spike-tv     # select branch → leaf → form
-scripts/test-ldap.sh stop
+# gated live tests:
+EDAPTOR_TEST_LDAP_URI=ldap://localhost:1389 cargo test -j4 --test tv_edit_write
 ```
-Verify feature isolation: `cargo tree -i tvision-rs` must FAIL without
-`--features spike-tv` (proves the spike never touches the default build).
-TUI smoke: quit via **Alt+X**; do NOT `pkill -f edaptor` (matches the LDAP
-container). No TTY in agent sessions → `CrosstermBackend::new()` returns ENXIO;
-interactive checks need a human at a terminal.
+
+Facade guards (must print nothing):
+```bash
+! grep -rl "use tvision_rs" src | grep -vE "^src/(tui/|bin/edaptor-tv.rs)"
+! grep -rl "use ratatui\|use tui_" src | grep -vE "^src/ui/"
+```
 
 ---
 
 ## Conventions (follow these)
 
-- **Facade boundary — this is the migration's core rule.** Today: only `src/ui/*`
-  may `use ratatui` / `use tui_*`. During the migration the SAME rule applies to
-  `tvision_rs`: only `src/ui/*` (and, transitionally, `src/bin/spike-tv.rs`) may
-  `use tvision_rs`. The domain layer must stay UI-framework-agnostic. Verify:
-  `! grep -rl "use ratatui\|use tui_\|use tvision_rs" src | grep -vE "^src/ui/|^src/bin/spike-tv.rs"`.
-- **`form` is the pure domain layer** (`changeset`, `validate`, `is_secret_attr`):
-  must NOT import `ui`. `ui` and `workflows` depend on `form`. Reuse it for the
-  tvision save/validate path unchanged.
-- **Widget palette = the one config-driven "rich field" home.** New per-attribute
-  behavior is a `[profile.widget.<attr>]` `kind`, resolved in `config::widget`
-  into a `WidgetKind`. The tvision form must honor `EditField.widget_binding`.
-- **Strict TDD**, atomic commits; crate compiles after every commit; `cargo fmt`
-  before every commit; clippy clean (`--all-targets`).
-- **Dependency:** published `tvision-rs = "0.1"`; alias as `tv` per its house style
-  (`tv = { package = "tvision-rs" }`) if convenient. tvision-rs is edition 2024;
-  edaptor is edition 2021 — fine (edition is per-crate).
-- **Live tests gated** by `EDAPTOR_TEST_LDAP_URI` (skip when unset). DN base
-  `dc=example,dc=org`. Demo password env `EDAPTOR_TEST_ADMIN_PW=adminpassword`.
-- **Docs are one-home:** config detail → mdBook (`docs/src/`), surfaced at
-  <https://oposs.github.io/edaptor>; `README.md` is orientation only; `CHANGES.md`
-  gets every user-visible change. Process/design notes → `docs/superpowers/`.
-- **No back-compat constraints** — no userbase; remove/replace cleanly.
+- **Facade boundary (core migration rule):** only `src/tui/**` and
+  `src/bin/edaptor-tv.rs` may `use tvision_rs`; only `src/ui/**` may
+  `use ratatui`/`use tui_*`. The domain layer (`config`, `form`, `ldap`, `schema`,
+  `samba`, `workflows`) imports NEITHER and stays UI-agnostic.
+- **Don't touch `src/ui/**` (ratatui).** It's the running binary; the neutral
+  models are introduced fresh in `workflows::*` and the ratatui tree is deleted
+  wholesale at the M5 cutover. Editing the live UI mid-migration is the wrong risk.
+- **Widget palette** is the one config-driven "rich field" home: a
+  `[profile.widget.<attr>]` `kind` → `config::widget::WidgetKind`. The form honours
+  `EditField.widget_binding`. M4 adds the rich widgets (choice/password/picker/
+  membership) as `FieldWidget` impls with NO form-core changes.
+- **Borrow discipline:** never hold a `RefCell`/`UiState` borrow across
+  `ctx.broadcast`/`ctx.post`/`Program::exec_view`/`worker.submit`/`new_list`/
+  `child_mut`/`set_value`. Collect into locals → drop the borrow → call.
+- **Strict TDD**, atomic commits, crate compiles after every commit, `cargo fmt`
+  before each commit, clippy `--all-targets -D warnings` clean.
+- **Live tests gated** by `EDAPTOR_TEST_LDAP_URI` (skip when unset). Base
+  `dc=example,dc=org`, password env `EDAPTOR_TEST_ADMIN_PW=adminpassword`.
+- **Docs one-home:** config detail → mdBook (`docs/src/`); README orientation only;
+  `CHANGES.md` for every user-visible change (the tvision preview already has
+  entries). Process/design → `docs/superpowers/`.
 - **Commit trailer:** `Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>`.
-- **Execution style:** subagent-driven (fresh subagent per task + spec-then-quality
-  review). One editor per working tree at a time.
+  ⚠ Use `git commit -F` (a file/heredoc) for messages with backticks — `-m "...`...`"`
+  triggers shell command-substitution and mangles the message.
+- **Execution style:** subagent-driven (fresh subagent per task + two-stage review).
+  One editor per working tree at a time.
 
 ---
 
-## Open gaps / decisions to make
+## Load-bearing tvision-rs facts (0.2.0 — so you don't rediscover them)
 
-1. **Where the findings doc + handover live.** Both are currently on
-   `spike/tvision-rs` (handover) / branch-only (findings). Decide whether to land
-   them on `main` so they survive if the spike branch is deleted.
-2. **Migration branch strategy:** new branch off `main`; keep the ratatui UI as a
-   runtime fallback (feature flag) until tvision reaches parity, or hard-swap.
-3. **`ReadFlow`/`FormModel` vs raw `LdapEntry`:** the spike displayed raw attrs;
-   the real form must use `ReadFlow` + the schema-driven `FormModel`/widgets and
-   the changeset/validate write path.
-4. **`main` is local-only / unpushed** (origin behind at `2185b2e`); CI, docs
-   deploy, and releases only take effect once pushed + Pages enabled.
-5. **ObjectClassPicker** is the riskiest widget — prototype it early in the
-   migration rather than last.
+- **Hierarchical Tab (new in 0.2.0):** Tab/Shift-Tab walk the focusable-leaf tree
+  across nested groups; the Splitter is transparent to focus. Consequence for a
+  pane-heavy UI: EVERY focusable widget is a Tab stop (e.g. leaf search box AND
+  list are separate stops) — more granular than "Tab between panes". edaptor adds
+  arrow-key intra-pane nav to mitigate. A widget that owns Tab (multi-line editor)
+  still consumes it.
+- **App skeleton:** `Program::new(backend, clock, theme, init_desktop,
+  init_status_line, init_menu_bar)` then `program.run_app(|prog, cmd| …)`. The
+  `init_*` factories take capturing closures, so `Rc<RefCell<UiState>>` reaches the
+  view tree (no thread_local). **`run_app`'s `(prog, cmd)` closure is the ONLY
+  place with `&mut Program`** → the single `exec_view` site (`tui::app::dispatch`).
+- **`Program` has NO `post`/`broadcast`.** End the app from the dispatch closure
+  via `prog.end_modal(Command::QUIT)`. Panes/pump request modals by POSTING a
+  custom command (`ctx.post(cmd)`) that surfaces to `run_app`'s closure;
+  `Command::QUIT` is consumed by the built-in handler before the closure sees it
+  (hence the custom `REQUEST_QUIT`). `exec_view(view) -> Command` blocks but the
+  pump timer keeps firing inside it (so async writes finish with a dialog open).
+- **Worker → views:** zero-area `PumpView` + `Context::set_timer(50ms)` periodic
+  `Event::Timer` → drain `worker.poll()` → correlate via `read_flow`/`write_flow`
+  → `ctx.broadcast(REFRESH)`. Broadcasts reach every view incl. zero-area/disabled.
+- **`Outline` (0.1.1+):** auto-seeds scrollbar/focus on first display; call
+  `tv::ov_update` only after MUTATING the tree. Read selection via
+  `Outline::value() -> Some(FieldValue::Int(foc))` (parity with `ListBox`).
+- **`ListBox` consumes (clears) Up/Down/PageUp/PageDown.** Detect a selection
+  change via `value()` vs a saved index — do NOT gate on `ev` still being a
+  KeyDown after `group.handle_event` (the tree pane does this right; the leaf pane
+  bug was exactly this).
+- **`StaticText` has no `set_value`** (only `new`/`text`/`set_text`). For a cell
+  whose text updates at render, use a disabled `InputLine` (the `ro_cell` idiom).
+  `StaticText` is fine for static dialog content.
+- **Dialogs:** `Dialog::new(rect, Some(title))`; `dlg.state_mut().options.center_x/
+  center_y`; `dlg.insert_child(Box::new(StaticText::new(...)))`;
+  `dlg.button_row(&[(label, Command, ButtonFlags)], ButtonRowAlign)`. Buttons MUST
+  use modal-exit commands (`OK`/`CANCEL`/`YES`/`NO`) so `exec_view` returns them.
+- **Headless view tests:** `Context::new(&mut out, &mut timers, 0, &mut deferred)`
+  with `tv::timer::TimerQueue::new()` and `Vec<tv::Deferred>` (crate-root
+  `tv::Deferred` since 0.1.1). A standalone `InputLine` needs
+  `state.state.selected = true`. tvision events are `Event::KeyDown` (NOT `Key`).
+
+## Upstream tvision-rs (oetiker's repo) — working with it
+
+edaptor is tvision-rs's first real consumer; improve it as you go. Directive: work
+in a SEPARATE clone of `https://github.com/oetiker/tvision-rs`, one focused PR per
+change; edaptor depends on the PUBLISHED crate (a git pin is the only fallback, and
+only until a release ships — then bump the version and drop the pin). The
+`#[delegate(to=group)]` macro forwards `View` methods via a manual list in
+`tvision-rs-macros/src/specs.rs` — a NEW `View` method must be added there to be
+forwarded through wrapper views. ⚠ `gh pr edit` fails on that repo (deprecated
+Projects-classic GraphQL) — edit PR title/body via REST: `gh api -X PATCH
+repos/oetiker/tvision-rs/pulls/N -f title=… -F body=@file`.
