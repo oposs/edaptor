@@ -129,10 +129,14 @@ impl FormPane {
             let st = self.state.borrow();
             match st.edit_form.as_ref() {
                 None => Vec::new(),
+                // Only the first FORM_ROWS fields have a value cell; bound the
+                // index so a longer entry truncates instead of indexing past the
+                // fixed cell pool. (Scrolling for >FORM_ROWS fields is M3 work.)
                 Some(form) => form
                     .fields
                     .iter()
                     .enumerate()
+                    .take(FORM_ROWS)
                     .filter(|(_, f)| inline_editable(f))
                     .map(|(i, _)| i)
                     .collect(),
@@ -245,6 +249,40 @@ mod tests {
         deferred: &'a mut Vec<tv::Deferred>,
     ) -> Context<'a> {
         Context::new(out, timers, 0, deferred)
+    }
+
+    #[test]
+    fn more_fields_than_rows_truncates_without_panic() {
+        // An entry with more attributes than FORM_ROWS must truncate gracefully —
+        // sync_into_form/render must never index past the fixed value-cell pool.
+        // Regression: panic "index out of bounds: len is 32 but index is 39".
+        use crate::ldap::worker::RawSubschema;
+        let schema = SchemaModel::from_raw(&RawSubschema::default());
+        let structure = Structure::build("dc=x", vec![]);
+        let mut st =
+            UiState::new_for_test(structure, schema, "dc=x".into(), Vec::new(), Vec::new());
+        let fields: Vec<EditField> = (0..FORM_ROWS + 8)
+            .map(|i| ef(&format!("attr{i}"), "v", true))
+            .collect();
+        st.edit_form = Some(EditForm {
+            dn: "cn=a,dc=x".into(),
+            mode: FormMode::Edit,
+            object_classes: vec![],
+            fields,
+        });
+        st.form_needs_render = true;
+        let shared: Shared = Rc::new(RefCell::new(st));
+        let mut pane = FormPane::new(Rect::new(0, 0, 80, FORM_ROWS as i32 + 1), shared.clone());
+        let mut out = VecDeque::new();
+        let mut timers = tv::timer::TimerQueue::new();
+        let mut deferred = Vec::new();
+        let mut ctx = headless_ctx(&mut out, &mut timers, &mut deferred);
+        let mut ev = Event::Broadcast {
+            command: REFRESH,
+            source: None,
+        };
+        // Must not panic (renders + syncs only the first FORM_ROWS fields).
+        pane.handle_event(&mut ev, &mut ctx);
     }
 
     #[test]
