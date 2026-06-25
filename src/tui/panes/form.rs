@@ -3,33 +3,18 @@
 use tvision_rs::{self as tv, delegate, Context, Event, FieldValue, Group, InputLine, Rect, View};
 
 use crate::tui::{Shared, REFRESH};
-use crate::workflows::form_model::FormModel;
+use crate::workflows::edit_form::EditForm;
 
 const FORM_ROWS: usize = 32;
 
-/// Render a FormModel into `"label: value"` strings (MUST marked with `*`).
-fn render_rows(model: &FormModel) -> Vec<String> {
+/// Render an EditForm into `"label: value"` strings (MUST marked with `*`).
+fn render_rows(model: &EditForm) -> Vec<String> {
     model
         .fields
         .iter()
         .map(|f| {
-            let marker = if f.is_must { " *" } else { "" };
-            // TEMPORARY shim until Task 6 rewrites this pane to own an EditForm.
-            let ef = crate::workflows::edit_form::EditField {
-                label: f.label.clone(),
-                must: f.is_must,
-                editable: false,
-                multi: false,
-                secret: false,
-                ordered: false,
-                orphaned: false,
-                kind: f.kind,
-                widget: f.widget.clone(),
-                widget_binding: None,
-                values: f.values.clone(),
-                baseline: f.values.clone(),
-            };
-            let cell = crate::tui::widget::present_field(&ef);
+            let marker = if f.must { " *" } else { "" };
+            let cell = crate::tui::widget::present_field(f);
             format!("{}{}: {}", f.label, marker, cell)
         })
         .collect()
@@ -67,11 +52,11 @@ impl View for FormPane {
 
     fn handle_event(&mut self, ev: &mut Event, ctx: &mut Context) {
         let is_refresh = matches!(ev, Event::Broadcast { command, .. } if *command == REFRESH);
-        if is_refresh && self.state.borrow().form_dirty {
+        if is_refresh && self.state.borrow().form_needs_render {
             let lines: Vec<String> = {
                 let mut st = self.state.borrow_mut();
-                st.form_dirty = false;
-                st.form.as_ref().map(render_rows).unwrap_or_default()
+                st.form_needs_render = false;
+                st.edit_form.as_ref().map(render_rows).unwrap_or_default()
             }; // borrow dropped before mutating children
             for (i, &id) in self.rows.iter().enumerate() {
                 let text = lines.get(i).cloned().unwrap_or_default();
@@ -88,7 +73,8 @@ impl View for FormPane {
 mod tests {
     use super::*;
     use crate::schema::FieldKind;
-    use crate::workflows::form_model::{FormField, WidgetSpec};
+    use crate::workflows::edit_form::{EditField, EditForm, FormMode};
+    use crate::workflows::form_model::WidgetSpec;
 
     /// Minimal test state: no worker, no form.
     fn make_state() -> Shared {
@@ -124,22 +110,38 @@ mod tests {
 
     #[test]
     fn test_render_rows_labels_and_must_marker() {
-        let model = FormModel {
-            title: "cn=a,dc=x".into(),
+        let model = EditForm {
+            dn: "cn=a,dc=x".into(),
+            mode: FormMode::Edit,
+            object_classes: vec![],
             fields: vec![
-                FormField {
+                EditField {
                     label: "cn".into(),
+                    must: true,
+                    editable: false,
+                    multi: false,
+                    secret: false,
+                    ordered: false,
+                    orphaned: false,
                     kind: FieldKind::Text,
-                    is_must: true,
+                    widget: WidgetSpec::ReadOnlyText,
+                    widget_binding: None,
                     values: vec!["a".into()],
-                    widget: WidgetSpec::ReadOnlyText,
+                    baseline: vec!["a".into()],
                 },
-                FormField {
+                EditField {
                     label: "mail".into(),
+                    must: false,
+                    editable: false,
+                    multi: true,
+                    secret: false,
+                    ordered: false,
+                    orphaned: false,
                     kind: FieldKind::Text,
-                    is_must: false,
-                    values: vec!["a@x".into(), "b@x".into()],
                     widget: WidgetSpec::ReadOnlyText,
+                    widget_binding: None,
+                    values: vec!["a@x".into(), "b@x".into()],
+                    baseline: vec!["a@x".into(), "b@x".into()],
                 },
             ],
         };

@@ -7,12 +7,21 @@ use crate::config::tree_label::CompiledTreeRule;
 use crate::config::{Config, EntryProfile};
 use crate::ldap::worker::{Request, Response, WorkerHandle};
 use crate::schema::SchemaModel;
-use crate::workflows::form_model::FormModel;
+use crate::workflows::edit_form::{build_edit_form, EditForm};
 use crate::workflows::labels::LabelRule;
 use crate::workflows::read_flow::ReadFlow;
 use crate::workflows::structure::Structure;
 #[cfg(test)]
 use crate::workflows::structure::StructureInput;
+use crate::workflows::write_flow::{WriteFlow, WriteOutcome};
+
+/// What `pump_worker` wants the pump view to do after draining responses.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct PumpResult {
+    pub changed: bool,
+    pub quit: bool,
+    pub error: bool,
+}
 
 /// Everything the panes read/write, behind a single RefCell.
 pub struct UiState {
@@ -29,10 +38,23 @@ pub struct UiState {
     pub current_branch: Option<String>,
     pub current_leaf: Option<String>,
     pub search: String,
-    /// The loaded read-only form (None until a leaf is read).
-    pub form: Option<FormModel>,
+    /// The loaded editable form (None until a leaf is read).
+    pub edit_form: Option<EditForm>,
+    /// Async write flow (validate/diff/submit/correlate).
+    pub write_flow: WriteFlow,
+    /// Read-only mode disables editing and the save path.
+    pub read_only: bool,
+    /// Transient status text (e.g. "Saved.").
+    pub status: String,
+    /// True when a pane must re-render the form from `edit_form`.
+    pub form_needs_render: bool,
+    /// A dirty-blocked navigation awaiting the guard's decision: (dn, objectClasses).
+    pub guard_target: Option<(String, Vec<String>)>,
+    /// Where to navigate after a guard-Save completes: (dn, objectClasses).
+    pub pending_nav: Option<(String, Vec<String>)>,
+    /// Last async write error, surfaced by the dispatch closure's Error dialog.
+    pub last_write_error: Option<String>,
     pub list_dirty: bool,
-    pub form_dirty: bool,
 }
 
 impl UiState {
@@ -62,19 +84,23 @@ impl UiState {
             current_branch: None,
             current_leaf: None,
             search: String::new(),
-            form: None,
+            edit_form: None,
+            write_flow: WriteFlow::new(),
+            read_only: false,
+            status: String::new(),
+            form_needs_render: false,
+            guard_target: None,
+            pending_nav: None,
+            last_write_error: None,
             list_dirty: false,
-            form_dirty: false,
         }
     }
 }
 
 impl UiState {
-    /// Drain ready worker responses through ReadFlow; install a FormModel when a
-    /// pending read returns. Returns true if anything changed (caller broadcasts
-    /// REFRESH). No-op without a worker (test instances). Borrow-safe: collects
-    /// responses before touching read_flow.
-    pub fn pump_worker(&mut self) -> bool {
+    /// Drain ready worker responses: install a fresh `EditForm` on a read, and
+    /// apply write outcomes. Returns what the pump view should do.
+    pub fn pump_worker(&mut self) -> PumpResult {
         use crate::workflows::read_flow::ReadOutcome;
         let mut resps = Vec::new();
         if let Some(w) = self.worker.as_ref() {
@@ -82,23 +108,93 @@ impl UiState {
                 resps.push(r);
             }
         }
-        let mut changed = false;
+        let mut out = PumpResult::default();
         for resp in &resps {
+            // Reads first (Entries/SearchError); disjoint from write variants.
             match self.read_flow.on_response(resp) {
-                ReadOutcome::Form { model, .. } => {
-                    self.form = Some(model);
-                    self.form_dirty = true;
-                    changed = true;
+                ReadOutcome::Form {
+                    model,
+                    object_classes,
+                } => {
+                    let mut form = build_edit_form(&model, self.read_flow.schema(), self.read_only);
+                    form.object_classes = object_classes;
+                    self.edit_form = Some(form);
+                    self.form_needs_render = true;
+                    out.changed = true;
+                    continue;
                 }
                 ReadOutcome::Error(msg) => {
-                    self.form = Some(error_form(&msg));
-                    self.form_dirty = true;
-                    changed = true;
+                    self.status = msg.clone();
+                    out.changed = true;
+                    continue;
                 }
                 ReadOutcome::Ignored => {}
             }
+            // Then writes (WriteOk/WriteError).
+            let outcome = self.write_flow.on_response(resp);
+            if !matches!(outcome, WriteOutcome::Ignored) {
+                let r = self.apply_write_outcome(outcome);
+                out.changed |= r.changed;
+                out.quit |= r.quit;
+                out.error |= r.error;
+            }
         }
-        changed
+        out
+    }
+
+    /// Apply one non-ignored write outcome to state, returning the pump action.
+    pub fn apply_write_outcome(&mut self, outcome: WriteOutcome) -> PumpResult {
+        let mut out = PumpResult {
+            changed: true,
+            ..Default::default()
+        };
+        match outcome {
+            WriteOutcome::Saved {
+                reread_dn,
+                quit_after,
+            } => {
+                self.status = "Saved.".to_string();
+                if quit_after {
+                    out.quit = true;
+                    return out;
+                }
+                // Navigate to the guard's target if one is pending, else re-read.
+                let (dn, profile_ocs) = self.pending_nav.take().unwrap_or((reread_dn, Vec::new()));
+                self.reread(&dn, &profile_ocs);
+            }
+            WriteOutcome::NeedFollowupModify {
+                dn,
+                mods,
+                quit_after,
+            } => {
+                if let Some(w) = self.worker.as_ref() {
+                    let _ = self.write_flow.submit_followup(w, &dn, mods, quit_after);
+                }
+            }
+            WriteOutcome::Error(msg) => {
+                self.last_write_error = Some(msg);
+                out.error = true;
+            }
+            WriteOutcome::Ignored => out.changed = false,
+        }
+        out
+    }
+
+    /// Submit a base-scope re-read of `dn`, selecting a profile by `ocs`.
+    fn reread(&mut self, dn: &str, ocs: &[String]) {
+        let Self {
+            worker,
+            read_flow,
+            profiles,
+            current_leaf,
+            ..
+        } = self;
+        if let Some(w) = worker.as_ref() {
+            let profile = profile_for(profiles, ocs);
+            if read_flow.request_entry(w, dn, profile).is_ok() {
+                *current_leaf = Some(dn.to_string());
+            }
+        }
     }
 }
 
@@ -115,22 +211,6 @@ impl UiState {
             ),
             None => Vec::new(),
         }
-    }
-}
-
-/// A one-field FormModel used to surface a read error in the form pane.
-fn error_form(msg: &str) -> crate::workflows::form_model::FormModel {
-    use crate::schema::FieldKind;
-    use crate::workflows::form_model::{FormField, FormModel, WidgetSpec};
-    FormModel {
-        title: "error".into(),
-        fields: vec![FormField {
-            label: "error".into(),
-            kind: FieldKind::Text,
-            is_must: false,
-            values: vec![msg.to_string()],
-            widget: WidgetSpec::ReadOnlyText,
-        }],
     }
 }
 
@@ -186,9 +266,15 @@ pub(crate) fn bootstrap(config: Config, password: String) -> Result<UiState> {
         current_branch: None,
         current_leaf: None,
         search: String::new(),
-        form: None,
+        edit_form: None,
+        write_flow: WriteFlow::new(),
+        read_only: false,
+        status: String::new(),
+        form_needs_render: false,
+        guard_target: None,
+        pending_nav: None,
+        last_write_error: None,
         list_dirty: false,
-        form_dirty: false,
     })
 }
 
@@ -234,7 +320,7 @@ mod tests {
         let schema = SchemaModel::from_raw(&RawSubschema::default());
         let st = UiState::new_for_test(structure, schema, "dc=x".into(), Vec::new(), Vec::new());
         assert!(st.current_leaf_dn().is_none());
-        assert!(st.form.is_none());
+        assert!(st.edit_form.is_none());
         assert!(!st.list_dirty);
     }
 
@@ -244,7 +330,51 @@ mod tests {
         let schema = SchemaModel::from_raw(&RawSubschema::default());
         let mut st =
             UiState::new_for_test(structure, schema, "dc=x".into(), Vec::new(), Vec::new());
-        assert!(!st.pump_worker());
-        assert!(st.form.is_none());
+        assert!(!st.pump_worker().changed);
+        assert!(st.edit_form.is_none());
+    }
+}
+
+#[cfg(test)]
+mod write_routing_tests {
+    use super::*;
+    use crate::workflows::write_flow::WriteOutcome;
+
+    fn empty_state() -> UiState {
+        use crate::ldap::worker::RawSubschema;
+        use crate::workflows::structure::Structure;
+        let schema = crate::schema::SchemaModel::from_raw(&RawSubschema::default());
+        let structure = Structure::build("dc=x", vec![]);
+        UiState::new_for_test(structure, schema, "dc=x".into(), Vec::new(), Vec::new())
+    }
+
+    #[test]
+    fn saved_without_quit_requests_reread_and_sets_status() {
+        let mut st = empty_state();
+        let res = st.apply_write_outcome(WriteOutcome::Saved {
+            reread_dn: "cn=a,dc=x".into(),
+            quit_after: false,
+        });
+        assert!(res.changed);
+        assert!(!res.quit);
+        assert_eq!(st.status, "Saved.");
+    }
+
+    #[test]
+    fn saved_with_quit_sets_quit_flag() {
+        let mut st = empty_state();
+        let res = st.apply_write_outcome(WriteOutcome::Saved {
+            reread_dn: "x".into(),
+            quit_after: true,
+        });
+        assert!(res.quit);
+    }
+
+    #[test]
+    fn write_error_sets_error_flag_and_message() {
+        let mut st = empty_state();
+        let res = st.apply_write_outcome(WriteOutcome::Error("boom".into()));
+        assert!(res.error);
+        assert_eq!(st.last_write_error.as_deref(), Some("boom"));
     }
 }

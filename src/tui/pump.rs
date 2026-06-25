@@ -44,8 +44,8 @@ impl View for PumpView {
             );
         }
         if matches!(ev, Event::Timer(_)) {
-            let changed = self.state.borrow_mut().pump_worker();
-            if changed {
+            let result = self.state.borrow_mut().pump_worker();
+            if result.changed {
                 ctx.broadcast(REFRESH, None);
             }
         }
