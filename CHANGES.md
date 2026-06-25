@@ -8,6 +8,10 @@ All notable changes to eDAPtor are documented here. The format follows
 
 ### New
 
+- tvision UI (preview, `edaptor-tv`): the entry form is now editable for plain
+  single-value attributes, with an LDIF-preview save confirmation, async writes
+  (MODIFY + rename/MODRDN), and dirty-change guards on navigation and quit.
+
 ### Changed
 
 ### Fixed
