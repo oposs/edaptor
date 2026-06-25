@@ -40,7 +40,8 @@ use crate::config::Config;
 pub fn run(config: Config, password: String) -> Result<()> {
     let state: Shared = Rc::new(RefCell::new(state::bootstrap(config, password)?));
     let backend = Box::new(CrosstermBackend::new()?);
-    let mut program = app::build_program(backend, state);
-    program.run_app(|_prog, _cmd| {});
+    let mut program = app::build_program(backend, state.clone());
+    let dispatch_state = state.clone();
+    program.run_app(move |prog, cmd| app::dispatch(prog, cmd, &dispatch_state));
     Ok(())
 }

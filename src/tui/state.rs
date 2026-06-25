@@ -180,6 +180,11 @@ impl UiState {
         out
     }
 
+    /// Public wrapper around the private `reread` for the dispatch closure.
+    pub fn reread_public(&mut self, dn: &str, ocs: &[String]) {
+        self.reread(dn, ocs);
+    }
+
     /// Submit a base-scope re-read of `dn`, selecting a profile by `ocs`.
     fn reread(&mut self, dn: &str, ocs: &[String]) {
         let Self {

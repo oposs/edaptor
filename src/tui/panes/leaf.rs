@@ -5,7 +5,7 @@ use tvision_rs::{
 };
 
 use crate::tui::state::profile_for;
-use crate::tui::{Shared, REFRESH};
+use crate::tui::{Shared, GUARD_NAV, REFRESH};
 
 /// A search `InputLine` (row 0) above a `ListBox`. Recomputes rows from the
 /// shared state on REFRESH and whenever the search text changes; submits a base
@@ -55,7 +55,7 @@ impl LeafPane {
         self.last_sel = -1;
     }
 
-    fn submit_selected(&mut self) {
+    fn submit_selected(&mut self, ctx: &mut Context) {
         let sel = match self.group.child_mut(self.list_id).and_then(|v| v.value()) {
             Some(FieldValue::Int(i)) => i,
             _ => return,
@@ -78,6 +78,21 @@ impl LeafPane {
             })
         };
         let Some((dn, ocs)) = target else { return };
+
+        // Check dirty before navigating: if dirty, stash the target and post
+        // GUARD_NAV for the dispatch closure to handle.
+        let dirty = {
+            let st = self.state.borrow();
+            st.edit_form.as_ref().map(|f| f.is_dirty()).unwrap_or(false)
+        };
+        if dirty {
+            {
+                let mut st = self.state.borrow_mut();
+                st.guard_target = Some((dn.clone(), ocs.clone()));
+            }
+            ctx.post(GUARD_NAV);
+            return;
+        }
 
         let mut st = self.state.borrow_mut();
         if st.current_leaf.as_deref() == Some(dn.as_str()) {
@@ -129,7 +144,7 @@ impl View for LeafPane {
 
         // Submit a read when selection lands on a new leaf.
         if matches!(ev, Event::KeyDown(k) if matches!(k.key, Key::Up | Key::Down)) || is_refresh {
-            self.submit_selected();
+            self.submit_selected(ctx);
         }
     }
 }
