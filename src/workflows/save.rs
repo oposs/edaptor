@@ -8,6 +8,7 @@ use crate::ldap::ldif::render_changeset;
 use crate::schema::SchemaModel;
 
 /// The outcome of preparing a form save.
+#[derive(Debug)]
 pub enum PrepareSave {
     /// Client-side validation failed.
     Invalid(Vec<ValidationError>),

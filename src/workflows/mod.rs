@@ -12,6 +12,7 @@ pub mod labels;
 pub mod read_flow;
 pub mod save;
 pub mod structure;
+pub mod write_flow;
 
 #[cfg(test)]
 pub(crate) mod test_fixtures;
