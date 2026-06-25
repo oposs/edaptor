@@ -37,28 +37,16 @@ impl EditField {
         if self.orphaned {
             return vec![];
         }
-        if self.editable {
-            if !self.multi {
-                // Single-value: trim and drop if blank.
-                let v = self.values.first().map(|s| s.trim()).unwrap_or("");
-                if v.is_empty() {
-                    vec![]
-                } else {
-                    vec![v.to_string()]
-                }
+        if !self.multi && self.editable {
+            // Single-value inline edit: trim and drop if blank, so an emptied
+            // field yields no values and the diff emits a delete (not an empty
+            // value). Multi-valued and read-only fields keep `values` verbatim,
+            // matching the ratatui `ui::edit_form` baseline (dedup at M5).
+            let v = self.values.first().map(|s| s.trim()).unwrap_or("");
+            if v.is_empty() {
+                vec![]
             } else {
-                // Multi-value: drop blank/whitespace-only entries.
-                self.values
-                    .iter()
-                    .filter_map(|s| {
-                        let t = s.trim();
-                        if t.is_empty() {
-                            None
-                        } else {
-                            Some(t.to_string())
-                        }
-                    })
-                    .collect()
+                vec![v.to_string()]
             }
         } else {
             self.values.clone()
@@ -184,7 +172,8 @@ mod tests {
                     .to_string(),
             ],
             attribute_types: vec![
-                "( 2.5.4.3 NAME 'cn' SYNTAX 1.3.6.1.4.1.1466.115.121.1.15 )".to_string(),
+                "( 2.5.4.3 NAME 'cn' SYNTAX 1.3.6.1.4.1.1466.115.121.1.15 SINGLE-VALUE )"
+                    .to_string(),
                 "( 2.5.4.4 NAME 'sn' SYNTAX 1.3.6.1.4.1.1466.115.121.1.15 )".to_string(),
             ],
             ldap_syntaxes: vec![],
