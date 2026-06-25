@@ -1,7 +1,7 @@
 //! Leaf list pane: a search box over a ListBox of the current branch's leaves.
 
 use tvision_rs::{
-    self as tv, delegate, Context, Event, FieldValue, Group, InputLine, Key, ListBox, Rect, View,
+    self as tv, delegate, Context, Event, FieldValue, Group, InputLine, ListBox, Rect, View,
 };
 
 use crate::tui::state::profile_for;
@@ -142,10 +142,12 @@ impl View for LeafPane {
             self.repopulate(ctx);
         }
 
-        // Submit a read when selection lands on a new leaf.
-        if matches!(ev, Event::KeyDown(k) if matches!(k.key, Key::Up | Key::Down)) || is_refresh {
-            self.submit_selected(ctx);
-        }
+        // Submit a read when the selection lands on a new leaf. The ListBox CONSUMES
+        // (clears) Up/Down keys, so we must NOT gate on `ev` still being a KeyDown
+        // (it has been cleared by the time we get here). Instead, like the tree pane
+        // reads `outline.value()`, `submit_selected` compares the list's `value()` to
+        // `last_sel` and is a cheap no-op when the selection is unchanged.
+        self.submit_selected(ctx);
     }
 }
 
@@ -217,5 +219,82 @@ mod tests {
         pane.handle_event(&mut ev, &mut ctx);
         // No panic, borrow discipline held; list_dirty cleared.
         assert!(!shared.borrow().list_dirty);
+    }
+
+    #[test]
+    fn test_leaf_selection_change_detected_when_key_was_consumed() {
+        // Regression: the `ListBox` CONSUMES (clears) Up/Down keys, so the leaf pane
+        // must detect a selection change from the list's value() — NOT by inspecting
+        // the (already-cleared) event. Here the selection moves to row 1, then a
+        // non-Up/Down event is delivered (standing in for the consumed key); the pane
+        // must still pick up the new selection (last_sel advances to 1).
+        let inputs = vec![
+            StructureInput {
+                dn: "dc=x".into(),
+                cn: None,
+                description: None,
+                object_classes: vec![],
+                attrs: BTreeMap::new(),
+            },
+            StructureInput {
+                dn: "ou=p,dc=x".into(),
+                cn: None,
+                description: None,
+                object_classes: vec![],
+                attrs: BTreeMap::new(),
+            },
+            StructureInput {
+                dn: "cn=a,ou=p,dc=x".into(),
+                cn: Some("a".into()),
+                description: None,
+                object_classes: vec![],
+                attrs: BTreeMap::new(),
+            },
+            StructureInput {
+                dn: "cn=b,ou=p,dc=x".into(),
+                cn: Some("b".into()),
+                description: None,
+                object_classes: vec![],
+                attrs: BTreeMap::new(),
+            },
+        ];
+        let structure = Structure::build("dc=x", inputs);
+        let schema = SchemaModel::from_raw(&RawSubschema::default());
+        let mut state =
+            UiState::new_for_test(structure, schema, "dc=x".into(), Vec::new(), Vec::new());
+        state.current_branch = Some("ou=p,dc=x".into());
+        let shared: Shared = Rc::new(RefCell::new(state));
+
+        let mut pane = LeafPane::new(Rect::new(0, 0, 30, 10), shared.clone());
+        let mut out: VecDeque<Event> = VecDeque::new();
+        let mut timers = tv::timer::TimerQueue::new();
+        let mut deferred: Vec<tv::Deferred> = Vec::new();
+        let mut ctx = tv::Context::new(&mut out, &mut timers, 0, &mut deferred);
+
+        // Seed (initial selection settles on row 0).
+        shared.borrow_mut().list_dirty = true;
+        let mut seed = Event::Broadcast {
+            command: REFRESH,
+            source: None,
+        };
+        pane.handle_event(&mut seed, &mut ctx);
+        assert_eq!(pane.last_sel, 0, "seeding selects row 0");
+
+        // Move the list selection to row 1 (as a consumed Up/Down would).
+        if let Some(list) = pane.group.child_mut(pane.list_id) {
+            list.set_value_ctx(FieldValue::Int(1), &mut ctx);
+        }
+
+        // Deliver an event that is NOT a live Up/Down key (the real key was cleared).
+        let mut other = Event::Broadcast {
+            command: tv::Command::custom("test.noop"),
+            source: None,
+        };
+        pane.handle_event(&mut other, &mut ctx);
+
+        assert_eq!(
+            pane.last_sel, 1,
+            "leaf pane must detect the new selection from value(), not the cleared key event"
+        );
     }
 }

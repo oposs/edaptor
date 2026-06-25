@@ -55,12 +55,20 @@ pub(crate) fn build_branch_nodes(
             })
             .unwrap_or_default();
 
+        // Build children in FORWARD order so `dns` is pushed in display/foc order
+        // (the Outline numbers visible lines in pre-order). Linking the `with_next`
+        // chain needs reverse folding, but that is done AFTER the recursion so it
+        // does not affect `dns` ordering.
+        let mut child_nodes: Vec<tv::Node> = Vec::with_capacity(child_branches.len());
+        for cb in &child_branches {
+            child_nodes.push(build(cb, state, branches, width, dns));
+        }
         let mut chain: Option<Box<tv::Node>> = None;
-        for cb in child_branches.into_iter().rev() {
-            let mut child = build(&cb, state, branches, width, dns);
-            if let Some(next) = chain.take() {
-                child = child.with_next(next);
-            }
+        for child in child_nodes.into_iter().rev() {
+            let child = match chain.take() {
+                Some(next) => child.with_next(next),
+                None => child,
+            };
             chain = Some(Box::new(child));
         }
         if let Some(children) = chain {
@@ -145,6 +153,43 @@ mod tests {
             object_classes: vec![],
             attrs: BTreeMap::new(),
         }
+    }
+
+    #[test]
+    fn test_branch_nodes_sibling_order_matches_display() {
+        // Root with THREE sibling branches a,b,c (each has a leaf child, so each is
+        // a branch). The Outline displays them a,b,c (with_next chain order), so the
+        // parallel branch_dns index MUST be forward pre-order [root, a, b, c] — NOT
+        // reversed. Regression guard for the `foc -> branch_dns` mismatch.
+        let inputs = vec![
+            si("dc=x"),
+            si("ou=a,dc=x"),
+            si("ou=b,dc=x"),
+            si("ou=c,dc=x"),
+            si("cn=1,ou=a,dc=x"),
+            si("cn=1,ou=b,dc=x"),
+            si("cn=1,ou=c,dc=x"),
+        ];
+        let structure = Structure::build("dc=x", inputs);
+        let schema = SchemaModel::from_raw(&RawSubschema::default());
+        let st = UiState::new_for_test(
+            structure,
+            schema,
+            "dc=x".into(),
+            Vec::new(),
+            compile_tree_rules(&TreeConfig::default()),
+        );
+        let (_root, dns) = build_branch_nodes(&st, 40);
+        assert_eq!(
+            dns,
+            vec![
+                "dc=x".to_string(),
+                "ou=a,dc=x".to_string(),
+                "ou=b,dc=x".to_string(),
+                "ou=c,dc=x".to_string(),
+            ],
+            "branch_dns must be in forward display/foc order, not reversed per sibling"
+        );
     }
 
     #[test]
