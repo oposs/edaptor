@@ -49,3 +49,9 @@ path = "src/bin/edaptor-tv.rs"
 [lib]
 name = "edaptor"
 path = "src/lib.rs"
+
+# tvision-rs Splitter Tab-focus fix is not in a published release yet; pin to the
+# upstream commit (oetiker/tvision-rs#feat/splitter-tab-focus). Drop this once a
+# release (>=0.1.3) carrying it ships and bump the version above.
+[patch.crates-io]
+tvision-rs = { git = "https://github.com/oetiker/tvision-rs.git", rev = "8ba2b53e56ec7524f427b593a4fbb08b17bea72a" }

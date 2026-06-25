@@ -11,6 +11,10 @@ All notable changes to eDAPtor are documented here. The format follows
 - tvision UI (preview, `edaptor-tv`): the entry form is now editable for plain
   single-value attributes, with an LDIF-preview save confirmation, async writes
   (MODIFY + rename/MODRDN), and dirty-change guards on navigation and quit.
+- tvision UI (preview): keyboard navigation — Tab/Shift-Tab switch panes;
+  within a pane the arrow keys navigate (tree branches, leaf list while the
+  search box keeps focus, and form fields). `edaptor-tv` also accepts
+  `--config <path>` (matching the main binary).
 
 ### Changed
 
