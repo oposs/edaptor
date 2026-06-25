@@ -2,7 +2,6 @@
 
 use tvision_rs::{self as tv, delegate, Context, Event, FieldValue, Group, InputLine, Rect, View};
 
-use crate::tui::widget::present_field;
 use crate::tui::{Shared, REFRESH};
 use crate::workflows::form_model::FormModel;
 
@@ -15,7 +14,23 @@ fn render_rows(model: &FormModel) -> Vec<String> {
         .iter()
         .map(|f| {
             let marker = if f.is_must { " *" } else { "" };
-            format!("{}{}: {}", f.label, marker, present_field(f))
+            // TEMPORARY shim until Task 6 rewrites this pane to own an EditForm.
+            let ef = crate::workflows::edit_form::EditField {
+                label: f.label.clone(),
+                must: f.is_must,
+                editable: false,
+                multi: false,
+                secret: false,
+                ordered: false,
+                orphaned: false,
+                kind: f.kind,
+                widget: f.widget.clone(),
+                widget_binding: None,
+                values: f.values.clone(),
+                baseline: f.values.clone(),
+            };
+            let cell = crate::tui::widget::present_field(&ef);
+            format!("{}{}: {}", f.label, marker, cell)
         })
         .collect()
 }
