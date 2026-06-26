@@ -5,15 +5,20 @@ for that see git log, the specs under `docs/superpowers/specs/`, the SDD ledger
 (`.superpowers/sdd/progress.md`), and project memory (`…/memory/MEMORY.md`).
 
 **Date:** 2026-06-26 · **Where we are: the tvision-rs UI migration is mid-flight.
-M1 (read core) and M2 (edit + write spine) are COMPLETE, reviewed, and now
-LIVE-ACCEPTED (save round-trip + guards driven in tmux). Next is M3 (ObjectClass
-picker + create flow).**
+M1 (read core) and M2 (edit + write spine) are COMPLETE, reviewed, and
+LIVE-ACCEPTED (save round-trip + guards driven in tmux). The temporary git-pin
+is GONE — edaptor now depends on the released `tvision-rs` 0.3.0, and the main
+window runs frameless full-screen (`Fullscreen::Desktop`). Next is M3 (ObjectClass
+picker + create flow), carrying the pending edges below.**
 
-> ⚠ **Temporary git-pin in `Cargo.toml`.** `[patch.crates-io]` pins `tvision-rs`
-> to commit `fccb59d` (PR oetiker/tvision-rs#6, branch `feat/exec-view-focused`),
-> which adds `Program::exec_view_focused`. **Drop the pin and bump `tvision-rs`
-> once that PR merges and a release ships.** Without it, modal dialogs open with
-> the wrong button focused (Enter cancels the save). See "What's done" below.
+> **Carried into M3 — full-screen pane-fill artifact.** Going frameless exposed
+> that the leaf and form panes don't paint their last column / bottom row when
+> given the larger client area (the tree/Outline fills fine), leaving a one-cell
+> desktop-background (`▒`) strip on the right/bottom. Root cause is the existing
+> fixed-size pane / `FORM_ROWS = 32` pool, not the full-screen flip (a forced
+> relayout doesn't change it). Fix it with the M3 "panes fill / scrollable form"
+> work. The full-screen flip itself (pump posts `Command::FULLSCREEN` once; window
+> shadow disabled) is in `tui::pump`/`tui::app` and verified live.
 
 `edaptor` is a Rust TUI for administering an OpenLDAP directory. It introspects
 live schema (`cn=subschema`) and generates edit forms from `objectClass`
@@ -32,8 +37,9 @@ a **widget palette** (`[profile.widget.<attr>]` kinds: `choice` / `password` /
   (umbrella §7) — the ratatui UI stays the shipping `edaptor` binary through M1–M4.
 - `main` is behind/unpushed (origin at v0.4.0). Pushing / CI / release are a
   separate concern, not gated by the migration.
-- `Cargo.toml` version is `0.4.0`. Dependency: **`tvision-rs = "0.2"`** from
-  crates.io (a plain release dep — no git pin, no patch).
+- `Cargo.toml` version is `0.4.0`. Dependency: **`tvision-rs = "0.3"`** from
+  crates.io (a plain release dep — no git pin, no patch; the `exec_view_focused`
+  pin was dropped once 0.3.0 shipped).
 
 The migration is governed by the **umbrella design**:
 [`docs/superpowers/specs/2026-06-23-tvision-ui-migration-umbrella-design.md`](superpowers/specs/2026-06-23-tvision-ui-migration-umbrella-design.md)
