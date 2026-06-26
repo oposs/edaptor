@@ -185,12 +185,22 @@ command was swallowed). The model now (user-chosen "B"):
   so the pane snaps the highlight back. Any future trigger (M3 create-flow, tree)
   should funnel through `requested_leaf` → `reconcile_selection`, NOT re-poll.
 
-Known minor edges (documented, not yet fixed): (1) TV first-click on an unfocused
-pane only focuses it — the highlight moves on the 2nd click. (2) guard→Save then
-cancelling the confirm leaves the highlight on the target while the form stays
-pinned (self-heals on the next move/Stay). (3) changing **branch** in the tree
-while dirty guards but can't snap back (current entry isn't in the new branch's
-rows) — tree-side guard is M3 work.
+**Known edges — TWO still open (do not forget):**
+
+- ✅ FIXED: TV first-click on an unfocused pane only focused it. The leaf/form
+  panes now set `options.first_click = true` (the tree got it free via the
+  Outline), so a single click both focuses the pane and lands on the row/field.
+- ⬜ **TODO (#2):** guard→Save then **cancelling the confirm** leaves the list
+  highlight on the would-be target while the form stays pinned to the original
+  (highlight/form mismatch). It self-heals on the next move/Stay, but the clean
+  fix is to treat a cancelled confirm like "Stay" (snap the highlight back via
+  `set_leaf_row = current_leaf_row()`). Needs `do_save`/dispatch to know it came
+  from the guard path.
+- ⬜ **TODO (#3):** changing **branch** in the tree while the form is dirty guards
+  (the repopulated leaf list re-requests), but **Stay can't snap back** because
+  `current_leaf` isn't in the new branch's rows, leaving the tree on the new
+  branch with the old form pinned. Proper fix: guard the branch change too and
+  revert the tree selection on Stay — pairs with the M3 create-flow focus work.
 
 ## Deferred to M3 / cleanup (logged from M2 reviews)
 

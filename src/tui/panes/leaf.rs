@@ -22,6 +22,13 @@ pub(crate) struct LeafPane {
 impl LeafPane {
     pub(crate) fn new(bounds: Rect, state: Shared) -> Self {
         let mut group = Group::new(bounds);
+        // ofFirstClick: the click that focuses this pane (when another pane was
+        // active) must ALSO reach the list, so a single click both focuses and
+        // moves the highlight. Without it the parent group consumes the selecting
+        // click (group.rs auto-select) and the list only responds to the 2nd click.
+        // The tree pane gets this for free by delegating to the Outline (which sets
+        // it); a plain Group does not, so set it explicitly.
+        group.state_mut().options.first_click = true;
         let w = bounds.b.x - bounds.a.x;
         let search = InputLine::with_limit(Rect::new(0, 0, w, 1), 256);
         let search_id = group.insert(Box::new(search));

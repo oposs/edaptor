@@ -43,6 +43,10 @@ fn header_text(form: &EditForm) -> String {
 impl FormPane {
     pub(crate) fn new(bounds: Rect, state: Shared) -> Self {
         let mut group = Group::new(bounds);
+        // ofFirstClick: a single click into this pane (from another pane) both
+        // focuses the pane and lands on the clicked field, rather than needing a
+        // second click (see the note in `LeafPane::new`).
+        group.state_mut().options.first_click = true;
         let w = bounds.b.x - bounds.a.x;
 
         // Row 0: header (read-only cell).
