@@ -19,8 +19,10 @@ helpers; no domain-layer or ratatui (`src/ui/**`) changes.
 
 1. **Panes fill their cell** — kill the one-cell desktop-background (`▒`) strip the
    frameless full-screen window exposed.
-2. **Form pane scrolling** — windowed view over the fields with a vertical
-   scrollbar; removes the `FORM_ROWS = 32` display cap.
+2. **Form pane scrolling** — a new, self-contained `ScrollGroup` (a generic
+   scroll-container of child views) holding one cell per field with a real linked
+   vertical scrollbar; removes the `FORM_ROWS = 32` display cap. Built for
+   extraction — a candidate to contribute upstream to tvision-rs afterward.
 3. **Guard edge #2** — a cancelled save-confirm on the guard path snaps the list
    highlight back (behaves like *Stay*).
 4. **Guard edge #3** — changing branch in the tree while the form is dirty guards,
@@ -62,78 +64,99 @@ helpers; no domain-layer or ratatui (`src/ui/**`) changes.
 
 ## Design
 
-### 1. Panes fill their cell
+### 1. Panes fill their cell (the `▒` strip)
 
-Give `LeafPane` and `FormPane` an `on_bounds_changed(&mut self, ctx)` that re-bounds
-their children to the pane's current size, then forwards to the embedded group so the
-inner widgets re-fit:
+The custom panes lay out their children **once at construction** and never re-fit
+when the splitter resizes them (no `on_bounds_changed`); the `Outline` tree self-fits
+and is fine. Fix:
 
-- `LeafPane`: search box → `Rect(0,0,w,1)`; list → `Rect(0,1,w,h)`; call the
-  `ListBox`/list-viewer bounds-changed path so its scroll range republishes.
-- `FormPane`: header → `Rect(0,0,w,1)`; each visible row cell → its `y=row+1` line
-  spanning the new width (label `0..LABEL_W`, value `LABEL_W..w`). Row count derives
-  from `h` (see §2), so this hook and scrolling share the same relayout routine.
+- `LeafPane`: add `on_bounds_changed(&mut self, ctx)` (a shared `relayout`) that
+  re-bounds the search box (`Rect(0,0,w,1)`) and the `ListBox` (`Rect(0,1,w,h)`) to
+  the live pane size and drives the list's bounds-changed path so its scroll range
+  republishes.
+- `FormPane`: its fill is handled by the `ScrollGroup` rework in §2 — the scroll
+  container fills the pane and repositions/clips its children — so it needs no
+  separate pool-relayout hack.
 
-A shared private `relayout(&mut self, ctx)` does the bounds math from the live view
-bounds; both `new()` and `on_bounds_changed()` call it. This removes the `▒` strip
-(verified live) and is the prerequisite for meaningful scrolling.
+Removes the `▒` strip (the artifact carried from the full-screen change).
 
-### 2. Form pane scrolling
+### 2. Form pane scrolling — an extractable `ScrollGroup`
 
 **Idiomatic basis (verified against the tvision-rs 0.3.0 source).** The framework
-has **no scroll-container for child views** — `Group` carries no scroll/`delta`
-offset for its children, and `Scroller` is strictly for *self-drawn* content (the
-`Editor`/`Terminal`/`Outline` subclass it and draw their own rows shifted by
-`delta.y`). Every scrollable view in the framework — `ListBox`/`ListViewer`,
-`ThemeEditorBody`, the `FilePane` example — hand-rolls the **same windowing pattern**:
-a `top`/`scroll_top` index, draw only the visible range, mirror it into a linked
-`ScrollBar`. There is no reusable widget to drop in; the choice is which idiomatic
-hand-rolled pattern. Two options were evaluated:
+has **no scroll-container for child views** — `Group` carries no scroll offset for its
+children, and `Scroller` is strictly for *self-drawn* content (the `Editor`/`Terminal`
+/`Outline` subclass it). So scrolling a *form of editable child widgets* is the one
+case the framework doesn't already cover. Three options were evaluated:
 
-- **(a) Windowed pool of `InputLine`/label cells** — pool sized to the visible rows,
-  `top` maps `fields → cells` (row virtualization, exactly how `ListBox` reuses rows),
-  a real linked `ScrollBar`. Keeps `InputLine`'s text editing for free.
-- **(b) Self-drawn `Scroller` subclass** (like `Editor`) — more native for *scrolling*
-  but throws away `InputLine` and means **reimplementing inline text editing** by hand.
+- **(a) Virtualized cell pool** — a fixed pool sized to the visible rows, reused
+  across fields as you scroll (the `ListBox` row-reuse trick). Edaptor-specific, has an
+  edit-commit-on-reassign trap (a scroll mid-edit could smear onto the wrong attr),
+  and is not worth upstreaming.
+- **(b) Self-drawn `Scroller` subclass** (like `Editor`) — throws away `InputLine`
+  and means reimplementing inline text editing by hand. Rejected.
+- **(c) `ScrollGroup`** — a small **generic scroll-container of child views**: it owns
+  the real per-field `Label`+`InputLine` children, keeps a `top` offset, and on scroll
+  repositions every child by `-top` (offscreen children clip automatically — see the
+  spike below) while driving a linked `ScrollBar`. Persistent per-field cells ⇒ editing
+  just works (focus, cursor, and edit buffer travel *with* the field — no reassign,
+  no smear). It is also the **missing reusable primitive**: built self-contained in
+  `src/tui/` now, and a candidate to contribute upstream to tvision-rs as a focused
+  follow-up PR once proven against this consumer (edaptor then switches to the
+  published widget and deletes its copy).
 
-**We take (a)** — it reuses `InputLine` (no reinvented editing) on top of the
-framework's own windowing pattern (no reinvented scrolling). Notably the current form
-pane is already pattern (a) minus the windowing, so Phase 1 *completes* it rather than
-replacing it. (The leaf pane is `ListBox` and the tree is `Outline` — already idiomatic
-built-ins; the form is the one necessarily-custom pane.)
+**We take (c).** It gives the cleaner form *and* the contribution. The leaf pane
+(`ListBox`) and tree (`Outline`) are already idiomatic built-ins; the form is the one
+necessarily-custom pane, and `ScrollGroup` is the right shape for it.
 
-Concretely, make the form a **windowed view** over `EditForm.fields`:
+**Feasibility spike (source-level, PASS).** Reposition-on-scroll works on tvision-rs
+0.3.0 unchanged:
+- *Draw clip* — `Group::draw` draws each child through `ctx.sub(child_bounds)`, and
+  `DrawCtx::sub` sets the child clip to `parent_clip ∩ child_bounds` (context.rs:910);
+  a child at negative-y clips at the top edge, one past the bottom clips there, a
+  fully-offscreen one draws nothing. The framework's own `sub_narrows_clip_and_shifts_
+  origin` / `fill_clips_to_clip_rect` tests already cover this clip path.
+- *Mouse* — routing is `bounds.contains(parent-local pos)` + local translate
+  (group.rs:198/928), sign-agnostic, so clicks map correctly to negative-origin
+  children.
+- *Cursor / Tab* — correct **given scroll-to-focused** (Tab walks all focusable
+  leaves, so focusing an offscreen field must scroll it into view). That is the one
+  piece of real implementation work, not a feasibility risk.
 
-- The cell pool sizes to the **visible row count** `visible = max(0, h - 1)` (header
-  takes row 0), recomputed in `relayout`. (Keep a generous fixed pool and only
-  *use*/show `visible` of it, or grow the pool on demand — a plan-time decision;
-  behaviour is "exactly the rows that fit are live".)
-- The pane holds a `top: usize` scroll offset. `render()` maps
-  `fields[top .. top+visible]` into the visible cells (no `.take(32)`).
-- **Edit-state commit on reassign.** Because a cell is reused for different fields as
-  you scroll (virtualization), the focused cell's pending edit must be committed back
-  to its current field *before* `top` changes and the cell is repointed at another
-  field — otherwise a scroll would smear the edit onto the wrong attribute. The plan
-  pins where this commit hooks in (it reuses the existing focus-change/Enter commit
-  path; a scroll is just another reassignment trigger).
-- Arrow navigation: moving the focused field above `top` or below `top+visible-1`
-  scrolls by one (adjust `top`), keeping the focused field on screen. Page-up/down
-  optional (plan-time; not required for acceptance).
-- The header/dirty marker stays pinned at row 0 (does not scroll).
+**`ScrollGroup` design:**
 
-**Scrollbar — a real linked `ScrollBar`.** The form is the rightmost splitter pane.
-A vertical `ScrollBar::new` (width-1 ⇒ vertical) is created in the splitter cell and
-passed to the form **by id**, mirroring the `ListBox`+bar idiom; the form's value
-cells shrink by one column while the bar is shown (`fields.len() > visible`). The bar
-and the form stay in sync through the framework's `ScrollSync` broker, exactly as
-`ListViewer` does (it holds only the bar's id, never the bar itself):
-- the form publishes range/value with `ctx.request_scroll_bar_params(bar, value=top,
-  min=0, max=fields.len()-visible, page/arrow steps, …)` whenever the field set or
-  `top` changes;
-- on a user drag the bar broadcasts `SCROLL_BAR_CHANGED { source = bar }`; the form
-  sees it and calls `ctx.request_scroll_sync(self_id, h, v)`; the pump resolves the
-  bar's value and calls the form's overridden `View::apply_scroll_sync`, which sets
-  `top` and re-renders.
+- Owns a content child set + an optional linked vertical `ScrollBar` id, and a
+  `top: i32` offset. Each child has a stable *logical* y over the full content height;
+  scrolling sets the child's on-screen `bounds.y = logical_y − top` via
+  `change_bounds`, so **bounds, draw, mouse, and cursor stay consistent** (no
+  draw-only offset that would desync mouse/cursor).
+- `ensure_visible(child)` / scroll-to-focused: when focus moves to a child outside the
+  visible band, adjust `top` so it shows, then republish the bar. Hooked off the
+  focus-change path so Tab/arrows never strand the cursor offscreen.
+- Linked `ScrollBar` via the framework `ScrollSync` broker, exactly as `ListViewer`
+  does (it holds only the bar's id): publishes range/value with
+  `ctx.request_scroll_bar_params(bar, value=top, min=0, max=content−visible, steps…)`;
+  on a user drag the bar broadcasts `SCROLL_BAR_CHANGED { source = bar }`, the group
+  calls `ctx.request_scroll_sync(self_id, …)`, and the pump calls the group's
+  overridden `View::apply_scroll_sync` to set `top`. No self-drawn indicator.
+
+**`FormPane` on top of `ScrollGroup`:**
+
+- One `Label`/`ro_cell` + `InputLine` per field (no `FORM_ROWS = 32` cap); the header
+  + dirty marker stay pinned (outside the scrolled band).
+- **Per-entry rebuild:** on a new leaf load the field set changes, so the child cells
+  are rebuilt from `EditForm.fields` — a view-tree mutation done through the
+  established deferred / `handle_event` path, observing borrow discipline (no
+  `UiState`/`RefCell` borrow held across `child_mut`/`change_bounds`/`ctx.*`). This is
+  user-paced (per navigation, not per frame).
+- Editing reuses the **M2 inline-edit/commit path unchanged** (commit on
+  focus-change / Enter); because each field owns its cell there is no scroll-time
+  smear, so the virtualized-pool's commit-on-reassign problem does not arise.
+- The bar occupies the pane's right column; value cells shrink by one column while the
+  bar is shown (`content > visible`).
+
+The `ScrollGroup` lives in its own module (`src/tui/scroll_group.rs` or similar) with
+no edaptor-domain coupling, so the follow-up upstream extraction is a lift-and-publish,
+not a rewrite.
 
 No self-drawn indicator — the bar is a first-class linked view, wired through the
 same broker every built-in scroller uses.
@@ -181,10 +204,18 @@ after each commit, facade guards clean.
 
 - **Headless view tests** (the established `Context::new(&mut out, &mut timers, 0,
   &mut deferred)` pattern in `panes/leaf.rs`/`form.rs` tests):
-  - `relayout`/`on_bounds_changed`: after a bounds grow, child cell bounds cover the
-    full pane (no gap at the right/bottom edge); pure-ish bounds-math assertions.
-  - Form windowing: with `fields.len() > visible`, `top` advances on arrow past the
-    edge; rendered cells map `fields[top..]`; scrollbar shown/hidden by overflow.
+  - `LeafPane::on_bounds_changed`: after a bounds grow, the search/list child bounds
+    cover the full pane (no right/bottom gap); bounds-math assertions.
+  - `ScrollGroup` (its own test module — it has no edaptor coupling): with content
+    taller than the viewport, `scroll_to`/`top` shifts each child's `bounds.y` by
+    `-top`; a child scrolled above the top or below the bottom clips (assert via the
+    headless `Buffer`/`DrawCtx` harness — `Buffer::new(w,h)` + `buf.get(x,y).symbol()`,
+    as the crate's own clip tests do); `ensure_visible(child)` adjusts `top` so a
+    focused child enters the viewport; the linked-bar params (`request_scroll_bar_params`)
+    and `apply_scroll_sync` round-trip update `top`.
+  - `FormPane` over `ScrollGroup`: a >viewport field set is fully reachable (every
+    field's cell can be brought on-screen); per-entry rebuild yields one cell per
+    field; the header/dirty row stays pinned.
   - Guard #2: a unit test that the `GUARD_NAV` Save arm, given a cancelled confirm
     (do_save → NotSubmitted), sets `set_leaf_row = current_leaf_row()` and clears the
     targets. Keep the dialog out of the unit by testing the decision routing (as M2's
@@ -211,6 +242,14 @@ after each commit, facade guards clean.
    the current branch; Discard/Save behave consistently with the leaf guard.
 5. `make check` green (fmt + clippy `-D warnings` + tests); facade guards print
    nothing; the new headless tests pass.
+
+## Upstream contribution (follow-up, out of Phase 1 scope)
+
+`ScrollGroup` is built self-contained and domain-free in `src/tui/` so it can later be
+lifted into tvision-rs as a focused PR (the established workflow: separate clone, one
+PR per change, edaptor then depends on the published crate). This is a deliberate
+*follow-up* — Phase 1 ships with the component living in edaptor; the extraction does
+not block Phase 1 and is not gated on a tvision-rs release.
 
 ## Conventions
 
