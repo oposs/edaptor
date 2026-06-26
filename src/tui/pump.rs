@@ -11,6 +11,7 @@ pub(crate) struct PumpView {
     vs: tv::ViewState,
     state: Shared,
     armed: bool,
+    fullscreen_applied: bool,
 }
 
 impl PumpView {
@@ -19,7 +20,22 @@ impl PumpView {
             vs: tv::ViewState::new(tv::Rect::new(0, 0, 0, 0)),
             state,
             armed: false,
+            fullscreen_applied: false,
         }
+    }
+
+    /// One-shot: switch the base window to frameless fullscreen on the first tick.
+    /// We post `Command::FULLSCREEN` (Off → Desktop) rather than calling the API
+    /// directly: the window's own `handle_event` owns the border-drop + maximize
+    /// (the pump cannot downcast to `Window`), and routing reaches the desktop's
+    /// only window. `Desktop` mode keeps the menu bar and status line, just drops
+    /// the border/title/inset. Idempotent — posted at most once.
+    fn apply_fullscreen_once(&mut self, ctx: &mut Context) {
+        if self.fullscreen_applied {
+            return;
+        }
+        ctx.post(tv::Command::FULLSCREEN);
+        self.fullscreen_applied = true;
     }
 }
 
@@ -44,6 +60,7 @@ impl View for PumpView {
             );
         }
         if matches!(ev, Event::Timer(_)) {
+            self.apply_fullscreen_once(ctx);
             let r = self.state.borrow_mut().pump_worker();
             // Reconcile a pending leaf selection: load it (clean) or, if the form is
             // dirty, ask the dispatch closure to raise the guard. Posting from the
@@ -62,6 +79,71 @@ impl View for PumpView {
             if r.quit {
                 ctx.post(tv::Command::QUIT);
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::schema::SchemaModel;
+    use crate::workflows::structure::Structure;
+    use std::cell::RefCell;
+    use std::collections::VecDeque;
+    use std::rc::Rc;
+
+    fn headless<'a>(
+        out: &'a mut VecDeque<Event>,
+        timers: &'a mut tv::timer::TimerQueue,
+        deferred: &'a mut Vec<tv::Deferred>,
+    ) -> Context<'a> {
+        Context::new(out, timers, 0, deferred)
+    }
+
+    /// The pump posts `Command::FULLSCREEN` exactly once (Off → Desktop); the
+    /// window's own handler does the border-drop + cross-tree layout from there.
+    #[test]
+    fn posts_fullscreen_command_once() {
+        let structure = Structure::build("dc=x", Vec::new());
+        let schema = SchemaModel::from_raw(&crate::ldap::worker::RawSubschema::default());
+        let state = crate::tui::state::UiState::new_for_test(
+            structure,
+            schema,
+            "dc=x".into(),
+            Vec::new(),
+            Vec::new(),
+        );
+        let shared: Shared = Rc::new(RefCell::new(state));
+        let mut pump = PumpView::new(shared);
+
+        let count_fullscreen = |out: &VecDeque<Event>| {
+            out.iter()
+                .filter(|e| matches!(e, Event::Command(c) if *c == tv::Command::FULLSCREEN))
+                .count()
+        };
+
+        // First call posts the command exactly once.
+        {
+            let mut out = VecDeque::new();
+            let mut timers = tv::timer::TimerQueue::new();
+            let mut deferred: Vec<tv::Deferred> = Vec::new();
+            let mut ctx = headless(&mut out, &mut timers, &mut deferred);
+            pump.apply_fullscreen_once(&mut ctx);
+            assert_eq!(count_fullscreen(&out), 1);
+        }
+
+        // Idempotent: a second call posts nothing further.
+        {
+            let mut out = VecDeque::new();
+            let mut timers = tv::timer::TimerQueue::new();
+            let mut deferred: Vec<tv::Deferred> = Vec::new();
+            let mut ctx = headless(&mut out, &mut timers, &mut deferred);
+            pump.apply_fullscreen_once(&mut ctx);
+            assert_eq!(
+                count_fullscreen(&out),
+                0,
+                "fullscreen is posted at most once"
+            );
         }
     }
 }

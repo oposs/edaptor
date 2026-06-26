@@ -484,7 +484,10 @@ mod write_routing_tests {
             Some(("cn=b,dc=x".into(), vec!["top".into()])),
             "the requested entry becomes the guard target"
         );
-        assert!(st.requested_leaf.is_none(), "request consumed into the guard");
+        assert!(
+            st.requested_leaf.is_none(),
+            "request consumed into the guard"
+        );
         assert_eq!(
             st.current_leaf.as_deref(),
             Some("cn=a,dc=x"),

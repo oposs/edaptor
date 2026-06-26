@@ -29,7 +29,7 @@ crossterm = "0.29"
 unicode-width = "0.2"
 # tvision-rs UI (migration target). During M1-M4 it ships only via the
 # edaptor-tv dev binary; the default edaptor binary stays ratatui until M5.
-tvision-rs = "0.2"
+tvision-rs = "0.3"
 
 [dev-dependencies]
 tempfile = "3"
@@ -49,10 +49,3 @@ path = "src/bin/edaptor-tv.rs"
 [lib]
 name = "edaptor"
 path = "src/lib.rs"
-
-# Temporary git-pin to the tvision-rs `exec_view_focused` fix (PR
-# oetiker/tvision-rs#6). Drop this and bump `tvision-rs` to the release that
-# includes it once that ships. Without it, modal dialogs (Save confirm, dirty
-# guard) open with Cancel focused, so Enter cancels instead of confirming.
-[patch.crates-io]
-tvision-rs = { git = "https://github.com/oetiker/tvision-rs.git", rev = "fccb59dbfb9c818d13efeda28ad901131b7398b3" }

@@ -186,6 +186,10 @@ fn init_desktop(r: Rect, state: Shared) -> Option<Box<dyn View>> {
 
     let win_rect = Rect::new(r.a.x + 1, r.a.y, r.b.x - 1, r.b.y);
     let mut win = Window::new(win_rect, Some("edaptor".to_string()), 1);
+    // No drop shadow: as a desktop-filling frameless window it has nothing to cast
+    // onto, and the shadow would otherwise paint a one-cell strip over the desktop
+    // background along the right and bottom edges.
+    win.state_mut().state.shadow = false;
     let ext = win.state().get_extent();
     let interior = Rect::new(1, 1, ext.b.x - 1, ext.b.y - 1);
     let width = (interior.b.x - interior.a.x).max(8) as usize;
@@ -210,6 +214,8 @@ fn init_desktop(r: Rect, state: Shared) -> Option<Box<dyn View>> {
 
     let split_id = win.insert_child(Box::new(split));
     if let Some(v) = win.child_mut(split_id) {
+        // The splitter's grow_mode defaults to { hi_x, hi_y }, so its bottom-right
+        // tracks the window when the pump flips it to frameless fullscreen.
         v.change_bounds(interior);
     }
     win.insert_child(Box::new(PumpView::new(state.clone())));

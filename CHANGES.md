@@ -15,16 +15,22 @@ All notable changes to eDAPtor are documented here. The format follows
   within a pane the arrow keys navigate (tree branches, leaf list while the
   search box keeps focus, and form fields). `edaptor-tv` also accepts
   `--config <path>` (matching the main binary).
+- tvision UI (preview): the main window now runs frameless full-screen — the
+  three panes fill the terminal edge-to-edge (no window border or title bar),
+  while the menu bar and status line are kept.
 
 ### Changed
+
+- tvision UI (preview): now builds against the released `tvision-rs` 0.3.0; the
+  temporary git-pin for `exec_view_focused` has been removed.
 
 ### Fixed
 
 - tvision UI (preview): the Save-confirm and unsaved-changes guard dialogs opened
   with the wrong button focused (Cancel / Stay), so pressing Enter cancelled the
   save instead of confirming it — a save could not be completed by keyboard. The
-  dialogs now open with the primary action (Save) focused. (Requires tvision-rs's
-  new `exec_view_focused`; pinned to that fix until the next tvision-rs release.)
+  dialogs now open with the primary action (Save) focused. (Uses tvision-rs's
+  `exec_view_focused`, released in 0.3.0.)
 - tvision UI (preview): switching to another entry while a form had unsaved
   changes did nothing when driven by the **mouse** — no save prompt, and the form
   got stuck. The unsaved-changes guard now fires consistently for keyboard *and*
