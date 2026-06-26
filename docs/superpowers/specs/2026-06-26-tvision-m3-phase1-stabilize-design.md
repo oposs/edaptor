@@ -80,31 +80,63 @@ bounds; both `new()` and `on_bounds_changed()` call it. This removes the `▒` s
 
 ### 2. Form pane scrolling
 
-The form holds *editable child cells*, so neither the `Scroller` base (shifts
-self-drawn content) nor `ListBox` (plain strings) fits. Instead make the form a
-**windowed view** over `EditForm.fields`:
+**Idiomatic basis (verified against the tvision-rs 0.3.0 source).** The framework
+has **no scroll-container for child views** — `Group` carries no scroll/`delta`
+offset for its children, and `Scroller` is strictly for *self-drawn* content (the
+`Editor`/`Terminal`/`Outline` subclass it and draw their own rows shifted by
+`delta.y`). Every scrollable view in the framework — `ListBox`/`ListViewer`,
+`ThemeEditorBody`, the `FilePane` example — hand-rolls the **same windowing pattern**:
+a `top`/`scroll_top` index, draw only the visible range, mirror it into a linked
+`ScrollBar`. There is no reusable widget to drop in; the choice is which idiomatic
+hand-rolled pattern. Two options were evaluated:
+
+- **(a) Windowed pool of `InputLine`/label cells** — pool sized to the visible rows,
+  `top` maps `fields → cells` (row virtualization, exactly how `ListBox` reuses rows),
+  a real linked `ScrollBar`. Keeps `InputLine`'s text editing for free.
+- **(b) Self-drawn `Scroller` subclass** (like `Editor`) — more native for *scrolling*
+  but throws away `InputLine` and means **reimplementing inline text editing** by hand.
+
+**We take (a)** — it reuses `InputLine` (no reinvented editing) on top of the
+framework's own windowing pattern (no reinvented scrolling). Notably the current form
+pane is already pattern (a) minus the windowing, so Phase 1 *completes* it rather than
+replacing it. (The leaf pane is `ListBox` and the tree is `Outline` — already idiomatic
+built-ins; the form is the one necessarily-custom pane.)
+
+Concretely, make the form a **windowed view** over `EditForm.fields`:
 
 - The cell pool sizes to the **visible row count** `visible = max(0, h - 1)` (header
-  takes row 0), recomputed in `relayout`. (Implementation may keep a generous fixed
-  pool and only *use*/show `visible` of it, or grow the pool on demand — a plan-time
-  decision; behaviour is "exactly the rows that fit are live".)
+  takes row 0), recomputed in `relayout`. (Keep a generous fixed pool and only
+  *use*/show `visible` of it, or grow the pool on demand — a plan-time decision;
+  behaviour is "exactly the rows that fit are live".)
 - The pane holds a `top: usize` scroll offset. `render()` maps
   `fields[top .. top+visible]` into the visible cells (no `.take(32)`).
-- A vertical `ScrollBar` is created in the splitter cell next to the form (linked by
-  id), shown only when `fields.len() > visible`. Its range/value track `top` over
-  `fields.len()`; dragging it (via the `ScrollSync` broker) updates `top`.
+- **Edit-state commit on reassign.** Because a cell is reused for different fields as
+  you scroll (virtualization), the focused cell's pending edit must be committed back
+  to its current field *before* `top` changes and the cell is repointed at another
+  field — otherwise a scroll would smear the edit onto the wrong attribute. The plan
+  pins where this commit hooks in (it reuses the existing focus-change/Enter commit
+  path; a scroll is just another reassignment trigger).
 - Arrow navigation: moving the focused field above `top` or below `top+visible-1`
   scrolls by one (adjust `top`), keeping the focused field on screen. Page-up/down
   optional (plan-time; not required for acceptance).
 - The header/dirty marker stays pinned at row 0 (does not scroll).
 
-**Scrollbar placement vs the splitter.** The form is the rightmost splitter pane.
-The vertical bar occupies the pane's right column; the form's value cells shrink by
-one column when the bar is shown. The bar is inserted into the same parent as the
-form (the splitter cell content) and passed to the form by id, mirroring the
-`ListBox`+bar idiom. If wiring a live bar inside a splitter cell proves awkward, the
-fallback is the form drawing its own one-column scrollbar indicator and owning the
-`top` math directly (no broker) — equivalent UX, decided at plan time.
+**Scrollbar — a real linked `ScrollBar`.** The form is the rightmost splitter pane.
+A vertical `ScrollBar::new` (width-1 ⇒ vertical) is created in the splitter cell and
+passed to the form **by id**, mirroring the `ListBox`+bar idiom; the form's value
+cells shrink by one column while the bar is shown (`fields.len() > visible`). The bar
+and the form stay in sync through the framework's `ScrollSync` broker, exactly as
+`ListViewer` does (it holds only the bar's id, never the bar itself):
+- the form publishes range/value with `ctx.request_scroll_bar_params(bar, value=top,
+  min=0, max=fields.len()-visible, page/arrow steps, …)` whenever the field set or
+  `top` changes;
+- on a user drag the bar broadcasts `SCROLL_BAR_CHANGED { source = bar }`; the form
+  sees it and calls `ctx.request_scroll_sync(self_id, h, v)`; the pump resolves the
+  bar's value and calls the form's overridden `View::apply_scroll_sync`, which sets
+  `top` and re-renders.
+
+No self-drawn indicator — the bar is a first-class linked view, wired through the
+same broker every built-in scroller uses.
 
 ### 3. Guard edge #2 — cancelled confirm snaps back
 
