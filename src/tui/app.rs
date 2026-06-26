@@ -77,7 +77,11 @@ pub(crate) fn dispatch(prog: &mut Program, cmd: Command, state: &Shared) {
                 state.borrow_mut().guard_target = None;
             }
             GuardDecision::Stay => {
-                state.borrow_mut().guard_target = None;
+                // Keep editing the pinned form; snap the list highlight back to it
+                // so highlight and form agree (the move is cancelled).
+                let mut st = state.borrow_mut();
+                st.guard_target = None;
+                st.set_leaf_row = st.current_leaf_row();
             }
         }
     } else if cmd == REQUEST_QUIT {

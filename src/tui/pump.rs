@@ -45,8 +45,16 @@ impl View for PumpView {
         }
         if matches!(ev, Event::Timer(_)) {
             let r = self.state.borrow_mut().pump_worker();
+            // Reconcile a pending leaf selection: load it (clean) or, if the form is
+            // dirty, ask the dispatch closure to raise the guard. Posting from the
+            // pump's clean top-level tick is reliable — a pane posting the same
+            // command is swallowed when a list mouse-track capture is active.
+            let need_guard = self.state.borrow_mut().reconcile_selection();
             if r.changed {
                 ctx.broadcast(REFRESH, None);
+            }
+            if need_guard {
+                ctx.post(crate::tui::GUARD_NAV);
             }
             if r.error {
                 ctx.post(crate::tui::SHOW_ERROR);

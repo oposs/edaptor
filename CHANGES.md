@@ -25,6 +25,12 @@ All notable changes to eDAPtor are documented here. The format follows
   save instead of confirming it — a save could not be completed by keyboard. The
   dialogs now open with the primary action (Save) focused. (Requires tvision-rs's
   new `exec_view_focused`; pinned to that fix until the next tvision-rs release.)
+- tvision UI (preview): switching to another entry while a form had unsaved
+  changes did nothing when driven by the **mouse** — no save prompt, and the form
+  got stuck. The unsaved-changes guard now fires consistently for keyboard *and*
+  mouse: a dirty form is **pinned** (no other entry is shown) until you choose
+  Save / Discard / Stay, and **Stay** snaps the list highlight back to the form on
+  screen. When the form is clean it still follows the highlight as you browse.
 
 ## 0.4.0 - 2026-06-12
 

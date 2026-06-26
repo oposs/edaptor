@@ -4,8 +4,7 @@ use tvision_rs::{
     self as tv, delegate, Context, Event, FieldValue, Group, InputLine, Key, ListBox, Rect, View,
 };
 
-use crate::tui::state::profile_for;
-use crate::tui::{Shared, GUARD_NAV, REFRESH};
+use crate::tui::{Shared, REFRESH};
 
 /// A search `InputLine` (row 0) above a `ListBox`. Recomputes rows from the
 /// shared state on REFRESH and whenever the search text changes; submits a base
@@ -55,7 +54,12 @@ impl LeafPane {
         self.last_sel = -1;
     }
 
-    fn submit_selected(&mut self, ctx: &mut Context) {
+    /// Pure selector: when the highlight lands on a new row, record the requested
+    /// leaf in shared state. The controller (the pump's `reconcile_selection`)
+    /// decides whether to load it or raise the dirty guard — the pane never loads,
+    /// guards, or posts a command (which is what made this fail under the mouse
+    /// capture, where pane-posted commands are swallowed before the app handler).
+    fn report_selection(&mut self) {
         let sel = match self.group.child_mut(self.list_id).and_then(|v| v.value()) {
             Some(FieldValue::Int(i)) => i,
             _ => return,
@@ -77,40 +81,21 @@ impl LeafPane {
                 (dn.clone(), ocs)
             })
         };
-        let Some((dn, ocs)) = target else { return };
-
-        // Check dirty before navigating: if dirty, stash the target and post
-        // GUARD_NAV for the dispatch closure to handle.
-        let dirty = {
-            let st = self.state.borrow();
-            st.edit_form.as_ref().map(|f| f.is_dirty()).unwrap_or(false)
-        };
-        if dirty {
-            {
-                let mut st = self.state.borrow_mut();
-                st.guard_target = Some((dn.clone(), ocs.clone()));
-            }
-            ctx.post(GUARD_NAV);
-            return;
+        if let Some((dn, ocs)) = target {
+            self.state.borrow_mut().request_leaf(dn, ocs);
         }
+    }
 
-        let mut st = self.state.borrow_mut();
-        if st.current_leaf.as_deref() == Some(dn.as_str()) {
-            return;
-        }
-        // Disjoint field borrows: worker (read) + read_flow (mut) + profiles (read).
-        let crate::tui::state::UiState {
-            worker,
-            read_flow,
-            profiles,
-            current_leaf,
-            ..
-        } = &mut *st;
-        if let Some(w) = worker.as_ref() {
-            let profile = profile_for(profiles, &ocs);
-            if read_flow.request_entry(w, &dn, profile).is_ok() {
-                *current_leaf = Some(dn);
+    /// Controller → pane: if `set_leaf_row` was set (a guard "Stay" snapping the
+    /// highlight back to the pinned form), apply it to the list and sync `last_sel`
+    /// so it is not re-reported as a fresh move.
+    fn apply_set_row(&mut self, ctx: &mut Context) {
+        let row = self.state.borrow_mut().set_leaf_row.take();
+        if let Some(row) = row {
+            if let Some(list) = self.group.child_mut(self.list_id) {
+                list.set_value_ctx(FieldValue::Int(row), ctx);
             }
+            self.last_sel = row;
         }
     }
 }
@@ -158,12 +143,12 @@ impl View for LeafPane {
             self.repopulate(ctx);
         }
 
-        // Submit a read when the selection lands on a new leaf. The ListBox CONSUMES
-        // (clears) Up/Down keys, so we must NOT gate on `ev` still being a KeyDown
-        // (it has been cleared by the time we get here). Instead, like the tree pane
-        // reads `outline.value()`, `submit_selected` compares the list's `value()` to
-        // `last_sel` and is a cheap no-op when the selection is unchanged.
-        self.submit_selected(ctx);
+        // First honour any controller-requested highlight (snap-back on guard
+        // "Stay"), then report a new highlight. The ListBox CONSUMES (clears)
+        // Up/Down keys, so detection compares the list's `value()` to `last_sel`
+        // (a cheap no-op when unchanged) rather than inspecting the cleared event.
+        self.apply_set_row(ctx);
+        self.report_selection();
     }
 }
 

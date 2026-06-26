@@ -166,18 +166,36 @@ ratatui `ui::edit_form::sync_schema_fields` is the reference behaviour).
 
 ---
 
+## Nav/guard model (redesigned — read before touching the panes)
+
+Entry-switching was reworked into a **controller-owned transition** (the old
+per-pane `submit_selected` poll that posted `GUARD_NAV` only worked for keyboard —
+mouse selection runs inside a tvision mouse-track capture, and `program.rs:2267`
+skips the app handler when a capture consumes the event, so the pane's posted
+command was swallowed). The model now (user-chosen "B"):
+
+- **The form follows the highlight.** Clean form → moving the highlight loads that
+  entry. Dirty form → it is **pinned**: no other entry is shown until the guard
+  (Save / Discard / Stay) is resolved; **Stay** snaps the highlight back to the form.
+- **Panes are pure selectors.** `LeafPane::report_selection` only records
+  `UiState::requested_leaf`; it never reads, guards, or posts. The **pump** calls
+  `UiState::reconcile_selection` each tick (clean → load; dirty → stash
+  `guard_target`, post `GUARD_NAV` from its clean, capture-free context) and
+  `app::dispatch` opens the modal; Stay sets `set_leaf_row` (= `current_leaf_row`)
+  so the pane snaps the highlight back. Any future trigger (M3 create-flow, tree)
+  should funnel through `requested_leaf` → `reconcile_selection`, NOT re-poll.
+
+Known minor edges (documented, not yet fixed): (1) TV first-click on an unfocused
+pane only focuses it — the highlight moves on the 2nd click. (2) guard→Save then
+cancelling the confirm leaves the highlight on the target while the form stays
+pinned (self-heals on the next move/Stay). (3) changing **branch** in the tree
+while dirty guards but can't snap back (current entry isn't in the new branch's
+rows) — tree-side guard is M3 work.
+
 ## Deferred to M3 / cleanup (logged from M2 reviews)
 
-- **Focus-switch guard** — M2 ships dirty-nav + dirty-quit guards; the
-  dirty-FOCUS-switch guard (leaving a dirty form pane via Tab) was deferred to M3
-  (needs focus-event plumbing that pairs with create-flow focus work). Spec §8.
 - **Scrollable form** — `FORM_ROWS = 32` truncates entries with >32 attributes
   (rendered/editable only for the first 32). M3 should add form scrolling.
-- **Leaf `last_sel` sticky-retry** — after a dirty-nav "Stay", re-selecting the
-  SAME leaf row is a no-op until you move off and back. The clean fix is
-  selection-revert-on-Stay (needs a ListBox set-focus call), deferred to M3. The
-  obvious reorder was DECLINED (it makes a background REFRESH spuriously re-pop the
-  guard). M2 acceptance is unaffected.
 - Minor/cosmetic: `value_set_eq` duplicate-value false-positive (shared with
   ratatui; fix at M5 dedup); `EditForm::set_value` has no `!multi` guard (only
   single-value callers in M2); read-error shows a stale form (status-only); a few

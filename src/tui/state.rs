@@ -55,6 +55,14 @@ pub struct UiState {
     /// Last async write error, surfaced by the dispatch closure's Error dialog.
     pub last_write_error: Option<String>,
     pub list_dirty: bool,
+    /// Pane → controller: the leaf a selector pane wants shown (dn + objectClasses).
+    /// Set when the highlight moves; consumed by [`reconcile_selection`]. The panes
+    /// never load or guard themselves — they only record this intent.
+    pub requested_leaf: Option<(String, Vec<String>)>,
+    /// Controller → leaf pane: force the list highlight to this row on the pane's
+    /// next event (used to snap the highlight back to `current_leaf` after a guard
+    /// "Stay", so highlight and form always agree).
+    pub set_leaf_row: Option<i32>,
 }
 
 impl UiState {
@@ -93,6 +101,8 @@ impl UiState {
             pending_nav: None,
             last_write_error: None,
             list_dirty: false,
+            requested_leaf: None,
+            set_leaf_row: None,
         }
     }
 }
@@ -201,6 +211,42 @@ impl UiState {
             }
         }
     }
+
+    /// Pane → controller: record that the user moved the highlight to `dn`. The
+    /// selector panes call this and nothing else; the load/guard decision is the
+    /// controller's ([`reconcile_selection`](Self::reconcile_selection)).
+    pub fn request_leaf(&mut self, dn: String, ocs: Vec<String>) {
+        self.requested_leaf = Some((dn, ocs));
+    }
+
+    /// Controller: reconcile a pending [`requested_leaf`](Self::requested_leaf)
+    /// against the entry currently shown in the form. Returns `true` when the
+    /// caller (the pump) must raise the dirty guard.
+    ///
+    /// - already showing it / nothing requested → clear, `false`.
+    /// - form **clean** → load it now (the form follows the highlight), `false`.
+    /// - form **dirty** → stash it as the guard target and return `true`; the form
+    ///   stays pinned until the guard's decision (the pump posts `GUARD_NAV`).
+    pub fn reconcile_selection(&mut self) -> bool {
+        let Some((dn, ocs)) = self.requested_leaf.take() else {
+            return false;
+        };
+        if self.current_leaf.as_deref() == Some(dn.as_str()) {
+            return false;
+        }
+        let dirty = self
+            .edit_form
+            .as_ref()
+            .map(|f| f.is_dirty())
+            .unwrap_or(false);
+        if dirty {
+            self.guard_target = Some((dn, ocs));
+            true
+        } else {
+            self.reread(&dn, &ocs);
+            false
+        }
+    }
 }
 
 impl UiState {
@@ -216,6 +262,17 @@ impl UiState {
             ),
             None => Vec::new(),
         }
+    }
+
+    /// The list row index of the entry currently shown in the form (`current_leaf`),
+    /// or `None` if it is not in the current rows. Used to snap the highlight back
+    /// to the pinned form on a guard "Stay".
+    pub fn current_leaf_row(&self) -> Option<i32> {
+        let cur = self.current_leaf.as_deref()?;
+        self.leaf_rows()
+            .iter()
+            .position(|(_l, dn)| dn == cur)
+            .map(|i| i as i32)
     }
 }
 
@@ -280,6 +337,8 @@ pub(crate) fn bootstrap(config: Config, password: String) -> Result<UiState> {
         pending_nav: None,
         last_write_error: None,
         list_dirty: false,
+        requested_leaf: None,
+        set_leaf_row: None,
     })
 }
 
@@ -351,6 +410,86 @@ mod write_routing_tests {
         let schema = crate::schema::SchemaModel::from_raw(&RawSubschema::default());
         let structure = Structure::build("dc=x", vec![]);
         UiState::new_for_test(structure, schema, "dc=x".into(), Vec::new(), Vec::new())
+    }
+
+    /// A minimal single-field form; `dirty` controls whether the field diverges
+    /// from its baseline (so `is_dirty()` is true).
+    fn form_with_dirty(dirty: bool) -> crate::workflows::edit_form::EditForm {
+        use crate::schema::FieldKind;
+        use crate::workflows::edit_form::{EditField, EditForm, FormMode};
+        use crate::workflows::form_model::WidgetSpec;
+        let field = EditField {
+            label: "cn".into(),
+            must: true,
+            editable: true,
+            multi: false,
+            secret: false,
+            ordered: false,
+            orphaned: false,
+            kind: FieldKind::Text,
+            widget: WidgetSpec::ReadOnlyText,
+            widget_binding: None,
+            values: vec![if dirty { "new" } else { "base" }.into()],
+            baseline: vec!["base".into()],
+        };
+        EditForm {
+            dn: "cn=a,dc=x".into(),
+            mode: FormMode::Edit,
+            object_classes: vec!["top".into()],
+            fields: vec![field],
+        }
+    }
+
+    #[test]
+    fn reconcile_no_request_is_noop() {
+        let mut st = empty_state();
+        assert!(!st.reconcile_selection());
+        assert!(st.guard_target.is_none());
+    }
+
+    #[test]
+    fn reconcile_same_leaf_clears_without_guard() {
+        let mut st = empty_state();
+        st.current_leaf = Some("cn=a,dc=x".into());
+        st.request_leaf("cn=a,dc=x".into(), vec![]);
+        assert!(!st.reconcile_selection(), "already shown → no guard");
+        assert!(st.requested_leaf.is_none(), "request consumed");
+        assert!(st.guard_target.is_none());
+    }
+
+    #[test]
+    fn reconcile_clean_form_loads_without_guard() {
+        // Clean form (or none): the controller loads directly — no guard. (No worker
+        // in the test, so the read is a no-op, but the decision path is clean.)
+        let mut st = empty_state();
+        st.edit_form = Some(form_with_dirty(false));
+        st.request_leaf("cn=b,dc=x".into(), vec![]);
+        assert!(!st.reconcile_selection(), "clean form → load, no guard");
+        assert!(st.requested_leaf.is_none());
+        assert!(st.guard_target.is_none());
+    }
+
+    #[test]
+    fn reconcile_dirty_form_raises_guard_with_target() {
+        // The reported bug: switching entries while the form is dirty must raise the
+        // guard (here, return true so the pump posts GUARD_NAV) — regardless of which
+        // input drove the selection.
+        let mut st = empty_state();
+        st.current_leaf = Some("cn=a,dc=x".into());
+        st.edit_form = Some(form_with_dirty(true));
+        st.request_leaf("cn=b,dc=x".into(), vec!["top".into()]);
+        assert!(st.reconcile_selection(), "dirty form → raise guard");
+        assert_eq!(
+            st.guard_target,
+            Some(("cn=b,dc=x".into(), vec!["top".into()])),
+            "the requested entry becomes the guard target"
+        );
+        assert!(st.requested_leaf.is_none(), "request consumed into the guard");
+        assert_eq!(
+            st.current_leaf.as_deref(),
+            Some("cn=a,dc=x"),
+            "the form stays pinned to the current entry"
+        );
     }
 
     #[test]
