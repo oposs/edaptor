@@ -99,7 +99,8 @@ pub(crate) fn dispatch(prog: &mut Program, cmd: Command, state: &Shared) {
     } else if cmd == SHOW_ERROR {
         let msg = state.borrow_mut().last_write_error.take();
         if let Some(msg) = msg {
-            prog.exec_view(error::build(&msg));
+            let (view, ok) = error::build(&msg);
+            prog.exec_view_focused(view, ok);
         }
     }
 }
@@ -107,7 +108,8 @@ pub(crate) fn dispatch(prog: &mut Program, cmd: Command, state: &Shared) {
 /// Run the guard modal and decode the answer. (`exec_view` re-enters the loop; the
 /// pump keeps draining, so an in-flight write still completes.)
 fn run_guard(prog: &mut Program) -> GuardDecision {
-    let answer = prog.exec_view(guard::build());
+    let (view, save) = guard::build();
+    let answer = prog.exec_view_focused(view, save);
     guard_decision(answer)
 }
 
@@ -135,10 +137,14 @@ fn do_save(
             st.form_needs_render = true; // repaints on the next pump tick
         }
         SaveAction::Error(text) => {
-            prog.exec_view(error::build(&text));
+            let (view, ok) = error::build(&text);
+            prog.exec_view_focused(view, ok);
         }
         SaveAction::Confirm(ldif) => {
-            if prog.exec_view(confirm::build(&ldif)) != Command::OK {
+            // Focus the Save button so Enter confirms — without it the modal opens
+            // with Cancel focused (firstMatch picks the last-inserted selectable).
+            let (view, save) = confirm::build(&ldif);
+            if prog.exec_view_focused(view, save) != Command::OK {
                 return; // Cancel: keep editing.
             }
             // 2. Submit the plan we prepared. Re-extract Ready for the plan/dn.

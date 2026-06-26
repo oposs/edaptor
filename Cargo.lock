@@ -95,7 +95,7 @@ dependencies = [
  "objc2-foundation",
  "parking_lot",
  "percent-encoding",
- "windows-sys 0.52.0",
+ "windows-sys 0.59.0",
  "wl-clipboard-rs",
  "x11rb",
 ]
@@ -691,7 +691,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1573,7 +1573,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7d8fae84b431384b68627d0f9b3b1245fcf9f46f6c0e3dc902e9dce64edd1967"
 dependencies = [
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2030,7 +2030,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2384,7 +2384,7 @@ dependencies = [
  "getrandom 0.4.2",
  "once_cell",
  "rustix",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2683,8 +2683,7 @@ dependencies = [
 [[package]]
 name = "tvision-rs"
 version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "767f826d7cb8cd4dfc427ad3c76fd142f862552bfc77a00222b00d04466a465c"
+source = "git+https://github.com/oetiker/tvision-rs.git?rev=fccb59dbfb9c818d13efeda28ad901131b7398b3#fccb59dbfb9c818d13efeda28ad901131b7398b3"
 dependencies = [
  "arboard",
  "crossterm",
@@ -2699,8 +2698,7 @@ dependencies = [
 [[package]]
 name = "tvision-rs-macros"
 version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4bb9919bab6a44494094bbc8b8f991b27f07258c6bce4865cfe1dbeb757a5b52"
+source = "git+https://github.com/oetiker/tvision-rs.git?rev=fccb59dbfb9c818d13efeda28ad901131b7398b3#fccb59dbfb9c818d13efeda28ad901131b7398b3"
 dependencies = [
  "proc-macro-crate",
  "proc-macro2",

@@ -5,8 +5,15 @@ for that see git log, the specs under `docs/superpowers/specs/`, the SDD ledger
 (`.superpowers/sdd/progress.md`), and project memory (`…/memory/MEMORY.md`).
 
 **Date:** 2026-06-26 · **Where we are: the tvision-rs UI migration is mid-flight.
-M1 (read core) and M2 (edit + write spine) are COMPLETE and reviewed. Next is M3
-(ObjectClass picker + create flow).**
+M1 (read core) and M2 (edit + write spine) are COMPLETE, reviewed, and now
+LIVE-ACCEPTED (save round-trip + guards driven in tmux). Next is M3 (ObjectClass
+picker + create flow).**
+
+> ⚠ **Temporary git-pin in `Cargo.toml`.** `[patch.crates-io]` pins `tvision-rs`
+> to commit `fccb59d` (PR oetiker/tvision-rs#6, branch `feat/exec-view-focused`),
+> which adds `Program::exec_view_focused`. **Drop the pin and bump `tvision-rs`
+> once that PR merges and a release ships.** Without it, modal dialogs open with
+> the wrong button focused (Enter cancels the save). See "What's done" below.
 
 `edaptor` is a Rust TUI for administering an OpenLDAP directory. It introspects
 live schema (`cn=subschema`) and generates edit forms from `objectClass`
@@ -79,16 +86,34 @@ depends on the release. PR #5 (merged). The Splitter is now transparent to focus
 
 ---
 
-## The one open M2 item: live acceptance of SAVE + GUARDS
+## M2 SAVE + GUARDS — live-accepted (the gate is now CLOSED)
 
-M2's edit/dirty/nav was verified live (tmux), but the **save round-trip and the
-guard dialogs were NOT yet driven interactively** — that is M2's remaining accept
-gate (umbrella §6 M2: "edit and persist one real entry end-to-end; guard fires on
-dirty nav and quit; LDIF preview correct"). **Do this first next session** (it's
-cheap and de-risks M3, which builds on the write spine). Drive in tmux (see
-"Live-driving the TUI"): edit a plain attr → **Alt-S** → LDIF confirm dialog →
-Save → persists → re-read clears the dirty `*`; then dirty-nav and Alt-X guards
-(Save/Discard/Stay). If save/guards misbehave, fix before M3.
+The save round-trip and guard dialogs were driven live in tmux and **a real bug
+was found and fixed before it could reach M3**:
+
+- **Symptom:** edit a plain attr → Alt-S → confirm dialog → Enter → dialog closed
+  but nothing persisted, form stayed dirty, no error.
+- **Root cause:** on modal open, tvision's `first_match_visible_selectable`
+  focuses the *last-inserted* selectable child — the **Cancel/Stay** button. A
+  focused non-default button becomes the acting default, so Enter fired Cancel and
+  `do_save` early-returned. Faithful Turbo Vision behaviour; `message_box` dodges
+  it via `initial_focus`, but edaptor's bare `exec_view` passed `None` and the
+  public API had no way to set focus.
+- **Fix (upstream, user-chosen):** tvision-rs **PR #6** adds
+  `Program::exec_view_focused(view, focus)`. edaptor's `confirm`/`guard`/`error`
+  builders now return `(view, default_btn_id)` and `app::dispatch` calls
+  `exec_view_focused`, so dialogs open with Save/OK focused. edaptor is git-pinned
+  to the PR commit until it releases (see the banner at the top).
+- **Verified live:** save persists to LDAP + dirty `*` clears + re-read; confirm
+  Esc keeps editing; quit guard (Enter=Save→confirm, Stay, Discard=quit-no-save);
+  dirty-nav guard fires and Discard navigates + drops the edit. Demo data restored.
+
+Useful detail discovered while driving: **only single-valued attributes are
+inline-editable** in the form (uidNumber, gidNumber, homeDirectory, sambaSID,
+displayName, employeeNumber, gecos, loginShell for a posix/samba user) — arrow nav
+cycles exactly those; multi-valued-capable attrs (cn, sn, mail, description, …) are
+intentionally skipped (the `present_field` multi-value short-circuit). Also: a
+focused `InputLine` selects-all, so typing replaces the whole value.
 
 ---
 

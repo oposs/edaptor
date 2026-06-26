@@ -20,6 +20,12 @@ All notable changes to eDAPtor are documented here. The format follows
 
 ### Fixed
 
+- tvision UI (preview): the Save-confirm and unsaved-changes guard dialogs opened
+  with the wrong button focused (Cancel / Stay), so pressing Enter cancelled the
+  save instead of confirming it — a save could not be completed by keyboard. The
+  dialogs now open with the primary action (Save) focused. (Requires tvision-rs's
+  new `exec_view_focused`; pinned to that fix until the next tvision-rs release.)
+
 ## 0.4.0 - 2026-06-12
 
 ### New
