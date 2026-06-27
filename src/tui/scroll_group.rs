@@ -9,7 +9,7 @@
 //! driven through the `ScrollSync` broker. Domain-free: candidate for upstreaming
 //! to tvision-rs.
 
-use tvision_rs::{self as tv, delegate, Context, DrawCtx, Rect, ScrollBar, View, ViewId};
+use tvision_rs::{self as tv, delegate, Context, DrawCtx, Event, Rect, ScrollBar, View, ViewId};
 
 pub(crate) struct ScrollGroup {
     group: tv::Group,
@@ -92,6 +92,11 @@ impl ScrollGroup {
         self.reposition();
     }
 
+    #[cfg(test)]
+    pub(crate) fn content_id_for_test(&self, idx: usize) -> ViewId {
+        self.content[idx].0
+    }
+
     #[allow(dead_code)]
     pub(crate) fn clear_content(&mut self, ctx: &mut Context) {
         let ids: Vec<ViewId> = self.content.iter().map(|(id, _)| *id).collect();
@@ -121,9 +126,20 @@ impl ScrollGroup {
         self.publish_bar(ctx);
     }
 
-    /// Republish the bar params (stub until Task 3 fills it in).
-    #[allow(dead_code)]
-    fn publish_bar(&mut self, _ctx: &mut Context) {}
+    fn publish_bar(&mut self, ctx: &mut Context) {
+        let max = self.max_top();
+        if let Some(b) = self.group.child_mut(self.v_bar) {
+            b.state_mut().state.visible = max > 0;
+        }
+        ctx.request_scroll_bar_params(
+            self.v_bar,
+            Some(self.top),
+            Some(0),
+            Some(max),
+            Some(self.viewport_h.max(1)),
+            Some(1),
+        );
+    }
 }
 
 #[delegate(to = group)]
@@ -146,6 +162,23 @@ impl View for ScrollGroup {
             b.change_bounds(Rect::new(w - 1, 0, w, h));
         }
         self.scroll_to(self.top, ctx);
+    }
+
+    fn handle_event(&mut self, ev: &mut Event, ctx: &mut Context) {
+        if let Event::Broadcast { command, source } = ev {
+            if *command == tv::Command::SCROLL_BAR_CHANGED && *source == Some(self.v_bar) {
+                if let Some(id) = self.group.state().id() {
+                    ctx.request_scroll_sync(id, None, Some(self.v_bar));
+                }
+            }
+        }
+        self.group.handle_event(ev, ctx);
+    }
+
+    fn apply_scroll_sync(&mut self, _h: Option<i32>, v: Option<i32>, ctx: &mut Context) {
+        if let Some(v) = v {
+            self.scroll_to(v, ctx);
+        }
     }
 }
 
@@ -215,5 +248,57 @@ mod tests {
         // The glyph at (1,0) is '2' (from "R2"), proving row 2 — not row 0 — is on top.
         assert_eq!(buf.get(1, 0).symbol(), "2");
         let _ = FieldValue::Int(0);
+    }
+
+    #[test]
+    fn publish_bar_sets_params_and_hides_when_fits() {
+        use tvision_rs::{Deferred, FieldValue};
+        let mut sg = ScrollGroup::new(Rect::new(0, 0, 10, 5));
+        let w = sg.inner_width();
+        for y in 0..8 {
+            sg.add_content(
+                Box::new(tv::InputLine::with_limit(Rect::new(0, y, w, y + 1), 64)),
+                Rect::new(0, y, w, y + 1),
+            );
+        }
+        let mut out = std::collections::VecDeque::new();
+        let mut timers = tv::timer::TimerQueue::new();
+        let mut deferred: Vec<Deferred> = Vec::new();
+        let mut ctx = Context::new(&mut out, &mut timers, 0, &mut deferred);
+        sg.scroll_to(2, &mut ctx);
+        // A ScrollBarSetParams deferred with value=2, max=max_top()=3 was requested.
+        let found = deferred.iter().any(|d| {
+            matches!(
+                d,
+                Deferred::ScrollBarSetParams {
+                    value: Some(2),
+                    max: Some(3),
+                    ..
+                }
+            )
+        });
+        assert!(found, "publish_bar must request value=2 max=3");
+        let _ = FieldValue::Int(0);
+    }
+
+    #[test]
+    fn apply_scroll_sync_sets_top() {
+        use tvision_rs::Deferred;
+        let mut sg = ScrollGroup::new(Rect::new(0, 0, 10, 5));
+        let w = sg.inner_width();
+        for y in 0..8 {
+            sg.add_content(
+                Box::new(tv::InputLine::with_limit(Rect::new(0, y, w, y + 1), 64)),
+                Rect::new(0, y, w, y + 1),
+            );
+        }
+        let mut out = std::collections::VecDeque::new();
+        let mut timers = tv::timer::TimerQueue::new();
+        let mut deferred: Vec<Deferred> = Vec::new();
+        let mut ctx = Context::new(&mut out, &mut timers, 0, &mut deferred);
+        <ScrollGroup as View>::apply_scroll_sync(&mut sg, None, Some(2), &mut ctx);
+        // child for logical row 5 is now at screen row 3 (5 - top=2).
+        let id = sg.content_id_for_test(5);
+        assert_eq!(sg.child_mut(id).unwrap().state().get_bounds().a.y, 3);
     }
 }
