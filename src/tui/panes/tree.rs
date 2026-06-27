@@ -4,7 +4,7 @@ use tvision_rs::{self as tv, delegate, Context, Event, FieldValue, Rect, View};
 
 use crate::config::tree_label::{eval_tree_label, fit_label};
 use crate::tui::state::UiState;
-use crate::tui::{Shared, REFRESH};
+use crate::tui::Shared;
 
 /// Build a tvision `Node` tree and a parallel DFS pre-order DN index from the
 /// structure's branch hierarchy. Only branches (nodes with ≥1 child) appear;
@@ -86,9 +86,12 @@ pub(crate) fn build_branch_nodes(
     }
 }
 
-/// Outline pane: updates `current_branch` + `list_dirty` and broadcasts REFRESH
-/// when the selected branch changes. (0.1.2 auto-seeds; read selection via
-/// `Outline::value()`; call `ov_update` only after a tree mutation — none here.)
+/// Outline pane: pure selector — records `requested_branch` when the highlighted
+/// branch changes. Never mutates `current_branch` or `list_dirty` directly, and
+/// never broadcasts; the controller ([`UiState::reconcile_branch`]) decides
+/// whether to commit the navigation. Also honours `set_tree_row` to snap the
+/// outline highlight back when a guard returns "Stay". (Auto-seeds on first event;
+/// call `ov_update` only after a tree mutation — none here.)
 pub(crate) struct TreePane {
     outline: tv::Outline,
     state: Shared,
@@ -103,6 +106,14 @@ impl TreePane {
             last_sel: -1,
         }
     }
+
+    /// Test seam: directly set the outline's focused row (bypasses `set_value_ctx`
+    /// which is a no-op on `Outline` since it does not override `set_value`).
+    #[cfg(test)]
+    pub(crate) fn select_row_for_test(&mut self, row: i32, _ctx: &mut Context) {
+        use tv::OutlineViewer;
+        self.outline.ov_mut().foc = row;
+    }
 }
 
 #[delegate(to = outline)]
@@ -112,6 +123,13 @@ impl View for TreePane {
     }
 
     fn handle_event(&mut self, ev: &mut Event, ctx: &mut Context) {
+        // Controller → pane: snap the selection back (guard "Stay") before reporting.
+        let snap = self.state.borrow_mut().set_tree_row.take();
+        if let Some(row) = snap {
+            tv::widgets::outline::adjust_focus(&mut self.outline, row, ctx);
+            self.last_sel = row;
+        }
+
         self.outline.handle_event(ev, ctx);
         let sel = match self.outline.value() {
             Some(FieldValue::Int(i)) => i,
@@ -119,17 +137,11 @@ impl View for TreePane {
         };
         if sel != self.last_sel {
             self.last_sel = sel;
-            let mut updated = false;
             if sel >= 0 {
-                let mut st = self.state.borrow_mut();
-                if let Some(dn) = st.branch_dns.get(sel as usize).cloned() {
-                    st.current_branch = Some(dn);
-                    st.list_dirty = true;
-                    updated = true;
+                let dn = self.state.borrow().branch_dns.get(sel as usize).cloned();
+                if let Some(dn) = dn {
+                    self.state.borrow_mut().request_branch(dn); // pure selector
                 }
-            } // borrow dropped before broadcast
-            if updated {
-                ctx.broadcast(REFRESH, None);
             }
         }
     }
@@ -142,6 +154,7 @@ mod tests {
     use crate::config::TreeConfig;
     use crate::ldap::worker::RawSubschema;
     use crate::schema::SchemaModel;
+    use crate::tui::REFRESH;
     use crate::workflows::structure::{Structure, StructureInput};
     use std::collections::BTreeMap;
 
@@ -214,5 +227,55 @@ mod tests {
         assert!(root.is_some());
         assert_eq!(dns, vec!["dc=x".to_string(), "ou=a,dc=x".to_string()]);
         assert!(!dns.contains(&"ou=b,dc=x".to_string()));
+    }
+
+    /// Pure-selector contract: moving the tree highlight records `requested_branch`
+    /// but never touches `current_branch` or `list_dirty`, and never broadcasts.
+    #[test]
+    fn tree_records_requested_branch_only() {
+        let inputs = vec![
+            si("dc=x"),
+            si("ou=a,dc=x"),
+            si("ou=b,dc=x"),
+            si("cn=1,ou=a,dc=x"),
+            si("cn=1,ou=b,dc=x"),
+        ];
+        let structure = Structure::build("dc=x", inputs);
+        let schema = SchemaModel::from_raw(&RawSubschema::default());
+        let mut st = UiState::new_for_test(
+            structure,
+            schema,
+            "dc=x".into(),
+            Vec::new(),
+            compile_tree_rules(&TreeConfig::default()),
+        );
+        let (root, dns) = build_branch_nodes(&st, 40);
+        st.branch_dns = dns;
+        let shared: std::rc::Rc<std::cell::RefCell<UiState>> =
+            std::rc::Rc::new(std::cell::RefCell::new(st));
+        let mut pane = TreePane::new(Rect::new(0, 0, 30, 10), root, shared.clone());
+
+        let mut out = std::collections::VecDeque::new();
+        let mut timers = tv::timer::TimerQueue::new();
+        let mut deferred: Vec<tv::Deferred> = Vec::new();
+        let mut ctx = Context::new(&mut out, &mut timers, 0, &mut deferred);
+        // Move selection to row 1 (ou=a) and deliver an event.
+        pane.select_row_for_test(1, &mut ctx);
+        let mut ev = Event::Broadcast {
+            command: REFRESH,
+            source: None,
+        };
+        pane.handle_event(&mut ev, &mut ctx);
+
+        let st = shared.borrow();
+        assert_eq!(
+            st.requested_branch.as_deref(),
+            Some("ou=a,dc=x"),
+            "tree must record requested_branch on selection change"
+        );
+        assert_eq!(
+            st.current_branch, None,
+            "pure selector: never switches current_branch inline"
+        );
     }
 }
