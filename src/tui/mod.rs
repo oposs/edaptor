@@ -32,6 +32,7 @@ pub const ACTIVATE: tv::Command = tv::Command::custom("edaptor.activate_field");
 
 /// App-level commands routed to `app::dispatch` via `run_app`.
 pub const SAVE: tv::Command = tv::Command::custom("edaptor.save");
+pub const CREATE: tv::Command = tv::Command::custom("edaptor.create");
 pub const REQUEST_QUIT: tv::Command = tv::Command::custom("edaptor.request_quit");
 pub const GUARD_NAV: tv::Command = tv::Command::custom("edaptor.guard_nav");
 pub const SHOW_ERROR: tv::Command = tv::Command::custom("edaptor.show_error");

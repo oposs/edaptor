@@ -15,7 +15,7 @@ use crate::tui::panes::{
 use crate::tui::pump::PumpView;
 use crate::tui::state::GuardTarget;
 use crate::tui::widget::{widget_for, Activation};
-use crate::tui::{Shared, ACTIVATE, GUARD_NAV, REQUEST_QUIT, SAVE, SHOW_ERROR};
+use crate::tui::{Shared, ACTIVATE, CREATE, GUARD_NAV, REQUEST_QUIT, SAVE, SHOW_ERROR};
 use crate::workflows::save::PrepareSave;
 
 fn init_status_line(r: Rect) -> Option<Box<dyn View>> {
@@ -23,7 +23,8 @@ fn init_status_line(r: Rect) -> Option<Box<dyn View>> {
     r.a.y = r.b.y - 1;
     let defs = StatusDef::list()
         .def_all(|d| {
-            d.item("~Alt-S~ Save", alt('s'), SAVE)
+            d.item("~Alt-N~ New", alt('n'), CREATE)
+                .item("~Alt-S~ Save", alt('s'), SAVE)
                 .item("~Alt-X~ Exit", alt('x'), REQUEST_QUIT)
         })
         .build();
@@ -35,7 +36,8 @@ fn init_menu_bar(r: Rect) -> Option<Box<dyn View>> {
     r.b.y = r.a.y + 1;
     let menu = tv::Menu::builder()
         .submenu("~F~ile", alt('f'), |m| {
-            m.command_key("~S~ave", SAVE, alt('s'), "Alt-S")
+            m.command_key("~N~ew", CREATE, alt('n'), "Alt-N")
+                .command_key("~S~ave", SAVE, alt('s'), "Alt-S")
                 .command_key("E~x~it", REQUEST_QUIT, alt('x'), "Alt-X")
         })
         .build();
@@ -193,6 +195,42 @@ pub(crate) fn dispatch(prog: &mut Program, cmd: Command, state: &Shared) {
             GuardDecision::Discard => prog.end_modal(Command::QUIT),
             GuardDecision::Stay => {}
         }
+    } else if cmd == CREATE {
+        // Container = the current branch.
+        let container = state.borrow().current_branch.clone();
+        let Some(container) = container else {
+            state.borrow_mut().status = "Select a container first.".into();
+            return;
+        };
+        let idxs = {
+            let st = state.borrow();
+            crate::workflows::create::profiles_for_container(&st.profiles, &container)
+        };
+        match idxs.as_slice() {
+            [] => {
+                state.borrow_mut().status = "No profile for this container.".into();
+            }
+            [only] => open_create(state, *only, &container),
+            _ => {
+                // >1: run the chooser, then open the chosen profile.
+                let names: Vec<String> = {
+                    let st = state.borrow();
+                    idxs.iter().map(|i| st.profiles[*i].name.clone()).collect()
+                };
+                let (view, focus) =
+                    crate::tui::dialog::profile_chooser::build(names, state.clone());
+                if prog.exec_view_focused(view, focus) == Command::OK {
+                    let chosen = state.borrow_mut().chosen_profile.take();
+                    if let Some(rel) = chosen {
+                        if let Some(idx) = idxs.get(rel) {
+                            open_create(state, *idx, &container);
+                        }
+                    }
+                } else {
+                    state.borrow_mut().chosen_profile = None;
+                }
+            }
+        }
     } else if cmd == SHOW_ERROR {
         let msg = state.borrow_mut().last_write_error.take();
         if let Some(msg) = msg {
@@ -200,6 +238,22 @@ pub(crate) fn dispatch(prog: &mut Program, cmd: Command, state: &Shared) {
             prog.exec_view_focused(view, ok);
         }
     }
+}
+
+/// Build a create-mode form for `profile_idx` under `container` and install it.
+/// (Block B posts the autonumber scans for the returned requests; here they are
+/// just dropped until B wires them — `let _ = autonum`.)
+fn open_create(state: &Shared, profile_idx: usize, container: &str) {
+    let form_and_reqs = {
+        let st = state.borrow();
+        let schema = st.read_flow.schema();
+        let profile = &st.profiles[profile_idx];
+        crate::workflows::create::build_create_form(schema, profile, profile_idx, container)
+    };
+    let (form, _autonum) = form_and_reqs;
+    let mut st = state.borrow_mut();
+    st.edit_form = Some(form);
+    st.form_needs_render = true;
 }
 
 /// Run the guard modal and decode the answer. (`exec_view` re-enters the loop; the
