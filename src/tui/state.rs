@@ -209,9 +209,24 @@ impl UiState {
                 out.error = true;
             }
             WriteOutcome::Ignored => out.changed = false,
-            // TODO(Task 5): implement navigate-after-create; placeholder keeps
-            // the build non-exhaustive until Task 5 wires up the real logic.
-            WriteOutcome::Created { .. } => {}
+            WriteOutcome::Created { dn, quit_after } => {
+                let ocs = self
+                    .edit_form
+                    .as_ref()
+                    .map(|f| f.object_classes.clone())
+                    .unwrap_or_default();
+                self.current_leaf = Some(dn.clone());
+                self.list_dirty = true;
+                self.edit_form = None; // re-read reloads it in Edit mode
+                if self.worker.is_some() {
+                    self.reread_public(&dn, &ocs);
+                }
+                return PumpResult {
+                    changed: true,
+                    quit: quit_after,
+                    error: false,
+                };
+            }
         }
         out
     }
@@ -777,6 +792,48 @@ mod write_routing_tests {
         let res = st.apply_write_outcome(WriteOutcome::Error("boom".into()));
         assert!(res.error);
         assert_eq!(st.last_write_error.as_deref(), Some("boom"));
+    }
+
+    #[test]
+    fn created_navigates_to_new_entry() {
+        use crate::schema::FieldKind;
+        use crate::workflows::edit_form::{EditField, EditForm, FormMode};
+        use crate::workflows::form_model::WidgetSpec;
+        let mut st = empty_state();
+        st.edit_form = Some(EditForm {
+            dn: "uid=bob,ou=people,dc=example,dc=org".into(),
+            mode: FormMode::Create {
+                profile_idx: 0,
+                container: "ou=people,dc=example,dc=org".into(),
+            },
+            object_classes: vec!["inetOrgPerson".into(), "top".into()],
+            fields: vec![EditField {
+                label: "uid".into(),
+                must: true,
+                editable: true,
+                multi: false,
+                secret: false,
+                ordered: false,
+                orphaned: false,
+                kind: FieldKind::Text,
+                widget: WidgetSpec::ReadOnlyText,
+                widget_binding: None,
+                values: vec!["bob".into()],
+                baseline: vec![],
+            }],
+        });
+        let r = st.apply_write_outcome(WriteOutcome::Created {
+            dn: "uid=bob,ou=people,dc=example,dc=org".into(),
+            quit_after: false,
+        });
+        assert_eq!(
+            st.current_leaf.as_deref(),
+            Some("uid=bob,ou=people,dc=example,dc=org")
+        );
+        assert!(st.list_dirty);
+        assert!(r.changed);
+        // With worker: None, edit_form is cleared (reread skipped but state mutations apply).
+        assert!(st.edit_form.is_none());
     }
 
     fn si(dn: &str, child_hint: Option<&str>) -> StructureInput {
