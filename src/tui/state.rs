@@ -76,6 +76,12 @@ pub struct UiState {
     /// Controller → tree pane: force the tree highlight to this row on the pane's
     /// next event (used to snap back to `current_branch` after a guard "Stay").
     pub set_tree_row: Option<i32>,
+    /// Form pane → controller: the field index whose modal editor should open on
+    /// the next `ACTIVATE`. Set by the pane, consumed by `app::dispatch`.
+    pub activate_field: Option<usize>,
+    /// Modal editor → controller: the prospective commit an open editor would
+    /// apply. Maintained live by the editor view; applied by `dispatch` on OK.
+    pub staged_commit: Option<crate::tui::widget::CommitOutcome>,
 }
 
 impl UiState {
@@ -118,6 +124,8 @@ impl UiState {
             set_leaf_row: None,
             requested_branch: None,
             set_tree_row: None,
+            activate_field: None,
+            staged_commit: None,
         }
     }
 }
@@ -225,6 +233,42 @@ impl UiState {
                 *current_leaf = Some(dn.to_string());
             }
         }
+    }
+
+    /// Apply a modal editor's typed `CommitOutcome` to the loaded form. For the
+    /// resync variant: write the objectClass field values, mirror them into
+    /// `object_classes`, then regenerate fields. Reads schema from `read_flow`
+    /// (split-borrow so `edit_form` and `read_flow` are borrowed disjointly).
+    pub fn apply_commit(&mut self, field_idx: usize, outcome: crate::tui::widget::CommitOutcome) {
+        use crate::tui::widget::CommitOutcome;
+        let UiState {
+            edit_form,
+            read_flow,
+            form_needs_render,
+            ..
+        } = self;
+        match outcome {
+            CommitOutcome::SetValues(vals) => {
+                if let Some(form) = edit_form.as_mut() {
+                    if let Some(f) = form.fields.get_mut(field_idx) {
+                        f.values = vals;
+                    }
+                }
+            }
+            CommitOutcome::SetValuesThenResyncSchema(ocs) => {
+                if let Some(form) = edit_form.as_mut() {
+                    if let Some(f) = form.fields.get_mut(field_idx) {
+                        f.values = ocs.clone();
+                    }
+                    form.object_classes = ocs;
+                    form.sync_schema_fields(read_flow.schema());
+                }
+            }
+            // StageSecret is M4 (password); no-op here.
+            CommitOutcome::StageSecret { .. } => {}
+            CommitOutcome::Cancelled => {}
+        }
+        *form_needs_render = true;
     }
 
     /// Pane → controller: record that the user moved the highlight to `dn`. The
@@ -402,6 +446,8 @@ pub(crate) fn bootstrap(config: Config, password: String) -> Result<UiState> {
         set_leaf_row: None,
         requested_branch: None,
         set_tree_row: None,
+        activate_field: None,
+        staged_commit: None,
     })
 }
 
@@ -459,6 +505,77 @@ mod tests {
             UiState::new_for_test(structure, schema, "dc=x".into(), Vec::new(), Vec::new());
         assert!(!st.pump_worker().changed);
         assert!(st.edit_form.is_none());
+    }
+
+    #[test]
+    fn apply_commit_resyncs_on_objectclass_change() {
+        use crate::schema::FieldKind;
+        use crate::tui::widget::CommitOutcome;
+        use crate::workflows::edit_form::{EditField, EditForm, FormMode};
+        use crate::workflows::form_model::WidgetSpec;
+
+        // Minimal schema with person (MUST sn,cn MAY description).
+        let raw = crate::ldap::worker::RawSubschema {
+            object_classes: vec![
+                "( 2.5.6.0 NAME 'top' ABSTRACT MUST objectClass )".into(),
+                "( 2.5.6.6 NAME 'person' SUP top STRUCTURAL MUST ( sn $ cn ) MAY description )"
+                    .into(),
+            ],
+            attribute_types: vec![
+                "( 2.5.4.3 NAME 'cn' SYNTAX 1.3.6.1.4.1.1466.115.121.1.15 SINGLE-VALUE )".into(),
+                "( 2.5.4.4 NAME 'sn' SYNTAX 1.3.6.1.4.1.1466.115.121.1.15 )".into(),
+                "( 2.5.4.13 NAME 'description' SYNTAX 1.3.6.1.4.1.1466.115.121.1.15 )".into(),
+            ],
+            ldap_syntaxes: vec![],
+        };
+        let schema = crate::schema::SchemaModel::from_raw(&raw);
+        let structure = Structure::build("dc=example,dc=org", vec![]);
+        let mut st = UiState::new_for_test(
+            structure,
+            schema,
+            "dc=example,dc=org".into(),
+            Vec::new(),
+            Vec::new(),
+        );
+        let oc_field = EditField {
+            label: "objectClass".into(),
+            must: true,
+            editable: false,
+            multi: true,
+            secret: false,
+            ordered: false,
+            orphaned: false,
+            kind: FieldKind::Text,
+            widget: WidgetSpec::ReadOnlyText,
+            widget_binding: None,
+            values: vec!["top".into()],
+            baseline: vec!["top".into()],
+        };
+        st.edit_form = Some(EditForm {
+            dn: "cn=Bob,dc=example,dc=org".into(),
+            mode: FormMode::Edit,
+            object_classes: vec!["top".into()],
+            fields: vec![oc_field],
+        });
+
+        // Commit "top, person": objectClass values updated, fields injected, render flagged.
+        st.apply_commit(
+            0,
+            CommitOutcome::SetValuesThenResyncSchema(vec!["top".into(), "person".into()]),
+        );
+        let form = st.edit_form.as_ref().unwrap();
+        assert_eq!(
+            form.object_classes,
+            vec!["top".to_string(), "person".to_string()]
+        );
+        let oc = form
+            .fields
+            .iter()
+            .find(|f| f.label == "objectClass")
+            .unwrap();
+        assert_eq!(oc.values, vec!["top".to_string(), "person".to_string()]);
+        assert!(form.fields.iter().any(|f| f.label == "sn"));
+        assert!(st.form_needs_render);
     }
 }
 
