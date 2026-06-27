@@ -3,16 +3,20 @@
 //! editable; the rest stay disabled (read-only). On every event the editable
 //! `InputLine`s are synced into the shared `EditForm` so a `SAVE` sees current
 //! values, and the header's dirty marker is refreshed.
+//!
+//! The form is built on a `ScrollGroup` (rows 1..h) so arbitrarily many fields are
+//! supported — there is no longer a fixed `FORM_ROWS` cap. Cells are rebuilt from
+//! `EditForm.fields` whenever the shown entry changes.
 
 use tvision_rs::{
     self as tv, delegate, Context, Event, FieldValue, Group, InputLine, Key, Rect, View,
 };
 
+use crate::tui::scroll_group::ScrollGroup;
 use crate::tui::widget::{inline_editable, present_field};
 use crate::tui::{Shared, REFRESH};
 use crate::workflows::edit_form::EditForm;
 
-const FORM_ROWS: usize = 32;
 /// Columns reserved for the label before the value `InputLine`.
 const LABEL_W: i32 = 22;
 
@@ -26,11 +30,16 @@ fn ro_cell(bounds: Rect) -> InputLine {
 }
 
 pub(crate) struct FormPane {
+    /// Outer container: header (row 0) + ScrollGroup (rows 1..h).
     group: Group,
     header_id: tv::ViewId,
-    /// Per field row: the value `InputLine` id (label is a disabled InputLine).
+    scroll_id: tv::ViewId,
+    /// One value `InputLine` id per field, in field order (full-length; no cap).
     value_ids: Vec<tv::ViewId>,
+    /// One label `InputLine` (ro) id per field, parallel to `value_ids`.
     label_ids: Vec<tv::ViewId>,
+    /// DN of the entry whose cells are currently built; `None` before first render.
+    built_dn: Option<String>,
     state: Shared,
 }
 
@@ -45,36 +54,48 @@ impl FormPane {
         let mut group = Group::new(bounds);
         // ofFirstClick: a single click into this pane (from another pane) both
         // focuses the pane and lands on the clicked field, rather than needing a
-        // second click (see the note in `LeafPane::new`).
+        // second click.
         group.state_mut().options.first_click = true;
         let w = bounds.b.x - bounds.a.x;
+        let h = bounds.b.y - bounds.a.y;
 
         // Row 0: header (read-only cell).
         let header_id = group.insert(Box::new(ro_cell(Rect::new(0, 0, w, 1))));
+        // Rows 1..h: scrollable content pane.
+        let scroll_id = group.insert(Box::new(ScrollGroup::new(Rect::new(0, 1, w, h))));
 
-        let mut value_ids = Vec::new();
-        let mut label_ids = Vec::new();
-        for i in 0..FORM_ROWS {
-            let y = i as i32 + 1; // rows start below the header
-            label_ids.push(group.insert(Box::new(ro_cell(Rect::new(0, y, LABEL_W, y + 1)))));
-            let mut il = InputLine::with_limit(Rect::new(LABEL_W, y, w, y + 1), 1024);
-            il.state.state.disabled = true; // default read-only; refresh enables editable rows
-            value_ids.push(group.insert(Box::new(il)));
-        }
         FormPane {
             group,
             header_id,
-            value_ids,
-            label_ids,
+            scroll_id,
+            value_ids: Vec::new(),
+            label_ids: Vec::new(),
+            built_dn: None,
             state,
         }
+    }
+
+    /// Return a mutable reference to the inner `ScrollGroup`.
+    fn scroll_mut(&mut self) -> Option<&mut ScrollGroup> {
+        self.group
+            .child_mut(self.scroll_id)
+            .and_then(|v| v.as_any_mut())
+            .and_then(|a| a.downcast_mut::<ScrollGroup>())
+    }
+
+    /// Test seam: number of value InputLine cells currently built (one per field,
+    /// uncapped after the ScrollGroup rewrite).
+    #[cfg(test)]
+    pub(crate) fn field_cell_count(&self) -> usize {
+        self.value_ids.len()
     }
 
     /// Test seam: is the value InputLine for field `i` disabled?
     #[cfg(test)]
     pub(crate) fn value_disabled(&mut self, i: usize) -> bool {
-        self.group
-            .child_mut(self.value_ids[i])
+        let vid = self.value_ids[i];
+        self.scroll_mut()
+            .and_then(|sg| sg.child_mut(vid))
             .map(|c| c.state().state.disabled)
             .unwrap_or(true)
     }
@@ -82,14 +103,69 @@ impl FormPane {
     /// Test seam: set the value InputLine text for field `i`.
     #[cfg(test)]
     pub(crate) fn set_value_text(&mut self, i: usize, text: String) {
-        if let Some(c) = self.group.child_mut(self.value_ids[i]) {
-            c.set_value(FieldValue::Text(text));
+        let vid = self.value_ids[i];
+        if let Some(sg) = self.scroll_mut() {
+            if let Some(c) = sg.child_mut(vid) {
+                c.set_value(FieldValue::Text(text));
+            }
         }
     }
 
-    /// Repaint header + all rows from `edit_form`.
+    /// Rebuild one label+value cell pair per field into the `ScrollGroup`. Called
+    /// when the shown entry changes (different `dn`). Borrow discipline: collect
+    /// field metadata, drop the state borrow, then mutate the scroll group.
+    fn rebuild_cells(&mut self, ctx: &mut Context) {
+        // Collect field metadata (drop state borrow before touching views).
+        let fields: Vec<(String, bool)> = {
+            let st = self.state.borrow();
+            match st.edit_form.as_ref() {
+                None => Vec::new(),
+                Some(form) => form
+                    .fields
+                    .iter()
+                    .map(|f| {
+                        let marker = if f.must { "*" } else { "" };
+                        (format!("{}{}", f.label, marker), inline_editable(f))
+                    })
+                    .collect(),
+            }
+        }; // state borrow dropped
+
+        // Build all cells. Accumulate IDs into locals so the `sg` borrow (from
+        // `self.group`) does not overlap with writing `self.label_ids`/`self.value_ids`.
+        let mut new_lids: Vec<tv::ViewId> = Vec::with_capacity(fields.len());
+        let mut new_vids: Vec<tv::ViewId> = Vec::with_capacity(fields.len());
+        {
+            let Some(sg) = self.scroll_mut() else { return };
+            sg.clear_content(ctx);
+            let w = sg.inner_width();
+            for (row, (_label, editable)) in fields.iter().enumerate() {
+                let y = row as i32;
+                let lid = sg.add_content(
+                    Box::new(ro_cell(Rect::new(0, y, LABEL_W, y + 1))),
+                    Rect::new(0, y, LABEL_W, y + 1),
+                );
+                let mut il = InputLine::with_limit(Rect::new(LABEL_W, y, w, y + 1), 1024);
+                il.state.state.disabled = !editable;
+                let vid = sg.add_content(Box::new(il), Rect::new(LABEL_W, y, w, y + 1));
+                new_lids.push(lid);
+                new_vids.push(vid);
+            }
+        } // sg borrow released; self is free again
+        self.label_ids = new_lids;
+        self.value_ids = new_vids;
+    }
+
+    /// Repaint header + all cell texts from `edit_form`; rebuild cells first if
+    /// the shown entry changed (different `dn`).
     fn render(&mut self, ctx: &mut Context) {
-        let _ = ctx;
+        let cur_dn = self.state.borrow().edit_form.as_ref().map(|f| f.dn.clone());
+        if cur_dn != self.built_dn {
+            self.rebuild_cells(ctx);
+            self.built_dn = cur_dn;
+        }
+
+        // Collect display data (drop state borrow before touching views).
         let (header, rows): (String, Vec<(String, String, bool)>) = {
             let st = self.state.borrow();
             match st.edit_form.as_ref() {
@@ -101,41 +177,55 @@ impl FormPane {
                         .iter()
                         .map(|f| {
                             let marker = if f.must { "*" } else { "" };
-                            let label = format!("{}{}", f.label, marker);
-                            (label, present_field(f), inline_editable(f))
+                            (
+                                format!("{}{}", f.label, marker),
+                                present_field(f),
+                                inline_editable(f),
+                            )
                         })
                         .collect();
                     (header, rows)
                 }
             }
-        }; // borrow dropped
+        }; // state borrow dropped
 
         if let Some(h) = self.group.child_mut(self.header_id) {
             h.set_value(FieldValue::Text(header));
         }
-        for i in 0..FORM_ROWS {
-            let (label, value, editable) = rows
-                .get(i)
-                .cloned()
-                .unwrap_or_else(|| (String::new(), String::new(), false));
-            if let Some(l) = self.group.child_mut(self.label_ids[i]) {
-                l.set_value(FieldValue::Text(label));
-            }
-            if let Some(v) = self.group.child_mut(self.value_ids[i]) {
-                v.set_value(FieldValue::Text(value));
-                v.state_mut().state.disabled = !editable;
-            }
-        }
 
-        // Land focus on the first editable field so Tab-ing into this pane is
-        // immediately editable (Tab switches panes; Up/Down move between fields).
+        // Update each cell via the scroll group. Clone IDs before borrowing sg.
+        let (label_ids, value_ids) = (self.label_ids.clone(), self.value_ids.clone());
+        {
+            let Some(sg) = self.scroll_mut() else {
+                return;
+            };
+            for (i, (label, value, editable)) in rows.iter().enumerate() {
+                if let (Some(&lid), Some(&vid)) = (label_ids.get(i), value_ids.get(i)) {
+                    if let Some(l) = sg.child_mut(lid) {
+                        l.set_value(FieldValue::Text(label.clone()));
+                    }
+                    if let Some(v) = sg.child_mut(vid) {
+                        v.set_value(FieldValue::Text(value.clone()));
+                        v.state_mut().state.disabled = !editable;
+                    }
+                }
+            }
+        } // sg borrow dropped
+
+        // Land focus on the first editable field. Tab switches panes; Up/Down
+        // move between fields. Also ensures the outer Group routes events to the
+        // ScrollGroup.
         if let Some(first) = self.editable_value_ids().first().copied() {
-            self.group.focus_child(first, ctx);
+            let scroll_id = self.scroll_id;
+            self.group.focus_child(scroll_id, ctx);
+            if let Some(sg) = self.scroll_mut() {
+                sg.focus_child(first, ctx);
+            }
         }
     }
 
-    /// The value-cell view ids of the inline-editable rows, in display order
-    /// (bounded by the fixed cell pool).
+    /// The value-cell view ids of the inline-editable rows, in display order.
+    /// Full-length — no `FORM_ROWS` cap.
     fn editable_value_ids(&self) -> Vec<tv::ViewId> {
         let st = self.state.borrow();
         match st.edit_form.as_ref() {
@@ -144,7 +234,6 @@ impl FormPane {
                 .fields
                 .iter()
                 .enumerate()
-                .take(FORM_ROWS)
                 .filter(|(_, f)| inline_editable(f))
                 .map(|(i, _)| self.value_ids[i])
                 .collect(),
@@ -158,46 +247,53 @@ impl FormPane {
         if ids.is_empty() {
             return;
         }
-        let cur = self.group.current();
+        // Current focused field lives inside the ScrollGroup.
+        let cur = self.scroll_mut().and_then(|sg| sg.current());
         let pos = cur.and_then(|c| ids.iter().position(|id| *id == c));
         let next = match pos {
             Some(p) => (p as i32 + delta).rem_euclid(ids.len() as i32) as usize,
             None if delta >= 0 => 0,
             None => ids.len() - 1,
         };
-        self.group.focus_child(ids[next], ctx);
+        let next_id = ids[next];
+        if let Some(sg) = self.scroll_mut() {
+            sg.focus_child(next_id, ctx);
+        }
     }
 
     /// Sync each editable value InputLine's text into `edit_form`; refresh header.
+    /// Borrow discipline: collect indices (drop state borrow), read from scroll group
+    /// (drop sg borrow), then mutate state (drop before touching group header).
     fn sync_into_form(&mut self) {
-        // Collect (idx) for editable rows, then collect (idx, text) without holding borrow.
+        // Collect editable field indices; drop borrow before accessing views.
         let editable: Vec<usize> = {
             let st = self.state.borrow();
             match st.edit_form.as_ref() {
                 None => Vec::new(),
-                // Only the first FORM_ROWS fields have a value cell; bound the
-                // index so a longer entry truncates instead of indexing past the
-                // fixed cell pool. (Scrolling for >FORM_ROWS fields is M3 work.)
                 Some(form) => form
                     .fields
                     .iter()
                     .enumerate()
-                    .take(FORM_ROWS)
                     .filter(|(_, f)| inline_editable(f))
                     .map(|(i, _)| i)
                     .collect(),
             }
-        };
+        }; // state borrow dropped
+
+        // Read current InputLine texts from the ScrollGroup.
+        let value_ids = self.value_ids.clone();
         let mut edits: Vec<(usize, String)> = Vec::new();
-        for &i in &editable {
-            if let Some(FieldValue::Text(s)) = self
-                .group
-                .child_mut(self.value_ids[i])
-                .and_then(|v| v.value())
-            {
-                edits.push((i, s));
+        if let Some(sg) = self.scroll_mut() {
+            for &i in &editable {
+                if let Some(&vid) = value_ids.get(i) {
+                    if let Some(FieldValue::Text(s)) = sg.child_mut(vid).and_then(|v| v.value()) {
+                        edits.push((i, s));
+                    }
+                }
             }
-        }
+        } // sg borrow dropped
+
+        // Write edits back into the form; compute the new header text.
         let header = {
             let mut st = self.state.borrow_mut();
             if let Some(form) = st.edit_form.as_mut() {
@@ -215,7 +311,8 @@ impl FormPane {
             } else {
                 None
             }
-        };
+        }; // borrow_mut dropped
+
         if let (Some(text), Some(h)) = (header, self.group.child_mut(self.header_id)) {
             h.set_value(FieldValue::Text(text));
         }
@@ -327,7 +424,8 @@ mod tests {
         });
         st.form_needs_render = true;
         let shared: Shared = Rc::new(RefCell::new(st));
-        let mut pane = FormPane::new(Rect::new(0, 0, 80, FORM_ROWS as i32 + 1), shared.clone());
+        // Use a concrete height (no longer references the removed FORM_ROWS constant).
+        let mut pane = FormPane::new(Rect::new(0, 0, 80, 20), shared.clone());
         let mut out = VecDeque::new();
         let mut timers = tv::timer::TimerQueue::new();
         let mut deferred = Vec::new();
@@ -344,48 +442,44 @@ mod tests {
             2,
             "cn (multi) is not editable; gidNumber+sn are"
         );
+        // Focus lives inside the ScrollGroup; query it via scroll_mut().
+        let cur = pane.scroll_mut().and_then(|sg| sg.current());
         assert_eq!(
-            pane.group.current(),
+            cur,
             Some(editable[0]),
             "render focuses the first editable field"
         );
 
         let mut d = Event::KeyDown(tv::KeyEvent::from(tv::Key::Down));
         pane.handle_event(&mut d, &mut ctx);
-        assert_eq!(
-            pane.group.current(),
-            Some(editable[1]),
-            "Down → next editable field"
-        );
+        let cur = pane.scroll_mut().and_then(|sg| sg.current());
+        assert_eq!(cur, Some(editable[1]), "Down → next editable field");
 
         let mut d = Event::KeyDown(tv::KeyEvent::from(tv::Key::Down));
         pane.handle_event(&mut d, &mut ctx);
+        let cur = pane.scroll_mut().and_then(|sg| sg.current());
         assert_eq!(
-            pane.group.current(),
+            cur,
             Some(editable[0]),
             "Down wraps to the first editable field"
         );
 
         let mut u = Event::KeyDown(tv::KeyEvent::from(tv::Key::Up));
         pane.handle_event(&mut u, &mut ctx);
-        assert_eq!(
-            pane.group.current(),
-            Some(editable[1]),
-            "Up → previous editable field"
-        );
+        let cur = pane.scroll_mut().and_then(|sg| sg.current());
+        assert_eq!(cur, Some(editable[1]), "Up → previous editable field");
     }
 
     #[test]
-    fn more_fields_than_rows_truncates_without_panic() {
-        // An entry with more attributes than FORM_ROWS must truncate gracefully —
-        // sync_into_form/render must never index past the fixed value-cell pool.
-        // Regression: panic "index out of bounds: len is 32 but index is 39".
+    fn builds_a_cell_per_field_no_row_cap() {
+        // Each field must get its own value cell; there must be no fixed row cap.
+        // Regression guard: old code capped at FORM_ROWS=32 and panicked beyond that.
         use crate::ldap::worker::RawSubschema;
         let schema = SchemaModel::from_raw(&RawSubschema::default());
         let structure = Structure::build("dc=x", vec![]);
         let mut st =
             UiState::new_for_test(structure, schema, "dc=x".into(), Vec::new(), Vec::new());
-        let fields: Vec<EditField> = (0..FORM_ROWS + 8)
+        let fields: Vec<EditField> = (0..40)
             .map(|i| ef(&format!("attr{i}"), "v", true))
             .collect();
         st.edit_form = Some(EditForm {
@@ -396,7 +490,7 @@ mod tests {
         });
         st.form_needs_render = true;
         let shared: Shared = Rc::new(RefCell::new(st));
-        let mut pane = FormPane::new(Rect::new(0, 0, 80, FORM_ROWS as i32 + 1), shared.clone());
+        let mut pane = FormPane::new(Rect::new(0, 0, 80, 12), shared.clone()); // small viewport
         let mut out = VecDeque::new();
         let mut timers = tv::timer::TimerQueue::new();
         let mut deferred = Vec::new();
@@ -405,14 +499,18 @@ mod tests {
             command: REFRESH,
             source: None,
         };
-        // Must not panic (renders + syncs only the first FORM_ROWS fields).
-        pane.handle_event(&mut ev, &mut ctx);
+        pane.handle_event(&mut ev, &mut ctx); // must not panic; builds 40 rows
+        assert_eq!(
+            pane.field_cell_count(),
+            40,
+            "one value cell per field, uncapped"
+        );
     }
 
     #[test]
     fn editable_rows_enabled_static_rows_disabled() {
         let shared = state_with_form();
-        let mut pane = FormPane::new(Rect::new(0, 0, 80, FORM_ROWS as i32 + 1), shared.clone());
+        let mut pane = FormPane::new(Rect::new(0, 0, 80, 20), shared.clone());
         let mut out = VecDeque::new();
         let mut timers = tv::timer::TimerQueue::new();
         let mut deferred = Vec::new();
@@ -430,7 +528,7 @@ mod tests {
     #[test]
     fn editing_value_inputline_marks_form_dirty() {
         let shared = state_with_form();
-        let mut pane = FormPane::new(Rect::new(0, 0, 80, FORM_ROWS as i32 + 1), shared.clone());
+        let mut pane = FormPane::new(Rect::new(0, 0, 80, 20), shared.clone());
         let mut out = VecDeque::new();
         let mut timers = tv::timer::TimerQueue::new();
         let mut deferred = Vec::new();
@@ -452,7 +550,7 @@ mod tests {
         // Grapheme-correct edit regression (folded from the spike umlaut test):
         // a multibyte value set into the InputLine survives the sync into edit_form.
         let shared = state_with_form();
-        let mut pane = FormPane::new(Rect::new(0, 0, 80, FORM_ROWS as i32 + 1), shared.clone());
+        let mut pane = FormPane::new(Rect::new(0, 0, 80, 20), shared.clone());
         let mut out = VecDeque::new();
         let mut timers = tv::timer::TimerQueue::new();
         let mut deferred = Vec::new();
