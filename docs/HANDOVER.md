@@ -8,16 +8,38 @@ for that see git log, the specs under `docs/superpowers/specs/`, the SDD ledger
 M1 (read core) and M2 (edit + write spine) are COMPLETE, reviewed, and
 LIVE-ACCEPTED. edaptor depends on the released `tvision-rs` 0.3.0 (no pin) and the
 main window runs frameless full-screen (`Fullscreen::Desktop`). M3 was split into
-two cycles; **M3 Phase 1 is now FULLY SIGNED OFF** — all 12 plan tasks + a
-regression fix executed subagent-driven, each reviewed clean, plus a whole-branch
-review (READY-WITH-FIXES) and its consolidated fix pass, the strip fix (`bc64274`),
-and the interactive guard-edge acceptance (live PTY). Phase 2 (the M3 core) is next.**
+Phase 1 (stabilize) + Phase 2 (the M3 core); Phase 2 was further split into
+2a (objectClass widget + live resync) + 2b (create flow). **M3 Phase 1 and
+Phase 2a are both COMPLETE and LIVE-ACCEPTED.** Phase 2a executed subagent-driven
+(8 TDD tasks, each reviewed clean), two fix passes (reset_current list seed; a
+borrow-panic on picker open found in live acceptance), a whole-branch review
+(COMPLETE & SOUND with fixes, now applied), and a full live tmux acceptance.
+**M3 Phase 2b (the create flow) is next.**
 
-> **▶ NEXT ACTION — start M3 Phase 2 (the M3 core).** Both M3 P1 open items are now
-> closed; the base is stable. Begin Phase 2 with its own brainstorming →
-> writing-plans cycle (see "Phase 2" below). Phase 1 landed on `feat/tvision-ui`
-> @ `bc64274` (512 lib tests, clippy/fmt clean, `make check` green, both facade
-> guards clean).
+> **▶ NEXT ACTION — start M3 Phase 2b (the create flow).** Phase 2a landed on
+> `feat/tvision-ui` @ `1e1263d` (527 lib tests, clippy/fmt clean, `make check`
+> green, both facade guards clean). Begin 2b with its own brainstorming →
+> writing-plans cycle: Alt+N profile chooser, single-profile fast path,
+> `FormMode::Create`, create-mode form, objectClass auto-injection, and the
+> `plan_create`/`build_add_entry` submit path. The neutral `workflows::create`
+> helpers are already implemented + tested; 2a's modal seam + `sync_schema_fields`
+> + `apply_commit` are the machinery 2b reuses. Spec+plan for 2a:
+> [`specs/2026-06-27-tvision-m3-phase2a-objectclass-resync-design.md`](superpowers/specs/2026-06-27-tvision-m3-phase2a-objectclass-resync-design.md),
+> [`plans/2026-06-27-tvision-m3-phase2a-objectclass-resync.md`](superpowers/plans/2026-06-27-tvision-m3-phase2a-objectclass-resync.md).
+>
+> _Phase 2a load-bearing facts (so the next session doesn't rediscover them):_
+> - **`reset_current` is THE modal-open init hook** in tvision-rs 0.3.0
+>   (`program.rs:1710`, runs before first draw/event), NOT `on_bounds_changed`
+>   (dead for modal inserts — `Group::insert` calls `set_bounds` directly). Any M4
+>   modal widget that must seed a list / stage state on open uses `reset_current`.
+> - **Borrow trap (fixed, but the pattern recurs):** a `FieldEditor` must NOT
+>   `borrow_mut()` the shared state during construction/`into_view`, because
+>   `dispatch` holds `state.borrow()` to pass the schema in. Stage in
+>   `reset_current` (borrow-safe, post-dispatch-borrow), not in `new()`.
+> - The objectClass **field's values are authoritative** for `sync_schema_fields`;
+>   `EditForm.object_classes` is a mirror kept by `apply_commit` for the save path.
+> - `widget_for(field)` routes objectClass→picker else plain; M4 extends it to
+>   dispatch on `field.widget_binding` with no form-core change.
 >
 > _Closed P1 items, for the record:_
 > 1. ✅ **RESOLVED — bottom `░` strip (`bc64274`).** Root cause (verified vs
@@ -220,20 +242,33 @@ Execute **subagent-driven** (fresh subagent per task + spec-then-quality review;
 final whole-branch review). The plan has complete per-task code; verified 0.3.0 API
 facts are listed in its self-review.
 
-### Phase 2 — the M3 core (NOT yet specced)
+### ✅ Phase 2a — objectClass widget + live resync (DONE — live-accepted @ `1e1263d`)
 
-Per umbrella §6 M3: ObjectClass plugin (schema-seeded multi-select over `ListBox`,
-client-side substring filter, `SetValuesThenResyncSchema` driving schema-based field
-regeneration — the riskiest part); Alt+N profile chooser dialog; single-profile fast
-path; create-mode form; objectClass auto-injection on create. **Accept:** create a
-new entry from a profile; editing objectClass adds/orphans fields live; the typed
-resync outcome (no global flag) works end-to-end. Start it with its own
-**brainstorming → writing-plans** cycle AFTER Phase 1 lands. The neutral layer is
-already well-prepared: `workflows::create` has `profiles_for_container`,
-`empty_form_for_profile`, `build_add_entry`; `CommitOutcome::SetValuesThenResyncSchema`
-and `EditForm.object_classes` exist; the ratatui `ui::edit_form::sync_schema_fields`
-(lines ~394–462) is the reference behaviour to port into neutral `EditForm`
-(`FormMode::New` + a `sync_schema_fields` method are the M3-core additions).
+The riskiest half of the M3 core, on EXISTING entries. Delivered: the first reusable
+modal-widget seam (`Activation::Modal(Box<dyn FieldEditor>)` + generic `app::dispatch`
+ACTIVATE path); the objectClass picker (`src/tui/oc_picker.rs` — schema-seeded
+multi-select `ListBox`, client substring filter, pre-tick, staged
+`SetValuesThenResyncSchema`); the neutral `EditForm::sync_schema_fields` port (+
+`EditField::injected`, `order_fields`); `UiState::{activate_field, staged_commit,
+apply_commit}`; form-pane modal-row focus/Enter→ACTIVATE; gated `tests/tv_objectclass.rs`.
+**Accept (met):** editing objectClass on an existing entry adds/orphans fields live via
+the typed outcome (no global flag). See the spec/plan dated 2026-06-27 and the NEXT
+ACTION banner's load-bearing facts (`reset_current` hook; the construction-time
+borrow trap; objectClass-field-is-authoritative).
+
+### ▶ Phase 2b — the create flow (NEXT, not yet specced)
+
+Per umbrella §6 M3, the remaining half: Alt+N profile chooser dialog; single-profile
+fast path; `FormMode::Create`; create-mode form; objectClass auto-injection on create;
+the `plan_create`/`build_add_entry` submit path. **Accept:** create a new entry from a
+profile end-to-end. Start with its own **brainstorming → writing-plans** cycle. The
+neutral layer is well-prepared: `workflows::create` has `profiles_for_container`,
+`empty_form_for_profile`, `build_add_entry`, `plan_create`, defaults/autonumber/
+password-fold (all tested); Phase 2a's modal seam, `sync_schema_fields`, and
+`apply_commit` are the machinery 2b reuses. The create form has a wrinkle to resolve
+in design: `empty_form_for_profile` excludes objectClass from fields, but the
+objectClass widget needs a row to activate the picker — decide how create-mode seeds
+the objectClass field (and pre-injects the profile's classes).
 
 ---
 
