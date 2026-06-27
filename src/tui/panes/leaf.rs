@@ -61,11 +61,6 @@ impl LeafPane {
         self.last_sel = -1;
     }
 
-    /// Pure selector: when the highlight lands on a new row, record the requested
-    /// leaf in shared state. The controller (the pump's `reconcile_selection`)
-    /// decides whether to load it or raise the dirty guard — the pane never loads,
-    /// guards, or posts a command (which is what made this fail under the mouse
-    /// capture, where pane-posted commands are swallowed before the app handler).
     #[cfg(test)]
     pub(crate) fn search_bounds_for_test(&mut self) -> Rect {
         self.group
@@ -84,6 +79,11 @@ impl LeafPane {
             .get_bounds()
     }
 
+    /// Pure selector: when the highlight lands on a new row, record the requested
+    /// leaf in shared state. The controller (the pump's `reconcile_selection`)
+    /// decides whether to load it or raise the dirty guard — the pane never loads,
+    /// guards, or posts a command (which is what made this fail under the mouse
+    /// capture, where pane-posted commands are swallowed before the app handler).
     fn report_selection(&mut self) {
         let sel = match self.group.child_mut(self.list_id).and_then(|v| v.value()) {
             Some(FieldValue::Int(i)) => i,

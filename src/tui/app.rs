@@ -223,6 +223,8 @@ fn do_save(
                 } = &mut *st;
                 if let Some(w) = worker.as_ref() {
                     let _ = write_flow.submit(w, plan, &dn, quit_after);
+                } else {
+                    return SaveOutcome::NotSubmitted;
                 }
             }
             SaveOutcome::Submitted

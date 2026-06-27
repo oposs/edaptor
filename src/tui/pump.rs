@@ -76,10 +76,7 @@ impl View for PumpView {
             if r.changed || list_dirty {
                 ctx.broadcast(REFRESH, None);
             }
-            if need_guard {
-                ctx.post(crate::tui::GUARD_NAV);
-            }
-            if need_branch_guard {
+            if need_guard || need_branch_guard {
                 ctx.post(crate::tui::GUARD_NAV);
             }
             if r.error {
@@ -214,5 +211,80 @@ mod tests {
                 "fullscreen is posted at most once"
             );
         }
+    }
+
+    /// Regression: when BOTH `requested_leaf` and `requested_branch` are pending and
+    /// the form is dirty, both `reconcile_selection` and `reconcile_branch` return
+    /// `true` in the same tick. Before the fix two `GUARD_NAV` posts were emitted;
+    /// after the fix exactly one must be posted (the first guard handles the single
+    /// `guard_target` — the second would fire `run_guard` on a cleared `None` target).
+    #[test]
+    fn guard_nav_posted_at_most_once_when_both_reconciles_dirty() {
+        use crate::schema::FieldKind;
+        use crate::workflows::edit_form::{EditField, EditForm, FormMode};
+        use crate::workflows::form_model::WidgetSpec;
+        use std::time::Duration;
+
+        let structure = crate::workflows::structure::Structure::build("dc=x", Vec::new());
+        let schema = SchemaModel::from_raw(&crate::ldap::worker::RawSubschema::default());
+        let mut state = crate::tui::state::UiState::new_for_test(
+            structure,
+            schema,
+            "dc=x".into(),
+            Vec::new(),
+            Vec::new(),
+        );
+
+        let field = EditField {
+            label: "cn".into(),
+            must: true,
+            editable: true,
+            multi: false,
+            secret: false,
+            ordered: false,
+            orphaned: false,
+            kind: FieldKind::Text,
+            widget: WidgetSpec::ReadOnlyText,
+            widget_binding: None,
+            values: vec!["new".into()],
+            baseline: vec!["base".into()],
+        };
+        state.edit_form = Some(EditForm {
+            dn: "cn=a,dc=x".into(),
+            mode: FormMode::Edit,
+            object_classes: vec!["top".into()],
+            fields: vec![field],
+        });
+
+        state.current_leaf = Some("cn=old,dc=x".into());
+        state.current_branch = Some("ou=p,dc=x".into());
+        state.branch_dns = vec!["ou=p,dc=x".into(), "ou=q,dc=x".into()];
+        state.request_leaf("cn=new,dc=x".into(), vec![]);
+        state.request_branch("ou=q,dc=x".into());
+
+        let shared: Shared = Rc::new(RefCell::new(state));
+        let mut pump = PumpView::new(shared);
+
+        let mut out = VecDeque::new();
+        let mut timers = tv::timer::TimerQueue::new();
+        let mut deferred: Vec<tv::Deferred> = Vec::new();
+        let timer_id = timers.set_timer(
+            0,
+            Duration::from_millis(50),
+            Some(Duration::from_millis(50)),
+        );
+        let mut ctx = headless(&mut out, &mut timers, &mut deferred);
+        let mut ev = Event::Timer(timer_id);
+        pump.handle_event(&mut ev, &mut ctx);
+
+        let guard_count = out
+            .iter()
+            .filter(|e| matches!(e, Event::Command(c) if *c == crate::tui::GUARD_NAV))
+            .count();
+        assert_eq!(
+            guard_count,
+            1,
+            "must post GUARD_NAV at most once even when both reconciles return true; got {guard_count}"
+        );
     }
 }
