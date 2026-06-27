@@ -8,6 +8,7 @@
 pub mod confirm;
 pub mod error;
 pub mod guard;
+pub mod profile_chooser;
 
 use tvision_rs::Command;
 
@@ -65,5 +66,23 @@ mod tests {
     #[test]
     fn guard_builds_without_panic() {
         let _v = guard::build();
+    }
+
+    #[test]
+    fn profile_chooser_builds_without_panic() {
+        use crate::ldap::worker::RawSubschema;
+        use crate::workflows::structure::Structure;
+        use std::cell::RefCell;
+        use std::rc::Rc;
+        let schema = crate::schema::SchemaModel::from_raw(&RawSubschema::default());
+        let st = crate::tui::state::UiState::new_for_test(
+            Structure::build("dc=example,dc=org", vec![]),
+            schema,
+            "dc=example,dc=org".into(),
+            Vec::new(),
+            Vec::new(),
+        );
+        let shared = Rc::new(RefCell::new(st));
+        let _v = profile_chooser::build(vec!["People".into(), "Groups".into()], shared);
     }
 }

@@ -82,6 +82,9 @@ pub struct UiState {
     /// Modal editor → controller: the prospective commit an open editor would
     /// apply. Maintained live by the editor view; applied by `dispatch` on OK.
     pub staged_commit: Option<crate::tui::widget::CommitOutcome>,
+    /// Profile chooser → controller: the index the user highlighted when OK was
+    /// pressed. Set by `ProfileChooser`; read by `dispatch` to select a profile.
+    pub chosen_profile: Option<usize>,
 }
 
 impl UiState {
@@ -126,6 +129,7 @@ impl UiState {
             set_tree_row: None,
             activate_field: None,
             staged_commit: None,
+            chosen_profile: None,
         }
     }
 }
@@ -469,6 +473,7 @@ pub(crate) fn bootstrap(config: Config, password: String) -> Result<UiState> {
         set_tree_row: None,
         activate_field: None,
         staged_commit: None,
+        chosen_profile: None,
     })
 }
 
