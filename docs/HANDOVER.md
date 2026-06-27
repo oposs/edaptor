@@ -16,17 +16,21 @@ fix executed subagent-driven, each reviewed clean, plus a whole-branch review
 > Phase 1 landed on `feat/tvision-ui` @ `426b75f` (511 lib tests, clippy/fmt clean,
 > `make check` green, both facade guards clean). Two items remain before the phase
 > is fully signed off:
-> 1. **Initial-launch full-screen strip (user decision pending).** A 1-row `░`
->    desktop strip shows at the bottom edge *at launch* and clears on the first
->    terminal resize. Root cause: the `Command::FULLSCREEN` flip maximizes the
->    window but does NOT cascade `on_bounds_changed` to the panes (a terminal
->    resize does). The edaptor-side form residual was fixed (ScrollGroup now paints
->    its backdrop, `426b75f`); the leaf fill works on resize. Candidate fix:
->    construct the `Window` already-fullscreen in `init_desktop` (`app.rs:246`) —
->    `win.set_fullscreen(Fullscreen::Desktop)` at build time + frameless `interior`
->    + drop the pump's FULLSCREEN post — so panes are built at full size (no flip).
->    Moderate change to the architected full-screen path; may instead be a
->    tvision-rs cascade fix. **Awaiting the user's call.**
+> 1. ✅ **RESOLVED — bottom `░` strip (`bc64274`).** Root cause (verified vs
+>    tvision-rs 0.3.0 source): tvision refits nested views via `grow_mode`
+>    (`calc_bounds`) only — it calls `on_bounds_changed` solely on the window's
+>    direct body, NEVER on splitter-nested panes. The tree filled because `Outline`
+>    self-sets `grow_mode {hi_x,hi_y}`; the leaf `ListBox`/search and form
+>    header/`ScrollGroup` set none → didn't track the pane → strip. The earlier
+>    `FormPane`/`LeafPane::on_bounds_changed` (M3 P1 Tasks 6–7) were the wrong
+>    mechanism — DEAD CODE for nested panes. Fix: set `grow_mode` on the pane
+>    children (search/header `hi_x`; list/ScrollGroup `hi_x+hi_y`), delete the dead
+>    overrides, and move `ScrollGroup`'s resize-recompute into a `change_bounds`
+>    override (the hook the framework actually calls). NOT a tvision bug.
+>    Live-verified: no strip at launch or after shrink/grow resizes. Minor residual
+>    (cosmetic, logged): `ScrollGroup` content-cell *widths* only re-fit on a DN
+>    change, so a width-only resize leaves value cells their old width until you
+>    pick another entry.
 > 2. **Interactive guard-edge sign-off (human TTY).** Live tmux verified: branch→
 >    leaf reload (after the `cf9d743` reload fix), form-follows-highlight, multi-
 >    attribute form + scrollbar. NOT yet driven live: keyboard scroll-to-focused,
