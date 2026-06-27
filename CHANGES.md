@@ -18,6 +18,9 @@ All notable changes to eDAPtor are documented here. The format follows
 - tvision UI (preview): the main window now runs frameless full-screen — the
   three panes fill the terminal edge-to-edge (no window border or title bar),
   while the menu bar and status line are kept.
+- tvision UI (preview): the three panes now fill their area and the entry form
+  scrolls — a vertical scrollbar appears when an entry has more attributes than
+  fit, and every attribute is reachable (the former 32-row display cap is gone).
 
 ### Changed
 
@@ -37,6 +40,10 @@ All notable changes to eDAPtor are documented here. The format follows
   mouse: a dirty form is **pinned** (no other entry is shown) until you choose
   Save / Discard / Stay, and **Stay** snaps the list highlight back to the form on
   screen. When the form is clean it still follows the highlight as you browse.
+- tvision UI (preview): cancelling the save-confirm raised by an unsaved-changes
+  guard now snaps the list highlight back to the form being edited; and changing
+  branch in the tree while the form is dirty now raises the same guard (Stay
+  reverts the tree, Discard/Save behave as on a leaf change).
 
 ## 0.4.0 - 2026-06-12
 
