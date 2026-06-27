@@ -4,21 +4,22 @@ Carries the **current concerns** into the next session. Not a project history �
 for that see git log, the specs under `docs/superpowers/specs/`, the SDD ledger
 (`.superpowers/sdd/progress.md`), and project memory (`…/memory/MEMORY.md`).
 
-**Date:** 2026-06-26 · **Where we are: the tvision-rs UI migration is mid-flight.
+**Date:** 2026-06-27 · **Where we are: the tvision-rs UI migration is mid-flight.
 M1 (read core) and M2 (edit + write spine) are COMPLETE, reviewed, and
-LIVE-ACCEPTED (save round-trip + guards driven in tmux). The temporary git-pin
-is GONE — edaptor now depends on the released `tvision-rs` 0.3.0, and the main
-window runs frameless full-screen (`Fullscreen::Desktop`). Next is M3 (ObjectClass
-picker + create flow), carrying the pending edges below.**
+LIVE-ACCEPTED. edaptor depends on the released `tvision-rs` 0.3.0 (no pin) and the
+main window runs frameless full-screen (`Fullscreen::Desktop`). M3 was split into
+two cycles; M3 Phase 1 has a SPEC and a PLAN written + committed and is READY TO
+EXECUTE (start at Task 1). Phase 2 (the M3 core) comes after.**
 
-> **Carried into M3 — full-screen pane-fill artifact.** Going frameless exposed
-> that the leaf and form panes don't paint their last column / bottom row when
-> given the larger client area (the tree/Outline fills fine), leaving a one-cell
-> desktop-background (`▒`) strip on the right/bottom. Root cause is the existing
-> fixed-size pane / `FORM_ROWS = 32` pool, not the full-screen flip (a forced
-> relayout doesn't change it). Fix it with the M3 "panes fill / scrollable form"
-> work. The full-screen flip itself (pump posts `Command::FULLSCREEN` once; window
-> shadow disabled) is in `tui::pump`/`tui::app` and verified live.
+> **▶ NEXT ACTION — execute the M3 Phase 1 plan.**
+> [`docs/superpowers/plans/2026-06-27-tvision-m3-phase1-stabilize.md`](superpowers/plans/2026-06-27-tvision-m3-phase1-stabilize.md)
+> (spec: [`specs/2026-06-26-tvision-m3-phase1-stabilize-design.md`](superpowers/specs/2026-06-26-tvision-m3-phase1-stabilize-design.md)).
+> 12 TDD tasks, subagent-driven recommended (fresh subagent per task + spec-then-
+> quality review). Phase 1 = "stabilize the base" before the create flow:
+> **panes fill + form scrolling (a new reusable `ScrollGroup`)** and the two
+> outstanding dirty-form **guard edges #2/#3**. The plan's API facts were verified
+> against the 0.3.0 source, so the code should compile largely as written. The one
+> flagged validation point is the Task 2 headless-draw glyph assertion.
 
 `edaptor` is a Rust TUI for administering an OpenLDAP directory. It introspects
 live schema (`cn=subschema`) and generates edit forms from `objectClass`
@@ -32,9 +33,10 @@ a **widget palette** (`[profile.widget.<attr>]` kinds: `choice` / `password` /
 
 ## Git topology (read before you branch)
 
-- **Branch `feat/tvision-ui` = `da3f828`** — the long-lived migration branch. ALL
-  migration work lives here. **It does NOT merge to `main` until the M5 cutover**
-  (umbrella §7) — the ratatui UI stays the shipping `edaptor` binary through M1–M4.
+- **Branch `feat/tvision-ui`** (HEAD `93b84cc`: full-screen + 0.3.0 shipped, M3
+  Phase 1 spec+plan committed) — the long-lived migration branch. ALL migration work
+  lives here. **It does NOT merge to `main` until the M5 cutover** (umbrella §7) —
+  the ratatui UI stays the shipping `edaptor` binary through M1–M4.
 - `main` is behind/unpushed (origin at v0.4.0). Pushing / CI / release are a
   separate concern, not gated by the migration.
 - `Cargo.toml` version is `0.4.0`. Dependency: **`tvision-rs = "0.3"`** from
@@ -149,26 +151,54 @@ via the 50ms pump).
 
 ---
 
-## Next: M3 — ObjectClass picker + create flow (the riskiest milestone, done early)
+## M3 is split into two cycles (each its own spec → plan → implement)
+
+The user approved splitting M3 so the carried-forward problems are fixed first,
+because the create flow reuses the form pane and the tree-guard machinery.
+
+### ▶ Phase 1 — stabilize the base (PLANNED, ready to execute)
+
+Spec [`specs/2026-06-26-tvision-m3-phase1-stabilize-design.md`](superpowers/specs/2026-06-26-tvision-m3-phase1-stabilize-design.md),
+plan [`plans/2026-06-27-tvision-m3-phase1-stabilize.md`](superpowers/plans/2026-06-27-tvision-m3-phase1-stabilize.md).
+**12 TDD tasks**, foundation-first:
+- **Tasks 1–4 — `ScrollGroup`** (NEW, domain-free, `src/tui/scroll_group.rs`): a
+  generic vertical scroll-container of child views. tvision-rs has NO scroll
+  container for child widgets (Group has no child offset; Scroller is self-drawn) —
+  so we build one: it holds child views at logical positions and repositions them
+  by `-top` on scroll (the framework clips offscreen children via `DrawCtx::sub`),
+  driving a linked `ScrollBar` through the `ScrollSync` broker, with scroll-to-
+  focused. Feasibility was spiked at the source level (PASS). **It is built for
+  extraction → a follow-up upstream tvision-rs PR once proven (the user wants this
+  contributed); edaptor then switches to the published widget.**
+- **Tasks 5–6 — `FormPane` on `ScrollGroup`:** one persistent `Label`+`InputLine`
+  per field, rebuilt per entry (`Group::remove`/`insert`), **drops `FORM_ROWS=32`**;
+  `on_bounds_changed` refit. Editing reuses the M2 inline path unchanged (each
+  field owns its cell → no scroll-time edit smear).
+- **Task 7 — `LeafPane` fill** (`on_bounds_changed`) → kills the `▒` strip.
+- **Task 8 — guard edge #2** (cancelled confirm snaps back like Stay).
+- **Tasks 9–11 — guard edge #3** (branch nav controller mirroring the leaf path:
+  `requested_branch`/`reconcile_branch`/`GuardTarget` enum, `TreePane` pure-selector,
+  pump + dispatch with `set_tree_row` snap-back on Stay).
+- **Task 12** — `CHANGES.md`, facade guards, `make check`, live tmux acceptance.
+
+Execute **subagent-driven** (fresh subagent per task + spec-then-quality review;
+final whole-branch review). The plan has complete per-task code; verified 0.3.0 API
+facts are listed in its self-review.
+
+### Phase 2 — the M3 core (NOT yet specced)
 
 Per umbrella §6 M3: ObjectClass plugin (schema-seeded multi-select over `ListBox`,
-client-side substring filter, `SetValuesThenResyncSchema` driving schema-based
-field regeneration); Alt+N profile chooser dialog; single-profile fast path;
-create-mode form; objectClass auto-injection on create. **Accept:** create a new
-entry from a profile; editing objectClass adds/orphans fields live; the typed
-resync outcome (no global flag) works end-to-end.
-
-Start with the **brainstorming → writing-plans** flow (own spec + plan), then
-**subagent-driven-development** (fresh subagent per task + spec-then-quality review,
-final whole-branch review on opus). Same machinery as M2 — the SDD ledger at
-`.superpowers/sdd/progress.md` has the full M1/M2 record and is the durable
-progress map (check it after any compaction; resume at the first task not marked
-complete).
-
-**Riskiest part:** the schema-driven field regeneration on objectClass change.
-M2 already made `SetValuesThenResyncSchema` a typed `CommitOutcome` (no global
-flag) and `EditForm` has the orphan/`sync_schema_fields` shape to build on (the
-ratatui `ui::edit_form::sync_schema_fields` is the reference behaviour).
+client-side substring filter, `SetValuesThenResyncSchema` driving schema-based field
+regeneration — the riskiest part); Alt+N profile chooser dialog; single-profile fast
+path; create-mode form; objectClass auto-injection on create. **Accept:** create a
+new entry from a profile; editing objectClass adds/orphans fields live; the typed
+resync outcome (no global flag) works end-to-end. Start it with its own
+**brainstorming → writing-plans** cycle AFTER Phase 1 lands. The neutral layer is
+already well-prepared: `workflows::create` has `profiles_for_container`,
+`empty_form_for_profile`, `build_add_entry`; `CommitOutcome::SetValuesThenResyncSchema`
+and `EditForm.object_classes` exist; the ratatui `ui::edit_form::sync_schema_fields`
+(lines ~394–462) is the reference behaviour to port into neutral `EditForm`
+(`FormMode::New` + a `sync_schema_fields` method are the M3-core additions).
 
 ---
 
@@ -191,27 +221,26 @@ command was swallowed). The model now (user-chosen "B"):
   so the pane snaps the highlight back. Any future trigger (M3 create-flow, tree)
   should funnel through `requested_leaf` → `reconcile_selection`, NOT re-poll.
 
-**Known edges — TWO still open (do not forget):**
+**Known edges — both now SCHEDULED in the Phase 1 plan (no longer loose TODOs):**
 
 - ✅ FIXED: TV first-click on an unfocused pane only focused it. The leaf/form
   panes now set `options.first_click = true` (the tree got it free via the
   Outline), so a single click both focuses the pane and lands on the row/field.
-- ⬜ **TODO (#2):** guard→Save then **cancelling the confirm** leaves the list
-  highlight on the would-be target while the form stays pinned to the original
-  (highlight/form mismatch). It self-heals on the next move/Stay, but the clean
-  fix is to treat a cancelled confirm like "Stay" (snap the highlight back via
-  `set_leaf_row = current_leaf_row()`). Needs `do_save`/dispatch to know it came
-  from the guard path.
-- ⬜ **TODO (#3):** changing **branch** in the tree while the form is dirty guards
-  (the repopulated leaf list re-requests), but **Stay can't snap back** because
-  `current_leaf` isn't in the new branch's rows, leaving the tree on the new
-  branch with the old form pinned. Proper fix: guard the branch change too and
-  revert the tree selection on Stay — pairs with the M3 create-flow focus work.
+- 📋 **#2 (Phase 1 Task 8):** guard→Save then **cancelling the confirm** leaves the
+  list highlight on the would-be target while the form stays pinned (mismatch).
+  Fix: treat a cancelled confirm like "Stay" (`set_leaf_row = current_leaf_row()`);
+  `do_save` returns a `SaveOutcome`, dispatch snaps back on `NotSubmitted`.
+- 📋 **#3 (Phase 1 Tasks 9–11):** changing **branch** while dirty guards but Stay
+  can't snap back. Fix: extend the controller-owned model to the tree
+  (`requested_branch`/`reconcile_branch`/`GuardTarget::{Leaf,Branch}`), `TreePane`
+  becomes a pure selector, Stay reverts via `set_tree_row = current_branch_row()`.
 
 ## Deferred to M3 / cleanup (logged from M2 reviews)
 
-- **Scrollable form** — `FORM_ROWS = 32` truncates entries with >32 attributes
-  (rendered/editable only for the first 32). M3 should add form scrolling.
+- **Scrollable form + pane fill** — DONE in the Phase 1 plan (Tasks 1–7): the
+  `▒` strip and the `FORM_ROWS = 32` cap both go away via the new `ScrollGroup`
+  (form) and `on_bounds_changed` (leaf). The full-screen flip exposed the `▒`
+  strip; root cause is the panes not re-fitting children on resize, not the flip.
 - Minor/cosmetic: `value_set_eq` duplicate-value false-positive (shared with
   ratatui; fix at M5 dedup); `EditForm::set_value` has no `!multi` guard (only
   single-value callers in M2); read-error shows a stale form (status-only); a few
@@ -227,7 +256,7 @@ command was swallowed). The model now (user-chosen "B"):
 ```bash
 cargo build -j4                 # both bins (edaptor ratatui + edaptor-tv tvision)
 cargo build -j4 --bin edaptor-tv
-cargo test  -j4                 # ~490 lib tests + gated integration (skip w/o env)
+cargo test  -j4                 # ~495 lib tests + gated integration (skip w/o env)
 cargo clippy -j4 --all-targets -- -D warnings
 cargo fmt --check
 make check                      # fmt + clippy + tests
@@ -278,7 +307,35 @@ Facade guards (must print nothing):
 
 ---
 
-## Load-bearing tvision-rs facts (0.2.0 — so you don't rediscover them)
+## Load-bearing tvision-rs facts (0.3.0 — so you don't rediscover them)
+
+**New in 0.3.0 / discovered this session (Phase 1 planning):**
+- **Frameless full-screen:** `Window::set_fullscreen(Fullscreen::{Off,Desktop,Screen})`
+  composes maximize + border-drop, and `Command::FULLSCREEN` cycles it. edaptor's
+  pump posts `Command::FULLSCREEN` once on its first tick (the pane can't downcast to
+  `Window`; the command routes to the desktop's only window). `Desktop` keeps the
+  menu bar + status line. The window's **drop shadow is disabled** (it would paint a
+  one-cell strip over the desktop along the right/bottom edges).
+- **No scroll-container for child views** (this is WHY Phase 1 builds `ScrollGroup`):
+  `Group` has no child scroll offset; `Scroller` is for self-drawn content only. But
+  **repositioning children works**: `Group::draw` draws each child through
+  `ctx.sub(child_bounds)` and `DrawCtx::sub` clips to `parent_clip ∩ child_bounds`
+  (context.rs:910), so a child moved to negative-y / past the bottom clips at the
+  edge; mouse routing is `bounds.contains` + local translate (sign-agnostic).
+- **Scroll broker:** a content view holds only its bar's `ViewId`. Publish range/value
+  with `ctx.request_scroll_bar_params(bar, value,min,max,page,arrow)`; on the bar's
+  `SCROLL_BAR_CHANGED { source }` broadcast call `ctx.request_scroll_sync(self_id, h, v)`;
+  the pump resolves and calls your overridden `View::apply_scroll_sync(h,v,ctx)`
+  (defaulted no-op). `ScrollBar::new(rect)` infers vertical when width==1.
+- **`Group::remove(id, ctx)`** exists (alongside `insert`) — so dynamic per-entry
+  child rebuild is fine (the Phase 1 FormPane uses it).
+- **Headless DRAW tests:** `Buffer::new(w,h)` + `DrawCtx::new(&mut buf, &theme, clip,
+  origin)` + `buf.get(x,y).symbol()`; `Theme::classic_blue()`. The crate's own
+  `fill_clips_to_clip_rect` / `sub_narrows_clip_and_shifts_origin` are the templates.
+- Crate-root re-exports incl. `Buffer, DrawCtx, Point, ScrollBar, GrowMode, StaticText,
+  Label, Outline` (lib.rs:124–154). Hide a view by `state_mut().state.visible = false`.
+
+**Carried from 0.2.0:**
 
 - **Hierarchical Tab (new in 0.2.0):** Tab/Shift-Tab walk the focusable-leaf tree
   across nested groups; the Splitter is transparent to focus. Consequence for a
