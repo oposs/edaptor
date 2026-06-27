@@ -91,7 +91,15 @@ pub(crate) fn save_flow_action(prepared: &PrepareSave) -> SaveAction {
 /// commands posted from panes / the pump.
 pub(crate) fn dispatch(prog: &mut Program, cmd: Command, state: &Shared) {
     if cmd == SAVE {
-        let _ = do_save(prog, state, None, false);
+        let is_create = matches!(
+            state.borrow().edit_form.as_ref().map(|f| &f.mode),
+            Some(crate::workflows::edit_form::FormMode::Create { .. })
+        );
+        if is_create {
+            do_create(prog, state);
+        } else {
+            let _ = do_save(prog, state, None, false);
+        }
     } else if cmd == ACTIVATE {
         // Open a field's modal editor. The pane recorded which field.
         let idx = state.borrow_mut().activate_field.take();
@@ -317,6 +325,56 @@ fn do_save(
                 }
             }
             SaveOutcome::Submitted
+        }
+    }
+}
+
+/// Validate the create-mode form, confirm with the user, then submit an ADD.
+/// Borrow discipline: the `plan_create` borrow drops before any `exec_view_focused`
+/// call; on OK a fresh `borrow_mut` is taken using the split-borrow idiom.
+fn do_create(prog: &mut Program, state: &Shared) {
+    use crate::workflows::create::{plan_create, CreatePrep};
+    use crate::workflows::edit_form::FormMode;
+    // 1. Compute the plan (borrow, drop before exec_view / submit).
+    let prep = {
+        let st = state.borrow();
+        let Some(form) = st.edit_form.as_ref() else {
+            return;
+        };
+        let FormMode::Create {
+            profile_idx,
+            container,
+        } = &form.mode
+        else {
+            return;
+        };
+        let profile = &st.profiles[*profile_idx];
+        plan_create(
+            st.read_flow.schema(),
+            profile,
+            container,
+            &form.to_edit_entry(),
+        )
+    };
+    match prep {
+        CreatePrep::Error(msg) => {
+            let (view, ok) = crate::tui::dialog::error::build(&msg);
+            prog.exec_view_focused(view, ok);
+        }
+        CreatePrep::Confirm {
+            dn, attrs, ldif, ..
+        } => {
+            let (view, save) = crate::tui::dialog::confirm::build(&ldif);
+            if prog.exec_view_focused(view, save) != Command::OK {
+                return; // cancel: keep editing the create form.
+            }
+            let mut st = state.borrow_mut();
+            let crate::tui::state::UiState {
+                worker, write_flow, ..
+            } = &mut *st;
+            if let Some(w) = worker.as_ref() {
+                let _ = write_flow.submit_create(w, &dn, attrs, false);
+            }
         }
     }
 }
