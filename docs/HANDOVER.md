@@ -8,18 +8,36 @@ for that see git log, the specs under `docs/superpowers/specs/`, the SDD ledger
 M1 (read core) and M2 (edit + write spine) are COMPLETE, reviewed, and
 LIVE-ACCEPTED. edaptor depends on the released `tvision-rs` 0.3.0 (no pin) and the
 main window runs frameless full-screen (`Fullscreen::Desktop`). M3 was split into
-two cycles; M3 Phase 1 has a SPEC and a PLAN written + committed and is READY TO
-EXECUTE (start at Task 1). Phase 2 (the M3 core) comes after.**
+two cycles; **M3 Phase 1 is now CODE-COMPLETE** — all 12 plan tasks + a regression
+fix executed subagent-driven, each reviewed clean, plus a whole-branch review
+(READY-WITH-FIXES) and its consolidated fix pass. Phase 2 (the M3 core) is next.**
 
-> **▶ NEXT ACTION — execute the M3 Phase 1 plan.**
-> [`docs/superpowers/plans/2026-06-27-tvision-m3-phase1-stabilize.md`](superpowers/plans/2026-06-27-tvision-m3-phase1-stabilize.md)
-> (spec: [`specs/2026-06-26-tvision-m3-phase1-stabilize-design.md`](superpowers/specs/2026-06-26-tvision-m3-phase1-stabilize-design.md)).
-> 12 TDD tasks, subagent-driven recommended (fresh subagent per task + spec-then-
-> quality review). Phase 1 = "stabilize the base" before the create flow:
-> **panes fill + form scrolling (a new reusable `ScrollGroup`)** and the two
-> outstanding dirty-form **guard edges #2/#3**. The plan's API facts were verified
-> against the 0.3.0 source, so the code should compile largely as written. The one
-> flagged validation point is the Task 2 headless-draw glyph assertion.
+> **▶ NEXT ACTION — two small open items on M3 Phase 1, then start Phase 2.**
+> Phase 1 landed on `feat/tvision-ui` @ `426b75f` (511 lib tests, clippy/fmt clean,
+> `make check` green, both facade guards clean). Two items remain before the phase
+> is fully signed off:
+> 1. **Initial-launch full-screen strip (user decision pending).** A 1-row `░`
+>    desktop strip shows at the bottom edge *at launch* and clears on the first
+>    terminal resize. Root cause: the `Command::FULLSCREEN` flip maximizes the
+>    window but does NOT cascade `on_bounds_changed` to the panes (a terminal
+>    resize does). The edaptor-side form residual was fixed (ScrollGroup now paints
+>    its backdrop, `426b75f`); the leaf fill works on resize. Candidate fix:
+>    construct the `Window` already-fullscreen in `init_desktop` (`app.rs:246`) —
+>    `win.set_fullscreen(Fullscreen::Desktop)` at build time + frameless `interior`
+>    + drop the pump's FULLSCREEN post — so panes are built at full size (no flip).
+>    Moderate change to the architected full-screen path; may instead be a
+>    tvision-rs cascade fix. **Awaiting the user's call.**
+> 2. **Interactive guard-edge sign-off (human TTY).** Live tmux verified: branch→
+>    leaf reload (after the `cf9d743` reload fix), form-follows-highlight, multi-
+>    attribute form + scrollbar. NOT yet driven live: keyboard scroll-to-focused,
+>    guard #2 (cancelled-confirm snap-back), guard #3 (branch-change-while-dirty) —
+>    all are headless-tested + reviewer-verified at the logic level; a human TTY
+>    spot-check is the remaining acceptance (as M1/M2 did for final sign-off).
+>
+> Full per-task + review ledger: `.superpowers/sdd/progress.md` (M3 P1 section).
+> The original plan + spec (now executed):
+> [`plans/2026-06-27-tvision-m3-phase1-stabilize.md`](superpowers/plans/2026-06-27-tvision-m3-phase1-stabilize.md),
+> [`specs/2026-06-26-tvision-m3-phase1-stabilize-design.md`](superpowers/specs/2026-06-26-tvision-m3-phase1-stabilize-design.md).
 
 `edaptor` is a Rust TUI for administering an OpenLDAP directory. It introspects
 live schema (`cn=subschema`) and generates edit forms from `objectClass`
