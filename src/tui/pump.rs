@@ -67,10 +67,14 @@ impl View for PumpView {
             // pump's clean top-level tick is reliable — a pane posting the same
             // command is swallowed when a list mouse-track capture is active.
             let need_guard = self.state.borrow_mut().reconcile_selection();
+            let need_branch_guard = self.state.borrow_mut().reconcile_branch();
             if r.changed {
                 ctx.broadcast(REFRESH, None);
             }
             if need_guard {
+                ctx.post(crate::tui::GUARD_NAV);
+            }
+            if need_branch_guard {
                 ctx.post(crate::tui::GUARD_NAV);
             }
             if r.error {

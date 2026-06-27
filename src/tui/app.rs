@@ -13,6 +13,7 @@ use crate::tui::panes::{
     tree::{build_branch_nodes, TreePane},
 };
 use crate::tui::pump::PumpView;
+use crate::tui::state::GuardTarget;
 use crate::tui::{Shared, GUARD_NAV, REQUEST_QUIT, SAVE, SHOW_ERROR};
 use crate::workflows::save::PrepareSave;
 
@@ -59,6 +60,13 @@ pub(crate) fn apply_cancelled_guard_save(st: &mut crate::tui::state::UiState) {
     st.pending_nav = None;
 }
 
+/// Snap the tree highlight back to `current_branch` and clear the guard target.
+/// Called on guard "Stay" for a Branch target. Pure (no ctx); unit-tested.
+pub(crate) fn apply_branch_guard_stay(st: &mut crate::tui::state::UiState) {
+    st.set_tree_row = st.current_branch_row();
+    st.guard_target = None;
+}
+
 /// What the save flow should do for a given prepare result.
 pub(crate) enum SaveAction {
     Status(String),
@@ -82,37 +90,54 @@ pub(crate) fn dispatch(prog: &mut Program, cmd: Command, state: &Shared) {
     if cmd == SAVE {
         let _ = do_save(prog, state, None, false);
     } else if cmd == GUARD_NAV {
-        // A dirty-blocked navigation: ask, then act on the stashed target.
-        // Branch targets exist only once Task 11 wires reconcile_branch into the
-        // pump; for now map non-Leaf variants to None so leaf behaviour is intact.
-        let target = match state.borrow().guard_target.clone() {
-            Some(crate::tui::state::GuardTarget::Leaf(dn, ocs)) => Some((dn, ocs)),
-            _ => None,
-        };
+        // A dirty-blocked navigation: ask, then act on the stashed target per variant.
+        let target = state.borrow().guard_target.clone(); // Option<GuardTarget>
         match run_guard(prog) {
             GuardDecision::Save => {
-                if do_save(prog, state, target, false) == SaveOutcome::NotSubmitted {
-                    // Cancelled confirm: treat like Stay — snap the highlight back
-                    // to the pinned form and clear the stashed nav targets.
+                // For Leaf: pass dn+ocs as the post-save nav; for Branch: just persist.
+                let nav = match &target {
+                    Some(GuardTarget::Leaf(dn, ocs)) => Some((dn.clone(), ocs.clone())),
+                    _ => None, // branch save: persist, then tree re-requests
+                };
+                if do_save(prog, state, nav, false) == SaveOutcome::NotSubmitted {
+                    // Cancelled confirm or no-op: revert highlight to the pinned form.
                     let mut st = state.borrow_mut();
-                    apply_cancelled_guard_save(&mut st);
+                    match target {
+                        Some(GuardTarget::Branch(_)) => apply_branch_guard_stay(&mut st),
+                        _ => apply_cancelled_guard_save(&mut st),
+                    }
+                } else if let Some(GuardTarget::Branch(dn)) = target {
+                    // Save submitted: switch the branch now (form will reload clean).
+                    let mut st = state.borrow_mut();
+                    st.current_branch = Some(dn);
+                    st.list_dirty = true;
+                    st.guard_target = None;
                 }
             }
             GuardDecision::Discard => {
-                // discard_edits sets form_needs_render; the re-read's worker
-                // response drives a REFRESH via the pump — no Program broadcast.
+                // discard_edits sets form_needs_render; re-read drives REFRESH via pump.
                 discard_edits(state);
-                if let Some((dn, ocs)) = target {
-                    state.borrow_mut().reread_public(&dn, &ocs);
+                match target {
+                    Some(GuardTarget::Leaf(dn, ocs)) => state.borrow_mut().reread_public(&dn, &ocs),
+                    Some(GuardTarget::Branch(dn)) => {
+                        let mut st = state.borrow_mut();
+                        st.current_branch = Some(dn);
+                        st.list_dirty = true;
+                    }
+                    None => {}
                 }
                 state.borrow_mut().guard_target = None;
             }
             GuardDecision::Stay => {
-                // Keep editing the pinned form; snap the list highlight back to it
-                // so highlight and form agree (the move is cancelled).
+                // Keep editing the pinned form; snap the highlight back so it agrees.
                 let mut st = state.borrow_mut();
+                match target {
+                    Some(GuardTarget::Branch(_)) => apply_branch_guard_stay(&mut st),
+                    _ => {
+                        st.set_leaf_row = st.current_leaf_row();
+                    }
+                }
                 st.guard_target = None;
-                st.set_leaf_row = st.current_leaf_row();
             }
         }
     } else if cmd == REQUEST_QUIT {
@@ -279,6 +304,30 @@ mod tests {
     use super::*;
     use crate::form::validate::ValidationError;
     use crate::workflows::save::PrepareSave;
+
+    #[test]
+    fn guard_stay_on_branch_target_reverts_tree() {
+        use crate::ldap::worker::RawSubschema;
+        use crate::schema::SchemaModel;
+        use crate::tui::state::{GuardTarget, UiState};
+        use crate::workflows::structure::Structure;
+        let structure = Structure::build("dc=x", vec![]);
+        let schema = SchemaModel::from_raw(&RawSubschema::default());
+        let mut st =
+            UiState::new_for_test(structure, schema, "dc=x".into(), Vec::new(), Vec::new());
+        st.branch_dns = vec!["dc=x".into(), "ou=p,dc=x".into(), "ou=q,dc=x".into()];
+        st.current_branch = Some("ou=p,dc=x".into());
+        st.guard_target = Some(GuardTarget::Branch("ou=q,dc=x".into()));
+
+        apply_branch_guard_stay(&mut st);
+
+        assert_eq!(
+            st.set_tree_row,
+            st.current_branch_row(),
+            "revert tree to current branch"
+        );
+        assert!(st.guard_target.is_none());
+    }
 
     #[test]
     fn cancelled_guard_save_snaps_highlight_back() {
