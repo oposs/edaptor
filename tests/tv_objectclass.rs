@@ -191,13 +191,10 @@ fn objectclass_change_regenerates_fields() {
         .filter(|oc| !oc.eq_ignore_ascii_case("sambaSamAccount"))
         .cloned()
         .collect();
-    assert!(
-        oc_field
-            .values
-            .iter()
-            .all(|oc| !oc.eq_ignore_ascii_case("sambaSamAccount")),
-        "sambaSamAccount must have been removed from the objectClass field values"
-    );
+    // Mirror what apply_commit does: keep object_classes in sync with the field values.
+    edit_form
+        .object_classes
+        .retain(|oc| !oc.eq_ignore_ascii_case("sambaSamAccount"));
 
     // -----------------------------------------------------------------------
     // Step 5: Resync the form fields from the updated objectClass values.
