@@ -726,6 +726,13 @@ mod tests {
         );
 
         assert_eq!(shared.borrow().activate_field, Some(1));
+        // T6: ACTIVATE command must also be posted into the event queue so the
+        // controller (app::dispatch) can open the modal editor.
+        assert!(
+            out.iter()
+                .any(|e| matches!(e, Event::Command(cmd) if *cmd == ACTIVATE)),
+            "ACTIVATE command must be posted to the event queue after Enter on objectClass"
+        );
     }
 
     #[test]

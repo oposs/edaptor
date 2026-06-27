@@ -260,6 +260,9 @@ impl UiState {
                     if let Some(f) = form.fields.get_mut(field_idx) {
                         f.values = ocs.clone();
                     }
+                    // The objectClass FIELD's values are authoritative for
+                    // `sync_schema_fields`; `object_classes` is the mirror kept for
+                    // the save path.
                     form.object_classes = ocs;
                     form.sync_schema_fields(read_flow.schema());
                 }
@@ -574,8 +577,74 @@ mod tests {
             .find(|f| f.label == "objectClass")
             .unwrap();
         assert_eq!(oc.values, vec!["top".to_string(), "person".to_string()]);
-        assert!(form.fields.iter().any(|f| f.label == "sn"));
+        assert!(
+            form.fields.iter().any(|f| f.label == "sn"),
+            "MUST attr sn injected"
+        );
+        assert!(
+            form.fields.iter().any(|f| f.label == "cn"),
+            "MUST attr cn injected"
+        );
         assert!(st.form_needs_render);
+    }
+
+    /// Fix 3 (T4): `CommitOutcome::SetValues` must update the field's values and
+    /// flag `form_needs_render`, without touching `object_classes` or resync.
+    #[test]
+    fn apply_commit_set_values_updates_field_and_flags_render() {
+        use crate::schema::FieldKind;
+        use crate::tui::widget::CommitOutcome;
+        use crate::workflows::edit_form::{EditField, EditForm, FormMode};
+        use crate::workflows::form_model::WidgetSpec;
+
+        let raw = crate::ldap::worker::RawSubschema::default();
+        let schema = crate::schema::SchemaModel::from_raw(&raw);
+        let structure = Structure::build("dc=example,dc=org", vec![]);
+        let mut st = UiState::new_for_test(
+            structure,
+            schema,
+            "dc=example,dc=org".into(),
+            Vec::new(),
+            Vec::new(),
+        );
+        let plain_field = EditField {
+            label: "description".into(),
+            must: false,
+            editable: true,
+            multi: false,
+            secret: false,
+            ordered: false,
+            orphaned: false,
+            kind: FieldKind::Text,
+            widget: WidgetSpec::ReadOnlyText,
+            widget_binding: None,
+            values: vec!["old".into()],
+            baseline: vec!["old".into()],
+        };
+        st.edit_form = Some(EditForm {
+            dn: "cn=test,dc=example,dc=org".into(),
+            mode: FormMode::Edit,
+            object_classes: vec!["top".into()],
+            fields: vec![plain_field],
+        });
+
+        st.apply_commit(0, CommitOutcome::SetValues(vec!["newval".into()]));
+
+        let form = st.edit_form.as_ref().unwrap();
+        assert_eq!(
+            form.fields[0].values,
+            vec!["newval".to_string()],
+            "SetValues must write the new values into the field"
+        );
+        assert!(
+            st.form_needs_render,
+            "SetValues must flag form_needs_render"
+        );
+        assert_eq!(
+            form.object_classes,
+            vec!["top".to_string()],
+            "SetValues must not touch object_classes"
+        );
     }
 }
 

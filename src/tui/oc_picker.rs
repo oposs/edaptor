@@ -101,7 +101,14 @@ impl ObjectClassPicker {
 
     /// Rebuild the visible list from `candidates` filtered by `last_search`,
     /// each row prefixed with a tick marker.
-    fn refresh_list(&mut self, ctx: &mut Context) {
+    ///
+    /// When `preserve_cursor` is `true` the current selection index is captured
+    /// before `new_list` resets it to 0, then restored afterwards (clamped to
+    /// the new list length). Use this on the Space-toggle path so multi-selection
+    /// does not jump back to the top after each tick.  Pass `false` whenever the
+    /// list *contents* change (search filter or initial seed), so the highlight
+    /// starts at the top.
+    fn refresh_list(&mut self, ctx: &mut Context, preserve_cursor: bool) {
         let needle = self.last_search.to_lowercase();
         self.filtered = self
             .candidates
@@ -121,9 +128,24 @@ impl ObjectClassPicker {
                 format!("{mark} {c}")
             })
             .collect();
+        let rows_len = rows.len();
         if let Some(list) = self.dlg.child_mut(self.list_id) {
+            // Capture the cursor position before new_list resets it to 0.
+            let saved_sel: Option<i32> = if preserve_cursor {
+                match list.value() {
+                    Some(FieldValue::Int(i)) => Some(i),
+                    _ => None,
+                }
+            } else {
+                None
+            };
             if let Some(lb) = list.as_any_mut().and_then(|a| a.downcast_mut::<ListBox>()) {
                 lb.new_list(rows, ctx);
+            }
+            // Restore the cursor when preserving, clamped to the (possibly shorter) list.
+            if let Some(sel) = saved_sel {
+                let clamped = sel.min((rows_len.saturating_sub(1)) as i32).max(0);
+                list.set_value_ctx(FieldValue::Int(clamped), ctx);
             }
         }
     }
@@ -176,7 +198,7 @@ impl View for ObjectClassPicker {
     fn reset_current(&mut self, ctx: &mut Context) {
         self.dlg.reset_current(ctx);
         if self.filtered.is_empty() {
-            self.refresh_list(ctx);
+            self.refresh_list(ctx, false);
             self.update_staged();
         }
     }
@@ -186,7 +208,7 @@ impl View for ObjectClassPicker {
         // This guard covers any path that delivers events without first calling
         // reset_current (e.g. direct unit-test event injection).
         if self.filtered.is_empty() && !self.candidates.is_empty() && self.last_search.is_empty() {
-            self.refresh_list(ctx);
+            self.refresh_list(ctx, false);
         }
 
         // Space toggles the highlighted candidate's tick.
@@ -202,7 +224,9 @@ impl View for ObjectClassPicker {
                 if !self.ticked.remove(&key) {
                     self.ticked.insert(key);
                 }
-                self.refresh_list(ctx);
+                // preserve_cursor=true: the list rows only change their [x]/[ ] prefix,
+                // not their order, so keeping the highlight position is correct.
+                self.refresh_list(ctx, true);
                 self.update_staged();
             }
             ev.clear();
@@ -214,11 +238,11 @@ impl View for ObjectClassPicker {
             self.dlg.handle_event(ev, ctx);
         }
 
-        // Refilter when the search text changed.
+        // Refilter when the search text changed (contents change → reset cursor).
         let cur = self.current_search();
         if cur != self.last_search {
             self.last_search = cur;
-            self.refresh_list(ctx);
+            self.refresh_list(ctx, false);
         }
     }
 }
@@ -327,6 +351,70 @@ mod tests {
             3,
             "all 3 candidates must be listed after reset_current, got {:?}",
             picker.filtered
+        );
+    }
+
+    /// TDD (Fix 1): Space-toggle must NOT reset the list cursor to the top.
+    ///
+    /// RED (before fix): `refresh_list` always called `new_list` which leaves the
+    /// selection at 0, so toggling any row while the highlight was at row > 0 would
+    /// snap it back to row 0.
+    /// GREEN (after fix): `refresh_list(ctx, preserve_cursor=true)` on the Space
+    /// path reads the selection before `new_list` and restores it afterwards.
+    #[test]
+    fn space_toggle_preserves_list_cursor() {
+        use tvision_rs::{Deferred, KeyEvent};
+        let sh = shared();
+        let ed: Box<dyn FieldEditor> = Box::new(ObjectClassEditor {
+            current: vec!["top".into()],
+        });
+        let (mut view, _focus_id) = ed.into_view(&schema(), sh.clone());
+
+        // Seed the list via reset_current.
+        let mut out: std::collections::VecDeque<tv::Event> = std::collections::VecDeque::new();
+        let mut timers = tv::timer::TimerQueue::new();
+        let mut deferred: Vec<Deferred> = Vec::new();
+        let mut ctx = Context::new(&mut out, &mut timers, 0, &mut deferred);
+        view.reset_current(&mut ctx);
+
+        // Move the list highlight to row 2 (organizationalPerson) by sending two
+        // Down events through handle_event (nav branch forwards them to the list).
+        let picker = view
+            .as_any_mut()
+            .and_then(|a| a.downcast_mut::<ObjectClassPicker>())
+            .expect("downcast");
+        assert_eq!(picker.filtered.len(), 3, "three candidates after seed");
+
+        for _ in 0..2 {
+            let mut ev = Event::KeyDown(KeyEvent::from(Key::Down));
+            picker.handle_event(&mut ev, &mut ctx);
+        }
+
+        // Sanity check: highlight is now at row 2.
+        let sel_before = match picker.dlg.child_mut(picker.list_id).and_then(|v| v.value()) {
+            Some(FieldValue::Int(i)) => i,
+            _ => panic!("no selection"),
+        };
+        assert_eq!(sel_before, 2, "highlight must be at row 2 before Space");
+
+        // Deliver Space — toggles the tick on organizationalPerson.
+        let candidate_before = picker.filtered[2].clone();
+        let was_ticked = picker.ticked.contains(&candidate_before.to_lowercase());
+        let mut ev = Event::KeyDown(KeyEvent::from(Key::Char(' ')));
+        picker.handle_event(&mut ev, &mut ctx);
+
+        // Tick must have flipped.
+        let now_ticked = picker.ticked.contains(&candidate_before.to_lowercase());
+        assert_ne!(was_ticked, now_ticked, "Space must flip the tick");
+
+        // And the cursor must STILL be at row 2 (not reset to 0).
+        let sel_after = match picker.dlg.child_mut(picker.list_id).and_then(|v| v.value()) {
+            Some(FieldValue::Int(i)) => i,
+            _ => panic!("no selection after Space"),
+        };
+        assert_eq!(
+            sel_after, 2,
+            "cursor must stay at row 2 after Space (not reset to 0)"
         );
     }
 
