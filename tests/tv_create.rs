@@ -9,6 +9,11 @@
 //!   -> set_value for all MUST fields -> plan_create -> CreatePrep::Confirm
 //!   -> Request::Add -> poll WriteOk -> base-read (assert entry+OC)
 //!   -> Request::Delete -> verify entry gone.
+//!
+//! Cleanup guarantee: an `EntryCleanup` RAII guard is constructed right after the
+//! ADD succeeds and fires a best-effort DELETE in its `Drop` impl.  This ensures
+//! the test entry is removed even when an assertion panics mid-test.  The
+//! idempotent pre-cleanup at the top handles any leftover from a prior crashed run.
 
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
@@ -19,6 +24,38 @@ use edaptor::config::{
 use edaptor::ldap::worker::{Request, Response, SearchScope, WorkerHandle};
 use edaptor::schema::SchemaModel;
 use edaptor::workflows::create::{build_create_form, plan_create, CreatePrep};
+
+// ---------------------------------------------------------------------------
+// RAII guard: ensures the test entry is deleted even on assertion panic.
+// ---------------------------------------------------------------------------
+
+/// Fires a best-effort DELETE for `dn` when dropped.
+///
+/// `submit` takes `&self` on `WorkerHandle`, so holding a shared reference is
+/// sufficient.  The guard uses request-id 99 (reserved for cleanup).  No
+/// response is awaited inside `drop` — the caller can poll for id 99 separately
+/// when an explicit "entry is gone" assertion is desired.
+struct EntryCleanup<'a> {
+    worker: &'a WorkerHandle,
+    dn: String,
+}
+
+impl<'a> EntryCleanup<'a> {
+    fn new(worker: &'a WorkerHandle, dn: String) -> Self {
+        Self { worker, dn }
+    }
+}
+
+impl Drop for EntryCleanup<'_> {
+    fn drop(&mut self) {
+        // Best-effort: submit and ignore errors / response.
+        // The next-run idempotent pre-cleanup is the final backstop.
+        let _ = self.worker.submit(Request::Delete {
+            id: 99,
+            dn: std::mem::take(&mut self.dn),
+        });
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Helpers (mirror of tv_edit_write.rs — each tests/ file is standalone)
@@ -248,6 +285,12 @@ fn create_entry_via_neutral_create_path() {
         other => panic!("ADD failed: {}", describe(&other)),
     }
 
+    // Construct the cleanup guard NOW, immediately after the ADD is confirmed.
+    // If any later assertion panics, `drop` fires a best-effort DELETE so the
+    // entry is not left behind indefinitely.  Request-id 99 is reserved for
+    // this guard; no other submit in this test uses that id.
+    let cleanup = EntryCleanup::new(&worker, confirm_dn.clone());
+
     // -----------------------------------------------------------------------
     // Step 5: Read the new entry back and assert it exists with the OC set.
     // -----------------------------------------------------------------------
@@ -283,15 +326,14 @@ fn create_entry_via_neutral_create_path() {
     );
 
     // -----------------------------------------------------------------------
-    // Step 6: DELETE the test entry — restore the demo seed.
+    // Step 6: DELETE the test entry — let the guard own the deletion.
+    //
+    // Dropping the guard submits Request::Delete{id:99} (best-effort).  We then
+    // poll for id 99 to wait for the server's acknowledgement before verifying
+    // the entry is gone.
     // -----------------------------------------------------------------------
-    worker
-        .submit(Request::Delete {
-            id: 20,
-            dn: confirm_dn.clone(),
-        })
-        .expect("submit DELETE");
-    match poll_for_id(&worker, 20, Duration::from_secs(10)) {
+    drop(cleanup); // fires DELETE id 99
+    match poll_for_id(&worker, 99, Duration::from_secs(10)) {
         Some(Response::WriteOk { .. }) => {}
         other => panic!("DELETE failed: {}", describe(&other)),
     }
