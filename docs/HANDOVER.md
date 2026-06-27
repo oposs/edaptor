@@ -8,14 +8,18 @@ for that see git log, the specs under `docs/superpowers/specs/`, the SDD ledger
 M1 (read core) and M2 (edit + write spine) are COMPLETE, reviewed, and
 LIVE-ACCEPTED. edaptor depends on the released `tvision-rs` 0.3.0 (no pin) and the
 main window runs frameless full-screen (`Fullscreen::Desktop`). M3 was split into
-two cycles; **M3 Phase 1 is now CODE-COMPLETE** — all 12 plan tasks + a regression
-fix executed subagent-driven, each reviewed clean, plus a whole-branch review
-(READY-WITH-FIXES) and its consolidated fix pass. Phase 2 (the M3 core) is next.**
+two cycles; **M3 Phase 1 is now FULLY SIGNED OFF** — all 12 plan tasks + a
+regression fix executed subagent-driven, each reviewed clean, plus a whole-branch
+review (READY-WITH-FIXES) and its consolidated fix pass, the strip fix (`bc64274`),
+and the interactive guard-edge acceptance (live PTY). Phase 2 (the M3 core) is next.**
 
-> **▶ NEXT ACTION — two small open items on M3 Phase 1, then start Phase 2.**
-> Phase 1 landed on `feat/tvision-ui` @ `426b75f` (511 lib tests, clippy/fmt clean,
-> `make check` green, both facade guards clean). Two items remain before the phase
-> is fully signed off:
+> **▶ NEXT ACTION — start M3 Phase 2 (the M3 core).** Both M3 P1 open items are now
+> closed; the base is stable. Begin Phase 2 with its own brainstorming →
+> writing-plans cycle (see "Phase 2" below). Phase 1 landed on `feat/tvision-ui`
+> @ `bc64274` (512 lib tests, clippy/fmt clean, `make check` green, both facade
+> guards clean).
+>
+> _Closed P1 items, for the record:_
 > 1. ✅ **RESOLVED — bottom `░` strip (`bc64274`).** Root cause (verified vs
 >    tvision-rs 0.3.0 source): tvision refits nested views via `grow_mode`
 >    (`calc_bounds`) only — it calls `on_bounds_changed` solely on the window's
@@ -31,12 +35,21 @@ fix executed subagent-driven, each reviewed clean, plus a whole-branch review
 >    (cosmetic, logged): `ScrollGroup` content-cell *widths* only re-fit on a DN
 >    change, so a width-only resize leaves value cells their old width until you
 >    pick another entry.
-> 2. **Interactive guard-edge sign-off (human TTY).** Live tmux verified: branch→
->    leaf reload (after the `cf9d743` reload fix), form-follows-highlight, multi-
->    attribute form + scrollbar. NOT yet driven live: keyboard scroll-to-focused,
->    guard #2 (cancelled-confirm snap-back), guard #3 (branch-change-while-dirty) —
->    all are headless-tested + reviewer-verified at the logic level; a human TTY
->    spot-check is the remaining acceptance (as M1/M2 did for final sign-off).
+> 2. ✅ **RESOLVED — interactive guard-edge sign-off (agent-driven tmux PTY).** All
+>    three deferred flows live-verified; demo data intact afterward (no write ever
+>    submitted). **A — keyboard scroll-to-focused:** PASS (viewport scrolls to keep
+>    focused editable field visible; pinned DN header stays). **B — guard #2
+>    (cancelled-confirm snap-back):** PASS (Save→confirm→cancel leaves form pinned +
+>    leaf highlight snaps back to the current entry). **C — guard #3
+>    (branch-change-while-dirty):** PASS (Stay reverts the tree highlight to the
+>    current branch). Bonus: Alt-X quit-guard→Discard exits clean. **NEW FINDING:** a
+>    single left-click on the `Outline` (tree) only FOCUSES the pane — it does NOT
+>    move the branch selection, so the branch guard is reached via keyboard arrows,
+>    not a click (the leaf pane's `first_click` DOES select). Reliable PTY focus
+>    probes (for the next driver): `tmux display-message -p '#{cursor_x}'` locates
+>    the focused widget by column; `tmux capture-pane -e` renders the focused element
+>    bg bright-green `(0,170,0)`. Still only unit-reasoned (not exercised live):
+>    branch Save-Submitted / branch Discard dispatch routing.
 >
 > Full per-task + review ledger: `.superpowers/sdd/progress.md` (M3 P1 section).
 > The original plan + spec (now executed):
@@ -178,7 +191,7 @@ via the 50ms pump).
 The user approved splitting M3 so the carried-forward problems are fixed first,
 because the create flow reuses the form pane and the tree-guard machinery.
 
-### ▶ Phase 1 — stabilize the base (PLANNED, ready to execute)
+### ✅ Phase 1 — stabilize the base (DONE — signed off, strip fixed + guard edges live-verified)
 
 Spec [`specs/2026-06-26-tvision-m3-phase1-stabilize-design.md`](superpowers/specs/2026-06-26-tvision-m3-phase1-stabilize-design.md),
 plan [`plans/2026-06-27-tvision-m3-phase1-stabilize.md`](superpowers/plans/2026-06-27-tvision-m3-phase1-stabilize.md).
