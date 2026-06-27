@@ -87,7 +87,7 @@ impl ObjectClassPicker {
             ],
             ButtonRowAlign::Right,
         );
-        let me = ObjectClassPicker {
+        ObjectClassPicker {
             dlg,
             search_id,
             list_id,
@@ -96,9 +96,7 @@ impl ObjectClassPicker {
             ticked,
             filtered: Vec::new(),
             last_search: String::new(),
-        };
-        me.update_staged(); // reflect the pre-ticked set even with no interaction
-        me
+        }
     }
 
     /// Rebuild the visible list from `candidates` filtered by `last_search`,
@@ -179,6 +177,7 @@ impl View for ObjectClassPicker {
         self.dlg.reset_current(ctx);
         if self.filtered.is_empty() {
             self.refresh_list(ctx);
+            self.update_staged();
         }
     }
 
@@ -262,12 +261,18 @@ mod tests {
 
     #[test]
     fn into_view_preticks_current_and_stages_them() {
+        use tvision_rs::Deferred;
         let sh = shared();
         let ed: Box<dyn FieldEditor> = Box::new(ObjectClassEditor {
             current: vec!["top".into(), "person".into()],
         });
-        let _ = ed.into_view(&schema(), sh.clone());
-        // construction stages the pre-ticked set immediately.
+        let (mut view, _focus_id) = ed.into_view(&schema(), sh.clone());
+        // staging happens in reset_current (safe: no state borrow held here).
+        let mut out: std::collections::VecDeque<tv::Event> = std::collections::VecDeque::new();
+        let mut timers = tv::timer::TimerQueue::new();
+        let mut deferred: Vec<Deferred> = Vec::new();
+        let mut ctx = Context::new(&mut out, &mut timers, 0, &mut deferred);
+        view.reset_current(&mut ctx);
         let staged = sh.borrow().staged_commit.clone();
         match staged {
             Some(CommitOutcome::SetValuesThenResyncSchema(v)) => {
@@ -329,12 +334,19 @@ mod tests {
     /// must still match and the staged commit must use the schema's canonical spelling.
     #[test]
     fn case_insensitive_pretick_stages_canonical_names() {
+        use tvision_rs::Deferred;
         let sh = shared();
         // "TOP" and "Person" do not match the schema's exact "top" / "person" spelling.
         let ed: Box<dyn FieldEditor> = Box::new(ObjectClassEditor {
             current: vec!["TOP".into(), "Person".into()],
         });
-        let _ = ed.into_view(&schema(), sh.clone());
+        let (mut view, _focus_id) = ed.into_view(&schema(), sh.clone());
+        // staging happens in reset_current (safe: no state borrow held here).
+        let mut out: std::collections::VecDeque<tv::Event> = std::collections::VecDeque::new();
+        let mut timers = tv::timer::TimerQueue::new();
+        let mut deferred: Vec<Deferred> = Vec::new();
+        let mut ctx = Context::new(&mut out, &mut timers, 0, &mut deferred);
+        view.reset_current(&mut ctx);
         let staged = sh.borrow().staged_commit.clone();
         match staged {
             Some(CommitOutcome::SetValuesThenResyncSchema(v)) => {
