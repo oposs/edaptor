@@ -5,6 +5,7 @@
 //! and the [`crate::workflows::form_model::FormModel`]s happens in the ratatui UI
 //! ([`crate::ui::view`]).
 
+pub mod alloc_flow;
 pub mod create;
 pub mod edit_form;
 pub mod form_model;
