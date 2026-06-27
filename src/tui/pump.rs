@@ -68,7 +68,12 @@ impl View for PumpView {
             // command is swallowed when a list mouse-track capture is active.
             let need_guard = self.state.borrow_mut().reconcile_selection();
             let need_branch_guard = self.state.borrow_mut().reconcile_branch();
-            if r.changed {
+            // A clean branch switch (reconcile_branch) or a post-guard branch switch
+            // sets list_dirty without any worker activity (r.changed = false). Broadcast
+            // REFRESH so the leaf pane rebuilds. The leaf clears list_dirty on rebuild,
+            // so this is a single idempotent refresh per dirty-marking, not a loop.
+            let list_dirty = self.state.borrow().list_dirty;
+            if r.changed || list_dirty {
                 ctx.broadcast(REFRESH, None);
             }
             if need_guard {
@@ -102,6 +107,66 @@ mod tests {
         deferred: &'a mut Vec<tv::Deferred>,
     ) -> Context<'a> {
         Context::new(out, timers, 0, deferred)
+    }
+
+    /// Regression: a clean branch switch sets `list_dirty` but produces no worker
+    /// activity (`r.changed = false`). The pump must broadcast `REFRESH` so the leaf
+    /// pane rebuilds. Previously the tree pane did this, but after it became a pure
+    /// selector (Task 10) nothing replaced that trigger.
+    ///
+    /// RED (before fix): no `REFRESH` broadcast emitted → leaf stays `<empty>`.
+    /// GREEN (after fix): pump broadcasts `REFRESH` whenever `list_dirty` is set.
+    #[test]
+    fn broadcasts_refresh_on_clean_branch_switch() {
+        use std::time::Duration;
+
+        let structure = Structure::build("dc=x", Vec::new());
+        let schema = SchemaModel::from_raw(&crate::ldap::worker::RawSubschema::default());
+        let mut state = crate::tui::state::UiState::new_for_test(
+            structure,
+            schema,
+            "dc=x".into(),
+            Vec::new(),
+            Vec::new(),
+        );
+        // Two-branch setup, currently on p, requesting q; no worker, form is clean.
+        state.branch_dns = vec!["ou=p,dc=x".into(), "ou=q,dc=x".into()];
+        state.current_branch = Some("ou=p,dc=x".into());
+        state.edit_form = None;
+        state.request_branch("ou=q,dc=x".into());
+
+        let shared: Shared = Rc::new(RefCell::new(state));
+        let mut pump = PumpView::new(shared.clone());
+
+        let mut out = VecDeque::new();
+        let mut timers = tv::timer::TimerQueue::new();
+        let mut deferred: Vec<tv::Deferred> = Vec::new();
+        // Obtain a valid TimerId by arming a real timer; the pump ignores which id fired.
+        let timer_id = timers.set_timer(
+            0,
+            Duration::from_millis(50),
+            Some(Duration::from_millis(50)),
+        );
+        let mut ctx = headless(&mut out, &mut timers, &mut deferred);
+        let mut ev = Event::Timer(timer_id);
+        pump.handle_event(&mut ev, &mut ctx);
+
+        // reconcile_branch must have switched the branch.
+        assert_eq!(
+            shared.borrow().current_branch.as_deref(),
+            Some("ou=q,dc=x"),
+            "reconcile_branch should switch current_branch"
+        );
+
+        // The pump must have broadcast REFRESH so the leaf pane reloads.
+        let refresh_count = out
+            .iter()
+            .filter(|e| matches!(e, Event::Broadcast { command, .. } if *command == REFRESH))
+            .count();
+        assert_eq!(
+            refresh_count, 1,
+            "pump must broadcast exactly one REFRESH on a clean branch switch"
+        );
     }
 
     /// The pump posts `Command::FULLSCREEN` exactly once (Off → Desktop); the
