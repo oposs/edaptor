@@ -111,6 +111,26 @@ impl FormPane {
         }
     }
 
+    /// Test seam: current bounds of the header cell.
+    #[cfg(test)]
+    pub(crate) fn header_bounds_for_test(&mut self) -> Rect {
+        self.group
+            .child_mut(self.header_id)
+            .unwrap()
+            .state()
+            .get_bounds()
+    }
+
+    /// Test seam: current bounds of the ScrollGroup child.
+    #[cfg(test)]
+    pub(crate) fn scroll_bounds_for_test(&mut self) -> Rect {
+        self.group
+            .child_mut(self.scroll_id)
+            .unwrap()
+            .state()
+            .get_bounds()
+    }
+
     /// Rebuild one label+value cell pair per field into the `ScrollGroup`. Called
     /// when the shown entry changes (different `dn`). Borrow discipline: collect
     /// field metadata, drop the state borrow, then mutate the scroll group.
@@ -325,6 +345,19 @@ impl View for FormPane {
         Some(self)
     }
 
+    fn on_bounds_changed(&mut self, ctx: &mut Context) {
+        let ext = self.group.state().get_extent();
+        let w = ext.b.x - ext.a.x;
+        let h = ext.b.y - ext.a.y;
+        if let Some(hdr) = self.group.child_mut(self.header_id) {
+            hdr.change_bounds(Rect::new(0, 0, w, 1));
+        }
+        if let Some(sc) = self.group.child_mut(self.scroll_id) {
+            sc.change_bounds(Rect::new(0, 1, w, h));
+            sc.on_bounds_changed(ctx);
+        }
+    }
+
     fn handle_event(&mut self, ev: &mut Event, ctx: &mut Context) {
         // Render whenever the form needs it, on ANY event. The dispatch closure
         // (Discard, re-read) only sets `form_needs_render` — it cannot broadcast
@@ -402,6 +435,21 @@ mod tests {
         deferred: &'a mut Vec<tv::Deferred>,
     ) -> Context<'a> {
         Context::new(out, timers, 0, deferred)
+    }
+
+    #[test]
+    fn on_bounds_changed_refits_header_and_scroll() {
+        let shared = state_with_form();
+        let mut pane = FormPane::new(Rect::new(0, 0, 40, 6), shared);
+        let mut out = VecDeque::new();
+        let mut timers = tv::timer::TimerQueue::new();
+        let mut deferred = Vec::new();
+        let mut ctx = headless_ctx(&mut out, &mut timers, &mut deferred);
+        <FormPane as View>::change_bounds(&mut pane, Rect::new(0, 0, 80, 20));
+        <FormPane as View>::on_bounds_changed(&mut pane, &mut ctx);
+        // Header spans the new full width; scroll child fills rows 1..20.
+        assert_eq!(pane.header_bounds_for_test().b.x, 80);
+        assert_eq!(pane.scroll_bounds_for_test(), Rect::new(0, 1, 80, 20));
     }
 
     #[test]
