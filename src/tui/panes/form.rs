@@ -15,7 +15,7 @@ use tvision_rs::{
 use crate::tui::scroll_group::ScrollGroup;
 use crate::tui::widget::{inline_editable, is_modal_field, present_field};
 use crate::tui::{Shared, ACTIVATE, REFRESH};
-use crate::workflows::edit_form::EditForm;
+use crate::workflows::edit_form::{composed_create_dn, FormMode};
 
 /// Columns reserved for the label before the value `InputLine`.
 const LABEL_W: i32 = 22;
@@ -47,12 +47,6 @@ pub(crate) struct FormPane {
     /// DN of the entry whose cells are currently built; `None` before first render.
     built_dn: Option<String>,
     state: Shared,
-}
-
-/// `"DN"` plus a ` *` marker when dirty.
-fn header_text(form: &EditForm) -> String {
-    let mark = if form.is_dirty() { " *" } else { "" };
-    format!("{}{}", form.dn, mark)
 }
 
 impl FormPane {
@@ -142,6 +136,49 @@ impl FormPane {
             .get_bounds()
     }
 
+    /// Test seam: the header string the pane would currently render.
+    #[cfg(test)]
+    pub(crate) fn header_text_for_test(&self) -> String {
+        self.header_text()
+    }
+
+    /// Compose the header string from the current form state.
+    /// For `Edit` mode: `"<dn><mark>"`.
+    /// For `Create` mode: `"<composed_dn> (new)<mark>"` where the RDN value is
+    /// read live from the field whose label matches the profile's `rdn_attr`.
+    /// Returns an empty string when no form is loaded.
+    /// Borrow discipline: takes a single short `state.borrow()` that is dropped
+    /// before this method returns — never holds a borrow across a view call.
+    fn header_text(&self) -> String {
+        let st = self.state.borrow();
+        let Some(form) = st.edit_form.as_ref() else {
+            return String::new();
+        };
+        let mark = if form.is_dirty() { " *" } else { "" };
+        match &form.mode {
+            FormMode::Edit => format!("{}{}", form.dn, mark),
+            FormMode::Create {
+                profile_idx,
+                container,
+            } => {
+                let rdn_attr = st
+                    .profiles
+                    .get(*profile_idx)
+                    .map(|p| p.rdn_attr.as_str())
+                    .unwrap_or("");
+                let rdn_value = form
+                    .fields
+                    .iter()
+                    .find(|f| f.label.eq_ignore_ascii_case(rdn_attr))
+                    .and_then(|f| f.values.first())
+                    .map(String::as_str)
+                    .unwrap_or("");
+                let composed = composed_create_dn(rdn_attr, rdn_value, container);
+                format!("{} (new){}", composed, mark)
+            }
+        }
+    }
+
     /// Rebuild one label+value cell pair per field into the `ScrollGroup`. Called
     /// when the shown entry changes (different `dn`). Borrow discipline: collect
     /// field metadata, drop the state borrow, then mutate the scroll group.
@@ -197,29 +234,27 @@ impl FormPane {
         }
 
         // Collect display data (drop state borrow before touching views).
-        let (header, rows): (String, Vec<(String, String, bool)>) = {
+        let rows: Vec<(String, String, bool)> = {
             let st = self.state.borrow();
             match st.edit_form.as_ref() {
-                None => (String::new(), Vec::new()),
-                Some(form) => {
-                    let header = header_text(form);
-                    let rows = form
-                        .fields
-                        .iter()
-                        .map(|f| {
-                            let marker = if f.must { "*" } else { "" };
-                            (
-                                format!("{}{}", f.label, marker),
-                                present_field(f),
-                                cell_focusable(f),
-                            )
-                        })
-                        .collect();
-                    (header, rows)
-                }
+                None => Vec::new(),
+                Some(form) => form
+                    .fields
+                    .iter()
+                    .map(|f| {
+                        let marker = if f.must { "*" } else { "" };
+                        (
+                            format!("{}{}", f.label, marker),
+                            present_field(f),
+                            cell_focusable(f),
+                        )
+                    })
+                    .collect(),
             }
         }; // state borrow dropped
 
+        // Compute header with a fresh short borrow (Create mode needs profiles too).
+        let header = self.header_text();
         if let Some(h) = self.group.child_mut(self.header_id) {
             h.set_value(FieldValue::Text(header));
         }
@@ -343,8 +378,8 @@ impl FormPane {
             }
         } // sg borrow dropped
 
-        // Write edits back into the form; compute the new header text.
-        let header = {
+        // Write edits back into the form; borrow_mut dropped before header is computed.
+        {
             let mut st = self.state.borrow_mut();
             if let Some(form) = st.edit_form.as_mut() {
                 for (i, s) in edits {
@@ -357,13 +392,12 @@ impl FormPane {
                         form.set_value(i, s);
                     }
                 }
-                Some(header_text(form))
-            } else {
-                None
             }
-        }; // borrow_mut dropped
+        } // borrow_mut dropped
 
-        if let (Some(text), Some(h)) = (header, self.group.child_mut(self.header_id)) {
+        // Compute header after writes are committed; Create mode needs profiles.
+        let text = self.header_text();
+        if let Some(h) = self.group.child_mut(self.header_id) {
             h.set_value(FieldValue::Text(text));
         }
     }
@@ -434,6 +468,41 @@ mod tests {
     use std::cell::RefCell;
     use std::collections::VecDeque;
     use std::rc::Rc;
+
+    /// Build a FormPane over a Shared state in create mode.
+    /// The profile at `profile_idx` has `rdn_attr` set; the form is seeded with
+    /// `fields` and `mode = FormMode::Create { profile_idx, container }`.
+    fn build_pane_with_create_form(
+        profile_idx: usize,
+        container: &str,
+        rdn_attr: &str,
+        fields: Vec<EditField>,
+    ) -> (Shared, FormPane) {
+        use crate::config::EntryProfile;
+        use crate::ldap::worker::RawSubschema;
+        let schema = SchemaModel::from_raw(&RawSubschema::default());
+        let structure = Structure::build("dc=x", vec![]);
+        let mut st =
+            UiState::new_for_test(structure, schema, "dc=x".into(), Vec::new(), Vec::new());
+        // Ensure the profile at profile_idx exists with the correct rdn_attr.
+        st.profiles = vec![EntryProfile {
+            rdn_attr: rdn_attr.to_string(),
+            ..Default::default()
+        }];
+        st.edit_form = Some(EditForm {
+            dn: String::new(),
+            mode: FormMode::Create {
+                profile_idx,
+                container: container.to_string(),
+            },
+            object_classes: vec![],
+            fields,
+        });
+        st.form_needs_render = true;
+        let shared: Shared = Rc::new(RefCell::new(st));
+        let pane = FormPane::new(Rect::new(0, 0, 80, 20), shared.clone());
+        (shared, pane)
+    }
 
     /// Build a FormPane over a Shared state seeded with the given fields.
     /// Returns `(shared, pane)`. The caller creates its own headless context.
@@ -732,6 +801,51 @@ mod tests {
             out.iter()
                 .any(|e| matches!(e, Event::Command(cmd) if *cmd == ACTIVATE)),
             "ACTIVATE command must be posted to the event queue after Enter on objectClass"
+        );
+    }
+
+    /// TDD for Task 3: create-mode header must compose the live DN from the RDN
+    /// field value + container, and include the `(new)` label.
+    #[test]
+    fn create_mode_header_composes_dn_from_rdn_field() {
+        let (_shared, mut pane) = build_pane_with_create_form(
+            0,
+            "ou=people,dc=example,dc=org",
+            "uid",
+            vec![EditField {
+                label: "uid".into(),
+                must: true,
+                editable: true,
+                multi: false,
+                secret: false,
+                ordered: false,
+                orphaned: false,
+                kind: FieldKind::Text,
+                widget: WidgetSpec::ReadOnlyText,
+                widget_binding: None,
+                values: vec!["alice".into()],
+                baseline: vec![],
+            }],
+        );
+        let mut out = VecDeque::new();
+        let mut timers = tv::timer::TimerQueue::new();
+        let mut deferred = Vec::new();
+        let mut tick = Event::Broadcast {
+            command: REFRESH,
+            source: None,
+        };
+        pane.handle_event(
+            &mut tick,
+            &mut headless_ctx(&mut out, &mut timers, &mut deferred),
+        );
+        let hdr = pane.header_text_for_test();
+        assert!(
+            hdr.contains("uid=alice,ou=people,dc=example,dc=org"),
+            "header must contain the composed DN; got: {hdr:?}"
+        );
+        assert!(
+            hdr.contains("(new)"),
+            "header must contain (new); got: {hdr:?}"
         );
     }
 
