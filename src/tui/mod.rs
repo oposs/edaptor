@@ -8,6 +8,7 @@ mod app;
 pub mod dialog;
 pub(crate) mod panes;
 pub(crate) mod pump;
+pub(crate) mod scroll_group;
 mod state;
 // Keep `pub`: the FieldWidget plugin contract is defined here for M1 and
 // consumed in M2. `pub` keeps the as-yet-unused contract types visible as
