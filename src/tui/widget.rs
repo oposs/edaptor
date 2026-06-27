@@ -1,8 +1,11 @@
 //! The field-widget plugin contract. M1 implements the read-only `present()`
 //! surface; M2 adds `activate`/`inline_editable`.
 
+use crate::schema::SchemaModel;
+use crate::tui::Shared;
 use crate::workflows::edit_form::EditField;
 use crate::workflows::form_model::WidgetSpec;
+use tvision_rs::{self as tv, View};
 
 /// What data a widget's editor needs (used by M2 dispatch; declared now).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -24,10 +27,24 @@ pub enum CommitOutcome {
     Cancelled,
 }
 
-/// How a field is edited (M2 adds `Modal`/`Immediate`).
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// How a field is edited. `Inline` = grapheme edit in place (M2). `Modal` = a
+/// dialog editor that yields a typed `CommitOutcome` (M3+: the first impl is the
+/// objectClass picker). Not `PartialEq`/`Clone`: it carries a trait object.
 pub enum Activation {
     Inline,
+    Modal(Box<dyn FieldEditor>),
+}
+
+/// A modal field editor: builds its tvision dialog and keeps the prospective
+/// `CommitOutcome` in `shared.borrow_mut().staged_commit` as the user interacts.
+/// `dispatch` reads it back by the `exec_view` return code (apply on OK, discard
+/// on CANCEL). Returns the view plus the `ViewId` to focus initially.
+pub trait FieldEditor {
+    fn into_view(
+        self: Box<Self>,
+        schema: &SchemaModel,
+        shared: Shared,
+    ) -> (Box<dyn View>, tv::ViewId);
 }
 
 /// One plugin per widget kind. M1 uses only `present`; M2 adds `activate`.
@@ -132,10 +149,10 @@ mod tests {
 
     #[test]
     fn test_plain_activate_is_inline() {
-        assert_eq!(
+        assert!(matches!(
             PlainWidget.activate(&field(&["x"], WidgetSpec::ReadOnlyText)),
             Activation::Inline
-        );
+        ));
     }
 
     #[test]
