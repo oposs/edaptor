@@ -13,8 +13,8 @@ use tvision_rs::{
 };
 
 use crate::tui::scroll_group::ScrollGroup;
-use crate::tui::widget::{inline_editable, present_field};
-use crate::tui::{Shared, REFRESH};
+use crate::tui::widget::{inline_editable, is_modal_field, present_field};
+use crate::tui::{Shared, ACTIVATE, REFRESH};
 use crate::workflows::edit_form::EditForm;
 
 /// Columns reserved for the label before the value `InputLine`.
@@ -27,6 +27,12 @@ fn ro_cell(bounds: Rect) -> InputLine {
     let mut il = InputLine::with_limit(bounds, 1024);
     il.state.state.disabled = true;
     il
+}
+
+/// A field's value cell is focusable if it is inline-editable OR a modal-activated
+/// field (objectClass): the latter is read-only text but must accept focus + Enter.
+fn cell_focusable(f: &crate::workflows::edit_form::EditField) -> bool {
+    inline_editable(f) || is_modal_field(f)
 }
 
 pub(crate) struct FormPane {
@@ -150,7 +156,7 @@ impl FormPane {
                     .iter()
                     .map(|f| {
                         let marker = if f.must { "*" } else { "" };
-                        (format!("{}{}", f.label, marker), inline_editable(f))
+                        (format!("{}{}", f.label, marker), cell_focusable(f))
                     })
                     .collect(),
             }
@@ -205,7 +211,7 @@ impl FormPane {
                             (
                                 format!("{}{}", f.label, marker),
                                 present_field(f),
-                                inline_editable(f),
+                                cell_focusable(f),
                             )
                         })
                         .collect();
@@ -240,7 +246,7 @@ impl FormPane {
         // Land focus on the first editable field. Tab switches panes; Up/Down
         // move between fields. Also ensures the outer Group routes events to the
         // ScrollGroup.
-        if let Some(first) = self.editable_value_ids().first().copied() {
+        if let Some(first) = self.focusable_value_ids().first().copied() {
             let scroll_id = self.scroll_id;
             self.group.focus_child(scroll_id, ctx);
             if let Some(sg) = self.scroll_mut() {
@@ -249,9 +255,9 @@ impl FormPane {
         }
     }
 
-    /// The value-cell view ids of the inline-editable rows, in display order.
-    /// Full-length — no `FORM_ROWS` cap.
-    fn editable_value_ids(&self) -> Vec<tv::ViewId> {
+    /// The value-cell view ids of focusable rows (inline-editable OR modal), in
+    /// display order. Full-length — no `FORM_ROWS` cap.
+    fn focusable_value_ids(&self) -> Vec<tv::ViewId> {
         let st = self.state.borrow();
         match st.edit_form.as_ref() {
             None => Vec::new(),
@@ -259,16 +265,16 @@ impl FormPane {
                 .fields
                 .iter()
                 .enumerate()
-                .filter(|(_, f)| inline_editable(f))
+                .filter(|(_, f)| cell_focusable(f))
                 .map(|(i, _)| self.value_ids[i])
                 .collect(),
         }
     }
 
-    /// Move focus to the prev/next editable field, wrapping. Focuses the first
-    /// editable when none is currently focused.
+    /// Move focus to the prev/next focusable field, wrapping. Focuses the first
+    /// focusable when none is currently focused.
     fn focus_field(&mut self, delta: i32, ctx: &mut Context) {
-        let ids = self.editable_value_ids();
+        let ids = self.focusable_value_ids();
         if ids.is_empty() {
             return;
         }
@@ -284,6 +290,25 @@ impl FormPane {
         if let Some(sg) = self.scroll_mut() {
             sg.focus_child(next_id, ctx);
         }
+    }
+
+    /// The field index whose value cell currently holds focus, if any.
+    fn focused_field_idx(&mut self) -> Option<usize> {
+        let cur = self.scroll_mut().and_then(|sg| sg.current())?;
+        self.value_ids.iter().position(|id| *id == cur)
+    }
+
+    /// Whether the focused field opens a modal editor (objectClass).
+    fn focused_is_modal(&mut self) -> bool {
+        let Some(idx) = self.focused_field_idx() else {
+            return false;
+        };
+        let st = self.state.borrow();
+        st.edit_form
+            .as_ref()
+            .and_then(|f| f.fields.get(idx))
+            .map(is_modal_field)
+            .unwrap_or(false)
     }
 
     /// Sync each editable value InputLine's text into `edit_form`; refresh header.
@@ -361,7 +386,29 @@ impl View for FormPane {
         }
         let _ = REFRESH; // REFRESH still drives other panes; retained import
 
-        // Up/Down move focus between editable fields (Tab is reserved for switching
+        // Enter on a modal row (objectClass) opens its editor via the controller:
+        // record the field index, post ACTIVATE (capture-free), consume the key.
+        let enter = matches!(ev, Event::KeyDown(k) if k.key == Key::Enter);
+        if enter && self.focused_is_modal() {
+            if let Some(idx) = self.focused_field_idx() {
+                self.state.borrow_mut().activate_field = Some(idx);
+                ctx.post(ACTIVATE);
+            }
+            ev.clear();
+            return;
+        }
+        // Swallow text edits on a modal row: its value comes from the picker, not
+        // typing. (The cell is enabled only so it can take focus + Enter.)
+        let edit_key = matches!(
+            ev,
+            Event::KeyDown(k) if matches!(k.key, Key::Char(_) | Key::Backspace | Key::Delete)
+        );
+        if edit_key && self.focused_is_modal() {
+            ev.clear();
+            return;
+        }
+
+        // Up/Down move focus between focusable fields (Tab is reserved for switching
         // panes, consumed by the Splitter). Consume the key so it stays in this pane.
         let nav = matches!(ev, Event::KeyDown(k) if matches!(k.key, Key::Up | Key::Down));
         if nav {
@@ -387,6 +434,26 @@ mod tests {
     use std::cell::RefCell;
     use std::collections::VecDeque;
     use std::rc::Rc;
+
+    /// Build a FormPane over a Shared state seeded with the given fields.
+    /// Returns `(shared, pane)`. The caller creates its own headless context.
+    fn build_pane_with_form(fields: Vec<EditField>) -> (Shared, FormPane) {
+        use crate::ldap::worker::RawSubschema;
+        let schema = SchemaModel::from_raw(&RawSubschema::default());
+        let structure = Structure::build("dc=x", vec![]);
+        let mut st =
+            UiState::new_for_test(structure, schema, "dc=x".into(), Vec::new(), Vec::new());
+        st.edit_form = Some(EditForm {
+            dn: "cn=test,dc=x".into(),
+            mode: FormMode::Edit,
+            object_classes: vec![],
+            fields,
+        });
+        st.form_needs_render = true;
+        let shared: Shared = Rc::new(RefCell::new(st));
+        let pane = FormPane::new(Rect::new(0, 0, 80, 20), shared.clone());
+        (shared, pane)
+    }
 
     fn ef(label: &str, val: &str, editable: bool) -> EditField {
         EditField {
@@ -487,38 +554,38 @@ mod tests {
         };
         pane.handle_event(&mut ev, &mut ctx); // render + focus first editable
 
-        let editable = pane.editable_value_ids();
+        let focusable = pane.focusable_value_ids();
         assert_eq!(
-            editable.len(),
+            focusable.len(),
             2,
-            "cn (multi) is not editable; gidNumber+sn are"
+            "cn (multi, non-modal) is not focusable; gidNumber+sn are"
         );
         // Focus lives inside the ScrollGroup; query it via scroll_mut().
         let cur = pane.scroll_mut().and_then(|sg| sg.current());
         assert_eq!(
             cur,
-            Some(editable[0]),
-            "render focuses the first editable field"
+            Some(focusable[0]),
+            "render focuses the first focusable field"
         );
 
         let mut d = Event::KeyDown(tv::KeyEvent::from(tv::Key::Down));
         pane.handle_event(&mut d, &mut ctx);
         let cur = pane.scroll_mut().and_then(|sg| sg.current());
-        assert_eq!(cur, Some(editable[1]), "Down → next editable field");
+        assert_eq!(cur, Some(focusable[1]), "Down → next focusable field");
 
         let mut d = Event::KeyDown(tv::KeyEvent::from(tv::Key::Down));
         pane.handle_event(&mut d, &mut ctx);
         let cur = pane.scroll_mut().and_then(|sg| sg.current());
         assert_eq!(
             cur,
-            Some(editable[0]),
-            "Down wraps to the first editable field"
+            Some(focusable[0]),
+            "Down wraps to the first focusable field"
         );
 
         let mut u = Event::KeyDown(tv::KeyEvent::from(tv::Key::Up));
         pane.handle_event(&mut u, &mut ctx);
         let cur = pane.scroll_mut().and_then(|sg| sg.current());
-        assert_eq!(cur, Some(editable[1]), "Up → previous editable field");
+        assert_eq!(cur, Some(focusable[1]), "Up → previous focusable field");
     }
 
     #[test]
@@ -594,6 +661,71 @@ mod tests {
         let mut ev2 = Event::KeyDown(tv::KeyEvent::from(tv::Key::Char('x')));
         pane.handle_event(&mut ev2, &mut ctx);
         assert!(shared.borrow().edit_form.as_ref().unwrap().is_dirty());
+    }
+
+    #[test]
+    fn enter_on_objectclass_row_posts_activate() {
+        // TDD for Task 6: objectClass row must be focusable; Enter on it sets
+        // activate_field and posts ACTIVATE.
+        let (shared, mut pane) = build_pane_with_form(vec![
+            EditField {
+                label: "cn".into(),
+                must: true,
+                editable: true,
+                multi: false,
+                secret: false,
+                ordered: false,
+                orphaned: false,
+                kind: FieldKind::Text,
+                widget: WidgetSpec::ReadOnlyText,
+                widget_binding: None,
+                values: vec!["Bob".into()],
+                baseline: vec!["Bob".into()],
+            },
+            EditField {
+                label: "objectClass".into(),
+                must: true,
+                editable: false,
+                multi: true,
+                secret: false,
+                ordered: false,
+                orphaned: false,
+                kind: FieldKind::Text,
+                widget: WidgetSpec::ReadOnlyText,
+                widget_binding: None,
+                values: vec!["top".into(), "person".into()],
+                baseline: vec!["top".into(), "person".into()],
+            },
+        ]);
+        let mut out = VecDeque::new();
+        let mut timers = tv::timer::TimerQueue::new();
+        let mut deferred = Vec::new();
+
+        // Initial render + focus first focusable (cn).
+        let mut tick = Event::Broadcast {
+            command: REFRESH,
+            source: None,
+        };
+        pane.handle_event(
+            &mut tick,
+            &mut headless_ctx(&mut out, &mut timers, &mut deferred),
+        );
+
+        // Move focus down to the objectClass row.
+        let mut down = Event::KeyDown(tv::KeyEvent::from(tv::Key::Down));
+        pane.handle_event(
+            &mut down,
+            &mut headless_ctx(&mut out, &mut timers, &mut deferred),
+        );
+
+        // Press Enter — must record activate_field = Some(1) and post ACTIVATE.
+        let mut enter = Event::KeyDown(tv::KeyEvent::from(tv::Key::Enter));
+        pane.handle_event(
+            &mut enter,
+            &mut headless_ctx(&mut out, &mut timers, &mut deferred),
+        );
+
+        assert_eq!(shared.borrow().activate_field, Some(1));
     }
 
     #[test]
