@@ -9,16 +9,11 @@
 //! driven through the `ScrollSync` broker. Domain-free: candidate for upstreaming
 //! to tvision-rs.
 
-use tvision_rs::{self as tv, Context, Rect, ScrollBar, View, ViewId};
+use tvision_rs::{self as tv, delegate, Context, DrawCtx, Rect, ScrollBar, View, ViewId};
 
-// Tasks 2-6 wire the remaining methods and construct this struct.
-// `pub(crate)` visibility suppresses dead_code in callers once wired; until
-// then we suppress explicitly so `-D warnings` stays clean across all tasks.
-#[allow(dead_code)]
 pub(crate) struct ScrollGroup {
     group: tv::Group,
     /// Vertical scroll bar in the right column (wired in Task 3).
-    #[allow(dead_code)]
     v_bar: ViewId,
     /// (child id, logical rect) for repositionable content (excludes the bar).
     content: Vec<(ViewId, Rect)>,
@@ -27,8 +22,8 @@ pub(crate) struct ScrollGroup {
     viewport_h: i32,
 }
 
-#[allow(dead_code)]
 impl ScrollGroup {
+    #[allow(dead_code)]
     pub(crate) fn new(bounds: Rect) -> Self {
         let w = bounds.b.x - bounds.a.x;
         let h = bounds.b.y - bounds.a.y;
@@ -45,10 +40,12 @@ impl ScrollGroup {
         }
     }
 
+    #[allow(dead_code)]
     pub(crate) fn inner_width(&self) -> i32 {
         self.inner_w
     }
 
+    #[allow(dead_code)]
     pub(crate) fn add_content(&mut self, view: Box<dyn View>, logical: Rect) -> ViewId {
         let id = self.group.insert(view);
         self.content.push((id, logical));
@@ -56,6 +53,7 @@ impl ScrollGroup {
         id
     }
 
+    #[allow(dead_code)]
     pub(crate) fn child_mut(&mut self, id: ViewId) -> Option<&mut dyn View> {
         self.group.child_mut(id)
     }
@@ -94,6 +92,7 @@ impl ScrollGroup {
         self.reposition();
     }
 
+    #[allow(dead_code)]
     pub(crate) fn clear_content(&mut self, ctx: &mut Context) {
         let ids: Vec<ViewId> = self.content.iter().map(|(id, _)| *id).collect();
         for id in ids {
@@ -101,6 +100,52 @@ impl ScrollGroup {
         }
         self.content.clear();
         self.top = 0;
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn current(&self) -> Option<ViewId> {
+        self.group.current()
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn focus_child(&mut self, id: ViewId, ctx: &mut Context) {
+        self.group.focus_child(id, ctx);
+    }
+
+    pub(crate) fn scroll_to(&mut self, top: i32, ctx: &mut Context) {
+        let clamped = top.clamp(0, self.max_top());
+        if clamped != self.top {
+            self.top = clamped;
+            self.reposition();
+        }
+        self.publish_bar(ctx);
+    }
+
+    /// Republish the bar params (stub until Task 3 fills it in).
+    #[allow(dead_code)]
+    fn publish_bar(&mut self, _ctx: &mut Context) {}
+}
+
+#[delegate(to = group)]
+impl View for ScrollGroup {
+    fn as_any_mut(&mut self) -> Option<&mut dyn core::any::Any> {
+        Some(self)
+    }
+
+    fn draw(&mut self, ctx: &mut DrawCtx) {
+        self.group.draw(ctx);
+    }
+
+    fn on_bounds_changed(&mut self, ctx: &mut Context) {
+        let ext = self.group.state().get_extent();
+        let w = ext.b.x - ext.a.x;
+        let h = ext.b.y - ext.a.y;
+        self.inner_w = (w - 1).max(0);
+        self.viewport_h = h.max(0);
+        if let Some(b) = self.group.child_mut(self.v_bar) {
+            b.change_bounds(Rect::new(w - 1, 0, w, h));
+        }
+        self.scroll_to(self.top, ctx);
     }
 }
 
@@ -138,5 +183,37 @@ mod tests {
     fn inner_width_reserves_bar_lane() {
         let sg = ScrollGroup::new(Rect::new(0, 0, 20, 5));
         assert_eq!(sg.inner_width(), 19); // 20 - 1 bar column
+    }
+
+    #[test]
+    fn scrolled_child_clips_to_viewport() {
+        use tvision_rs::{Buffer, DrawCtx, FieldValue, Point, StaticText, Theme, View};
+        // viewport 0..4 rows, content rows 0..8.
+        let mut sg = ScrollGroup::new(Rect::new(0, 0, 10, 4));
+        let w = sg.inner_width();
+        for y in 0..8_i32 {
+            // StaticText draws its text at the top-left of its bounds.
+            let t = StaticText::new(Rect::new(0, y, w, y + 1), format!("R{y}"));
+            sg.add_content(Box::new(t), Rect::new(0, y, w, y + 1));
+        }
+        // scroll so logical row 2 is at screen row 0; rows 0,1 go to negative y (clip).
+        sg.set_top_for_test(2);
+
+        let mut buf = Buffer::new(10, 4);
+        let theme = Theme::classic_blue();
+        {
+            let mut ctx = DrawCtx::new(&mut buf, &theme, Rect::new(0, 0, 10, 4), Point::new(0, 0));
+            // Drawing the group draws each child through ctx.sub(child_bounds), which
+            // clips to the group region — so the negative-y rows must not appear.
+            <ScrollGroup as View>::draw(&mut sg, &mut ctx);
+        }
+        // Screen row 0 shows logical row 2 ("R2"); rows above it (R0,R1) are clipped out.
+        assert_eq!(
+            buf.get(0, 0).symbol(),
+            "R".chars().next().unwrap().to_string()
+        );
+        // The glyph at (1,0) is '2' (from "R2"), proving row 2 — not row 0 — is on top.
+        assert_eq!(buf.get(1, 0).symbol(), "2");
+        let _ = FieldValue::Int(0);
     }
 }
