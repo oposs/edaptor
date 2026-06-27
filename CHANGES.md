@@ -8,6 +8,10 @@ All notable changes to eDAPtor are documented here. The format follows
 
 ### New
 
+- **tvision UI:** the `objectClass` field is now editable via a schema-seeded
+  multi-select picker (search + tick). Changing the set regenerates the form's
+  fields live — newly-allowed attributes appear, now-disallowed ones are marked
+  orphaned (dropped on save) — driven by a typed resync outcome.
 - tvision UI (preview, `edaptor-tv`): the entry form is now editable for plain
   single-value attributes, with an LDIF-preview save confirmation, async writes
   (MODIFY + rename/MODRDN), and dirty-change guards on navigation and quit.
