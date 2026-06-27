@@ -40,6 +40,25 @@ fn init_menu_bar(r: Rect) -> Option<Box<dyn View>> {
     Some(Box::new(tv::MenuBar::new(r, menu)))
 }
 
+/// Whether `do_save` reached the point of submitting the write to the worker.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum SaveOutcome {
+    /// The write was submitted (user confirmed the LDIF preview).
+    Submitted,
+    /// The save did not proceed: no form, no changes, validation error, or the
+    /// user cancelled the confirm dialog.
+    NotSubmitted,
+}
+
+/// Snap the leaf highlight back to the pinned form and clear nav targets.
+/// Called when the guard→Save path does not submit (cancelled confirm == Stay).
+/// Pure (no ctx); unit-tested.
+pub(crate) fn apply_cancelled_guard_save(st: &mut crate::tui::state::UiState) {
+    st.set_leaf_row = st.current_leaf_row();
+    st.guard_target = None;
+    st.pending_nav = None;
+}
+
 /// What the save flow should do for a given prepare result.
 pub(crate) enum SaveAction {
     Status(String),
@@ -61,12 +80,19 @@ pub(crate) fn save_flow_action(prepared: &PrepareSave) -> SaveAction {
 /// commands posted from panes / the pump.
 pub(crate) fn dispatch(prog: &mut Program, cmd: Command, state: &Shared) {
     if cmd == SAVE {
-        do_save(prog, state, None, false);
+        let _ = do_save(prog, state, None, false);
     } else if cmd == GUARD_NAV {
         // A dirty-blocked navigation: ask, then act on the stashed target.
         let target = state.borrow().guard_target.clone();
         match run_guard(prog) {
-            GuardDecision::Save => do_save(prog, state, target, false),
+            GuardDecision::Save => {
+                if do_save(prog, state, target, false) == SaveOutcome::NotSubmitted {
+                    // Cancelled confirm: treat like Stay — snap the highlight back
+                    // to the pinned form and clear the stashed nav targets.
+                    let mut st = state.borrow_mut();
+                    apply_cancelled_guard_save(&mut st);
+                }
+            }
             GuardDecision::Discard => {
                 // discard_edits sets form_needs_render; the re-read's worker
                 // response drives a REFRESH via the pump — no Program broadcast.
@@ -96,7 +122,9 @@ pub(crate) fn dispatch(prog: &mut Program, cmd: Command, state: &Shared) {
             return;
         }
         match run_guard(prog) {
-            GuardDecision::Save => do_save(prog, state, None, true),
+            GuardDecision::Save => {
+                let _ = do_save(prog, state, None, true);
+            }
             GuardDecision::Discard => prog.end_modal(Command::QUIT),
             GuardDecision::Stay => {}
         }
@@ -119,17 +147,19 @@ fn run_guard(prog: &mut Program) -> GuardDecision {
 
 /// Prepare → (Status | Error | Confirm→submit). `nav` is a post-save navigation
 /// target (guard-nav case); `quit_after` defers a quit until the write lands.
+/// Returns `SaveOutcome::Submitted` only when the write was handed off to the
+/// worker; every other path returns `SaveOutcome::NotSubmitted`.
 fn do_save(
     prog: &mut Program,
     state: &Shared,
     nav: Option<(String, Vec<String>)>,
     quit_after: bool,
-) {
+) -> SaveOutcome {
     // 1. Prepare (borrow, compute, drop borrow before any exec_view / submit).
     let prepared = {
         let st = state.borrow();
         match st.edit_form.as_ref() {
-            None => return,
+            None => return SaveOutcome::NotSubmitted,
             Some(form) => st.write_flow.prepare(form, st.read_flow.schema()),
         }
     };
@@ -139,17 +169,19 @@ fn do_save(
             st.status = s;
             st.guard_target = None;
             st.form_needs_render = true; // repaints on the next pump tick
+            SaveOutcome::NotSubmitted
         }
         SaveAction::Error(text) => {
             let (view, ok) = error::build(&text);
             prog.exec_view_focused(view, ok);
+            SaveOutcome::NotSubmitted
         }
         SaveAction::Confirm(ldif) => {
             // Focus the Save button so Enter confirms — without it the modal opens
             // with Cancel focused (firstMatch picks the last-inserted selectable).
             let (view, save) = confirm::build(&ldif);
             if prog.exec_view_focused(view, save) != Command::OK {
-                return; // Cancel: keep editing.
+                return SaveOutcome::NotSubmitted; // Cancel: keep editing.
             }
             // 2. Submit the plan we prepared. Re-extract Ready for the plan/dn.
             if let PrepareSave::Ready { plan, dn, .. } = prepared {
@@ -163,6 +195,7 @@ fn do_save(
                     let _ = write_flow.submit(w, plan, &dn, quit_after);
                 }
             }
+            SaveOutcome::Submitted
         }
     }
 }
@@ -241,6 +274,59 @@ mod tests {
     use super::*;
     use crate::form::validate::ValidationError;
     use crate::workflows::save::PrepareSave;
+
+    #[test]
+    fn cancelled_guard_save_snaps_highlight_back() {
+        // The guard→Save path that does NOT submit must request a snap-back to the
+        // pinned form's row and clear the stashed nav targets (like Stay).
+        use crate::ldap::worker::RawSubschema;
+        use crate::schema::SchemaModel;
+        use crate::tui::state::UiState;
+        use crate::workflows::structure::{Structure, StructureInput};
+        use std::collections::BTreeMap;
+
+        let inputs = vec![
+            StructureInput {
+                dn: "dc=x".into(),
+                cn: None,
+                description: None,
+                object_classes: vec![],
+                attrs: BTreeMap::new(),
+            },
+            StructureInput {
+                dn: "ou=p,dc=x".into(),
+                cn: None,
+                description: None,
+                object_classes: vec![],
+                attrs: BTreeMap::new(),
+            },
+            StructureInput {
+                dn: "cn=a,ou=p,dc=x".into(),
+                cn: Some("a".into()),
+                description: None,
+                object_classes: vec![],
+                attrs: BTreeMap::new(),
+            },
+        ];
+        let structure = Structure::build("dc=x", inputs);
+        let schema = SchemaModel::from_raw(&RawSubschema::default());
+        let mut st =
+            UiState::new_for_test(structure, schema, "dc=x".into(), Vec::new(), Vec::new());
+        st.current_branch = Some("ou=p,dc=x".into());
+        st.current_leaf = Some("cn=a,ou=p,dc=x".into());
+        st.guard_target = Some(("cn=b,ou=p,dc=x".into(), vec![]));
+        st.pending_nav = Some(("cn=b,ou=p,dc=x".into(), vec![]));
+
+        apply_cancelled_guard_save(&mut st);
+
+        assert_eq!(
+            st.set_leaf_row,
+            st.current_leaf_row(),
+            "snap back to the pinned form's row"
+        );
+        assert!(st.guard_target.is_none());
+        assert!(st.pending_nav.is_none());
+    }
 
     #[test]
     fn save_flow_action_classifies_prepare() {
