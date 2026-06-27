@@ -99,6 +99,24 @@ pub fn inline_editable(field: &EditField) -> bool {
     field.editable && !field.multi && !field.orphaned && field.widget_binding.is_none()
 }
 
+/// The widget plugin for a field. M3 Phase 2a: the objectClass field gets the
+/// objectClass picker; everything else is plain. (M4 extends this to dispatch on
+/// `field.widget_binding` — no form-core change.)
+pub fn widget_for(field: &EditField) -> Box<dyn FieldWidget> {
+    if field.label.eq_ignore_ascii_case("objectClass") {
+        Box::new(crate::tui::oc_picker::ObjectClassWidget)
+    } else {
+        Box::new(PlainWidget)
+    }
+}
+
+/// Whether a field opens a modal editor on activation (vs inline edit). Cheap
+/// label-based check used by the form pane for focus/nav/Enter without building
+/// an editor. Mirrors the `widget_for` routing.
+pub fn is_modal_field(field: &EditField) -> bool {
+    field.label.eq_ignore_ascii_case("objectClass")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -179,5 +197,20 @@ mod tests {
         let mut f = field(&["x"], WidgetSpec::ReadOnlyText);
         f.orphaned = true;
         assert!(!inline_editable(&f));
+    }
+
+    #[test]
+    fn objectclass_is_modal_field() {
+        let mut f = field(&["top"], WidgetSpec::ReadOnlyText);
+        f.label = "objectClass".into();
+        assert!(is_modal_field(&f));
+        assert!(matches!(widget_for(&f).activate(&f), Activation::Modal(_)));
+    }
+
+    #[test]
+    fn plain_field_is_not_modal() {
+        let f = field(&["x"], WidgetSpec::ReadOnlyText);
+        assert!(!is_modal_field(&f));
+        assert!(matches!(widget_for(&f).activate(&f), Activation::Inline));
     }
 }

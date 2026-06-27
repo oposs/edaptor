@@ -6,6 +6,7 @@ mod app;
 // Keep `pub`: builders and guard_decision are not yet called from non-test code
 // (wired in Task 8). `pub` suppresses the dead_code lint without `#[allow]`.
 pub mod dialog;
+pub(crate) mod oc_picker;
 pub(crate) mod panes;
 pub(crate) mod pump;
 pub(crate) mod scroll_group;
@@ -25,6 +26,9 @@ pub type Shared = Rc<RefCell<UiState>>;
 
 /// Broadcast command: re-render all panes from current `UiState`.
 pub const REFRESH: tv::Command = tv::Command::custom("edaptor.refresh");
+
+/// Form pane command: activate the focused field's modal editor.
+pub const ACTIVATE: tv::Command = tv::Command::custom("edaptor.activate_field");
 
 /// App-level commands routed to `app::dispatch` via `run_app`.
 pub const SAVE: tv::Command = tv::Command::custom("edaptor.save");
