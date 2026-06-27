@@ -66,6 +66,24 @@ impl LeafPane {
     /// decides whether to load it or raise the dirty guard — the pane never loads,
     /// guards, or posts a command (which is what made this fail under the mouse
     /// capture, where pane-posted commands are swallowed before the app handler).
+    #[cfg(test)]
+    pub(crate) fn search_bounds_for_test(&mut self) -> Rect {
+        self.group
+            .child_mut(self.search_id)
+            .unwrap()
+            .state()
+            .get_bounds()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn list_bounds_for_test(&mut self) -> Rect {
+        self.group
+            .child_mut(self.list_id)
+            .unwrap()
+            .state()
+            .get_bounds()
+    }
+
     fn report_selection(&mut self) {
         let sel = match self.group.child_mut(self.list_id).and_then(|v| v.value()) {
             Some(FieldValue::Int(i)) => i,
@@ -111,6 +129,19 @@ impl LeafPane {
 impl View for LeafPane {
     fn as_any_mut(&mut self) -> Option<&mut dyn core::any::Any> {
         Some(self)
+    }
+
+    fn on_bounds_changed(&mut self, ctx: &mut Context) {
+        let ext = self.group.state().get_extent();
+        let w = ext.b.x - ext.a.x;
+        let h = ext.b.y - ext.a.y;
+        if let Some(s) = self.group.child_mut(self.search_id) {
+            s.change_bounds(Rect::new(0, 0, w, 1));
+        }
+        if let Some(l) = self.group.child_mut(self.list_id) {
+            l.change_bounds(Rect::new(0, 1, w, h));
+            l.on_bounds_changed(ctx);
+        }
     }
 
     fn handle_event(&mut self, ev: &mut Event, ctx: &mut Context) {
@@ -169,6 +200,38 @@ mod tests {
     use std::cell::RefCell;
     use std::collections::{BTreeMap, VecDeque};
     use std::rc::Rc;
+
+    fn headless_ctx<'a>(
+        out: &'a mut VecDeque<Event>,
+        timers: &'a mut tv::timer::TimerQueue,
+        deferred: &'a mut Vec<tv::Deferred>,
+    ) -> tv::Context<'a> {
+        tv::Context::new(out, timers, 0, deferred)
+    }
+
+    #[test]
+    fn on_bounds_changed_refits_search_and_list() {
+        let inputs = vec![StructureInput {
+            dn: "dc=x".into(),
+            cn: None,
+            description: None,
+            object_classes: vec![],
+            attrs: BTreeMap::new(),
+        }];
+        let structure = Structure::build("dc=x", inputs);
+        let schema = SchemaModel::from_raw(&RawSubschema::default());
+        let st = UiState::new_for_test(structure, schema, "dc=x".into(), Vec::new(), Vec::new());
+        let shared: Shared = Rc::new(RefCell::new(st));
+        let mut pane = LeafPane::new(Rect::new(0, 0, 30, 10), shared);
+        let mut out = VecDeque::new();
+        let mut timers = tv::timer::TimerQueue::new();
+        let mut deferred = Vec::new();
+        let mut ctx = headless_ctx(&mut out, &mut timers, &mut deferred);
+        <LeafPane as View>::change_bounds(&mut pane, Rect::new(0, 0, 50, 20));
+        <LeafPane as View>::on_bounds_changed(&mut pane, &mut ctx);
+        assert_eq!(pane.search_bounds_for_test(), Rect::new(0, 0, 50, 1));
+        assert_eq!(pane.list_bounds_for_test(), Rect::new(0, 1, 50, 20));
+    }
 
     #[test]
     fn test_leaf_pane_lists_rows_for_selected_branch() {
