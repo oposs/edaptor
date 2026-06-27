@@ -15,6 +15,13 @@ use crate::workflows::structure::Structure;
 use crate::workflows::structure::StructureInput;
 use crate::workflows::write_flow::{WriteFlow, WriteOutcome};
 
+/// A dirty-blocked navigation awaiting the guard's decision.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GuardTarget {
+    Leaf(String, Vec<String>),
+    Branch(String),
+}
+
 /// What `pump_worker` wants the pump view to do after draining responses.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct PumpResult {
@@ -48,8 +55,8 @@ pub struct UiState {
     pub status: String,
     /// True when a pane must re-render the form from `edit_form`.
     pub form_needs_render: bool,
-    /// A dirty-blocked navigation awaiting the guard's decision: (dn, objectClasses).
-    pub guard_target: Option<(String, Vec<String>)>,
+    /// A dirty-blocked navigation awaiting the guard's decision.
+    pub guard_target: Option<GuardTarget>,
     /// Where to navigate after a guard-Save completes: (dn, objectClasses).
     pub pending_nav: Option<(String, Vec<String>)>,
     /// Last async write error, surfaced by the dispatch closure's Error dialog.
@@ -63,6 +70,12 @@ pub struct UiState {
     /// next event (used to snap the highlight back to `current_leaf` after a guard
     /// "Stay", so highlight and form always agree).
     pub set_leaf_row: Option<i32>,
+    /// Pane → controller: the branch a selector pane wants shown (dn).
+    /// Set when the tree highlight moves; consumed by [`reconcile_branch`].
+    pub requested_branch: Option<String>,
+    /// Controller → tree pane: force the tree highlight to this row on the pane's
+    /// next event (used to snap back to `current_branch` after a guard "Stay").
+    pub set_tree_row: Option<i32>,
 }
 
 impl UiState {
@@ -103,6 +116,8 @@ impl UiState {
             list_dirty: false,
             requested_leaf: None,
             set_leaf_row: None,
+            requested_branch: None,
+            set_tree_row: None,
         }
     }
 }
@@ -240,10 +255,56 @@ impl UiState {
             .map(|f| f.is_dirty())
             .unwrap_or(false);
         if dirty {
-            self.guard_target = Some((dn, ocs));
+            self.guard_target = Some(GuardTarget::Leaf(dn, ocs));
             true
         } else {
             self.reread(&dn, &ocs);
+            false
+        }
+    }
+
+    /// Pane → controller: record that the user moved the tree highlight to `dn`.
+    pub fn request_branch(&mut self, dn: String) {
+        self.requested_branch = Some(dn);
+    }
+
+    /// The DFS row index of `current_branch` in `branch_dns`, or `None`.
+    /// Used to snap the tree highlight back to the pinned branch on a guard "Stay".
+    pub fn current_branch_row(&self) -> Option<i32> {
+        let cur = self.current_branch.as_deref()?;
+        self.branch_dns
+            .iter()
+            .position(|d| d == cur)
+            .map(|i| i as i32)
+    }
+
+    /// Controller: reconcile a pending [`requested_branch`](Self::requested_branch)
+    /// against the currently-shown branch. Returns `true` when the caller (the pump)
+    /// must raise the dirty guard.
+    ///
+    /// - nothing requested → `false`.
+    /// - same as `current_branch` → `false` (no-op).
+    /// - form **clean** → switch (`current_branch = dn`, `list_dirty = true`), `false`.
+    /// - form **dirty** → stash [`GuardTarget::Branch`] and return `true`; the form
+    ///   stays pinned until the guard's decision.
+    pub fn reconcile_branch(&mut self) -> bool {
+        let Some(dn) = self.requested_branch.take() else {
+            return false;
+        };
+        if self.current_branch.as_deref() == Some(dn.as_str()) {
+            return false;
+        }
+        let dirty = self
+            .edit_form
+            .as_ref()
+            .map(|f| f.is_dirty())
+            .unwrap_or(false);
+        if dirty {
+            self.guard_target = Some(GuardTarget::Branch(dn));
+            true
+        } else {
+            self.current_branch = Some(dn);
+            self.list_dirty = true;
             false
         }
     }
@@ -339,6 +400,8 @@ pub(crate) fn bootstrap(config: Config, password: String) -> Result<UiState> {
         list_dirty: false,
         requested_leaf: None,
         set_leaf_row: None,
+        requested_branch: None,
+        set_tree_row: None,
     })
 }
 
@@ -402,7 +465,9 @@ mod tests {
 #[cfg(test)]
 mod write_routing_tests {
     use super::*;
+    use crate::ldap::worker::RawSubschema;
     use crate::workflows::write_flow::WriteOutcome;
+    use std::collections::BTreeMap;
 
     fn empty_state() -> UiState {
         use crate::ldap::worker::RawSubschema;
@@ -481,7 +546,7 @@ mod write_routing_tests {
         assert!(st.reconcile_selection(), "dirty form → raise guard");
         assert_eq!(
             st.guard_target,
-            Some(("cn=b,dc=x".into(), vec!["top".into()])),
+            Some(GuardTarget::Leaf("cn=b,dc=x".into(), vec!["top".into()])),
             "the requested entry becomes the guard target"
         );
         assert!(
@@ -523,5 +588,63 @@ mod write_routing_tests {
         let res = st.apply_write_outcome(WriteOutcome::Error("boom".into()));
         assert!(res.error);
         assert_eq!(st.last_write_error.as_deref(), Some("boom"));
+    }
+
+    fn si(dn: &str, child_hint: Option<&str>) -> StructureInput {
+        StructureInput {
+            dn: dn.into(),
+            cn: child_hint.map(Into::into),
+            description: None,
+            object_classes: vec![],
+            attrs: BTreeMap::new(),
+        }
+    }
+
+    fn structure_inputs_from(inputs: Vec<StructureInput>) -> Vec<StructureInput> {
+        inputs
+    }
+
+    fn dirty_form(dn: &str) -> crate::workflows::edit_form::EditForm {
+        let mut f = form_with_dirty(true);
+        f.dn = dn.into();
+        f
+    }
+
+    #[test]
+    fn reconcile_branch_clean_switches_dirty_guards() {
+        let inputs = vec![
+            si("dc=x", None),
+            si("ou=p,dc=x", None),
+            si("ou=q,dc=x", None),
+            si("cn=a,ou=p,dc=x", Some("a")),
+            si("cn=b,ou=q,dc=x", Some("b")),
+        ];
+        let structure = Structure::build("dc=x", structure_inputs_from(inputs));
+        let schema = SchemaModel::from_raw(&RawSubschema::default());
+        let mut st =
+            UiState::new_for_test(structure, schema, "dc=x".into(), Vec::new(), Vec::new());
+        st.branch_dns = vec!["dc=x".into(), "ou=p,dc=x".into(), "ou=q,dc=x".into()];
+        st.current_branch = Some("ou=p,dc=x".into());
+
+        // Clean form → switch immediately.
+        st.request_branch("ou=q,dc=x".into());
+        assert!(!st.reconcile_branch());
+        assert_eq!(st.current_branch.as_deref(), Some("ou=q,dc=x"));
+        assert!(st.list_dirty);
+
+        // Dirty form → stash a Branch guard target, signal guard, do not switch.
+        st.current_branch = Some("ou=p,dc=x".into());
+        st.edit_form = Some(dirty_form("cn=a,ou=p,dc=x"));
+        st.request_branch("ou=q,dc=x".into());
+        assert!(st.reconcile_branch());
+        assert!(
+            matches!(st.guard_target, Some(GuardTarget::Branch(ref b)) if b == "ou=q,dc=x"),
+            "dirty form → stash Branch guard target"
+        );
+        assert_eq!(
+            st.current_branch.as_deref(),
+            Some("ou=p,dc=x"),
+            "stays until guarded"
+        );
     }
 }

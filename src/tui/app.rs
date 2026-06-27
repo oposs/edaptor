@@ -83,7 +83,12 @@ pub(crate) fn dispatch(prog: &mut Program, cmd: Command, state: &Shared) {
         let _ = do_save(prog, state, None, false);
     } else if cmd == GUARD_NAV {
         // A dirty-blocked navigation: ask, then act on the stashed target.
-        let target = state.borrow().guard_target.clone();
+        // Branch targets exist only once Task 11 wires reconcile_branch into the
+        // pump; for now map non-Leaf variants to None so leaf behaviour is intact.
+        let target = match state.borrow().guard_target.clone() {
+            Some(crate::tui::state::GuardTarget::Leaf(dn, ocs)) => Some((dn, ocs)),
+            _ => None,
+        };
         match run_guard(prog) {
             GuardDecision::Save => {
                 if do_save(prog, state, target, false) == SaveOutcome::NotSubmitted {
@@ -314,7 +319,10 @@ mod tests {
             UiState::new_for_test(structure, schema, "dc=x".into(), Vec::new(), Vec::new());
         st.current_branch = Some("ou=p,dc=x".into());
         st.current_leaf = Some("cn=a,ou=p,dc=x".into());
-        st.guard_target = Some(("cn=b,ou=p,dc=x".into(), vec![]));
+        st.guard_target = Some(crate::tui::state::GuardTarget::Leaf(
+            "cn=b,ou=p,dc=x".into(),
+            vec![],
+        ));
         st.pending_nav = Some(("cn=b,ou=p,dc=x".into(), vec![]));
 
         apply_cancelled_guard_save(&mut st);
