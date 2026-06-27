@@ -289,6 +289,7 @@ pub fn build_create_form(
         .iter_mut()
         .find(|f| f.label.eq_ignore_ascii_case("objectClass"))
     {
+        f.editable = true;
         f.values = ocs.clone();
     } else {
         form.fields.push(EditField {
@@ -797,6 +798,7 @@ mod tests {
             .iter()
             .find(|f| f.label.eq_ignore_ascii_case("objectClass"))
             .unwrap();
+        assert!(oc.editable, "objectClass field must be editable");
         assert!(oc.values.iter().any(|v| v.eq_ignore_ascii_case("top")));
         assert!(oc.values.iter().any(|v| v.eq_ignore_ascii_case("person")));
         assert!(form.fields.iter().any(|f| f.label == "sn")); // MUST injected by resync
