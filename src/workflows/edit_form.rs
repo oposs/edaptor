@@ -52,6 +52,29 @@ impl EditField {
             self.values.clone()
         }
     }
+
+    /// A freshly schema-injected editable field with no `FormField` backing:
+    /// empty values/baseline, free-text widget, `kind`/`multi` resolved from
+    /// schema. Used by [`EditForm::sync_schema_fields`] when an objectClass change
+    /// brings a new attribute into MUST∪MAY.
+    pub fn injected(label: String, must: bool, schema: &SchemaModel) -> EditField {
+        let multi = !schema.is_single_value(&label);
+        let kind = schema.field_kind(&label);
+        EditField {
+            label,
+            must,
+            editable: true,
+            multi,
+            secret: false,
+            ordered: false,
+            orphaned: false,
+            kind,
+            widget: WidgetSpec::ReadOnlyText,
+            widget_binding: None,
+            values: Vec::new(),
+            baseline: Vec::new(),
+        }
+    }
 }
 
 /// Create vs edit; only `Edit` exists in M2 (`New` is M3's create flow).
@@ -110,6 +133,30 @@ pub fn value_set_eq(a: &[String], b: &[String]) -> bool {
     a.len() == b.len()
         && a.iter().all(|v| b.iter().any(|w| w == v))
         && b.iter().all(|v| a.iter().any(|w| w == v))
+}
+
+/// Reorder a built form's fields into: mandatory, then populated-or-special
+/// (non-empty current value, secret, or widget-bound), then the rest — each
+/// bucket case-insensitive by label. Orphaned fields have empty `current_values`,
+/// so they fall into the last bucket. Neutral port of `ui::edit_form::order_fields`
+/// (the ratatui picker probe becomes `widget_binding.is_some()`).
+pub fn order_fields(form: &mut EditForm) {
+    fn bucket(f: &EditField) -> u8 {
+        if f.orphaned {
+            2
+        } else if f.must {
+            0
+        } else if !f.current_values().is_empty() || f.secret || f.widget_binding.is_some() {
+            1
+        } else {
+            2
+        }
+    }
+    form.fields.sort_by(|a, b| {
+        bucket(a)
+            .cmp(&bucket(b))
+            .then_with(|| a.label.to_lowercase().cmp(&b.label.to_lowercase()))
+    });
 }
 
 /// True when a field is a free-text editor (not binary / boolean-checkbox).
@@ -251,5 +298,44 @@ mod tests {
         f.fields[0].values = vec!["b".into(), "a".into()];
         f.fields[0].baseline = vec!["a".into(), "b".into()];
         assert!(f.is_dirty());
+    }
+
+    #[test]
+    fn injected_field_resolves_kind_and_multi_from_schema() {
+        let s = schema();
+        // `cn` is SINGLE-VALUE in the fixture; `sn` is multi.
+        let cn = EditField::injected("cn".into(), true, &s);
+        assert!(!cn.multi);
+        assert!(cn.must);
+        assert!(cn.editable);
+        assert!(cn.values.is_empty() && cn.baseline.is_empty());
+        let sn = EditField::injected("sn".into(), false, &s);
+        assert!(sn.multi);
+        assert!(!sn.must);
+    }
+
+    #[test]
+    fn order_fields_puts_must_first_then_populated_then_empty() {
+        let mut f = build_edit_form(&model(), &schema(), false);
+        // model() has cn (must, populated) and sn (must, populated): add an empty
+        // optional and a populated optional to exercise all three buckets.
+        f.fields
+            .push(EditField::injected("description".into(), false, &schema())); // empty optional
+        let mut populated_opt = EditField::injected("givenName".into(), false, &schema());
+        populated_opt.values = vec!["x".into()];
+        f.fields.push(populated_opt);
+        order_fields(&mut f);
+        let labels: Vec<&str> = f.fields.iter().map(|x| x.label.as_str()).collect();
+        // must (cn, sn) first (alphabetical), then populated optional (givenName),
+        // then empty optional (description) last.
+        assert_eq!(labels, vec!["cn", "sn", "givenName", "description"]);
+    }
+
+    #[test]
+    fn order_fields_sinks_orphaned_to_bottom() {
+        let mut f = build_edit_form(&model(), &schema(), false);
+        f.fields[0].orphaned = true; // cn orphaned → current_values() == [] → bucket 2
+        order_fields(&mut f);
+        assert_eq!(f.fields.last().unwrap().label, "cn");
     }
 }
