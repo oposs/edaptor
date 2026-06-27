@@ -77,9 +77,13 @@ impl EditField {
     }
 }
 
-/// Create vs edit; only `Edit` exists in M2 (`New` is M3's create flow).
+/// Create vs edit. `Create` composes a new entry of `profile_idx` under `container`.
 pub enum FormMode {
     Edit,
+    Create {
+        profile_idx: usize,
+        container: String,
+    },
 }
 
 /// An editable entry: its DN, objectClasses, and fields.
@@ -217,6 +221,15 @@ fn field_is_editable(f: &FormField) -> bool {
         f.widget,
         WidgetSpec::BinaryNote(_) | WidgetSpec::DisabledCheckBox(_)
     )
+}
+
+/// The DN a create-mode form would produce: `<rdn_attr>=<rdn_value>,<container>`,
+/// with the RDN value trimmed. When the value is blank, a `…` placeholder stands in
+/// (so the header reads `uid=…,ou=…`). Pure.
+pub fn composed_create_dn(rdn_attr: &str, rdn_value: &str, container: &str) -> String {
+    let v = rdn_value.trim();
+    let shown = if v.is_empty() { "…" } else { v };
+    format!("{rdn_attr}={shown},{container}")
 }
 
 /// Build an [`EditForm`] from a read-only [`FormModel`] + schema. `values` and
@@ -497,5 +510,21 @@ mod tests {
         let cn = f.fields.iter().find(|x| x.label == "cn").unwrap();
         assert_eq!(cn.values, vec!["Bob".to_string()]);
         assert!(!cn.orphaned);
+    }
+
+    #[test]
+    fn composed_create_dn_uses_rdn_and_container() {
+        assert_eq!(
+            composed_create_dn("uid", "  alice ", "ou=people,dc=example,dc=org"),
+            "uid=alice,ou=people,dc=example,dc=org"
+        );
+    }
+
+    #[test]
+    fn composed_create_dn_placeholder_when_rdn_empty() {
+        assert_eq!(
+            composed_create_dn("uid", "   ", "ou=people,dc=example,dc=org"),
+            "uid=…,ou=people,dc=example,dc=org"
+        );
     }
 }
