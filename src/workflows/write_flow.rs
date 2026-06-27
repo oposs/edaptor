@@ -26,6 +26,8 @@ enum WriteIntent {
         mods: Vec<ModOp>,
         quit_after: bool,
     },
+    /// An ADD (create new entry): on success, yield [`WriteOutcome::Created`].
+    Create { dn: String, quit_after: bool },
 }
 
 /// The app-facing result of correlating one write response.
@@ -44,6 +46,8 @@ pub enum WriteOutcome {
     },
     /// A write failed; `msg` is already human-mapped by the worker.
     Error(String),
+    /// A new entry was successfully created (ADD).
+    Created { dn: String, quit_after: bool },
 }
 
 /// Tracks in-flight writes and turns the edit form into a save plan.
@@ -187,6 +191,31 @@ impl WriteFlow {
         Ok(())
     }
 
+    /// Submit a new entry (ADD). On [`Response::WriteOk`], [`on_response`]
+    /// yields [`WriteOutcome::Created`].
+    pub fn submit_create(
+        &mut self,
+        worker: &WorkerHandle,
+        dn: &str,
+        attrs: std::collections::BTreeMap<String, Vec<String>>,
+        quit_after: bool,
+    ) -> Result<()> {
+        let id = self.alloc();
+        worker.submit(Request::Add {
+            id,
+            dn: dn.to_string(),
+            attrs,
+        })?;
+        self.pending.insert(
+            id,
+            WriteIntent::Create {
+                dn: dn.to_string(),
+                quit_after,
+            },
+        );
+        Ok(())
+    }
+
     /// Submit the deferred modifications of a rename's second leg.
     pub fn submit_followup(
         &mut self,
@@ -231,6 +260,9 @@ impl WriteFlow {
                     mods,
                     quit_after,
                 },
+                Some(WriteIntent::Create { dn, quit_after }) => {
+                    WriteOutcome::Created { dn, quit_after }
+                }
                 None => WriteOutcome::Ignored,
             },
             Response::WriteError { id, msg } => {
@@ -415,6 +447,31 @@ mod tests {
             WriteOutcome::Error(m) => assert_eq!(m, "constraint"),
             other => panic!("expected Error, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn create_submit_tracks_then_reports_created() {
+        let mut wf = WriteFlow::new();
+        // Inject a Create intent directly (same idiom as other tests — private
+        // field access from the in-file test module, no *_for_test seams needed).
+        wf.pending.insert(
+            42,
+            WriteIntent::Create {
+                dn: "uid=bob,ou=people,dc=example,dc=org".into(),
+                quit_after: false,
+            },
+        );
+        match wf.on_response(&Response::WriteOk {
+            id: 42,
+            dn: "uid=bob,ou=people,dc=example,dc=org".into(),
+        }) {
+            WriteOutcome::Created { dn, quit_after } => {
+                assert_eq!(dn, "uid=bob,ou=people,dc=example,dc=org");
+                assert!(!quit_after);
+            }
+            other => panic!("expected Created, got {other:?}"),
+        }
+        assert!(wf.pending.is_empty());
     }
 
     #[test]

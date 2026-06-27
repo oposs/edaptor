@@ -209,6 +209,9 @@ impl UiState {
                 out.error = true;
             }
             WriteOutcome::Ignored => out.changed = false,
+            // TODO(Task 5): implement navigate-after-create; placeholder keeps
+            // the build non-exhaustive until Task 5 wires up the real logic.
+            WriteOutcome::Created { .. } => {}
         }
         out
     }
