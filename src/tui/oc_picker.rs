@@ -166,8 +166,26 @@ impl View for ObjectClassPicker {
         Some(self)
     }
 
+    /// Seed the candidate list on first open. `exec_view` calls `reset_current`
+    /// with a Context right after modal insertion (before the first draw and before
+    /// any event is delivered), so this is the deterministic open hook.
+    ///
+    /// NOTE: `on_bounds_changed` was considered but does NOT fire for a modal
+    /// inserted via `Group::insert` in tvision-rs 0.3.0 — that path calls
+    /// `set_bounds` directly without going through `Deferred::ChangeBounds`, so the
+    /// post-apply hook never runs. `reset_current` is the correct one-time-init
+    /// hook (same pattern as `FileDialog::reset_current`'s `readDirectory`).
+    fn reset_current(&mut self, ctx: &mut Context) {
+        self.dlg.reset_current(ctx);
+        if self.filtered.is_empty() {
+            self.refresh_list(ctx);
+        }
+    }
+
     fn handle_event(&mut self, ev: &mut Event, ctx: &mut Context) {
-        // Seed the list on first paint (filtered empty until first refresh).
+        // Fallback seed: reset_current populates the list when exec_view is used.
+        // This guard covers any path that delivers events without first calling
+        // reset_current (e.g. direct unit-test event injection).
         if self.filtered.is_empty() && !self.candidates.is_empty() && self.last_search.is_empty() {
             self.refresh_list(ctx);
         }
@@ -258,6 +276,80 @@ mod tests {
                 assert!(!v
                     .iter()
                     .any(|s| s.eq_ignore_ascii_case("organizationalPerson")));
+            }
+            other => panic!("expected resync outcome, got {other:?}"),
+        }
+    }
+
+    /// TDD: list must be seeded deterministically by reset_current (the hook that
+    /// exec_view calls with a Context before the first draw), without requiring any
+    /// prior key event.
+    #[test]
+    fn reset_current_seeds_list_before_first_event() {
+        use tvision_rs::Deferred;
+        let sh = shared();
+        let ed: Box<dyn FieldEditor> = Box::new(ObjectClassEditor {
+            current: vec!["top".into(), "person".into()],
+        });
+        let (mut view, _focus_id) = ed.into_view(&schema(), sh.clone());
+
+        // Before reset_current the filtered list must still be empty (no event has run).
+        {
+            let picker = view
+                .as_any_mut()
+                .and_then(|a| a.downcast_mut::<ObjectClassPicker>())
+                .expect("must downcast to ObjectClassPicker");
+            assert!(
+                picker.filtered.is_empty(),
+                "filtered must be empty before reset_current fires"
+            );
+        }
+
+        // Fire reset_current with a headless Context (mirrors exec_view's call).
+        let mut out: std::collections::VecDeque<tv::Event> = std::collections::VecDeque::new();
+        let mut timers = tv::timer::TimerQueue::new();
+        let mut deferred: Vec<Deferred> = Vec::new();
+        let mut ctx = Context::new(&mut out, &mut timers, 0, &mut deferred);
+        view.reset_current(&mut ctx);
+
+        // All 3 schema candidates must now be listed — no keypress needed.
+        let picker = view
+            .as_any_mut()
+            .and_then(|a| a.downcast_mut::<ObjectClassPicker>())
+            .expect("must downcast to ObjectClassPicker");
+        assert_eq!(
+            picker.filtered.len(),
+            3,
+            "all 3 candidates must be listed after reset_current, got {:?}",
+            picker.filtered
+        );
+    }
+
+    /// Case-insensitive pre-tick: names in current that differ in case from the schema
+    /// must still match and the staged commit must use the schema's canonical spelling.
+    #[test]
+    fn case_insensitive_pretick_stages_canonical_names() {
+        let sh = shared();
+        // "TOP" and "Person" do not match the schema's exact "top" / "person" spelling.
+        let ed: Box<dyn FieldEditor> = Box::new(ObjectClassEditor {
+            current: vec!["TOP".into(), "Person".into()],
+        });
+        let _ = ed.into_view(&schema(), sh.clone());
+        let staged = sh.borrow().staged_commit.clone();
+        match staged {
+            Some(CommitOutcome::SetValuesThenResyncSchema(v)) => {
+                assert!(
+                    v.iter().any(|s| s == "top"),
+                    "canonical 'top' expected in commit, got {v:?}"
+                );
+                assert!(
+                    v.iter().any(|s| s == "person"),
+                    "canonical 'person' expected in commit, got {v:?}"
+                );
+                assert!(
+                    !v.iter().any(|s| s == "organizationalPerson"),
+                    "unticked OC must not appear in commit"
+                );
             }
             other => panic!("expected resync outcome, got {other:?}"),
         }
