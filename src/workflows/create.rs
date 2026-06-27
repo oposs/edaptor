@@ -248,6 +248,89 @@ pub fn build_add_entry(
     (dn, attrs)
 }
 
+/// Compose a create-mode [`EditForm`] for `profile` under `container`: a schema-driven
+/// empty form (`empty_form_for_profile`), with an editable `objectClass` field seeded
+/// with `["top"] + profile.object_classes` (deduped, case-insensitive) so the picker
+/// can edit it and `sync_schema_fields` injects the effective MUST/MAY fields; then
+/// static defaults are applied. Returns the form plus the autonumber requests
+/// `(attr, min, max)` that still need a directory scan (Block B fills them). Pure.
+pub fn build_create_form(
+    schema: &SchemaModel,
+    profile: &EntryProfile,
+    profile_idx: usize,
+    container: &str,
+) -> (
+    crate::workflows::edit_form::EditForm,
+    Vec<(String, u64, u64)>,
+) {
+    use crate::schema::FieldKind;
+    use crate::workflows::edit_form::{build_edit_form, EditField, FormMode};
+    use crate::workflows::form_model::WidgetSpec;
+
+    let model = empty_form_for_profile(schema, profile);
+    let mut form = build_edit_form(&model, schema, false);
+    form.mode = FormMode::Create {
+        profile_idx,
+        container: container.to_string(),
+    };
+
+    // Canonical objectClass set: ["top"] + profile classes, deduped case-insensitively.
+    let mut ocs: Vec<String> = vec!["top".to_string()];
+    for oc in &profile.object_classes {
+        if !ocs.iter().any(|x| x.eq_ignore_ascii_case(oc)) {
+            ocs.push(oc.clone());
+        }
+    }
+    form.object_classes = ocs.clone();
+
+    // Ensure an editable objectClass field carrying that set (auto-injection).
+    if let Some(f) = form
+        .fields
+        .iter_mut()
+        .find(|f| f.label.eq_ignore_ascii_case("objectClass"))
+    {
+        f.values = ocs.clone();
+    } else {
+        form.fields.push(EditField {
+            label: "objectClass".to_string(),
+            must: true,
+            editable: true,
+            multi: true,
+            secret: false,
+            ordered: false,
+            orphaned: false,
+            kind: FieldKind::Text,
+            widget: WidgetSpec::ReadOnlyText,
+            widget_binding: None,
+            values: ocs.clone(),
+            baseline: Vec::new(),
+        });
+    }
+
+    // Regenerate fields for the seeded objectClass set.
+    form.sync_schema_fields(schema);
+
+    // Apply static defaults; collect autonumber requests. Work on an attrs map, then
+    // write filled values back into the (still-empty) fields.
+    let mut attrs: std::collections::BTreeMap<String, Vec<String>> = form
+        .fields
+        .iter()
+        .map(|f| (f.label.clone(), f.values.clone()))
+        .collect();
+    let autonum = apply_static_defaults(&profile.defaults, &mut attrs);
+    for f in &mut form.fields {
+        if f.values.is_empty() {
+            if let Some(v) = attrs.get(&f.label) {
+                if !v.is_empty() {
+                    f.values = v.clone();
+                }
+            }
+        }
+    }
+
+    (form, autonum)
+}
+
 /// Build an empty schema-driven [`FormModel`] for creating a new entry of the
 /// profile's object class: one (empty) field per effective MUST then MAY
 /// attribute (excluding `objectClass`, which is fixed by the profile), ordered by
@@ -673,6 +756,52 @@ mod tests {
         );
         assert!(body.is_none());
         assert!(!attrs.contains_key("userPassword"));
+    }
+
+    #[test]
+    fn build_create_form_injects_objectclass_and_resolves_fields() {
+        // schema with person (MUST sn,cn MAY description) + organizationalPerson.
+        let raw = crate::ldap::worker::RawSubschema {
+            object_classes: vec![
+                "( 2.5.6.0 NAME 'top' ABSTRACT MUST objectClass )".into(),
+                "( 2.5.6.6 NAME 'person' SUP top STRUCTURAL MUST ( sn $ cn ) MAY description )"
+                    .into(),
+            ],
+            attribute_types: vec![
+                "( 2.5.4.3 NAME 'cn' SYNTAX 1.3.6.1.4.1.1466.115.121.1.15 SINGLE-VALUE )".into(),
+                "( 2.5.4.4 NAME 'sn' SYNTAX 1.3.6.1.4.1.1466.115.121.1.15 )".into(),
+                "( 2.5.4.13 NAME 'description' SYNTAX 1.3.6.1.4.1.1466.115.121.1.15 )".into(),
+            ],
+            ldap_syntaxes: vec![],
+        };
+        let schema = crate::schema::SchemaModel::from_raw(&raw);
+        let profile = EntryProfile {
+            name: "People".into(),
+            object_classes: vec!["person".into()],
+            rdn_attr: "cn".into(),
+            search_base: "ou=people,dc=example,dc=org".into(),
+            show: vec![],
+            search_attrs: vec![],
+            defaults: Default::default(),
+            widgets: Default::default(),
+            label: None,
+        };
+        let (form, autonum) =
+            build_create_form(&schema, &profile, 0, "ou=people,dc=example,dc=org");
+        assert!(matches!(
+            form.mode,
+            crate::workflows::edit_form::FormMode::Create { profile_idx: 0, .. }
+        ));
+        let oc = form
+            .fields
+            .iter()
+            .find(|f| f.label.eq_ignore_ascii_case("objectClass"))
+            .unwrap();
+        assert!(oc.values.iter().any(|v| v.eq_ignore_ascii_case("top")));
+        assert!(oc.values.iter().any(|v| v.eq_ignore_ascii_case("person")));
+        assert!(form.fields.iter().any(|f| f.label == "sn")); // MUST injected by resync
+        assert!(form.object_classes.iter().any(|v| v == "person"));
+        assert!(autonum.is_empty()); // no {next:…} default in this profile
     }
 
     #[test]
