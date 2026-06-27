@@ -117,6 +117,18 @@ impl ScrollGroup {
         self.group.focus_child(id, ctx);
     }
 
+    pub(crate) fn logical_of(&self, id: ViewId) -> Option<Rect> {
+        self.content.iter().find(|(i, _)| *i == id).map(|(_, r)| *r)
+    }
+
+    pub(crate) fn ensure_visible(&mut self, logical: Rect, ctx: &mut Context) {
+        if logical.a.y < self.top {
+            self.scroll_to(logical.a.y, ctx);
+        } else if logical.b.y > self.top + self.viewport_h {
+            self.scroll_to(logical.b.y - self.viewport_h, ctx);
+        }
+    }
+
     pub(crate) fn scroll_to(&mut self, top: i32, ctx: &mut Context) {
         let clamped = top.clamp(0, self.max_top());
         if clamped != self.top {
@@ -173,6 +185,12 @@ impl View for ScrollGroup {
             }
         }
         self.group.handle_event(ev, ctx);
+        // Scroll-to-focused: keep the focused content child within the viewport.
+        if let Some(cur) = self.group.current() {
+            if let Some(logical) = self.logical_of(cur) {
+                self.ensure_visible(logical, ctx);
+            }
+        }
     }
 
     fn apply_scroll_sync(&mut self, _h: Option<i32>, v: Option<i32>, ctx: &mut Context) {
@@ -279,6 +297,31 @@ mod tests {
         });
         assert!(found, "publish_bar must request value=2 max=3");
         let _ = FieldValue::Int(0);
+    }
+
+    #[test]
+    fn ensure_visible_scrolls_offscreen_child_into_view() {
+        let mut sg = ScrollGroup::new(Rect::new(0, 0, 10, 4)); // viewport rows 0..4
+        let w = sg.inner_width();
+        for y in 0..8 {
+            sg.add_content(
+                Box::new(tv::InputLine::with_limit(Rect::new(0, y, w, y + 1), 64)),
+                Rect::new(0, y, w, y + 1),
+            );
+        }
+        let mut out = std::collections::VecDeque::new();
+        let mut timers = tv::timer::TimerQueue::new();
+        let mut deferred = Vec::new();
+        let mut ctx = Context::new(&mut out, &mut timers, 0, &mut deferred);
+        // Row 6 is below the viewport (top=0 shows 0..4). ensure_visible scrolls so
+        // its bottom (7) is the viewport bottom → top = 7 - 4 = 3.
+        sg.ensure_visible(Rect::new(0, 6, w, 7), &mut ctx);
+        let id = sg.content_id_for_test(6);
+        let y = sg.child_mut(id).unwrap().state().get_bounds().a.y;
+        assert!(
+            (0..4).contains(&y),
+            "row 6 must be inside the viewport, got y={y}"
+        );
     }
 
     #[test]
