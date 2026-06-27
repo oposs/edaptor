@@ -30,9 +30,15 @@ impl LeafPane {
         // it); a plain Group does not, so set it explicitly.
         group.state_mut().options.first_click = true;
         let w = bounds.b.x - bounds.a.x;
-        let search = InputLine::with_limit(Rect::new(0, 0, w, 1), 256);
+        // grow_mode so Group::change_bounds (driven by the Splitter) resizes children:
+        // search bar widens with the pane (stays at row 0, height 1).
+        let mut search = InputLine::with_limit(Rect::new(0, 0, w, 1), 256);
+        search.state.grow_mode.hi_x = true;
         let search_id = group.insert(Box::new(search));
-        let list = ListBox::new(Rect::new(0, 1, w, bounds.b.y - bounds.a.y), 1, None, None);
+        // list fills all remaining width + height.
+        let mut list = ListBox::new(Rect::new(0, 1, w, bounds.b.y - bounds.a.y), 1, None, None);
+        list.state_mut().grow_mode.hi_x = true;
+        list.state_mut().grow_mode.hi_y = true;
         let list_id = group.insert(Box::new(list));
         LeafPane {
             group,
@@ -131,19 +137,6 @@ impl View for LeafPane {
         Some(self)
     }
 
-    fn on_bounds_changed(&mut self, ctx: &mut Context) {
-        let ext = self.group.state().get_extent();
-        let w = ext.b.x - ext.a.x;
-        let h = ext.b.y - ext.a.y;
-        if let Some(s) = self.group.child_mut(self.search_id) {
-            s.change_bounds(Rect::new(0, 0, w, 1));
-        }
-        if let Some(l) = self.group.child_mut(self.list_id) {
-            l.change_bounds(Rect::new(0, 1, w, h));
-            l.on_bounds_changed(ctx);
-        }
-    }
-
     fn handle_event(&mut self, ev: &mut Event, ctx: &mut Context) {
         let is_refresh = matches!(ev, Event::Broadcast { command, .. } if *command == REFRESH);
         if !self.seeded || (is_refresh && self.state.borrow().list_dirty) {
@@ -201,16 +194,15 @@ mod tests {
     use std::collections::{BTreeMap, VecDeque};
     use std::rc::Rc;
 
-    fn headless_ctx<'a>(
-        out: &'a mut VecDeque<Event>,
-        timers: &'a mut tv::timer::TimerQueue,
-        deferred: &'a mut Vec<tv::Deferred>,
-    ) -> tv::Context<'a> {
-        tv::Context::new(out, timers, 0, deferred)
-    }
-
+    /// Regression: children must grow via grow_mode when the Splitter drives
+    /// Group::change_bounds — NOT via an on_bounds_changed override (which the
+    /// framework never calls for Splitter-nested panes).
+    ///
+    /// TDD evidence: before grow_mode flags were set (hi_x on search, hi_x+hi_y
+    /// on list), this test FAILED — children kept their original Rect. After
+    /// setting the flags, Group::change_bounds propagates the delta and this PASSES.
     #[test]
-    fn on_bounds_changed_refits_search_and_list() {
+    fn grow_mode_resize_fills_pane() {
         let inputs = vec![StructureInput {
             dn: "dc=x".into(),
             cn: None,
@@ -223,14 +215,18 @@ mod tests {
         let st = UiState::new_for_test(structure, schema, "dc=x".into(), Vec::new(), Vec::new());
         let shared: Shared = Rc::new(RefCell::new(st));
         let mut pane = LeafPane::new(Rect::new(0, 0, 30, 10), shared);
-        let mut out = VecDeque::new();
-        let mut timers = tv::timer::TimerQueue::new();
-        let mut deferred = Vec::new();
-        let mut ctx = headless_ctx(&mut out, &mut timers, &mut deferred);
+        // Simulate Splitter driving a resize: just change_bounds, no on_bounds_changed.
         <LeafPane as View>::change_bounds(&mut pane, Rect::new(0, 0, 50, 20));
-        <LeafPane as View>::on_bounds_changed(&mut pane, &mut ctx);
-        assert_eq!(pane.search_bounds_for_test(), Rect::new(0, 0, 50, 1));
-        assert_eq!(pane.list_bounds_for_test(), Rect::new(0, 1, 50, 20));
+        assert_eq!(
+            pane.search_bounds_for_test(),
+            Rect::new(0, 0, 50, 1),
+            "search InputLine must widen (hi_x)"
+        );
+        assert_eq!(
+            pane.list_bounds_for_test(),
+            Rect::new(0, 1, 50, 20),
+            "list ListBox must fill width+height (hi_x+hi_y)"
+        );
     }
 
     #[test]

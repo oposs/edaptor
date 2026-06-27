@@ -59,10 +59,15 @@ impl FormPane {
         let w = bounds.b.x - bounds.a.x;
         let h = bounds.b.y - bounds.a.y;
 
-        // Row 0: header (read-only cell).
-        let header_id = group.insert(Box::new(ro_cell(Rect::new(0, 0, w, 1))));
-        // Rows 1..h: scrollable content pane.
-        let scroll_id = group.insert(Box::new(ScrollGroup::new(Rect::new(0, 1, w, h))));
+        // Row 0: header (read-only cell). grow_mode hi_x so it widens with the pane.
+        let mut header = ro_cell(Rect::new(0, 0, w, 1));
+        header.state.grow_mode.hi_x = true;
+        let header_id = group.insert(Box::new(header));
+        // Rows 1..h: scrollable content pane. grow_mode hi_x+hi_y so it fills the pane.
+        let mut sg = ScrollGroup::new(Rect::new(0, 1, w, h));
+        sg.state_mut().grow_mode.hi_x = true;
+        sg.state_mut().grow_mode.hi_y = true;
+        let scroll_id = group.insert(Box::new(sg));
 
         FormPane {
             group,
@@ -345,19 +350,6 @@ impl View for FormPane {
         Some(self)
     }
 
-    fn on_bounds_changed(&mut self, ctx: &mut Context) {
-        let ext = self.group.state().get_extent();
-        let w = ext.b.x - ext.a.x;
-        let h = ext.b.y - ext.a.y;
-        if let Some(hdr) = self.group.child_mut(self.header_id) {
-            hdr.change_bounds(Rect::new(0, 0, w, 1));
-        }
-        if let Some(sc) = self.group.child_mut(self.scroll_id) {
-            sc.change_bounds(Rect::new(0, 1, w, h));
-            sc.on_bounds_changed(ctx);
-        }
-    }
-
     fn handle_event(&mut self, ev: &mut Event, ctx: &mut Context) {
         // Render whenever the form needs it, on ANY event. The dispatch closure
         // (Discard, re-read) only sets `form_needs_render` — it cannot broadcast
@@ -437,19 +429,30 @@ mod tests {
         Context::new(out, timers, 0, deferred)
     }
 
+    /// Regression: children must grow via grow_mode when the Splitter drives
+    /// Group::change_bounds — NOT via an on_bounds_changed override (which the
+    /// framework never calls for Splitter-nested panes).
+    ///
+    /// TDD evidence: before grow_mode flags were set (hi_x on header, hi_x+hi_y
+    /// on scroll), this test FAILED — children kept their original Rect. After
+    /// setting the flags, Group::change_bounds propagates the delta and this PASSES.
     #[test]
-    fn on_bounds_changed_refits_header_and_scroll() {
+    fn grow_mode_resize_fills_pane() {
         let shared = state_with_form();
         let mut pane = FormPane::new(Rect::new(0, 0, 40, 6), shared);
-        let mut out = VecDeque::new();
-        let mut timers = tv::timer::TimerQueue::new();
-        let mut deferred = Vec::new();
-        let mut ctx = headless_ctx(&mut out, &mut timers, &mut deferred);
+        // Simulate Splitter driving a resize: just change_bounds, no on_bounds_changed.
         <FormPane as View>::change_bounds(&mut pane, Rect::new(0, 0, 80, 20));
-        <FormPane as View>::on_bounds_changed(&mut pane, &mut ctx);
         // Header spans the new full width; scroll child fills rows 1..20.
-        assert_eq!(pane.header_bounds_for_test().b.x, 80);
-        assert_eq!(pane.scroll_bounds_for_test(), Rect::new(0, 1, 80, 20));
+        assert_eq!(
+            pane.header_bounds_for_test().b.x,
+            80,
+            "header must widen to new width (hi_x)"
+        );
+        assert_eq!(
+            pane.scroll_bounds_for_test(),
+            Rect::new(0, 1, 80, 20),
+            "scroll group must fill remaining width+height (hi_x+hi_y)"
+        );
     }
 
     #[test]

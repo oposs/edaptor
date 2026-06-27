@@ -22,6 +22,9 @@ pub(crate) struct ScrollGroup {
     top: i32,
     inner_w: i32,
     viewport_h: i32,
+    /// Set by `change_bounds` (no ctx available there) so that `handle_event`
+    /// re-publishes the scroll-bar params on the very next event after a resize.
+    bar_dirty: bool,
 }
 
 impl ScrollGroup {
@@ -39,6 +42,7 @@ impl ScrollGroup {
             top: 0,
             inner_w: (w - 1).max(0),
             viewport_h: h.max(0),
+            bar_dirty: false,
         }
     }
 
@@ -169,19 +173,40 @@ impl View for ScrollGroup {
         self.group.draw(ctx);
     }
 
-    fn on_bounds_changed(&mut self, ctx: &mut Context) {
-        let ext = self.group.state().get_extent();
-        let w = ext.b.x - ext.a.x;
-        let h = ext.b.y - ext.a.y;
+    /// Override `change_bounds` so that a grow-mode resize (driven by
+    /// `Group::change_bounds` in the owning FormPane) recomputes `inner_w`,
+    /// `viewport_h`, repositions the v_bar and content children, and schedules a
+    /// bar-params refresh on the next event (no `Context` is available here).
+    ///
+    /// The content cells and v_bar have default grow_mode (all-false), so the
+    /// delegated `Group::change_bounds` would leave them untouched — we position
+    /// them manually instead, then update the group bounds directly.
+    fn change_bounds(&mut self, bounds: Rect) {
+        // Update the group's own bounds without propagating to children (we
+        // position them manually below).
+        self.group.state_mut().set_bounds(bounds);
+        let w = bounds.b.x - bounds.a.x;
+        let h = bounds.b.y - bounds.a.y;
         self.inner_w = (w - 1).max(0);
         self.viewport_h = h.max(0);
+        // Reposition the v_bar to the right column at the new height.
         if let Some(b) = self.group.child_mut(self.v_bar) {
             b.change_bounds(Rect::new(w - 1, 0, w, h));
         }
-        self.scroll_to(self.top, ctx);
+        // Clamp top to the new max_top and reposition all content children.
+        self.top = self.top.clamp(0, self.max_top());
+        self.reposition();
+        // Bar params require a Context; defer the refresh to the next handle_event.
+        self.bar_dirty = true;
     }
 
     fn handle_event(&mut self, ev: &mut Event, ctx: &mut Context) {
+        // Flush a pending bar-params refresh deferred from change_bounds (which
+        // has no Context).  Idempotent when bar_dirty is false.
+        if self.bar_dirty {
+            self.publish_bar(ctx);
+            self.bar_dirty = false;
+        }
         if let Event::Broadcast { command, source } = ev {
             if *command == tv::Command::SCROLL_BAR_CHANGED && *source == Some(self.v_bar) {
                 if let Some(id) = self.group.state().id() {
@@ -376,6 +401,47 @@ mod tests {
         assert_eq!(
             sym, " ",
             "uncovered row must be blank space from backdrop fill, got {sym:?}"
+        );
+    }
+
+    /// `change_bounds` must recompute `inner_w`, `viewport_h`, reposition the
+    /// v_bar, and clamp/reposition content — all without a Context.
+    ///
+    /// This exercises the real framework resize path (Group::change_bounds →
+    /// child.change_bounds) rather than the dead `on_bounds_changed` hook.
+    #[test]
+    fn change_bounds_updates_geometry_and_repositions() {
+        let mut sg = ScrollGroup::new(Rect::new(0, 0, 20, 5));
+        let old_w = sg.inner_width();
+        // Add 8 content rows so there is something to scroll.
+        for y in 0..8 {
+            sg.add_content(cell(y, old_w), Rect::new(0, y, old_w, y + 1));
+        }
+        // Resize to a larger rect (mimics the Splitter driving the FormPane Group).
+        <ScrollGroup as tv::View>::change_bounds(&mut sg, Rect::new(0, 0, 30, 10));
+
+        // inner_w and viewport_h must reflect the new size.
+        assert_eq!(sg.inner_width(), 29, "inner_w = w-1 = 29");
+        assert_eq!(sg.viewport_h, 10, "viewport_h = h = 10");
+
+        // v_bar must now occupy the new right column at the new height.
+        let bar_bounds = sg.group.child_mut(sg.v_bar).unwrap().state().get_bounds();
+        assert_eq!(
+            bar_bounds,
+            Rect::new(29, 0, 30, 10),
+            "v_bar must sit in column 29 spanning new height 10"
+        );
+
+        // content height 8 ≤ new viewport_h 10 → max_top is now 0; top clamped.
+        assert_eq!(sg.max_top(), 0, "all content fits → max_top 0");
+        assert_eq!(sg.top, 0, "top clamped to new max_top");
+
+        // First content child must still be at screen row 0 (top=0).
+        let id0 = sg.content_id_for_test(0);
+        assert_eq!(
+            sg.child_mut(id0).unwrap().state().get_bounds().a.y,
+            0,
+            "first content row at screen y=0"
         );
     }
 
