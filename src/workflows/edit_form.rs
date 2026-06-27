@@ -125,6 +125,58 @@ impl EditForm {
             attrs,
         }
     }
+
+    /// Recompute the form's fields from the current `objectClass` field values:
+    /// flag fields that left MUST∪MAY as `orphaned`, refresh `must`, inject empty
+    /// fields for newly-allowed attrs, then reorder. Faithful neutral port of
+    /// `ui::edit_form::sync_schema_fields`. Values on still-allowed fields are
+    /// preserved; objectClass is never orphaned. No-op-safe if no objectClass field.
+    pub fn sync_schema_fields(&mut self, schema: &SchemaModel) {
+        let oc_values: Vec<String> = self
+            .fields
+            .iter()
+            .find(|f| f.label.eq_ignore_ascii_case("objectClass"))
+            .map(|f| f.values.clone())
+            .unwrap_or_default();
+        let oc_refs: Vec<&str> = oc_values.iter().map(|s| s.as_str()).collect();
+
+        let resolved = schema.effective_attributes(&oc_refs);
+        let allowed: std::collections::BTreeSet<String> = resolved
+            .must
+            .iter()
+            .chain(resolved.may.iter())
+            .map(|s| s.to_lowercase())
+            .chain(std::iter::once("objectclass".to_string()))
+            .collect();
+
+        for field in &mut self.fields {
+            let key = field.label.to_lowercase();
+            if key == "objectclass" {
+                field.orphaned = false;
+                continue;
+            }
+            let in_allowed = allowed.contains(&key);
+            field.orphaned = !in_allowed;
+            field.must = in_allowed
+                && resolved
+                    .must
+                    .iter()
+                    .any(|m| m.eq_ignore_ascii_case(&field.label));
+        }
+
+        let existing: std::collections::HashSet<String> =
+            self.fields.iter().map(|f| f.label.to_lowercase()).collect();
+        for attr in resolved.must.iter().chain(resolved.may.iter()) {
+            if existing.contains(&attr.to_lowercase()) {
+                continue;
+            }
+            let is_must = resolved.must.contains(attr);
+            self.fields
+                .push(EditField::injected(attr.clone(), is_must, schema));
+        }
+
+        order_fields(self);
+    }
 }
 
 /// Order-insensitive value-set equality (same length, each element of each side
@@ -337,5 +389,113 @@ mod tests {
         f.fields[0].orphaned = true; // cn orphaned → current_values() == [] → bucket 2
         order_fields(&mut f);
         assert_eq!(f.fields.last().unwrap().label, "cn");
+    }
+
+    fn schema_oc() -> SchemaModel {
+        // top (MUST objectClass); person (MUST sn,cn; MAY description);
+        // organizationalPerson SUP person (MAY title, ou);
+        // extensibleObject (no extra attrs, used to test removal).
+        let raw = RawSubschema {
+            object_classes: vec![
+                "( 2.5.6.0 NAME 'top' ABSTRACT MUST objectClass )".into(),
+                "( 2.5.6.6 NAME 'person' SUP top STRUCTURAL MUST ( sn $ cn ) MAY description )"
+                    .into(),
+                "( 2.5.6.7 NAME 'organizationalPerson' SUP person STRUCTURAL MAY ( title $ ou ) )"
+                    .into(),
+            ],
+            attribute_types: vec![
+                "( 2.5.4.3 NAME 'cn' SYNTAX 1.3.6.1.4.1.1466.115.121.1.15 SINGLE-VALUE )".into(),
+                "( 2.5.4.4 NAME 'sn' SYNTAX 1.3.6.1.4.1.1466.115.121.1.15 )".into(),
+                "( 2.5.4.13 NAME 'description' SYNTAX 1.3.6.1.4.1.1466.115.121.1.15 )".into(),
+                "( 2.5.4.12 NAME 'title' SYNTAX 1.3.6.1.4.1.1466.115.121.1.15 )".into(),
+                "( 2.5.4.11 NAME 'ou' SYNTAX 1.3.6.1.4.1.1466.115.121.1.15 )".into(),
+            ],
+            ldap_syntaxes: vec![],
+        };
+        SchemaModel::from_raw(&raw)
+    }
+
+    /// Build an EditForm with an explicit objectClass field carrying `ocs`.
+    fn form_with_ocs(ocs: &[&str]) -> EditForm {
+        let oc_field = EditField {
+            label: "objectClass".into(),
+            must: true,
+            editable: false,
+            multi: true,
+            secret: false,
+            ordered: false,
+            orphaned: false,
+            kind: FieldKind::Text,
+            widget: WidgetSpec::ReadOnlyText,
+            widget_binding: None,
+            values: ocs.iter().map(|s| s.to_string()).collect(),
+            baseline: ocs.iter().map(|s| s.to_string()).collect(),
+        };
+        EditForm {
+            dn: "cn=Bob,dc=example,dc=org".into(),
+            mode: FormMode::Edit,
+            object_classes: ocs.iter().map(|s| s.to_string()).collect(),
+            fields: vec![oc_field],
+        }
+    }
+
+    #[test]
+    fn sync_injects_must_and_may_fields_for_classes() {
+        let mut f = form_with_ocs(&["top", "person"]);
+        f.sync_schema_fields(&schema_oc());
+        let has = |l: &str| f.fields.iter().any(|x| x.label.eq_ignore_ascii_case(l));
+        assert!(has("cn") && has("sn") && has("description"));
+        let cn = f.fields.iter().find(|x| x.label == "cn").unwrap();
+        assert!(cn.must); // person MUST cn
+        let desc = f.fields.iter().find(|x| x.label == "description").unwrap();
+        assert!(!desc.must); // person MAY description
+    }
+
+    #[test]
+    fn sync_orphans_fields_when_class_removed() {
+        // Start with organizationalPerson (title/ou allowed + populated), then remove it.
+        let mut f = form_with_ocs(&["top", "organizationalPerson"]);
+        f.sync_schema_fields(&schema_oc()); // title/ou now injected & allowed
+        if let Some(t) = f.fields.iter_mut().find(|x| x.label == "title") {
+            t.values = vec!["Boss".into()];
+        }
+        // Now drop down to plain person: title/ou leave MUST∪MAY → orphaned.
+        f.fields
+            .iter_mut()
+            .find(|x| x.label.eq_ignore_ascii_case("objectClass"))
+            .unwrap()
+            .values = vec!["top".into(), "person".into()];
+        f.sync_schema_fields(&schema_oc());
+        let title = f.fields.iter().find(|x| x.label == "title").unwrap();
+        assert!(title.orphaned);
+        assert!(!title.must);
+        // title still present but sunk to the bottom region; objectClass never orphaned.
+        let oc = f
+            .fields
+            .iter()
+            .find(|x| x.label.eq_ignore_ascii_case("objectClass"))
+            .unwrap();
+        assert!(!oc.orphaned);
+    }
+
+    #[test]
+    fn sync_preserves_values_on_still_allowed_fields() {
+        let mut f = form_with_ocs(&["top", "person"]);
+        f.sync_schema_fields(&schema_oc());
+        f.fields
+            .iter_mut()
+            .find(|x| x.label == "cn")
+            .unwrap()
+            .values = vec!["Bob".into()];
+        // add organizationalPerson; cn stays allowed and keeps its value.
+        f.fields
+            .iter_mut()
+            .find(|x| x.label.eq_ignore_ascii_case("objectClass"))
+            .unwrap()
+            .values = vec!["top".into(), "person".into(), "organizationalPerson".into()];
+        f.sync_schema_fields(&schema_oc());
+        let cn = f.fields.iter().find(|x| x.label == "cn").unwrap();
+        assert_eq!(cn.values, vec!["Bob".to_string()]);
+        assert!(!cn.orphaned);
     }
 }
