@@ -9,7 +9,9 @@
 //! driven through the `ScrollSync` broker. Domain-free: candidate for upstreaming
 //! to tvision-rs.
 
-use tvision_rs::{self as tv, delegate, Context, DrawCtx, Event, Rect, ScrollBar, View, ViewId};
+use tvision_rs::{
+    self as tv, delegate, Context, DrawCtx, Event, Rect, Role, ScrollBar, View, ViewId,
+};
 
 pub(crate) struct ScrollGroup {
     group: tv::Group,
@@ -161,6 +163,9 @@ impl View for ScrollGroup {
     }
 
     fn draw(&mut self, ctx: &mut DrawCtx) {
+        let style = ctx.style(Role::Background);
+        let extent = self.group.state().get_extent();
+        ctx.fill(extent, ' ', style);
         self.group.draw(ctx);
     }
 
@@ -300,6 +305,31 @@ mod tests {
     }
 
     #[test]
+    fn publish_bar_hides_bar_when_content_fits() {
+        use tvision_rs::Deferred;
+        // 2 content rows in a 5-row viewport → content fits → bar must be HIDDEN.
+        let mut sg = ScrollGroup::new(Rect::new(0, 0, 10, 5));
+        let w = sg.inner_width();
+        for y in 0..2 {
+            sg.add_content(
+                Box::new(tv::InputLine::with_limit(Rect::new(0, y, w, y + 1), 64)),
+                Rect::new(0, y, w, y + 1),
+            );
+        }
+        assert_eq!(sg.max_top(), 0, "content fits → max_top must be 0");
+        let mut out = std::collections::VecDeque::new();
+        let mut timers = tv::timer::TimerQueue::new();
+        let mut deferred: Vec<Deferred> = Vec::new();
+        let mut ctx = Context::new(&mut out, &mut timers, 0, &mut deferred);
+        sg.scroll_to(0, &mut ctx);
+        let visible = sg.group.child_mut(sg.v_bar).unwrap().state().state.visible;
+        assert!(
+            !visible,
+            "scroll bar must be hidden when content fits in the viewport"
+        );
+    }
+
+    #[test]
     fn ensure_visible_scrolls_offscreen_child_into_view() {
         let mut sg = ScrollGroup::new(Rect::new(0, 0, 10, 4)); // viewport rows 0..4
         let w = sg.inner_width();
@@ -321,6 +351,31 @@ mod tests {
         assert!(
             (0..4).contains(&y),
             "row 6 must be inside the viewport, got y={y}"
+        );
+    }
+
+    #[test]
+    fn backdrop_fill_covers_uncovered_rows() {
+        use tvision_rs::{Buffer, DrawCtx, Point, StaticText, Theme, View};
+        // 2 content rows in a 6-row viewport → rows 2-5 are uncovered.
+        let mut sg = ScrollGroup::new(Rect::new(0, 0, 10, 6));
+        let w = sg.inner_width();
+        for y in 0..2_i32 {
+            let t = StaticText::new(Rect::new(0, y, w, y + 1), format!("R{y}"));
+            sg.add_content(Box::new(t), Rect::new(0, y, w, y + 1));
+        }
+
+        let mut buf = Buffer::new(10, 6);
+        let theme = Theme::classic_blue();
+        {
+            let mut ctx = DrawCtx::new(&mut buf, &theme, Rect::new(0, 0, 10, 6), Point::new(0, 0));
+            <ScrollGroup as View>::draw(&mut sg, &mut ctx);
+        }
+        // Row 3 (below the 2 content rows) must be blank space, not a desktop glyph.
+        let sym = buf.get(0, 3).symbol();
+        assert_eq!(
+            sym, " ",
+            "uncovered row must be blank space from backdrop fill, got {sym:?}"
         );
     }
 
