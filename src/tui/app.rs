@@ -14,7 +14,8 @@ use crate::tui::panes::{
 };
 use crate::tui::pump::PumpView;
 use crate::tui::state::GuardTarget;
-use crate::tui::{Shared, GUARD_NAV, REQUEST_QUIT, SAVE, SHOW_ERROR};
+use crate::tui::widget::{widget_for, Activation};
+use crate::tui::{Shared, ACTIVATE, GUARD_NAV, REQUEST_QUIT, SAVE, SHOW_ERROR};
 use crate::workflows::save::PrepareSave;
 
 fn init_status_line(r: Rect) -> Option<Box<dyn View>> {
@@ -89,6 +90,40 @@ pub(crate) fn save_flow_action(prepared: &PrepareSave) -> SaveAction {
 pub(crate) fn dispatch(prog: &mut Program, cmd: Command, state: &Shared) {
     if cmd == SAVE {
         let _ = do_save(prog, state, None, false);
+    } else if cmd == ACTIVATE {
+        // Open a field's modal editor. The pane recorded which field.
+        let idx = state.borrow_mut().activate_field.take();
+        let Some(idx) = idx else {
+            return;
+        };
+        // Build the editor from the field (drops the borrow before exec_view).
+        let editor = {
+            let st = state.borrow();
+            st.edit_form
+                .as_ref()
+                .and_then(|f| f.fields.get(idx))
+                .and_then(|field| match widget_for(field).activate(field) {
+                    Activation::Modal(ed) => Some(ed),
+                    Activation::Inline => None,
+                })
+        };
+        let Some(editor) = editor else {
+            return;
+        };
+        // Build the view (schema borrowed; Shared is an Rc clone, not a borrow).
+        let (view, focus) = {
+            let st = state.borrow();
+            editor.into_view(st.read_flow.schema(), state.clone())
+        };
+        let answer = prog.exec_view_focused(view, focus);
+        if answer == Command::OK {
+            let outcome = state.borrow_mut().staged_commit.take();
+            if let Some(outcome) = outcome {
+                state.borrow_mut().apply_commit(idx, outcome);
+            }
+        } else {
+            state.borrow_mut().staged_commit = None;
+        }
     } else if cmd == GUARD_NAV {
         // A dirty-blocked navigation: ask, then act on the stashed target per variant.
         let target = state.borrow().guard_target.clone(); // Option<GuardTarget>
