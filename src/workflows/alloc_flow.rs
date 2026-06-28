@@ -14,7 +14,7 @@ use crate::workflows::save::decide_allocation;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AllocOutcome {
     Filled { attr: String, value: String },
-    Failed(String),
+    Failed { attr: String, msg: String },
     Ignored,
 }
 
@@ -93,12 +93,15 @@ impl AllocFlow {
                         attr,
                         value: n.to_string(),
                     },
-                    Err(e) => AllocOutcome::Failed(e),
+                    Err(msg) => AllocOutcome::Failed { attr, msg },
                 }
             }
             Response::SearchError { id, msg } => {
-                if self.pending.remove(id).is_some() {
-                    AllocOutcome::Failed(msg.clone())
+                if let Some((attr, _min, _max)) = self.pending.remove(id) {
+                    AllocOutcome::Failed {
+                        attr,
+                        msg: msg.clone(),
+                    }
                 } else {
                     AllocOutcome::Ignored
                 }
@@ -161,6 +164,10 @@ mod tests {
             entries: vec![],
             truncated: true,
         });
-        assert!(matches!(out, AllocOutcome::Failed(_)));
+        // attr must match the requested attribute
+        assert!(
+            matches!(&out, AllocOutcome::Failed { attr, .. } if attr == "uidNumber"),
+            "expected Failed with attr=uidNumber, got {out:?}"
+        );
     }
 }

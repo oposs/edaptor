@@ -209,15 +209,19 @@ impl UiState {
                     {
                         if f.values.is_empty() || f.values == [ALLOC_PLACEHOLDER] {
                             f.values = vec![value];
+                            self.form_needs_render = true;
                         }
                     }
                 }
-                self.form_needs_render = true;
             }
-            AllocOutcome::Failed(msg) => {
+            AllocOutcome::Failed { attr, msg } => {
                 self.status = msg;
                 if let Some(form) = self.edit_form.as_mut() {
-                    for f in &mut form.fields {
+                    if let Some(f) = form
+                        .fields
+                        .iter_mut()
+                        .find(|f| f.label.eq_ignore_ascii_case(&attr))
+                    {
                         if f.values == [ALLOC_PLACEHOLDER] {
                             f.values = Vec::new();
                         }
@@ -772,6 +776,129 @@ mod tests {
             vec!["10006".to_string()],
             "Filled should replace the placeholder with the allocated value"
         );
+        assert!(st.form_needs_render, "form_needs_render must be set");
+    }
+
+    /// A field holding a user-typed value (NOT the placeholder) must be left
+    /// untouched by a `Filled` outcome for that attribute.
+    #[test]
+    fn apply_alloc_outcome_does_not_clobber_user_value() {
+        use crate::schema::FieldKind;
+        use crate::workflows::alloc_flow::AllocOutcome;
+        use crate::workflows::edit_form::{EditField, EditForm, FormMode};
+        use crate::workflows::form_model::WidgetSpec;
+
+        let raw = RawSubschema::default();
+        let schema = SchemaModel::from_raw(&raw);
+        let structure = Structure::build("dc=x", vec![]);
+        let mut st =
+            UiState::new_for_test(structure, schema, "dc=x".into(), Vec::new(), Vec::new());
+
+        let uid_field = EditField {
+            label: "uidNumber".into(),
+            must: false,
+            editable: true,
+            multi: false,
+            secret: false,
+            ordered: false,
+            orphaned: false,
+            kind: FieldKind::Integer,
+            widget: WidgetSpec::ReadOnlyText,
+            widget_binding: None,
+            // user already typed a real value — not the placeholder
+            values: vec!["12345".to_string()],
+            baseline: vec![],
+        };
+        st.edit_form = Some(EditForm {
+            dn: String::new(),
+            mode: FormMode::Create {
+                profile_idx: 0,
+                container: "ou=people,dc=x".into(),
+            },
+            object_classes: vec![],
+            fields: vec![uid_field],
+        });
+        st.form_needs_render = false;
+
+        st.apply_alloc_outcome(AllocOutcome::Filled {
+            attr: "uidNumber".into(),
+            value: "99999".into(),
+        });
+
+        let form = st.edit_form.as_ref().unwrap();
+        assert_eq!(
+            form.fields[0].values,
+            vec!["12345".to_string()],
+            "Filled must not overwrite a user-typed value"
+        );
+        // form_needs_render must remain false — no update happened
+        assert!(
+            !st.form_needs_render,
+            "form_needs_render must not be set when no field was updated"
+        );
+    }
+
+    /// `Failed { attr: "uidNumber", .. }` must clear only the uidNumber placeholder
+    /// and leave gidNumber's placeholder intact.
+    #[test]
+    fn apply_alloc_outcome_failed_clears_only_that_field() {
+        use crate::schema::FieldKind;
+        use crate::workflows::alloc_flow::AllocOutcome;
+        use crate::workflows::edit_form::{EditField, EditForm, FormMode};
+        use crate::workflows::form_model::WidgetSpec;
+
+        let raw = RawSubschema::default();
+        let schema = SchemaModel::from_raw(&raw);
+        let structure = Structure::build("dc=x", vec![]);
+        let mut st =
+            UiState::new_for_test(structure, schema, "dc=x".into(), Vec::new(), Vec::new());
+
+        let make_placeholder_field = |label: &str| EditField {
+            label: label.into(),
+            must: false,
+            editable: true,
+            multi: false,
+            secret: false,
+            ordered: false,
+            orphaned: false,
+            kind: FieldKind::Integer,
+            widget: WidgetSpec::ReadOnlyText,
+            widget_binding: None,
+            values: vec![ALLOC_PLACEHOLDER.to_string()],
+            baseline: vec![],
+        };
+
+        st.edit_form = Some(EditForm {
+            dn: String::new(),
+            mode: FormMode::Create {
+                profile_idx: 0,
+                container: "ou=people,dc=x".into(),
+            },
+            object_classes: vec![],
+            fields: vec![
+                make_placeholder_field("uidNumber"),
+                make_placeholder_field("gidNumber"),
+            ],
+        });
+        st.form_needs_render = false;
+
+        st.apply_alloc_outcome(AllocOutcome::Failed {
+            attr: "uidNumber".into(),
+            msg: "scan truncated".into(),
+        });
+
+        let form = st.edit_form.as_ref().unwrap();
+        assert_eq!(
+            form.fields[0].values,
+            Vec::<String>::new(),
+            "uidNumber placeholder must be cleared on failure"
+        );
+        assert_eq!(
+            form.fields[1].values,
+            vec![ALLOC_PLACEHOLDER.to_string()],
+            "gidNumber placeholder must be left untouched"
+        );
+        assert_eq!(st.status, "scan truncated", "status must show the error");
         assert!(st.form_needs_render, "form_needs_render must be set");
     }
 }
