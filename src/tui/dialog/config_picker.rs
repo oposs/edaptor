@@ -8,11 +8,6 @@
 //! in-app dialogs it owns its own `Rc<RefCell<Option<usize>>>` rather than the
 //! app `UiState` (which does not exist yet at startup).
 //!
-//! `dead_code` is suppressed at the module level: the public API here is wired
-//! by a later M5a task (startup Program); nothing outside `#[cfg(test)]` calls
-//! it yet.
-#![allow(dead_code)]
-
 use std::cell::RefCell;
 use std::path::PathBuf;
 use std::rc::Rc;
@@ -24,7 +19,7 @@ use tvision_rs::{
 
 /// One discovered config, flattened for display (decoupled from `ConfigCandidate`
 /// so the dialog is testable without filesystem discovery).
-pub(crate) struct PickerItem {
+pub struct PickerItem {
     pub name: String,
     pub description: String,
     pub path: PathBuf,
@@ -38,11 +33,11 @@ fn ro_cell(bounds: Rect) -> InputLine {
     il
 }
 
-pub(crate) struct ConfigPicker {
+pub struct ConfigPicker {
     dlg: Dialog,
     list_id: tv::ViewId,
-    pub(crate) desc_id: tv::ViewId,
-    pub(crate) path_id: tv::ViewId,
+    pub desc_id: tv::ViewId,
+    pub path_id: tv::ViewId,
     items: Vec<PickerItem>,
     selected: Rc<RefCell<Option<usize>>>,
 }
@@ -132,7 +127,7 @@ impl ConfigPicker {
 
     /// Test helper: read a detail cell's current text.
     #[cfg(test)]
-    pub(crate) fn detail_text(&mut self, id: tv::ViewId) -> String {
+    fn detail_text(&mut self, id: tv::ViewId) -> String {
         match self.dlg.child_mut(id).and_then(|v| v.value()) {
             Some(FieldValue::Text(t)) => t,
             _ => String::new(),
@@ -176,7 +171,7 @@ impl View for ConfigPicker {
 
 /// Build the config-picker dialog. Returns `(view, list_view_id)`; pass the id as
 /// the focus target to `exec_view_focused` so the list is active immediately.
-pub(crate) fn build(
+pub fn build(
     items: Vec<PickerItem>,
     selected: Rc<RefCell<Option<usize>>>,
 ) -> (Box<dyn View>, tv::ViewId) {

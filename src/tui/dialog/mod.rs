@@ -5,7 +5,7 @@
 // Submodules declared here — implementations live in their own files.
 // pub(crate) keeps them visible within the crate while avoiding dead_code
 // warnings (each is referenced from the smoke tests below).
-pub(crate) mod config_picker;
+pub mod config_picker;
 pub mod confirm;
 pub mod error;
 pub mod guard;
