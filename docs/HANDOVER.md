@@ -13,17 +13,46 @@ passes), full gate green (637 lib tests + all gated live tests, clippy `-D
 warnings` + `fmt --check` clean, both facade guards clean). M4 delivered the
 free-text multi-value editor, choice, picker (live LDAP search), the two-column
 membership mover with the multi-entry fan-out write, and sambaSID immediate
-auto-gen. **M5 (startup flow + cutover) is the only milestone left.**
+auto-gen. **M5 was split into M5a (startup flow) → M5b (cutover); M5a is now DONE
+— the only thing left is M5b.**
 
-> **▶ NEXT ACTION — start M5 (startup flow + cutover).** M4 landed on
-> `feat/tvision-ui` @ `a08008d` (+ doc commit `daa3ae8`). Per umbrella §6 M5:
-> config-discovery / config-picker as a tvision `Dialog` before `run_app`; final
-> polish (status-line/menu wiring, mouse); **cutover** — point `main.rs` at the
-> tvision UI, rename `src/tui/` → `src/ui/`, delete the old ratatui `src/ui` tree
-> + the `edaptor-tv` dev binary + spike artifacts, drop the `ratatui`/`tui-*` deps.
-> Start with its own brainstorming → writing-plans cycle. M4 spec+plan:
-> [`specs/2026-06-28-tvision-m4-rich-widgets-design.md`](superpowers/specs/2026-06-28-tvision-m4-rich-widgets-design.md),
-> [`plans/2026-06-28-tvision-m4-rich-widgets.md`](superpowers/plans/2026-06-28-tvision-m4-rich-widgets.md).
+> **▶ NEXT ACTION — start M5b (cutover + carried reconciliations).** M5a landed
+> on `feat/tvision-ui` @ `3344b77` (spec `specs/2026-06-28-tvision-m5a-startup-flow-design.md`,
+> plan `plans/2026-06-28-tvision-m5a-startup-flow.md`). M5b per umbrella §6 M5:
+> **cutover** — point `main.rs` at the tvision UI, rename `src/tui/` → `src/ui/`,
+> delete the old ratatui `src/ui` tree + the `edaptor-tv` dev binary + spike
+> artifacts (`src/bin/spike-tv.rs`, `tests/spike_tv_umlaut.rs`), drop the
+> `ratatui`/`tui-*` deps; final polish (status-line/menu wiring, mouse); **dedup
+> the intentional parity copies** (only possible once `src/ui` is deleted); plus
+> the **three reconciliations the user approved for real implementation** (see the
+> M5a spec §9): (1) **X-ORDERED editing** — `{n}` strip/reconstruct + the
+> `widget_for` routing arm (today X-ORDERED routes to read-only `PlainWidget`; the
+> docs claim editable — see the X-ORDERED item below); (2) **schema-aware
+> last-member pre-validation** — block last-member removal ONLY when the
+> membership attr is MUST for the entry's objectClasses (`groupOfNames`/
+> `groupOfUniqueNames`); `posixGroup`'s `memberUid` is MAY, so an empty posixGroup
+> is LEGAL and must NOT be blocked (M4 relies on the server to reject the MUST
+> case); (3) **live `sambaDomain` LDAP discovery**. Start M5b with its own
+> brainstorming → writing-plans cycle.
+>
+> _M5a load-bearing facts (for M5b cutover):_
+> - **Startup lives in `src/tui/startup.rs`** (renamed to `src/ui/startup.rs` at
+>   cutover): `pub fn resolve_config_path(cli: Option<PathBuf>) -> Result<Option<PathBuf>>`
+>   (discovery → 0 err / 1 use / many picker) is the public entry. The picker is a
+>   **separate short-lived tvision `Program`** (`run_config_picker`, private) — the
+>   main program is built from already-bootstrapped state, so the picker can't be a
+>   modal inside it. Ordering is load-bearing: path-resolution (no connection) →
+>   `Config::load` → password (`rpassword` needs a CLEAN terminal, outside any
+>   tvision alt-screen) → `bootstrap` → main `Program`.
+> - **At cutover, `main.rs` adopts the flow**: replace its `ui::config_picker::pick_config`
+>   block with `tui::startup::resolve_config_path` (→ `ui::startup` after rename),
+>   keeping the existing `password_source.resolve()` step (the dev binary
+>   `edaptor-tv` hard-codes the env password; `main.rs` keeps the real
+>   env/command/`Prompt` resolution). The ratatui `src/ui/config_picker.rs` dies
+>   with the rest of the ratatui tree.
+> - The picker `Dialog` is `src/tui/dialog/config_picker.rs` (ListBox + a two-line
+>   read-only detail pane: description + full path; index staged into a
+>   caller-owned `Rc<RefCell<Option<usize>>>`). Live-verified via tmux.
 >
 > _M4 load-bearing facts / divergences (for M5):_
 > - **`Activation::Immediate` was NOT added** (the M4 spec/plan proposed it for
@@ -141,10 +170,11 @@ a **widget palette** (`[profile.widget.<attr>]` kinds: `choice` / `password` /
 
 ## Git topology (read before you branch)
 
-- **Branch `feat/tvision-ui`** (HEAD `98e8913`: M4 complete + docs reconciled) —
+- **Branch `feat/tvision-ui`** (HEAD `3344b77`: M5a complete + reviewed) —
   the long-lived migration branch. ALL migration work lives here. **It does NOT
-  merge to `main` until the M5 cutover** (umbrella §7) — the ratatui UI stays the
-  shipping `edaptor` binary through M1–M4. M4 last code commit: `a08008d`.
+  merge to `main` until the M5b cutover** (umbrella §7) — the ratatui UI stays the
+  shipping `edaptor` binary through M1–M5a. M5a last code commit: `3344b77`
+  (M4: `a08008d`).
 - `main` is behind/unpushed (origin at v0.4.0). Pushing / CI / release are a
   separate concern, not gated by the migration.
 - `Cargo.toml` version is `0.4.0`. Dependency: **`tvision-rs = "0.3"`** from
@@ -159,6 +189,19 @@ Each milestone gets its own spec → plan → implement cycle.
 ---
 
 ## What's done
+
+**M5a — startup flow (DONE @ `3344b77`; final whole-branch review READY)** (spec
+`specs/2026-06-28-tvision-m5a-startup-flow-design.md`, plan
+`plans/2026-06-28-tvision-m5a-startup-flow.md`). 4 subagent-driven TDD tasks, each
+reviewed clean + a whole-branch review (verdict READY to close). Replaces the
+ratatui config-picker with a tvision one and wires the pre-TUI config-path
+resolution, while the ratatui UI + `edaptor-tv` still coexist (cutover is M5b).
+Delivered: `src/tui/dialog/config_picker.rs` (ListBox + detail pane),
+`src/tui/startup.rs` (`SHOW_PICKER` + one-shot `PickerTrigger`; `run_config_picker`
+short-lived Program; pure `decide_config_path` + `pub resolve_config_path`),
+`edaptor-tv` wired through `resolve_config_path`. Gate green: 644 lib tests, clippy
+`-D warnings` + `fmt --check` clean, both facade guards clean; live tmux acceptance
+(two-config picker nav/detail/Enter/Esc; single-config + `--config` skip).
 
 **M4 — rich widgets (DONE @ `a08008d`; final review READY)** (spec
 `specs/2026-06-28-tvision-m4-rich-widgets-design.md`, plan
