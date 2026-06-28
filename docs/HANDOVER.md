@@ -31,7 +31,9 @@ runs the tvision UI end-to-end. Gate green: 499 lib tests, clippy `-D warnings` 
 >
 > **(3) Live `sambaDomain` LDAP discovery** — port the former ratatui
 > `discover_samba_domain` logic into `ui::state::bootstrap`
-> (`src/ui/state/bootstrap.rs` — `src/ui/` is now the tvision tree since M5b):
+> (the `bootstrap` fn in `src/ui/state.rs`, ~L630 — `src/ui/` is now the tvision
+> tree since M5b; the ratatui `discover_samba_domain` source was deleted at the
+> cutover, recover it from git history before `c7d6a04`):
 > search `(objectClass=sambaDomain)`, parse `sambaSID` via the existing
 > `samba::sid::parse_samba_domain`.
 >
@@ -48,7 +50,7 @@ runs the tvision UI end-to-end. Gate green: 499 lib tests, clippy `-D warnings` 
 > - **M4 dialog key convention:** the search-as-you-type pickers free **Space**
 >   (types into the search box) and **Enter** (confirms OK); the list action is
 >   **Insert** (picker toggle; membership move-in, also `→`). Choice toggles on
->   Space (no search box). Keep this consistent for any M5 dialogs.
+>   Space (no search box). Keep this consistent for any M5c dialogs.
 > - **Former parity copies** (all deduped at M5b cutover — the ratatui tree is gone):
 >   `workflows::pick_state` is now the sole picker-state implementation;
 >   `workflows::save::plan_combined_save` and `workflows::edit_form` are the sole
@@ -454,7 +456,8 @@ export EDAPTOR_TEST_ADMIN_PW=adminpassword
 cargo run -- --config examples/demo-config.toml
 # gated live tests:
 EDAPTOR_TEST_LDAP_URI=ldap://localhost:1389 EDAPTOR_TEST_ADMIN_PW=adminpassword \
-    cargo test -j4 --test tv_membership --test tv_picker
+    cargo test -j4 --test tv_membership --test tv_picker --test tv_edit_write \
+        --test tv_objectclass --test tv_create
 ```
 
 Facade guards (must print nothing — single-UI reality):
