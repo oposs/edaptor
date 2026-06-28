@@ -380,6 +380,24 @@ impl UiState {
                 out.error = true;
             }
             WriteOutcome::Ignored => out.changed = false,
+            WriteOutcome::CombinedSaved {
+                reread_dn,
+                quit_after,
+            } => {
+                // A combined membership save completed; treat exactly like Saved:
+                // re-read the user entry (or navigate to a pending guard target).
+                self.status = "Saved.".to_string();
+                if quit_after {
+                    out.quit = true;
+                    return out;
+                }
+                let (dn, profile_ocs) = self.pending_nav.take().unwrap_or((reread_dn, Vec::new()));
+                self.reread(&dn, &profile_ocs);
+            }
+            WriteOutcome::BatchProgress { .. } => {
+                // A non-final leg of a combined save landed; nothing user-visible yet.
+                out.changed = false;
+            }
             WriteOutcome::Created { dn, quit_after } => {
                 let ocs = self
                     .edit_form

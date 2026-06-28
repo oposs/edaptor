@@ -16,7 +16,8 @@ use crate::schema::SchemaModel;
 use crate::workflows::create::now_unix_secs_or_zero;
 use crate::workflows::edit_form::EditForm;
 use crate::workflows::save::{
-    compose_renamed_dn, prepare_save, stage_pending_password, PrepareSave,
+    compose_renamed_dn, prepare_save, stage_pending_password, would_empty, CombinedSave,
+    PrepareSave,
 };
 
 /// What a pending write means once its `WriteOk` arrives.
@@ -32,6 +33,15 @@ enum WriteIntent {
     },
     /// An ADD (create new entry): on success, yield [`WriteOutcome::Created`].
     Create { dn: String, quit_after: bool },
+    /// One leg of a combined membership save (own MODIFY + one MODIFY per touched
+    /// group). All legs of one save share a `batch_id`; the batch completes — and a
+    /// terminal [`WriteOutcome::CombinedSaved`] is yielded — only when the LAST
+    /// outstanding leg's `WriteOk` arrives. See [`WriteFlow::submit_combined`].
+    CombinedLeg {
+        batch_id: u64,
+        reread_dn: String,
+        quit_after: bool,
+    },
 }
 
 /// The app-facing result of correlating one write response.
@@ -52,6 +62,13 @@ pub enum WriteOutcome {
     Error(String),
     /// A new entry was successfully created (ADD).
     Created { dn: String, quit_after: bool },
+    /// A combined membership save completed: every leg (own MODIFY + each touched
+    /// group's MODIFY) landed successfully. Re-read `reread_dn` (the user entry),
+    /// exactly like [`WriteOutcome::Saved`].
+    CombinedSaved { reread_dn: String, quit_after: bool },
+    /// One non-final leg of a combined membership save landed; the batch is not yet
+    /// complete. Non-terminal — no user-visible effect until [`CombinedSaved`].
+    BatchProgress { remaining: usize },
 }
 
 /// The masked sentinel set in a password field by `CommitOutcome::StageSecret`.
@@ -63,6 +80,10 @@ pub const STAGED_PASSWORD_SENTINEL: &str = "••••••"; // 6 × U+2022 
 pub struct WriteFlow {
     next_id: u64,
     pending: HashMap<u64, WriteIntent>,
+    /// Outstanding-leg count per combined-save batch, keyed by `batch_id` (the
+    /// first leg id allocated for that save). Decremented as each leg's `WriteOk`
+    /// lands; removed when it reaches zero (→ `CombinedSaved`) or on any leg error.
+    batches: HashMap<u64, usize>,
 }
 
 impl Default for WriteFlow {
@@ -78,6 +99,7 @@ impl WriteFlow {
         WriteFlow {
             next_id: 1_000_000,
             pending: HashMap::new(),
+            batches: HashMap::new(),
         }
     }
 
@@ -256,6 +278,95 @@ impl WriteFlow {
         Ok(())
     }
 
+    /// Submit a combined membership save: the own-entry MODIFY (when `own_mods` is
+    /// non-empty) plus one MODIFY per touched group. All legs are tracked under one
+    /// batch so [`on_response`](Self::on_response) can report
+    /// [`WriteOutcome::CombinedSaved`] only once every leg's `WriteOk` has landed.
+    ///
+    /// **Last-member pre-validation (before any submit):** for every group from
+    /// which the user is being removed (`ModOp::Delete`), check
+    /// [`would_empty`](crate::workflows::save::would_empty) against that group's
+    /// current member DNs in `group_members`. If any removal would leave a
+    /// `groupOfNames` empty, this returns `Err(msg)` (naming the group) having
+    /// submitted **nothing** — the check is purely on the passed-in data, so a
+    /// partial batch can never be submitted and then found invalid. Adds never
+    /// trigger this. A group missing from `group_members` is treated as having no
+    /// known members (conservative: `would_empty` returns false on an empty slice,
+    /// so we do not block on data we were not given).
+    ///
+    /// `batch_id` is the first leg's allocated id — deterministic, no clock/random.
+    pub fn submit_combined(
+        &mut self,
+        worker: &WorkerHandle,
+        combined: CombinedSave,
+        group_members: &std::collections::HashMap<String, Vec<String>>,
+        reread_dn: &str,
+        quit_after: bool,
+    ) -> std::result::Result<(), String> {
+        let CombinedSave {
+            own_dn,
+            own_mods,
+            fanout,
+            ..
+        } = combined;
+
+        // 1. Pre-validate ALL removals before submitting a single leg.
+        for (group_dn, op) in &fanout {
+            if let ModOp::Delete { .. } = op {
+                let current = group_members
+                    .get(group_dn)
+                    .map(Vec::as_slice)
+                    .unwrap_or(&[]);
+                if would_empty(current, &own_dn) {
+                    return Err(format!(
+                        "Refusing to save: removing {own_dn} from {group_dn} would leave the \
+                         group with no members (groupOfNames requires at least one member). \
+                         Add another member to the group first, or delete the group."
+                    ));
+                }
+            }
+        }
+
+        // 2. Assemble the legs: own entry first (if any own changes), then groups.
+        let mut legs: Vec<(String, Vec<ModOp>)> = Vec::new();
+        if !own_mods.is_empty() {
+            legs.push((own_dn, own_mods));
+        }
+        for (group_dn, op) in fanout {
+            legs.push((group_dn, vec![op]));
+        }
+        // Nothing to do (no own changes, no membership changes): a no-op success.
+        if legs.is_empty() {
+            return Ok(());
+        }
+
+        // 3. Allocate ids; the first leg id is the deterministic batch id. Register
+        //    the batch BEFORE submitting so a response can never underflow the count.
+        let count = legs.len();
+        let leg_ids: Vec<(u64, String, Vec<ModOp>)> = legs
+            .into_iter()
+            .map(|(dn, changes)| (self.alloc(), dn, changes))
+            .collect();
+        let batch_id = leg_ids[0].0;
+        self.batches.insert(batch_id, count);
+
+        // 4. Submit every leg, recording its intent under the shared batch.
+        for (id, dn, changes) in leg_ids {
+            worker
+                .submit(Request::Modify { id, dn, changes })
+                .map_err(|e| e.to_string())?;
+            self.pending.insert(
+                id,
+                WriteIntent::CombinedLeg {
+                    batch_id,
+                    reread_dn: reread_dn.to_string(),
+                    quit_after,
+                },
+            );
+        }
+        Ok(())
+    }
+
     /// Submit the deferred modifications of a rename's second leg.
     pub fn submit_followup(
         &mut self,
@@ -303,15 +414,46 @@ impl WriteFlow {
                 Some(WriteIntent::Create { dn, quit_after }) => {
                     WriteOutcome::Created { dn, quit_after }
                 }
+                Some(WriteIntent::CombinedLeg {
+                    batch_id,
+                    reread_dn,
+                    quit_after,
+                }) => match self.batches.get_mut(&batch_id) {
+                    Some(remaining) => {
+                        *remaining = remaining.saturating_sub(1);
+                        if *remaining == 0 {
+                            self.batches.remove(&batch_id);
+                            WriteOutcome::CombinedSaved {
+                                reread_dn,
+                                quit_after,
+                            }
+                        } else {
+                            WriteOutcome::BatchProgress {
+                                remaining: *remaining,
+                            }
+                        }
+                    }
+                    // Batch already resolved (completed earlier, or aborted by a
+                    // sibling leg's error): a late/extra WriteOk is not ours to act on.
+                    None => WriteOutcome::Ignored,
+                },
                 None => WriteOutcome::Ignored,
             },
-            Response::WriteError { id, msg } => {
-                if self.pending.remove(id).is_some() {
-                    WriteOutcome::Error(msg.clone())
-                } else {
-                    WriteOutcome::Ignored
+            Response::WriteError { id, msg } => match self.pending.remove(id) {
+                // A combined leg failed: abort the batch (drop its counter so any
+                // sibling WriteOks become Ignored) and surface that the membership
+                // change is only PARTIALLY applied — earlier legs may have landed.
+                Some(WriteIntent::CombinedLeg { batch_id, .. }) => {
+                    self.batches.remove(&batch_id);
+                    WriteOutcome::Error(format!(
+                        "Membership change only partially applied: one entry failed ({msg}). \
+                         Other entries in the same save may already have been modified — \
+                         review membership before retrying."
+                    ))
                 }
-            }
+                Some(_) => WriteOutcome::Error(msg.clone()),
+                None => WriteOutcome::Ignored,
+            },
             _ => WriteOutcome::Ignored,
         }
     }
@@ -662,6 +804,212 @@ mod tests {
             )),
             "userPassword must not appear in the plan when no widget matches; mods={mods:?}"
         );
+    }
+
+    // --- submit_combined (multi-entry membership write) -------------------
+
+    fn combined_with(own_mods: Vec<ModOp>, fanout: Vec<(String, ModOp)>) -> CombinedSave {
+        CombinedSave {
+            own_dn: "uid=ann,ou=people,dc=x".into(),
+            own_mods,
+            fanout,
+            ldif: String::new(),
+        }
+    }
+
+    fn add_op(group: &str) -> (String, ModOp) {
+        (
+            group.into(),
+            ModOp::Add {
+                attr: "member".into(),
+                values: vec!["uid=ann,ou=people,dc=x".into()],
+            },
+        )
+    }
+
+    fn del_op(group: &str) -> (String, ModOp) {
+        (
+            group.into(),
+            ModOp::Delete {
+                attr: "member".into(),
+                values: vec!["uid=ann,ou=people,dc=x".into()],
+            },
+        )
+    }
+
+    /// own MODIFY + one Add group + one Delete group → three distinct Modify legs,
+    /// all recorded in `pending` and `batches`.
+    #[test]
+    fn submit_combined_submits_all_legs_with_distinct_ids() {
+        let mut wf = WriteFlow::new();
+        let (worker, rx) = WorkerHandle::recording();
+        let combined = combined_with(
+            vec![ModOp::Replace {
+                attr: "description".into(),
+                values: vec!["new".into()],
+            }],
+            vec![
+                add_op("cn=g2,ou=groups,dc=x"),
+                del_op("cn=g1,ou=groups,dc=x"),
+            ],
+        );
+        // g1 has two members → removing ann does not empty it.
+        let mut members: HashMap<String, Vec<String>> = HashMap::new();
+        members.insert(
+            "cn=g1,ou=groups,dc=x".into(),
+            vec![
+                "uid=ann,ou=people,dc=x".into(),
+                "uid=bob,ou=people,dc=x".into(),
+            ],
+        );
+
+        wf.submit_combined(&worker, combined, &members, "uid=ann,ou=people,dc=x", false)
+            .expect("valid combined save submits");
+
+        // Drain the recorded requests: three Modifys with distinct ids.
+        let mut ids = Vec::new();
+        let mut leg_dns = Vec::new();
+        while let Ok((req, _)) = rx.try_recv() {
+            match req {
+                Request::Modify { id, dn, .. } => {
+                    ids.push(id);
+                    leg_dns.push(dn);
+                }
+                _ => panic!("expected only Request::Modify legs"),
+            }
+        }
+        assert_eq!(ids.len(), 3, "own + 2 group legs submitted");
+        let distinct: std::collections::HashSet<u64> = ids.iter().copied().collect();
+        assert_eq!(distinct.len(), 3, "every leg id must be distinct: {ids:?}");
+        assert!(leg_dns.contains(&"uid=ann,ou=people,dc=x".to_string()));
+        assert!(leg_dns.contains(&"cn=g2,ou=groups,dc=x".to_string()));
+        assert!(leg_dns.contains(&"cn=g1,ou=groups,dc=x".to_string()));
+        // Bookkeeping: three pending legs, one batch counting all three.
+        assert_eq!(wf.pending.len(), 3);
+        assert_eq!(wf.batches.len(), 1);
+        assert_eq!(*wf.batches.values().next().unwrap(), 3);
+    }
+
+    /// A Delete that would empty a groupOfNames aborts with Err and submits NOTHING.
+    #[test]
+    fn submit_combined_last_member_aborts_with_nothing_submitted() {
+        let mut wf = WriteFlow::new();
+        let (worker, rx) = WorkerHandle::recording();
+        let combined = combined_with(
+            vec![ModOp::Replace {
+                attr: "description".into(),
+                values: vec!["new".into()],
+            }],
+            vec![
+                add_op("cn=g2,ou=groups,dc=x"),
+                del_op("cn=g1,ou=groups,dc=x"),
+            ],
+        );
+        // g1's sole member is ann → removing her empties the group.
+        let mut members: HashMap<String, Vec<String>> = HashMap::new();
+        members.insert(
+            "cn=g1,ou=groups,dc=x".into(),
+            vec!["uid=ann,ou=people,dc=x".into()],
+        );
+
+        let err = wf
+            .submit_combined(&worker, combined, &members, "uid=ann,ou=people,dc=x", false)
+            .expect_err("last-member removal must abort");
+        assert!(
+            err.contains("cn=g1,ou=groups,dc=x"),
+            "error names the offending group: {err}"
+        );
+        // Nothing submitted, nothing tracked.
+        assert!(rx.try_recv().is_err(), "no request may be submitted");
+        assert!(wf.pending.is_empty(), "no pending legs");
+        assert!(wf.batches.is_empty(), "no batch registered");
+    }
+
+    /// The batch yields `CombinedSaved` only after the LAST leg's `WriteOk`.
+    #[test]
+    fn combined_batch_completes_only_on_last_leg() {
+        let mut wf = WriteFlow::new();
+        let batch_id = 1000;
+        wf.batches.insert(batch_id, 2);
+        for id in [1000u64, 1001] {
+            wf.pending.insert(
+                id,
+                WriteIntent::CombinedLeg {
+                    batch_id,
+                    reread_dn: "uid=ann,ou=people,dc=x".into(),
+                    quit_after: false,
+                },
+            );
+        }
+        // First leg → non-terminal BatchProgress.
+        match wf.on_response(&Response::WriteOk {
+            id: 1000,
+            dn: "uid=ann,ou=people,dc=x".into(),
+        }) {
+            WriteOutcome::BatchProgress { remaining } => assert_eq!(remaining, 1),
+            other => panic!("expected BatchProgress, got {other:?}"),
+        }
+        // Last leg → terminal CombinedSaved.
+        match wf.on_response(&Response::WriteOk {
+            id: 1001,
+            dn: "cn=g1,ou=groups,dc=x".into(),
+        }) {
+            WriteOutcome::CombinedSaved {
+                reread_dn,
+                quit_after,
+            } => {
+                assert_eq!(reread_dn, "uid=ann,ou=people,dc=x");
+                assert!(!quit_after);
+            }
+            other => panic!("expected CombinedSaved, got {other:?}"),
+        }
+        assert!(wf.pending.is_empty());
+        assert!(wf.batches.is_empty());
+    }
+
+    /// A `WriteError` on any leg aborts the batch with a partial-application Error,
+    /// and a subsequent sibling `WriteOk` is then Ignored (never CombinedSaved).
+    #[test]
+    fn combined_leg_error_reports_partial_and_aborts_batch() {
+        let mut wf = WriteFlow::new();
+        let batch_id = 2000;
+        wf.batches.insert(batch_id, 2);
+        for id in [2000u64, 2001] {
+            wf.pending.insert(
+                id,
+                WriteIntent::CombinedLeg {
+                    batch_id,
+                    reread_dn: "uid=ann,ou=people,dc=x".into(),
+                    quit_after: false,
+                },
+            );
+        }
+        match wf.on_response(&Response::WriteError {
+            id: 2000,
+            msg: "constraint violation".into(),
+        }) {
+            WriteOutcome::Error(m) => {
+                assert!(
+                    m.contains("constraint violation"),
+                    "carries server msg: {m}"
+                );
+                assert!(
+                    m.to_lowercase().contains("partial"),
+                    "signals partial application: {m}"
+                );
+            }
+            other => panic!("expected Error, got {other:?}"),
+        }
+        assert!(wf.batches.is_empty(), "batch aborted on error");
+        // A sibling leg's late success must NOT complete the (gone) batch.
+        match wf.on_response(&Response::WriteOk {
+            id: 2001,
+            dn: "cn=g1,ou=groups,dc=x".into(),
+        }) {
+            WriteOutcome::Ignored => {}
+            other => panic!("expected Ignored after batch abort, got {other:?}"),
+        }
+        assert!(wf.pending.is_empty());
     }
 
     #[test]

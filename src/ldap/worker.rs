@@ -298,6 +298,27 @@ impl Drop for WorkerHandle {
     }
 }
 
+#[cfg(test)]
+impl WorkerHandle {
+    /// Test-only handle backed by fresh channels (no live connection). Requests
+    /// fired via [`submit`](Self::submit) are delivered to the returned receiver so
+    /// a test can record exactly what was sent; the response channel is unused.
+    /// Used by `workflows::write_flow` tests to assert multi-leg submissions.
+    pub(crate) fn recording() -> (WorkerHandle, Receiver<(Request, Sender<Response>)>) {
+        let (tx, rx) = mpsc::channel();
+        let (resp_tx, resp_rx) = mpsc::channel();
+        (
+            WorkerHandle {
+                tx,
+                resp_tx,
+                resp_rx,
+                join: None,
+            },
+            rx,
+        )
+    }
+}
+
 fn connect_and_bind(config: &Config, password: &str) -> Result<LdapConn> {
     let settings = build_settings(&config.server)?;
     let mut conn = LdapConn::with_settings(settings, &config.server.uri)

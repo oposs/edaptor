@@ -8,6 +8,14 @@ All notable changes to eDAPtor are documented here. The format follows
 
 ### New
 
+- **tvision UI (membership writes, plumbing):** the write flow can now perform a
+  combined membership save — the user's own MODIFY plus one MODIFY per touched
+  group — correlated as a single batch that reports success only once every leg
+  has landed. A last-member safeguard pre-validates every group removal *before*
+  anything is submitted: if removing the user would leave a `groupOfNames` empty,
+  the whole save is refused (nothing is written) with an error naming the group.
+  Wiring this into the editor follows in a later step.
+
 - **tvision UI:** picker widget with live LDAP search. A `picker`-bound field
   (e.g. `gidNumber`, `member`, `memberUid`) opens a modal with a search box over
   a candidate list that refreshes as you type (server-side capped at 100).
