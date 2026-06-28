@@ -4,28 +4,56 @@ Carries the **current concerns** into the next session. Not a project history �
 for that see git log, the specs under `docs/superpowers/specs/`, the SDD ledger
 (`.superpowers/sdd/progress.md`), and project memory (`…/memory/MEMORY.md`).
 
-**Date:** 2026-06-28 · **Where we are: the tvision-rs UI migration is mid-flight.
-M1 (read core) and M2 (edit + write spine) are COMPLETE, reviewed, and
-LIVE-ACCEPTED. edaptor depends on the released `tvision-rs` 0.3.0 (no pin) and the
-main window runs frameless full-screen (`Fullscreen::Desktop`). M3 was split into
-Phase 1 (stabilize) + Phase 2 (the M3 core); Phase 2 was further split into
-2a (objectClass widget + live resync) + 2b (create flow). **M3 Phase 1, Phase 2a,
-and Phase 2b are ALL COMPLETE and LIVE-ACCEPTED — the entire M3 milestone is done,
-and the password widget (an M4 item) was pulled forward into 2b.** Phase 2b ran
-subagent-driven (18 TDD tasks across blocks A/B/C, each reviewed clean), multiple
-fix passes, a whole-branch review (COMPLETE & SOUND with fixes applied), and a full
-live tmux acceptance. **M4 (the remaining rich widgets) is next.**
+**Date:** 2026-06-28 · **Where we are: the tvision-rs UI migration — M1 through M4
+are COMPLETE, reviewed, and (M1–M3) LIVE-ACCEPTED.** edaptor depends on the
+released `tvision-rs` 0.3.0 (no pin); the main window runs frameless full-screen
+(`Fullscreen::Desktop`). **M4 (the remaining rich widgets) is DONE** — 19
+subagent-driven TDD tasks across 5 parts, each reviewed clean (5 review-fix
+passes), full gate green (637 lib tests + all gated live tests, clippy `-D
+warnings` + `fmt --check` clean, both facade guards clean). M4 delivered the
+free-text multi-value editor, choice, picker (live LDAP search), the two-column
+membership mover with the multi-entry fan-out write, and sambaSID immediate
+auto-gen. **M5 (startup flow + cutover) is the only milestone left.**
 
-> **▶ NEXT ACTION — start M4 (remaining rich widgets).** Phase 2b landed on
-> `feat/tvision-ui` @ `772b8b9` (554 lib tests, clippy/fmt clean, `make check`
-> green, both facade guards clean). The password widget already shipped in 2b, so
-> M4 = **choice / picker / membership / free-text multi-value editor** — each a
-> `FieldWidget` impl reusing the 2a/2b modal seam, registered via `widget_for`'s
-> `widget_binding` dispatch, with NO form-core changes. Picker/membership add live
-> LDAP search via the worker + a new flow (mirror `AllocFlow`/`read_flow`). Start
-> with its own brainstorming → writing-plans cycle. Spec+plan for 2b:
-> [`specs/2026-06-28-tvision-m3-phase2b-create-flow-design.md`](superpowers/specs/2026-06-28-tvision-m3-phase2b-create-flow-design.md),
-> [`plans/2026-06-28-tvision-m3-phase2b-create-flow.md`](superpowers/plans/2026-06-28-tvision-m3-phase2b-create-flow.md).
+> **▶ NEXT ACTION — start M5 (startup flow + cutover).** M4 landed on
+> `feat/tvision-ui` @ `a08008d` (+ doc commit `daa3ae8`). Per umbrella §6 M5:
+> config-discovery / config-picker as a tvision `Dialog` before `run_app`; final
+> polish (status-line/menu wiring, mouse); **cutover** — point `main.rs` at the
+> tvision UI, rename `src/tui/` → `src/ui/`, delete the old ratatui `src/ui` tree
+> + the `edaptor-tv` dev binary + spike artifacts, drop the `ratatui`/`tui-*` deps.
+> Start with its own brainstorming → writing-plans cycle. M4 spec+plan:
+> [`specs/2026-06-28-tvision-m4-rich-widgets-design.md`](superpowers/specs/2026-06-28-tvision-m4-rich-widgets-design.md),
+> [`plans/2026-06-28-tvision-m4-rich-widgets.md`](superpowers/plans/2026-06-28-tvision-m4-rich-widgets.md).
+>
+> _M4 load-bearing facts / divergences (for M5):_
+> - **`Activation::Immediate` was NOT added** (the M4 spec/plan proposed it for
+>   sambaSID). It would be never-constructed `dead_code` (the widget's
+>   `activate(&field)` can't see the sibling `uidNumber`/samba ctx), failing clippy
+>   `-D warnings`. sambaSID is a **dispatch special-case** in `app.rs` ACTIVATE
+>   calling neutral `workflows::samba_compute::samba_sid_for_form`. `Activation`
+>   stays `{Inline, Modal}`.
+> - **M4 dialog key convention:** the search-as-you-type pickers free **Space**
+>   (types into the search box) and **Enter** (confirms OK); the list action is
+>   **Insert** (picker toggle; membership move-in, also `→`). Choice toggles on
+>   Space (no search box). Keep this consistent for any M5 dialogs.
+> - **Intentional parity copies** (dedup at M5 cutover, do NOT "fix"):
+>   `workflows::pick_state` ⟵ `ui::picker`; `workflows::save::plan_combined_save`
+>   ⟵ `ui::app::save`; plus the pre-existing `edit_form`/`write_flow` copies.
+> - **Combined membership save caller contract (LOCKED, doc-comment on
+>   `plan_combined_save` + test `prepare_combined_no_pending_password_keeps_baseline_hash`):**
+>   callers MUST pass the password primary+derived in `mask_attrs`
+>   **unconditionally**, else a baseline password hash diffs to a spurious Delete.
+>   `prepare_combined` (write_flow) honors this.
+> - **Last-member pre-validation is best-effort in M4:** `submit_combined` is
+>   passed an EMPTY `group_members` map from the dispatch (no async group-member
+>   fetch), so `would_empty` never blocks; the **LDAP server enforces** the
+>   `groupOfNames` ≥1 rule (surfaced as `WriteOutcome::Error`). Full client-side
+>   pre-validation is an M5 item.
+> - **`SearchFlow`** (`workflows/search_flow.rs`) id range **3_000_000+**
+>   (disjoint from Read=1, Write=1M, Alloc=2M); latest-id debounce; reuses
+>   `pick_state::build_member_filter`. `UiState::submit_search` does the disjoint
+>   `worker`+`search_flow` borrow; results land in `UiState.search_results` and
+>   the dialog rebuilds on the `REFRESH` broadcast.
 >
 > _M3 load-bearing facts (so the next session doesn't rediscover them):_
 > - **`reset_current` is THE modal-open init hook** in tvision-rs 0.3.0
@@ -51,11 +79,10 @@ live tmux acceptance. **M4 (the remaining rich widgets) is next.**
 >   create (do_create) and edit (WriteFlow::prepare) and must NEVER reach the server.
 > - The objectClass **field's values are authoritative** for `sync_schema_fields`;
 >   `EditForm.object_classes` is a mirror kept by `apply_commit` for the save path.
-> - **Deferred (out of M3, for M4/later):** the `samba_enabled` flag is hard-`false`
->   at both `WidgetResolver::new` sites (UiState has no samba context) — wire it from
->   config when the SambaSid auto-gen widget lands. `apply_widget_bindings` sets
->   `widget_binding=Some(XOrdered)` but not the ratatui `ordered=true` side-effect —
->   port that when the X-ORDERED multi-value editor lands.
+> - **RESOLVED in M4:** `UiState.samba_domain` is now threaded from config and both
+>   `WidgetResolver::new` sites pass `samba_domain.is_some()` for `samba_enabled`
+>   (live `sambaDomain` LDAP discovery is still deferred to M5). `apply_widget_bindings`
+>   now sets `field.ordered=true` for `XOrdered` bindings (order-sensitive dirty).
 >
 > _Closed P1 items, for the record:_
 > 1. ✅ **RESOLVED — bottom `░` strip (`bc64274`).** Root cause (verified vs
