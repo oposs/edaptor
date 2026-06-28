@@ -269,6 +269,19 @@ fn open_create(state: &Shared, profile_idx: usize, container: &str) {
             f.values = vec![crate::tui::state::ALLOC_PLACEHOLDER.to_string()];
         }
     }
+    // Apply profile-driven widget bindings (Password / Choice / Picker / …) before
+    // installing the form. The borrow is released before the mut-borrow below.
+    {
+        let st = state.borrow();
+        let ocs = form.object_classes.clone();
+        let resolver = crate::config::resolver::WidgetResolver::new(
+            st.read_flow.schema(),
+            &st.profiles,
+            &st.resolved_widgets,
+            st.read_only,
+        );
+        crate::workflows::widget_bind::apply_widget_bindings(&mut form, &resolver, &ocs);
+    }
     let mut st = state.borrow_mut();
     st.edit_form = Some(form);
     st.form_needs_render = true;

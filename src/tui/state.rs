@@ -94,6 +94,10 @@ pub struct UiState {
     /// True when the LDAP connection is encrypted (LDAPS, StartTLS, or ldapi://).
     /// The password widget refuses to operate when this is false.
     pub connection_encrypted: bool,
+    /// Pre-resolved `[profile.widget.*]` bindings; built once in `bootstrap` via
+    /// `config::widget::resolve_widgets` and used by `apply_widget_bindings` every
+    /// time a form is opened.
+    pub resolved_widgets: Vec<crate::config::widget::ResolvedWidget>,
 }
 
 impl UiState {
@@ -141,6 +145,7 @@ impl UiState {
             staged_commit: None,
             chosen_profile: None,
             connection_encrypted: false,
+            resolved_widgets: Vec::new(),
         }
     }
 }
@@ -166,6 +171,20 @@ impl UiState {
                 } => {
                     let mut form = build_edit_form(&model, self.read_flow.schema(), self.read_only);
                     form.object_classes = object_classes;
+                    {
+                        // Build a resolver from &self fields (disjoint from the local
+                        // `form`); apply profile-driven bindings before installing.
+                        let ocs = form.object_classes.clone();
+                        let resolver = crate::config::resolver::WidgetResolver::new(
+                            self.read_flow.schema(),
+                            &self.profiles,
+                            &self.resolved_widgets,
+                            self.read_only,
+                        );
+                        crate::workflows::widget_bind::apply_widget_bindings(
+                            &mut form, &resolver, &ocs,
+                        );
+                    }
                     self.edit_form = Some(form);
                     self.form_needs_render = true;
                     out.changed = true;
@@ -480,6 +499,8 @@ pub(crate) fn bootstrap(config: Config, password: String) -> Result<UiState> {
     use crate::workflows::labels::{label_rules, structure_inputs, structure_scan_attrs};
     let base_dn = config.server.base_dn.clone();
     let profiles = config.profiles.clone();
+    let resolved_widgets = crate::config::widget::resolve_widgets(&profiles)
+        .map_err(|e| anyhow!("widget config error: {e}"))?;
     let label_rules = label_rules(&profiles);
     let tree_rules = crate::config::tree_label::compile_tree_rules(&config.tree);
     // Fetch the attributes the label/tree templates reference, so labels render.
@@ -535,6 +556,7 @@ pub(crate) fn bootstrap(config: Config, password: String) -> Result<UiState> {
         staged_commit: None,
         chosen_profile: None,
         connection_encrypted,
+        resolved_widgets,
     })
 }
 
