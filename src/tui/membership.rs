@@ -11,14 +11,16 @@
 //! - **Members** (right): a `ListBox` of the staged member DN set, seeded from
 //!   `field.values` (the user's current memberships / baseline).
 //!
-//! Move keys: **Enter / →** move the highlighted Available row into Members
+//! Move keys: **Insert / →** move the highlighted Available row into Members
 //! (de-dup by DN, case-insensitive; no-op if already a member); **Delete / ←**
 //! remove the highlighted Members row. **Tab** flips which column the Up/Down keys
 //! navigate. **Space is intentionally NOT intercepted** so it types into the
 //! search box (multi-word queries). The staged set is mirrored into
 //! `staged_commit` as `SetValues(member_dns)` after every move; OK applies it,
-//! Cancel discards it. Commit the dialog with the OK button's `Alt+O` accelerator
-//! (Enter is reserved for the move action); Esc cancels.
+//! Cancel discards it. Commit the dialog with **Enter** (the default OK button)
+//! or the `Alt+O` accelerator; Esc cancels. Enter is NOT consumed by the custom
+//! handler — it falls through to `dlg.handle_event` so it fires the default button,
+//! exactly like `picker.rs` / `oc_picker.rs`.
 //!
 //! This task stages only — the fan-out fan-out write (one MODIFY per group) is
 //! produced from the diff against baseline by the combined-save path (a later
@@ -401,8 +403,9 @@ impl View for MembershipDialog {
             return;
         }
 
-        // Move keys. Space is NOT intercepted here so it reaches the search box.
-        let move_in = matches!(ev, Event::KeyDown(k) if matches!(k.key, Key::Enter | Key::Right));
+        // Move keys. Space and Enter are NOT intercepted here so they reach the
+        // search box and the dialog's default OK button respectively.
+        let move_in = matches!(ev, Event::KeyDown(k) if matches!(k.key, Key::Insert | Key::Right));
         let move_out = matches!(ev, Event::KeyDown(k) if matches!(k.key, Key::Delete | Key::Left));
         let toggle_focus = matches!(ev, Event::KeyDown(k) if k.key == Key::Tab);
         let nav = matches!(
@@ -635,9 +638,43 @@ mod tests {
             .and_then(|a| a.downcast_mut::<MembershipDialog>())
             .expect("downcast");
 
-        // Highlight g1 (already a member, index 0 in Available) and press Enter.
+        // Highlight g1 (already a member, index 0 in Available) and press Insert.
         if let Some(list) = dlg.dlg.child_mut(dlg.avail_id) {
             list.set_value_ctx(FieldValue::Int(0), &mut ctx);
+        }
+        let mut ev = Event::KeyDown(KeyEvent::from(Key::Insert));
+        dlg.handle_event(&mut ev, &mut ctx);
+
+        assert_eq!(
+            staged_set(&shared),
+            vec![G1.to_string()],
+            "moving an existing member must not duplicate it"
+        );
+    }
+
+    /// Enter must NOT move a row — it is reserved for the dialog's default OK
+    /// button (mirrors `space_does_not_move_a_row`; guards against the M4 parity
+    /// regression where Enter was consumed by the custom handler).
+    #[test]
+    fn enter_does_not_move_a_row() {
+        let shared = test_shared();
+        shared.borrow_mut().search_results = vec![cand(G1), cand(G2)];
+
+        let mut view = build_dialog(&shared, &[G1]);
+        let mut out = std::collections::VecDeque::new();
+        let mut timers = TimerQueue::new();
+        let mut deferred = Vec::new();
+        let mut ctx = headless_ctx(&mut out, &mut timers, &mut deferred);
+        view.reset_current(&mut ctx);
+
+        let dlg = view
+            .as_any_mut()
+            .and_then(|a| a.downcast_mut::<MembershipDialog>())
+            .expect("downcast");
+
+        // Highlight g2 in Available, press Enter — must NOT move it into Members.
+        if let Some(list) = dlg.dlg.child_mut(dlg.avail_id) {
+            list.set_value_ctx(FieldValue::Int(1), &mut ctx);
         }
         let mut ev = Event::KeyDown(KeyEvent::from(Key::Enter));
         dlg.handle_event(&mut ev, &mut ctx);
@@ -645,7 +682,7 @@ mod tests {
         assert_eq!(
             staged_set(&shared),
             vec![G1.to_string()],
-            "moving an existing member must not duplicate it"
+            "Enter must not move a candidate — it is reserved for the default OK button"
         );
     }
 
