@@ -11,6 +11,7 @@ pub mod edit_form;
 pub mod form_model;
 pub mod labels;
 pub mod read_flow;
+pub mod samba_compute;
 pub mod save;
 pub mod structure;
 pub mod widget_bind;
