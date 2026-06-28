@@ -8,6 +8,13 @@ All notable changes to eDAPtor are documented here. The format follows
 
 ### New
 
+- **The TUI is now Turbo-Vision–based.** The user interface was migrated from
+  ratatui to [tvision-rs](https://github.com/oetiker/tvision-rs): a frameless
+  full-screen three-pane browser/editor with modal rich-field editors. The old
+  ratatui implementation and the transitional `edaptor-tv` dev binary were
+  removed, along with the `ratatui` / `tui-tree-widget` / `tui-prompts` /
+  `crossterm` dependencies.
+
 - **tvision UI: config picker at startup.** When more than one config is
   discovered in `~/.config/edaptor/` or `/etc/edaptor/`, a Turbo-Vision
   "Select configuration" dialog now lists them (name + description + path) so

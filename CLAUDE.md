@@ -1,6 +1,6 @@
 # eDAPtor — working agreement for agents
 
-A schema-driven TUI LDAP editor (Rust + ratatui). Read this before touching the repo.
+A schema-driven TUI LDAP editor (Rust + tvision-rs). Read this before touching the repo.
 
 ## At the start of every session: pull first
 

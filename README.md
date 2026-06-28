@@ -2,7 +2,7 @@
 
 *The TUI LDAP editor* — a terminal UI for administering an OpenLDAP directory —
 adding, modifying and removing **users** and **groups**, and managing **group
-memberships** — built in Rust with [ratatui](https://ratatui.rs/).
+memberships** — built in Rust with [tvision-rs](https://github.com/oetiker/tvision-rs).
 
 > The name is **e**ditor and L**DAP**, creatively merged.
 
@@ -23,7 +23,7 @@ overlays, and the Samba schema).
 
 ## Status
 
-**Working.** The core milestones are implemented on a three-pane ratatui
+**Working.** The core milestones are implemented on a three-pane tvision-rs
 interface: schema-driven create/edit/rename/delete, defaults and auto-numbering,
 inline passwords with the Samba lifecycle, unified candidate pickers, and
 symmetric membership editing. See the [documentation](https://oposs.github.io/edaptor)

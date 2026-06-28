@@ -1,6 +1,6 @@
 //! Pure structure/label helpers: compile per-profile label rules, render node
 //! labels, compute the pane-2 leaf rows, and map raw LDAP nodes into
-//! StructureInputs. No tui_tree_widget dependency — UI-agnostic.
+//! StructureInputs. UI-agnostic.
 
 use std::collections::BTreeMap;
 

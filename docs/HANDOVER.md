@@ -4,78 +4,41 @@ Carries the **current concerns** into the next session. Not a project history �
 for that see git log, the specs under `docs/superpowers/specs/`, the SDD ledger
 (`.superpowers/sdd/progress.md`), and project memory (`…/memory/MEMORY.md`).
 
-**Date:** 2026-06-28 · **Where we are: the tvision-rs UI migration — M1 through M4
-are COMPLETE, reviewed, and (M1–M3) LIVE-ACCEPTED.** edaptor depends on the
-released `tvision-rs` 0.3.0 (no pin); the main window runs frameless full-screen
-(`Fullscreen::Desktop`). **M4 (the remaining rich widgets) is DONE** — 19
-subagent-driven TDD tasks across 5 parts, each reviewed clean (5 review-fix
-passes), full gate green (637 lib tests + all gated live tests, clippy `-D
-warnings` + `fmt --check` clean, both facade guards clean). M4 delivered the
-free-text multi-value editor, choice, picker (live LDAP search), the two-column
-membership mover with the multi-entry fan-out write, and sambaSID immediate
-auto-gen. **M5 was split: M5a (startup flow, DONE) → M5b (cutover) → M5c (the
-three reconciliations). M5a is DONE; M5b's spec + plan are WRITTEN and committed,
-ready to execute — but NOT yet run (the tree is still dual-UI right now).**
+**Date:** 2026-06-29 · **Where we are: the tvision-rs UI migration is COMPLETE
+through M5b.** M1–M5b are DONE and committed on `feat/tvision-ui`. edaptor
+depends on released `tvision-rs` 0.3.0 (no pin); the main window runs frameless
+full-screen (`Fullscreen::Desktop`). **M5b (the cutover) is DONE** — the ratatui
+UI (`src/ui/`, ~9.4k LOC), the `edaptor-tv` dev binary, and the
+`ratatui`/`tui-tree-widget`/`tui-prompts`/`crossterm` deps are deleted; `src/tui/`
+was renamed to `src/ui/`; `crate::tui` → `crate::ui`. The `edaptor` binary now
+runs the tvision UI end-to-end. Gate green: 499 lib tests, clippy `-D warnings` +
+`fmt --check` clean, both facade guards empty, gated live tests pass.
 
-> **▶ NEXT ACTION — execute the M5b cutover plan (subagent-driven).** Spec
-> [`specs/2026-06-28-tvision-m5b-cutover-design.md`](superpowers/specs/2026-06-28-tvision-m5b-cutover-design.md),
-> plan [`plans/2026-06-28-tvision-m5b-cutover.md`](superpowers/plans/2026-06-28-tvision-m5b-cutover.md)
-> committed @ `ca69c36`. **M5b is the cutover ONLY** — the three reconciliations
-> were split out to M5c (below). 4 staged, compiler-guided tasks, each green +
-> bisectable: (1) rewire `main.rs` → `tui::run` + `tui::startup::resolve_config_path`
-> (the ratatui tree goes dead-but-compiling); (2) `git rm -r src/ui` (ratatui,
-> ~9.4k LOC) + delete `edaptor-tv` + drop `ratatui`/`tui-tree-widget`/`tui-prompts`/
-> `crossterm` from `Cargo.toml`; (3) `git mv src/tui` → `src/ui` + `crate::tui`→
-> `crate::ui` / `edaptor::tui`→`edaptor::ui`; (4) rewrite facade guards (tvision
-> only under `src/ui`; zero `ratatui`/`tui_*` anywhere) + docs (CLAUDE/README/
-> CHANGES/HANDOVER/mdBook) + gated-live + live tmux acceptance of the real
-> `edaptor` binary. **Refactor discipline** (no behavior change; the 644-test
-> suite is the safety net). _Recon-confirmed simplifications:_ spike artifacts
-> (`spike-tv.rs`, `spike_tv_umlaut.rs`) **already don't exist** (no-op);
-> `crossterm` is droppable (tvision pulls its own; zero direct uses outside
-> `src/ui`); the parity-copy 'dedup' is **automatic** (the neutral `workflows::*`
-> are already the sole versions — only stale "dedup at M5" doc-comments need
-> rewording); the gated `tv_*` tests don't reference the UI module (no path
-> changes). Leave `src/app.rs` (`pub mod app`, neutral) and `unicode-width`
-> (used by `config::tree_label`) alone.
+> **▶ NEXT ACTION — M5c (the three reconciliations; own brainstorm → plan →
+> implement cycle):**
 >
-> **▶ AFTER M5b — M5c (the three reconciliations; own brainstorm → plan →
-> implement cycle):** (1) **X-ORDERED editing** — the `{n}` diff/save plumbing
-> ALREADY exists in the neutral layer (`form::changeset::diff` takes an
-> `x_ordered_attrs` set; `write_flow.rs:145` builds + passes it), so M5c is the
-> tvision **display** side only: a `widget_for` `XOrdered` arm → an ordered
-> multivalue editor that strips `{n}` on display and reconstructs it from row order
-> on commit. (2) **schema-aware last-member pre-validation** — block last-member
-> removal ONLY when the membership attr is MUST (`groupOfNames`/`groupOfUniqueNames`);
+> **(1) X-ORDERED editing** — the `{n}` diff/save plumbing ALREADY exists in the
+> neutral layer (`form::changeset::diff` takes an `x_ordered_attrs` set;
+> `write_flow.rs:145` builds + passes it), so M5c is the tvision **display** side
+> only: a `widget_for` `XOrdered` arm → an ordered multivalue editor that strips
+> `{n}` on display and reconstructs it from row order on commit.
+>
+> **(2) Schema-aware last-member pre-validation** — block last-member removal ONLY
+> when the membership attr is MUST (`groupOfNames`/`groupOfUniqueNames`);
 > `posixGroup.memberUid` is MAY so an empty posixGroup is LEGAL and must NOT be
 > blocked. Needs a live group-member fetch before the confirm dialog (today
-> `submit_combined` gets an EMPTY map → never blocks; server enforces). (3) **live
-> `sambaDomain` LDAP discovery** — port `ui::app::discover_samba_domain`
-> (`src/ui/app/mod.rs:140`, ratatui) into `tui::state::bootstrap`: search
-> `(objectClass=sambaDomain)`, parse `sambaSID` via the existing
-> `samba::sid::parse_samba_domain`. M5b's spec §4 deliberately leaves
-> `widgets.md`'s X-ORDERED-editable claim as-is for M5c (which makes it true again).
+> `submit_combined` gets an EMPTY map → never blocks; server enforces).
 >
-> _M5a load-bearing facts (for M5b cutover):_
-> - **Startup lives in `src/tui/startup.rs`** (renamed to `src/ui/startup.rs` at
->   cutover): `pub fn resolve_config_path(cli: Option<PathBuf>) -> Result<Option<PathBuf>>`
->   (discovery → 0 err / 1 use / many picker) is the public entry. The picker is a
->   **separate short-lived tvision `Program`** (`run_config_picker`, private) — the
->   main program is built from already-bootstrapped state, so the picker can't be a
->   modal inside it. Ordering is load-bearing: path-resolution (no connection) →
->   `Config::load` → password (`rpassword` needs a CLEAN terminal, outside any
->   tvision alt-screen) → `bootstrap` → main `Program`.
-> - **At cutover, `main.rs` adopts the flow**: replace its `ui::config_picker::pick_config`
->   block with `tui::startup::resolve_config_path` (→ `ui::startup` after rename),
->   keeping the existing `password_source.resolve()` step (the dev binary
->   `edaptor-tv` hard-codes the env password; `main.rs` keeps the real
->   env/command/`Prompt` resolution). The ratatui `src/ui/config_picker.rs` dies
->   with the rest of the ratatui tree.
-> - The picker `Dialog` is `src/tui/dialog/config_picker.rs` (ListBox + a two-line
->   read-only detail pane: description + full path; index staged into a
->   caller-owned `Rc<RefCell<Option<usize>>>`). Live-verified via tmux.
+> **(3) Live `sambaDomain` LDAP discovery** — port the former ratatui
+> `discover_samba_domain` logic into `ui::state::bootstrap`
+> (`src/ui/state/bootstrap.rs` — `src/ui/` is now the tvision tree since M5b):
+> search `(objectClass=sambaDomain)`, parse `sambaSID` via the existing
+> `samba::sid::parse_samba_domain`.
 >
-> _M4 load-bearing facts / divergences (for M5):_
+> M5b's spec §4 deliberately left `widgets.md`'s X-ORDERED-editable claim as-is;
+> M5c makes it true again.
+>
+> _M4 load-bearing facts / divergences (for M5c):_
 > - **`Activation::Immediate` was NOT added** (the M4 spec/plan proposed it for
 >   sambaSID). It would be never-constructed `dead_code` (the widget's
 >   `activate(&field)` can't see the sibling `uidNumber`/samba ctx), failing clippy
@@ -86,9 +49,10 @@ ready to execute — but NOT yet run (the tree is still dual-UI right now).**
 >   (types into the search box) and **Enter** (confirms OK); the list action is
 >   **Insert** (picker toggle; membership move-in, also `→`). Choice toggles on
 >   Space (no search box). Keep this consistent for any M5 dialogs.
-> - **Intentional parity copies** (dedup at M5 cutover, do NOT "fix"):
->   `workflows::pick_state` ⟵ `ui::picker`; `workflows::save::plan_combined_save`
->   ⟵ `ui::app::save`; plus the pre-existing `edit_form`/`write_flow` copies.
+> - **Former parity copies** (all deduped at M5b cutover — the ratatui tree is gone):
+>   `workflows::pick_state` is now the sole picker-state implementation;
+>   `workflows::save::plan_combined_save` and `workflows::edit_form` are the sole
+>   save/form models. The `write_flow` copy is likewise the only version.
 > - **Combined membership save caller contract (LOCKED, doc-comment on
 >   `plan_combined_save` + test `prepare_combined_no_pending_password_keeps_baseline_hash`):**
 >   callers MUST pass the password primary+derived in `mask_attrs`
@@ -185,21 +149,20 @@ ready to execute — but NOT yet run (the tree is still dual-UI right now).**
 live schema (`cn=subschema`) and generates edit forms from `objectClass`
 definitions; a TOML config declares connection settings plus *entry profiles* and
 a **widget palette** (`[profile.widget.<attr>]` kinds: `choice` / `password` /
-`picker` / `membership`). Two UIs coexist during the migration: the shipping
-**ratatui** UI (`src/ui/*`, ~10k LOC, the `edaptor` binary) and the new
-**tvision-rs** UI (`src/tui/*`, the `edaptor-tv` dev binary).
+`picker` / `membership`). The UI is **tvision-rs** (`src/ui/`); the `edaptor`
+binary is the sole binary. (The ratatui UI and `edaptor-tv` dev binary were
+removed at the M5b cutover.)
 
 ---
 
 ## Git topology (read before you branch)
 
-- **Branch `feat/tvision-ui`** (HEAD `3344b77`: M5a complete + reviewed) —
-  the long-lived migration branch. ALL migration work lives here. **It does NOT
-  merge to `main` until the M5b cutover** (umbrella §7) — the ratatui UI stays the
-  shipping `edaptor` binary through M1–M5a. M5a last code commit: `3344b77`
-  (M4: `a08008d`).
+- **Branch `feat/tvision-ui`** (HEAD: M5b cutover docs, closing the milestone) —
+  the long-lived migration branch. ALL tvision work lives here. M5b cutover is
+  DONE; the branch is ready to merge to `main` after M5c (or earlier if the owner
+  decides).
 - `main` is behind/unpushed (origin at v0.4.0). Pushing / CI / release are a
-  separate concern, not gated by the migration.
+  separate concern, not gated by M5c.
 - `Cargo.toml` version is `0.4.0`. Dependency: **`tvision-rs = "0.3"`** from
   crates.io (a plain release dep — no git pin, no patch; the `exec_view_focused`
   pin was dropped once 0.3.0 shipped).
@@ -213,18 +176,27 @@ Each milestone gets its own spec → plan → implement cycle.
 
 ## What's done
 
-**M5a — startup flow (DONE @ `3344b77`; final whole-branch review READY)** (spec
+**M5b — tvision cutover (DONE; closes the migration)** (spec
+`specs/2026-06-28-tvision-m5b-cutover-design.md`, plan
+`plans/2026-06-28-tvision-m5b-cutover.md`). 4 staged tasks: (1) rewired `main.rs`
+to the tvision UI; (2) deleted the ratatui tree (`src/ui/` ~9.4k LOC), `edaptor-tv`
+bin, and `ratatui`/`tui-tree-widget`/`tui-prompts`/`crossterm` deps; (3) renamed
+`src/tui/` → `src/ui/` + `crate::tui` → `crate::ui`; (4) updated facade guards,
+docs, and mdBook. Gate green: 499 lib tests, clippy `-D warnings` + `fmt --check`
+clean, both single-UI facade guards empty, gated live tests (`tv_membership`,
+`tv_picker`) pass.
+
+**M5a — startup flow (DONE @ `3344b77`)** (spec
 `specs/2026-06-28-tvision-m5a-startup-flow-design.md`, plan
 `plans/2026-06-28-tvision-m5a-startup-flow.md`). 4 subagent-driven TDD tasks, each
-reviewed clean + a whole-branch review (verdict READY to close). Replaces the
-ratatui config-picker with a tvision one and wires the pre-TUI config-path
-resolution, while the ratatui UI + `edaptor-tv` still coexist (cutover is M5b).
-Delivered: `src/tui/dialog/config_picker.rs` (ListBox + detail pane),
-`src/tui/startup.rs` (`SHOW_PICKER` + one-shot `PickerTrigger`; `run_config_picker`
-short-lived Program; pure `decide_config_path` + `pub resolve_config_path`),
-`edaptor-tv` wired through `resolve_config_path`. Gate green: 644 lib tests, clippy
-`-D warnings` + `fmt --check` clean, both facade guards clean; live tmux acceptance
-(two-config picker nav/detail/Enter/Esc; single-config + `--config` skip).
+reviewed clean + a whole-branch review (verdict READY). Replaced the ratatui
+config-picker with a tvision one and wired the pre-TUI config-path resolution.
+Delivered: `src/ui/dialog/config_picker.rs` (ListBox + detail pane),
+`src/ui/startup.rs` (`SHOW_PICKER` + one-shot `PickerTrigger`; `run_config_picker`
+short-lived Program; pure `decide_config_path` + `pub resolve_config_path`).
+Gate green: 644 lib tests, clippy `-D warnings` + `fmt --check` clean, facade guards
+clean; live tmux acceptance (two-config picker nav/detail/Enter/Esc; single-config +
+`--config` skip).
 
 **M4 — rich widgets (DONE @ `a08008d`; final review READY)** (spec
 `specs/2026-06-28-tvision-m4-rich-widgets-design.md`, plan
@@ -232,43 +204,43 @@ short-lived Program; pure `decide_config_path` + `pub resolve_config_path`),
 parts, each reviewed clean (5 fix passes) + a whole-milestone review (verdict
 READY). Delivered, all via the M3 `widget_for`→`Activation::Modal`→`staged_commit`
 seam with NO form-core changes:
-- `src/tui/multivalue.rs` — free-text multi-value editor (add/del/reorder); the
+- `src/ui/multivalue.rs` — free-text multi-value editor (add/del/reorder); the
   X-ORDERED `ordered` flag is set but those fields stay **read-only** (see the
-  banner's X-ORDERED M5 item).
-- `src/tui/choice.rs` — radio/checkbox over the neutral `config::widget::ChoiceWidget`.
-- `src/tui/picker.rs` — live-search picker (single/multi, DN/scalar store); the new
+  banner's X-ORDERED M5c item).
+- `src/ui/choice.rs` — radio/checkbox over the neutral `config::widget::ChoiceWidget`.
+- `src/ui/picker.rs` — live-search picker (single/multi, DN/scalar store); the new
   async `workflows::search_flow::SearchFlow` (id 3M+) + neutral `workflows::pick_state`
-  (parity copy of `ui::picker`) + `UiState::{submit_search,search_results}`.
-- `src/tui/membership.rs` — two-column mover; the multi-entry fan-out write
-  (`workflows::save::plan_combined_save` parity port + `WriteFlow::submit_combined`
+  (the sole picker-state implementation since M5b) + `UiState::{submit_search,search_results}`.
+- `src/ui/membership.rs` — two-column mover; the multi-entry fan-out write
+  (`workflows::save::plan_combined_save` + `WriteFlow::submit_combined`
   + `WriteOutcome::CombinedSaved`); confirm dialog renders the combined LDIF.
 - sambaSID immediate auto-gen (dispatch special-case → `workflows::samba_compute`),
   `UiState.samba_domain` wired from config.
 Full per-task + review ledger: `.superpowers/sdd/progress.md` (M4 section). Gate
 green: 637 lib tests + all gated live tests (`tv_picker`, `tv_membership` round-trip
 vs the real demo server), clippy `-D warnings` + `fmt --check` clean, facade guards
-clean. **Read the top banner's "M4 load-bearing facts / divergences" before M5.**
+clean. **Read the top banner's "M4 load-bearing facts / divergences" before M5c.**
 
 **M1 — three-pane read core** (plan `plans/2026-06-24-tvision-m1-read-core.md`).
 DIT `Outline` (tree) | leaf `ListBox`+search | read-only form `Group`, driven by
 the unchanged domain layer via `workflows::read_flow`/`form_model`. The
-`FieldWidget` trait + registry skeleton (`src/tui/widget.rs`), `present()` only.
+`FieldWidget` trait + registry skeleton (`src/ui/widget.rs`), `present()` only.
 
 **M2 — edit + write spine** (spec `specs/2026-06-25-tvision-m2-edit-write-design.md`,
 plan `plans/2026-06-25-tvision-m2-edit-write.md`). 9 tasks, subagent-driven,
 reviewed clean (whole-branch review verdict READY). Delivered:
 - `workflows::edit_form` — neutral editable model (values + baseline + set-wise
-  dirty + `to_edit_entry`). A FRESH parity copy of `ui::edit_form`; **dedup at M5**
-  (the duplication is intentional — do not "fix" it).
+  dirty + `to_edit_entry`). The sole edit-form model (the ratatui copy was removed
+  at the M5b cutover).
 - `workflows::write_flow` — `WriteFlow::{prepare,submit,on_response,submit_followup}`:
   validate+diff via `workflows::save::prepare_save`, submit to the worker, correlate
   `WriteOk`/`WriteError`; **MODIFY + MODRDN** (incl. rename-then-modify two-step).
   `prepare`/`on_response` are pure; submit is a thin worker wrapper.
-- `tui::widget` — `present(&EditField)`, `activate()→Inline`, `inline_editable` gate.
-- `tui::state` — `UiState` holds `edit_form`/`write_flow`; `pump_worker` routes
+- `ui::widget` — `present(&EditField)`, `activate()→Inline`, `inline_editable` gate.
+- `ui::state` — `UiState` holds `edit_form`/`write_flow`; `pump_worker` routes
   reads then writes → `PumpResult{changed,quit,error}`.
-- `tui::panes::form` — editable pane; `tui::dialog::{confirm,error,guard}` +
-  `guard_decision`; `tui::app` — the single `run_app` dispatch closure (the only
+- `ui::panes::form` — editable pane; `ui::dialog::{confirm,error,guard}` +
+  `guard_decision`; `ui::app` — the single `run_app` dispatch closure (the only
   `exec_view` site) wiring Save/Exit, dirty-nav guard, deferred-quit.
 - Gated live test `tests/tv_edit_write.rs` (skips unless `EDAPTOR_TEST_LDAP_URI`).
 
@@ -279,7 +251,7 @@ navigation had never been driven interactively):
   a leaf never loaded the form. Now detects the change via `value()`. Fixed.
 - Form pane indexed past the 32-cell pool for entries with >32 attrs (panic). Now
   `take(FORM_ROWS)`-bounded (graceful truncation). Fixed.
-- `edaptor-tv` now accepts `--config <path>` (was positional-only).
+- The tvision UI now accepts `--config <path>` (was positional-only; implemented during M2).
 - **Intra-pane keyboard nav**: arrows navigate within a pane (leaf list while the
   search box keeps focus; form fields). Tab switches between panes/widgets.
 
@@ -332,15 +304,15 @@ scripts/test-ldap.sh start                       # podman demo server (idempoten
 tmux kill-session -t edtv 2>/dev/null
 tmux new-session -d -s edtv -x 210 -y 50         # wide enough for 3 panes
 tmux send-keys -t edtv 'export EDAPTOR_TEST_ADMIN_PW=adminpassword' Enter
-tmux send-keys -t edtv '/home/oetiker/scratch/cargo-target/debug/edaptor-tv --config examples/demo-config.toml' Enter
+tmux send-keys -t edtv '/home/oetiker/scratch/cargo-target/debug/edaptor --config examples/demo-config.toml' Enter
 sleep 4
 tmux send-keys -t edtv Down       # keys: Down/Up/Tab/Enter, or a literal like 7 / 'User2'
 sleep 0.4
 tmux capture-pane -t edtv -p | sed -n '2,14p'   # read the screen
 tmux kill-session -t edtv         # clean up (the run holds an LDAP bind)
 ```
-Notes: build the binary first (`cargo build -j4 --bin edaptor-tv`) so the run is
-fast; the binary is at `/home/oetiker/scratch/cargo-target/debug/edaptor-tv` (NOT
+Notes: build the binary first (`cargo build -j4 --bin edaptor`) so the run is
+fast; the binary is at `/home/oetiker/scratch/cargo-target/debug/edaptor` (NOT
 `./target`). For modals (Confirm/Guard) send the button hotkey or arrows+Enter.
 Do NOT trigger destructive saves carelessly against the demo data; prefer a temp
 entry, or edit-then-Discard. Insert `sleep` between keystrokes (async reads land
@@ -358,7 +330,7 @@ because the create flow reuses the form pane and the tree-guard machinery.
 Spec [`specs/2026-06-26-tvision-m3-phase1-stabilize-design.md`](superpowers/specs/2026-06-26-tvision-m3-phase1-stabilize-design.md),
 plan [`plans/2026-06-27-tvision-m3-phase1-stabilize.md`](superpowers/plans/2026-06-27-tvision-m3-phase1-stabilize.md).
 **12 TDD tasks**, foundation-first:
-- **Tasks 1–4 — `ScrollGroup`** (NEW, domain-free, `src/tui/scroll_group.rs`): a
+- **Tasks 1–4 — `ScrollGroup`** (NEW, domain-free, `src/ui/scroll_group.rs`): a
   generic vertical scroll-container of child views. tvision-rs has NO scroll
   container for child widgets (Group has no child offset; Scroller is self-drawn) —
   so we build one: it holds child views at logical positions and repositions them
@@ -386,7 +358,7 @@ facts are listed in its self-review.
 
 The riskiest half of the M3 core, on EXISTING entries. Delivered: the first reusable
 modal-widget seam (`Activation::Modal(Box<dyn FieldEditor>)` + generic `app::dispatch`
-ACTIVATE path); the objectClass picker (`src/tui/oc_picker.rs` — schema-seeded
+ACTIVATE path); the objectClass picker (`src/ui/oc_picker.rs` — schema-seeded
 multi-select `ListBox`, client substring filter, pre-tick, staged
 `SetValuesThenResyncSchema`); the neutral `EditForm::sync_schema_fields` port (+
 `EditField::injected`, `order_fields`); `UiState::{activate_field, staged_commit,
@@ -457,11 +429,11 @@ command was swallowed). The model now (user-chosen "B"):
   `▒` strip and the `FORM_ROWS = 32` cap both go away via the new `ScrollGroup`
   (form) and `on_bounds_changed` (leaf). The full-screen flip exposed the `▒`
   strip; root cause is the panes not re-fitting children on resize, not the flip.
-- Minor/cosmetic: `value_set_eq` duplicate-value false-positive (shared with
-  ratatui; fix at M5 dedup); `EditForm::set_value` has no `!multi` guard (only
-  single-value callers in M2); read-error shows a stale form (status-only); a few
-  `let _ = ctx/REFRESH` import/param silencers in `form.rs`; dialog module/builders
-  are `pub` (could tighten to `pub(crate)` now that `app::dispatch` consumes them).
+- Minor/cosmetic: `value_set_eq` duplicate-value false-positive; `EditForm::set_value`
+  has no `!multi` guard (only single-value callers in M2); read-error shows a stale
+  form (status-only); a few `let _ = ctx/REFRESH` import/param silencers in `form.rs`;
+  dialog module/builders are `pub` (could tighten to `pub(crate)` now that
+  `app::dispatch` consumes them).
 
 ---
 
@@ -470,9 +442,8 @@ command was swallowed). The model now (user-chosen "B"):
 **⚠ Cap parallelism at 4 cores** (shared box). Target dir `/home/oetiker/scratch/cargo-target`.
 
 ```bash
-cargo build -j4                 # both bins (edaptor ratatui + edaptor-tv tvision)
-cargo build -j4 --bin edaptor-tv
-cargo test  -j4                 # 637 lib tests + gated integration (skip w/o env)
+cargo build -j4                 # the edaptor binary (tvision UI)
+cargo test  -j4                 # lib tests + gated integration (skip w/o env)
 cargo clippy -j4 --all-targets -- -D warnings
 cargo fmt --check
 make check                      # fmt + clippy + tests
@@ -480,27 +451,26 @@ make check                      # fmt + clippy + tests
 # Live LDAP demo (podman): ~600 users / ~25 groups, ldap://localhost:1389
 scripts/test-ldap.sh start
 export EDAPTOR_TEST_ADMIN_PW=adminpassword
+cargo run -- --config examples/demo-config.toml
 # gated live tests:
-EDAPTOR_TEST_LDAP_URI=ldap://localhost:1389 cargo test -j4 --test tv_edit_write
+EDAPTOR_TEST_LDAP_URI=ldap://localhost:1389 EDAPTOR_TEST_ADMIN_PW=adminpassword \
+    cargo test -j4 --test tv_membership --test tv_picker
 ```
 
-Facade guards (must print nothing):
+Facade guards (must print nothing — single-UI reality):
 ```bash
-! grep -rl "use tvision_rs" src | grep -vE "^src/(tui/|bin/edaptor-tv.rs)"
-! grep -rl "use ratatui\|use tui_" src | grep -vE "^src/ui/"
+! grep -rl "use tvision_rs" src | grep -vE "^src/ui/"
+! grep -rl "use ratatui\|use tui_" src
 ```
 
 ---
 
 ## Conventions (follow these)
 
-- **Facade boundary (core migration rule):** only `src/tui/**` and
-  `src/bin/edaptor-tv.rs` may `use tvision_rs`; only `src/ui/**` may
-  `use ratatui`/`use tui_*`. The domain layer (`config`, `form`, `ldap`, `schema`,
-  `samba`, `workflows`) imports NEITHER and stays UI-agnostic.
-- **Don't touch `src/ui/**` (ratatui).** It's the running binary; the neutral
-  models are introduced fresh in `workflows::*` and the ratatui tree is deleted
-  wholesale at the M5 cutover. Editing the live UI mid-migration is the wrong risk.
+- **Facade boundary:** only `src/ui/**` may `use tvision_rs`. The domain layer
+  (`config`, `form`, `ldap`, `schema`, `samba`, `workflows`) imports NEITHER
+  tvision_rs NOR any former ratatui/tui_* crate, and stays UI-agnostic. There is
+  no ratatui tree anymore; the single-UI guards confirm this on every gate run.
 - **Widget palette** is the one config-driven "rich field" home: a
   `[profile.widget.<attr>]` `kind` → `config::widget::WidgetKind`. The form honours
   `EditField.widget_binding`. M4 added the rich widgets (choice/password/picker/

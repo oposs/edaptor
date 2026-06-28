@@ -1,7 +1,8 @@
 //! UI-neutral editable form model: the M2 editable shape derived from a read-only
 //! [`FormModel`]. Carries plain `Vec<String>` values + a load-time `baseline` for
 //! the set-wise dirty check; the text editor itself lives in the tvision pane, so
-//! there is NO `TextState` here (cf. the ratatui `ui::edit_form`, deleted at M5).
+//! there is NO `TextState` here (the ratatui `ui::edit_form` was removed at the
+//! M5b cutover; this is the sole edit-form model).
 
 use std::collections::BTreeMap;
 
@@ -41,7 +42,7 @@ impl EditField {
             // Single-value inline edit: trim and drop if blank, so an emptied
             // field yields no values and the diff emits a delete (not an empty
             // value). Multi-valued and read-only fields keep `values` verbatim,
-            // matching the ratatui `ui::edit_form` baseline (dedup at M5).
+            // matching the former ratatui `ui::edit_form` baseline (now the sole model).
             let v = self.values.first().map(|s| s.trim()).unwrap_or("");
             if v.is_empty() {
                 vec![]

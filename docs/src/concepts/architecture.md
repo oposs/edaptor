@@ -33,11 +33,11 @@ responses each tick, so a search that takes seconds never blocks a keypress.
 
 ```mermaid
 flowchart LR
-    UI["Three-pane TUI (ratatui)"] -- requests --> W["LDAP worker thread"]
+    UI["Three-pane TUI (tvision-rs)"] -- requests --> W["LDAP worker thread"]
     W -- results --> UI
     W <--> S[("OpenLDAP<br/>cn=subschema, entries")]
 ```
 
-The TUI itself is built on [ratatui](https://ratatui.rs/) in a three-pane
+The TUI itself is built on [tvision-rs](https://github.com/oetiker/tvision-rs) in a three-pane
 layout; see [The Three-Pane TUI](../usage/three-pane.md) for the interface and
 [Change Flow](change-flow.md) for how an edit becomes an LDAP operation.
