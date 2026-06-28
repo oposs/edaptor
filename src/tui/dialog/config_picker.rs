@@ -36,8 +36,8 @@ fn ro_cell(bounds: Rect) -> InputLine {
 pub struct ConfigPicker {
     dlg: Dialog,
     list_id: tv::ViewId,
-    pub desc_id: tv::ViewId,
-    pub path_id: tv::ViewId,
+    desc_id: tv::ViewId,
+    path_id: tv::ViewId,
     items: Vec<PickerItem>,
     selected: Rc<RefCell<Option<usize>>>,
 }

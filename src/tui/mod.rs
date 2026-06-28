@@ -14,10 +14,10 @@ pub(crate) mod panes;
 pub(crate) mod picker;
 pub(crate) mod pump;
 pub(crate) mod pw_editor;
-// Keep `pub`: run_config_picker has no non-test caller until Task 3. `pub` on the
-// module makes it a crate-external live root so clippy's dead_code lint doesn't
-// fire — `pub(crate)` is not sufficient in a `pub(crate) mod`.
 pub(crate) mod scroll_group;
+// `pub` (not `pub(crate)`): the external `edaptor-tv` binary calls
+// `edaptor::tui::startup::resolve_config_path`, so the module must be a
+// crate-external item.
 pub mod startup;
 mod state;
 // Keep `pub`: the FieldWidget plugin contract is defined here for M1 and

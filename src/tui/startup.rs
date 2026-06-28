@@ -15,7 +15,7 @@ use crate::tui::dialog::config_picker::{self, PickerItem};
 
 /// Posted once by `PickerTrigger` on the first timer tick; the picker program's
 /// `run_app` closure responds by exec-viewing the dialog.
-pub(crate) const SHOW_PICKER: tv::Command = tv::Command::custom("edaptor.show_picker");
+const SHOW_PICKER: tv::Command = tv::Command::custom("edaptor.show_picker");
 
 /// Zero-area view that arms a timer on its first event and posts `SHOW_PICKER`
 /// exactly once. Mirrors `pump::PumpView`'s one-shot `FULLSCREEN` post.
@@ -134,7 +134,7 @@ pub fn resolve_config_path(cli_config: Option<PathBuf>) -> Result<Option<PathBuf
 /// cannot be a modal inside it. This minimal program's desktop holds only a
 /// `PickerTrigger`; on its first tick the trigger posts `SHOW_PICKER`, the
 /// `run_app` closure exec-views the dialog, reads the staged index, and ends.
-pub fn run_config_picker(items: Vec<PickerItem>) -> Result<Option<PathBuf>> {
+fn run_config_picker(items: Vec<PickerItem>) -> Result<Option<PathBuf>> {
     use tvision_rs::{Command, CrosstermBackend, Desktop, Program, Rect, SystemClock, Theme, View};
 
     let paths: Vec<PathBuf> = items.iter().map(|it| it.path.clone()).collect();
