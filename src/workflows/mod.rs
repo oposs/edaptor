@@ -7,6 +7,7 @@
 
 pub mod alloc_flow;
 pub mod pick_state;
+pub mod search_flow;
 pub mod create;
 pub mod edit_form;
 pub mod form_model;
