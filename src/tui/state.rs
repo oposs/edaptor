@@ -302,6 +302,28 @@ impl UiState {
         }
     }
 
+    /// Submit a candidate search under `base` for entries of object class `oc`
+    /// matching `term`, returning `attrs` per entry. `store_attr` declares how the
+    /// arriving candidates' `store_value` is derived (`None` ⇒ DN, `Some(attr)` ⇒
+    /// scalar). No-op without a live worker.
+    ///
+    /// Borrow-safe: `self.worker` and `self.search_flow` are disjoint fields, so
+    /// this is a single atomic `&mut self`. Call it as
+    /// `shared.borrow_mut().submit_search(...)` — never while holding any other
+    /// borrow (the worker `submit` happens inside this method, mirroring the pump).
+    pub fn submit_search(
+        &mut self,
+        base: &str,
+        oc: &str,
+        term: &str,
+        attrs: &[String],
+        store_attr: Option<&str>,
+    ) {
+        if let Some(w) = self.worker.as_ref() {
+            let _ = self.search_flow.request(w, base, oc, term, attrs, store_attr);
+        }
+    }
+
     /// Apply one non-ignored search outcome to state.
     ///
     /// `Results`: store the rows and truncated flag.

@@ -24,7 +24,7 @@ use anyhow::Result;
 
 use crate::ldap::worker::{LdapEntry, Request, Response, SearchScope, WorkerHandle};
 use crate::workflows::pick_state::{
-    build_member_filter, candidate_label, Candidate, PICKER_SEARCH_CAP,
+    build_member_filter, candidate_label, pick_value, Candidate, PICKER_SEARCH_CAP,
 };
 
 /// Build an RFC-4515 LDAP candidate-search filter for a single object class.
@@ -68,6 +68,12 @@ pub struct SearchFlow {
     /// The id of the most-recently submitted request. Responses for any other
     /// id are returned as [`SearchOutcome::Ignored`].
     latest: Option<u64>,
+    /// The store attribute the latest request targets. `None` ⇒ DN store
+    /// (`store_value = dn`); `Some(attr)` ⇒ scalar store (`store_value` = that
+    /// attribute's first value, falling back to the DN when absent). Set on every
+    /// [`request`][Self::request] so `on_response` maps entries the same way the
+    /// binding's `StoreKey` declares.
+    store_attr: Option<String>,
 }
 
 impl Default for SearchFlow {
@@ -83,6 +89,7 @@ impl SearchFlow {
         SearchFlow {
             next_id: 3_000_000,
             latest: None,
+            store_attr: None,
         }
     }
 
@@ -99,6 +106,10 @@ impl SearchFlow {
     /// [`Request::Search`] with [`SearchScope::Subtree`] and
     /// `size_limit = PICKER_SEARCH_CAP`, and records the assigned id as
     /// `latest`. Returns the assigned id.
+    ///
+    /// `store_attr` declares how `on_response` maps each returned entry to a
+    /// `Candidate.store_value`: `None` ⇒ the DN; `Some(attr)` ⇒ that scalar
+    /// attribute (the caller is responsible for including `attr` in `attrs`).
     pub fn request(
         &mut self,
         worker: &WorkerHandle,
@@ -106,6 +117,7 @@ impl SearchFlow {
         oc: &str,
         term: &str,
         attrs: &[String],
+        store_attr: Option<&str>,
     ) -> Result<u64> {
         let id = self.alloc();
         let filter = build_search_filter(oc, term);
@@ -118,6 +130,7 @@ impl SearchFlow {
             size_limit: Some(PICKER_SEARCH_CAP),
         })?;
         self.latest = Some(id);
+        self.store_attr = store_attr.map(|s| s.to_string());
         Ok(id)
     }
 
@@ -141,7 +154,11 @@ impl SearchFlow {
                 if Some(*id) != self.latest {
                     return SearchOutcome::Ignored;
                 }
-                let rows = entries.iter().map(entry_to_candidate).collect();
+                let store_attr = self.store_attr.as_deref();
+                let rows = entries
+                    .iter()
+                    .map(|e| entry_to_candidate(e, store_attr))
+                    .collect();
                 SearchOutcome::Results {
                     rows,
                     truncated: *truncated,
@@ -170,13 +187,19 @@ impl SearchFlow {
 
 /// Map an [`LdapEntry`] to a [`Candidate`].
 ///
-/// `store_value` defaults to the entry DN (covers the DN-store case).
-/// `label` is derived from the `cn` attribute via `pick_state::candidate_label`
-/// (falls back to the raw DN when `cn` is absent).
-fn entry_to_candidate(entry: &LdapEntry) -> Candidate {
+/// `store_value` is the entry DN for a DN store (`store_attr == None`), or the
+/// named scalar attribute for a scalar store (`store_attr == Some(attr)`),
+/// falling back to the DN when that attribute is absent. `label` is derived from
+/// the `cn` attribute via `pick_state::candidate_label` (falls back to the raw
+/// DN when `cn` is absent).
+fn entry_to_candidate(entry: &LdapEntry, store_attr: Option<&str>) -> Candidate {
+    let store_value = match store_attr {
+        Some(attr) => pick_value(&entry.attrs, attr).unwrap_or_else(|| entry.dn.clone()),
+        None => entry.dn.clone(),
+    };
     Candidate {
         dn: entry.dn.clone(),
-        store_value: entry.dn.clone(),
+        store_value,
         label: candidate_label(&entry.dn, &entry.attrs),
     }
 }
@@ -314,6 +337,60 @@ mod tests {
         match sf.on_response(&resp) {
             SearchOutcome::Results { rows, .. } => {
                 assert_eq!(rows[0].label, "uid=nobody,dc=x", "label must fall back to DN");
+            }
+            other => panic!("expected Results, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn scalar_store_attr_sets_store_value_from_named_attr() {
+        let mut sf = SearchFlow::new();
+        sf.force_latest(3_000_055);
+        sf.store_attr = Some("gidNumber".to_string());
+        let mut attrs: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        attrs.insert("cn".to_string(), vec!["devs".to_string()]);
+        attrs.insert("gidNumber".to_string(), vec!["1234".to_string()]);
+        let entry = LdapEntry {
+            dn: "cn=devs,ou=groups,dc=x".to_string(),
+            attrs,
+            bin_attrs: Default::default(),
+        };
+        let resp = Response::Entries {
+            id: 3_000_055,
+            entries: vec![entry],
+            truncated: false,
+        };
+        match sf.on_response(&resp) {
+            SearchOutcome::Results { rows, .. } => {
+                assert_eq!(rows[0].dn, "cn=devs,ou=groups,dc=x");
+                assert_eq!(rows[0].store_value, "1234", "store_value from gidNumber attr");
+                assert_eq!(rows[0].label, "devs", "label still from cn");
+            }
+            other => panic!("expected Results, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn scalar_store_attr_falls_back_to_dn_when_absent() {
+        let mut sf = SearchFlow::new();
+        sf.force_latest(3_000_056);
+        sf.store_attr = Some("gidNumber".to_string());
+        let entry = LdapEntry {
+            dn: "cn=nogid,ou=groups,dc=x".to_string(),
+            attrs: BTreeMap::new(),
+            bin_attrs: Default::default(),
+        };
+        let resp = Response::Entries {
+            id: 3_000_056,
+            entries: vec![entry],
+            truncated: false,
+        };
+        match sf.on_response(&resp) {
+            SearchOutcome::Results { rows, .. } => {
+                assert_eq!(
+                    rows[0].store_value, "cn=nogid,ou=groups,dc=x",
+                    "missing scalar attr falls back to DN"
+                );
             }
             other => panic!("expected Results, got {other:?}"),
         }

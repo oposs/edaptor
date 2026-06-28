@@ -135,6 +135,11 @@ pub fn widget_for(field: &EditField) -> Box<dyn FieldWidget> {
         Box::new(crate::tui::pw_editor::PasswordWidget)
     } else if matches!(field.widget_binding, Some(WidgetKind::Choice(_))) {
         Box::new(crate::tui::choice::ChoiceWidget)
+    } else if matches!(
+        &field.widget_binding,
+        Some(WidgetKind::Picker(b)) if b.fanout_attr.is_none()
+    ) {
+        Box::new(crate::tui::picker::PickerWidget)
     } else if matches!(field.widget_binding, Some(WidgetKind::SambaSid)) {
         Box::new(SambaSidWidget)
     } else if field.editable && field.multi && !field.orphaned && field.widget_binding.is_none() {
@@ -152,6 +157,10 @@ pub fn is_modal_field(field: &EditField) -> bool {
     field.label.eq_ignore_ascii_case("objectClass")
         || matches!(field.widget_binding, Some(WidgetKind::Password(_)))
         || matches!(field.widget_binding, Some(WidgetKind::Choice(_)))
+        || matches!(
+            &field.widget_binding,
+            Some(WidgetKind::Picker(b)) if b.fanout_attr.is_none()
+        )
         || matches!(field.widget_binding, Some(WidgetKind::SambaSid))
         || (field.editable && field.multi && !field.orphaned && field.widget_binding.is_none())
 }

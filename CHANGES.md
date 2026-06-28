@@ -8,6 +8,14 @@ All notable changes to eDAPtor are documented here. The format follows
 
 ### New
 
+- **tvision UI:** picker widget with live LDAP search. A `picker`-bound field
+  (e.g. `gidNumber`, `member`, `memberUid`) opens a modal with a search box over
+  a candidate list that refreshes as you type (server-side capped at 100).
+  Single-select uses radio markers (a pick replaces); multi-select uses
+  checkboxes (Space toggles), with the current selection shown selected-first.
+  A pick stores the candidate DN (`store = "dn"`) or a chosen scalar attribute
+  (e.g. the group's `gidNumber`). Membership/fan-out pickers remain a later step.
+
 - **tvision UI:** activating a `sambaSID` field auto-generates the SID
   immediately (no popup) from the entry's `uidNumber` and the configured Samba
   domain. A missing `uidNumber` or unconfigured domain SID shows an error dialog

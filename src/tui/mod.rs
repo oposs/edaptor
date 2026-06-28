@@ -10,6 +10,7 @@ pub(crate) mod choice;
 pub(crate) mod multivalue;
 pub(crate) mod oc_picker;
 pub(crate) mod panes;
+pub(crate) mod picker;
 pub(crate) mod pump;
 pub(crate) mod pw_editor;
 pub(crate) mod scroll_group;
