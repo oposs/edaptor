@@ -324,7 +324,12 @@ fn do_save(
         let st = state.borrow();
         match st.edit_form.as_ref() {
             None => return SaveOutcome::NotSubmitted,
-            Some(form) => st.write_flow.prepare(form, st.read_flow.schema()),
+            Some(form) => st.write_flow.prepare(
+                form,
+                st.read_flow.schema(),
+                st.pending_password.as_deref(),
+                &st.resolved_widgets,
+            ),
         }
     };
     match save_flow_action(&prepared) {
@@ -352,6 +357,7 @@ fn do_save(
                 let mut st = state.borrow_mut();
                 st.pending_nav = nav;
                 st.guard_target = None;
+                st.pending_password = None; // cleartext consumed; clear before worker picks it up
                 let crate::tui::state::UiState {
                     worker, write_flow, ..
                 } = &mut *st;
@@ -370,10 +376,12 @@ fn do_save(
 /// Borrow discipline: the `plan_create` borrow drops before any `exec_view_focused`
 /// call; on OK a fresh `borrow_mut` is taken using the split-borrow idiom.
 fn do_create(prog: &mut Program, state: &Shared) {
-    use crate::workflows::create::{plan_create, CreatePrep};
+    use crate::workflows::create::{
+        fold_create_password, now_unix_secs_or_zero, plan_create, CreatePrep,
+    };
     use crate::workflows::edit_form::FormMode;
-    // 1. Compute the plan (borrow, drop before exec_view / submit).
-    let prep = {
+    // 1. Compute the plan + extract pending password (borrow drops before exec_view).
+    let (prep, pending, resolved_widgets) = {
         let st = state.borrow();
         let Some(form) = st.edit_form.as_ref() else {
             return;
@@ -386,12 +394,15 @@ fn do_create(prog: &mut Program, state: &Shared) {
             return;
         };
         let profile = &st.profiles[*profile_idx];
-        plan_create(
+        let prep = plan_create(
             st.read_flow.schema(),
             profile,
             container,
             &form.to_edit_entry(),
-        )
+        );
+        let pending = st.pending_password.clone();
+        let resolved_widgets = st.resolved_widgets.clone();
+        (prep, pending, resolved_widgets)
     };
     match prep {
         CreatePrep::Error(msg) => {
@@ -399,13 +410,26 @@ fn do_create(prog: &mut Program, state: &Shared) {
             prog.exec_view_focused(view, ok);
         }
         CreatePrep::Confirm {
-            dn, attrs, ldif, ..
+            dn,
+            mut attrs,
+            ldif,
+            ..
         } => {
+            // Fold any staged password into attrs; get the masked LDIF preview.
+            let masked = fold_create_password(
+                &dn,
+                &mut attrs,
+                pending.as_deref(),
+                &resolved_widgets,
+                now_unix_secs_or_zero(),
+            );
+            let ldif = masked.unwrap_or(ldif);
             let (view, save) = crate::tui::dialog::confirm::build(&ldif);
             if prog.exec_view_focused(view, save) != Command::OK {
                 return; // cancel: keep editing the create form.
             }
             let mut st = state.borrow_mut();
+            st.pending_password = None; // cleartext consumed; clear before worker picks it up
             let crate::tui::state::UiState {
                 worker, write_flow, ..
             } = &mut *st;

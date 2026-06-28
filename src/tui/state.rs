@@ -98,6 +98,11 @@ pub struct UiState {
     /// `config::widget::resolve_widgets` and used by `apply_widget_bindings` every
     /// time a form is opened.
     pub resolved_widgets: Vec<crate::config::widget::ResolvedWidget>,
+    /// Cleartext staged by the password editor (Task 16/17); folded into the ADD or
+    /// MODIFY on submit. Never rendered or logged — the form shows "••••••" instead.
+    pub pending_password: Option<String>,
+    /// The attribute names the staged password targets (primary first).
+    pub pending_password_attrs: Vec<String>,
 }
 
 impl UiState {
@@ -146,6 +151,8 @@ impl UiState {
             chosen_profile: None,
             connection_encrypted: false,
             resolved_widgets: Vec::new(),
+            pending_password: None,
+            pending_password_attrs: Vec::new(),
         }
     }
 }
@@ -345,6 +352,8 @@ impl UiState {
             edit_form,
             read_flow,
             form_needs_render,
+            pending_password,
+            pending_password_attrs,
             ..
         } = self;
         match outcome {
@@ -367,8 +376,17 @@ impl UiState {
                     form.sync_schema_fields(read_flow.schema());
                 }
             }
-            // StageSecret is M4 (password); no-op here.
-            CommitOutcome::StageSecret { .. } => {}
+            CommitOutcome::StageSecret { attrs, cleartext } => {
+                // Stash the cleartext; set the masked sentinel so present() shows
+                // ‹set› and is_dirty() sees a change. Cleartext is never rendered.
+                *pending_password = Some(cleartext);
+                *pending_password_attrs = attrs;
+                if let Some(form) = edit_form.as_mut() {
+                    if let Some(f) = form.fields.get_mut(field_idx) {
+                        f.values = vec!["••••••".to_string()];
+                    }
+                }
+            }
             CommitOutcome::Cancelled => {}
         }
         *form_needs_render = true;
@@ -558,6 +576,8 @@ pub(crate) fn bootstrap(config: Config, password: String) -> Result<UiState> {
         chosen_profile: None,
         connection_encrypted,
         resolved_widgets,
+        pending_password: None,
+        pending_password_attrs: Vec::new(),
     })
 }
 
@@ -865,6 +885,69 @@ mod tests {
             !st.form_needs_render,
             "form_needs_render must not be set when no field was updated"
         );
+    }
+
+    /// Task 17 RED: StageSecret sets pending_password + masked sentinel + render.
+    #[test]
+    fn apply_commit_stage_secret_sets_pending_and_masks_field() {
+        use crate::schema::FieldKind;
+        use crate::tui::widget::CommitOutcome;
+        use crate::workflows::edit_form::{EditField, EditForm, FormMode};
+        use crate::workflows::form_model::WidgetSpec;
+
+        let raw = RawSubschema::default();
+        let schema = SchemaModel::from_raw(&raw);
+        let structure = Structure::build("dc=x", vec![]);
+        let mut st =
+            UiState::new_for_test(structure, schema, "dc=x".into(), Vec::new(), Vec::new());
+
+        let pw_field = EditField {
+            label: "userPassword".into(),
+            must: false,
+            editable: true,
+            multi: false,
+            secret: true,
+            ordered: false,
+            orphaned: false,
+            kind: FieldKind::Text,
+            widget: WidgetSpec::ReadOnlyText,
+            widget_binding: None,
+            values: vec![],
+            baseline: vec![],
+        };
+        st.edit_form = Some(EditForm {
+            dn: "uid=bob,dc=example,dc=org".into(),
+            mode: FormMode::Edit,
+            object_classes: vec!["inetOrgPerson".into()],
+            fields: vec![pw_field],
+        });
+        st.form_needs_render = false;
+
+        st.apply_commit(
+            0,
+            CommitOutcome::StageSecret {
+                attrs: vec!["userPassword".into()],
+                cleartext: "s3cret".into(),
+            },
+        );
+
+        assert_eq!(
+            st.pending_password.as_deref(),
+            Some("s3cret"),
+            "pending_password must be stashed"
+        );
+        assert_eq!(
+            st.pending_password_attrs,
+            vec!["userPassword".to_string()],
+            "pending_password_attrs must be stashed"
+        );
+        let form = st.edit_form.as_ref().unwrap();
+        assert_eq!(
+            form.fields[0].values,
+            vec!["••••••".to_string()],
+            "field must show masked sentinel"
+        );
+        assert!(st.form_needs_render, "form_needs_render must be set");
     }
 
     /// Task 13 (RED → GREEN): new_for_test must default connection_encrypted to false.

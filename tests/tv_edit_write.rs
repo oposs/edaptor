@@ -230,7 +230,7 @@ fn edit_persists_and_rename_via_write_flow() {
     // Step 5: WriteFlow prepare -> submit -> poll -> on_response (MODIFY).
     // -----------------------------------------------------------------------
     let mut wf = WriteFlow::new();
-    let (plan, _ldif) = match wf.prepare(&edit_form, &schema) {
+    let (plan, _ldif) = match wf.prepare(&edit_form, &schema, None, &[]) {
         PrepareSave::Ready { plan, ldif, .. } => (plan, ldif),
         other => panic!("expected Ready for description change, got {other:?}"),
     };
@@ -281,7 +281,7 @@ fn edit_persists_and_rename_via_write_flow() {
     assert!(edit_form2.is_dirty(), "form must be dirty after cn change");
 
     let mut wf2 = WriteFlow::new();
-    let (plan2, _ldif2) = match wf2.prepare(&edit_form2, &schema) {
+    let (plan2, _ldif2) = match wf2.prepare(&edit_form2, &schema, None, &[]) {
         PrepareSave::Ready { plan, ldif, .. } => (plan, ldif),
         other => panic!("expected Ready for rename, got {other:?}"),
     };

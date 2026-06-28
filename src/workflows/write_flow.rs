@@ -8,12 +8,16 @@ use std::collections::HashMap;
 
 use anyhow::Result;
 
+use crate::config::widget::{password_widget_for, ResolvedWidget};
 use crate::form::changeset::{EditEntry, ModOp};
 use crate::form::validate::SavePlan;
 use crate::ldap::worker::{Request, Response, WorkerHandle};
 use crate::schema::SchemaModel;
+use crate::workflows::create::now_unix_secs_or_zero;
 use crate::workflows::edit_form::EditForm;
-use crate::workflows::save::{compose_renamed_dn, prepare_save, PrepareSave};
+use crate::workflows::save::{
+    compose_renamed_dn, prepare_save, stage_pending_password, PrepareSave,
+};
 
 /// What a pending write means once its `WriteOk` arrives.
 #[derive(Debug, Clone)]
@@ -78,14 +82,19 @@ impl WriteFlow {
         id
     }
 
-    /// Validate + diff `form` into a [`PrepareSave`]. Pure (no worker, no clock).
-    /// Password staging is M4, so `password_mods`/`mask_attrs` are empty here.
-    pub fn prepare(&self, form: &EditForm, schema: &SchemaModel) -> PrepareSave {
-        // Uniform field handling: the MUST objectClass attribute is itself a form
-        // field (build_form_model emits every MUST/MAY attr, and objectClass is
-        // MUST via top), so `original`/`edited` carry it like any other field —
-        // no attribute-specific special-casing in the neutral form core.
-        let original = EditEntry {
+    /// Validate + diff `form` into a [`PrepareSave`], folding in any staged
+    /// `pending_password` (cleartext from the password editor) via `resolved_widgets`.
+    /// Pass `None`/`&[]` when no password is staged. Uses the wall clock for the
+    /// Samba `sambaPwdLastSet` timestamp; the test path passes `None` to skip it.
+    pub fn prepare(
+        &self,
+        form: &EditForm,
+        schema: &SchemaModel,
+        pending_password: Option<&str>,
+        resolved_widgets: &[ResolvedWidget],
+    ) -> PrepareSave {
+        // Uniform field handling: objectClass is a regular form field — no special-casing.
+        let mut original = EditEntry {
             dn: form.dn.clone(),
             attrs: form
                 .fields
@@ -93,7 +102,7 @@ impl WriteFlow {
                 .map(|f| (f.label.clone(), f.baseline.clone()))
                 .collect(),
         };
-        let edited = form.to_edit_entry();
+        let mut edited = form.to_edit_entry();
         let secret_attrs: Vec<String> = form
             .fields
             .iter()
@@ -112,13 +121,28 @@ impl WriteFlow {
             .filter(|f| f.ordered)
             .map(|f| f.label.clone())
             .collect();
+        // Fold pending password into password_mods; strip primary+derived from both
+        // sides so the plain diff never double-writes or emits a spurious Delete.
+        let (password_mods, mask_attrs) =
+            match password_widget_for(resolved_widgets, &form.object_classes) {
+                Some(pw) => stage_pending_password(
+                    pending_password,
+                    &pw.primary,
+                    &pw.derived,
+                    pw.samba,
+                    now_unix_secs_or_zero(),
+                    &mut original.attrs,
+                    &mut edited.attrs,
+                ),
+                None => (Vec::new(), Vec::new()),
+            };
         prepare_save(
             schema,
             &original,
             &edited,
             &form.object_classes,
-            &[], // password_mods (M4)
-            &[], // mask_attrs (M4)
+            &password_mods,
+            &mask_attrs,
             &secret_attrs,
             &orphaned,
             &x_ordered,
@@ -353,7 +377,10 @@ mod tests {
             field("cn", "Alice", "Alice"),
             field("sn", "Adams", "Adams"),
         ]);
-        assert!(matches!(wf.prepare(&f, &schema()), PrepareSave::NoChanges));
+        assert!(matches!(
+            wf.prepare(&f, &schema(), None, &[]),
+            PrepareSave::NoChanges
+        ));
     }
 
     #[test]
@@ -364,7 +391,7 @@ mod tests {
             field("cn", "Alice", "Alice"),
             field("sn", "Allen", "Adams"),
         ]);
-        match wf.prepare(&f, &schema()) {
+        match wf.prepare(&f, &schema(), None, &[]) {
             PrepareSave::Ready { dn, ldif, .. } => {
                 assert_eq!(dn, "cn=Alice,dc=example,dc=org");
                 assert!(ldif.contains("sn"));
@@ -472,6 +499,58 @@ mod tests {
             other => panic!("expected Created, got {other:?}"),
         }
         assert!(wf.pending.is_empty());
+    }
+
+    /// Task 17 RED: prepare with a non-empty pending_password yields a SavePlan::Modify
+    /// containing the password REPLACE mod.
+    #[test]
+    fn prepare_with_pending_password_yields_modify_with_password_mod() {
+        use crate::config::widget::{PasswordWidget, ResolvedWidget, WidgetKind};
+        use crate::form::validate::SavePlan;
+
+        let wf = WriteFlow::new();
+        let mut fields = vec![
+            oc_field(),
+            field("cn", "Alice", "Alice"),
+            field("sn", "Adams", "Adams"),
+        ];
+        fields.push(EditField {
+            label: "userPassword".into(),
+            must: false,
+            editable: true,
+            multi: false,
+            secret: true,
+            ordered: false,
+            orphaned: false,
+            kind: FieldKind::Text,
+            widget: WidgetSpec::ReadOnlyText,
+            widget_binding: None,
+            values: vec!["••••••".into()], // sentinel from StageSecret
+            baseline: vec!["{SSHA}old".into()],
+        });
+        let f = form_with(fields);
+        let widgets = vec![ResolvedWidget {
+            owner_object_classes: vec!["person".into()],
+            attr: "userPassword".into(),
+            kind: WidgetKind::Password(PasswordWidget {
+                primary: "userPassword".into(),
+                derived: vec![],
+                samba: false,
+            }),
+        }];
+        match wf.prepare(&f, &schema(), Some("hunter2"), &widgets) {
+            PrepareSave::Ready { plan, .. } => match plan {
+                SavePlan::Modify(mods) => assert!(
+                    mods.contains(&ModOp::Replace {
+                        attr: "userPassword".into(),
+                        values: vec!["hunter2".into()],
+                    }),
+                    "password mod must be in plan"
+                ),
+                _ => panic!("expected Modify"),
+            },
+            other => panic!("expected Ready, got {other:?}"),
+        }
     }
 
     #[test]
