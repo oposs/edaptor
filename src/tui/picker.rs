@@ -3,9 +3,10 @@
 //! search `InputLine` on top and a `ListBox` below: typing in the search box
 //! submits an async candidate search (`SearchFlow`) via the worker; results
 //! arrive on the next pump tick and are broadcast as `REFRESH`, which the dialog
-//! copies into its neutral `PickState` and re-renders. Space ticks the
+//! copies into its neutral `PickState` and re-renders. Insert ticks the
 //! highlighted row (radio for single, checkbox for multi); OK commits
-//! `SetValues(pick_state.selected_values())`.
+//! `SetValues(pick_state.selected_values())`. Space is intentionally NOT
+//! intercepted so it can be typed into the search box for multi-word queries.
 //!
 //! Mirrors the `oc_picker` / `choice` modal structure: one file holds
 //! `PickerWidget` (FieldWidget), `PickerEditor` (FieldEditor) and `PickerDialog`
@@ -305,7 +306,6 @@ impl PickerDialog {
         let Some(row) = rows.get(idx) else {
             return;
         };
-        let was_selected = row.selected;
         let cand = row.candidate.clone();
         match self.cardinality {
             Cardinality::Single => {
@@ -318,7 +318,6 @@ impl PickerDialog {
                 self.pick.toggle_cursor();
             }
         }
-        let _ = was_selected;
         self.rebuild_list(ctx, true);
         self.update_staged();
     }
@@ -359,14 +358,16 @@ impl View for PickerDialog {
             return;
         }
 
-        let space = matches!(ev, Event::KeyDown(k) if k.key == Key::Char(' '));
+        // Insert toggles/selects the highlighted candidate; Space is NOT
+        // intercepted here so it falls through to the search InputLine.
+        let insert = matches!(ev, Event::KeyDown(k) if k.key == Key::Insert);
         let nav = matches!(
             ev,
             Event::KeyDown(k)
                 if matches!(k.key, Key::Up | Key::Down | Key::PageUp | Key::PageDown)
         );
 
-        if space {
+        if insert {
             if let Some(idx) = self.highlighted_index() {
                 self.pick_at(idx, ctx);
             }
@@ -508,7 +509,8 @@ mod tests {
     // -- Task 14: headless dialog — seed results, toggle, assert staged ----
 
     /// RED→GREEN: seed `search_results` with two candidates, `reset_current`
-    /// builds the list, toggling one (multi) stages `SetValues([store_value])`.
+    /// builds the list, toggling one (multi) with Insert stages
+    /// `SetValues([store_value])`.
     #[test]
     fn multi_toggle_stages_selected_store_value() {
         let shared = test_shared();
@@ -546,7 +548,7 @@ mod tests {
             Some(CommitOutcome::SetValues(vec![]))
         );
 
-        // Highlight row 0 (Alice) and Space to tick it.
+        // Highlight row 0 (Alice) and press Insert to tick it.
         let dlg = view
             .as_any_mut()
             .and_then(|a| a.downcast_mut::<PickerDialog>())
@@ -554,7 +556,7 @@ mod tests {
         if let Some(list) = dlg.dlg.child_mut(dlg.list_id) {
             list.set_value_ctx(FieldValue::Int(0), &mut ctx);
         }
-        let mut ev = Event::KeyDown(KeyEvent::from(Key::Char(' ')));
+        let mut ev = Event::KeyDown(KeyEvent::from(Key::Insert));
         dlg.handle_event(&mut ev, &mut ctx);
 
         assert_eq!(
@@ -562,7 +564,51 @@ mod tests {
             Some(CommitOutcome::SetValues(vec![
                 "uid=alice,ou=people,dc=example,dc=org".to_string()
             ])),
-            "ticking Alice must stage her DN as the only selected value"
+            "Insert on Alice must stage her DN as the only selected value"
+        );
+    }
+
+    /// Space must NOT toggle any candidate — it must pass through to the search
+    /// box so users can type multi-word queries like "Ann Smith" or "van der".
+    #[test]
+    fn space_does_not_toggle_candidate() {
+        let shared = test_shared();
+        shared.borrow_mut().search_results = vec![cand(
+            "uid=alice,ou=people,dc=example,dc=org",
+            "uid=alice,ou=people,dc=example,dc=org",
+            "Alice",
+        )];
+
+        let ed: Box<dyn FieldEditor> = Box::new(PickerEditor {
+            label: "member".into(),
+            binding: multi_dn_binding(),
+            current: vec![],
+            multi: true,
+        });
+        let (mut view, _focus) = ed.into_view(&schema(), shared.clone());
+
+        let mut out = std::collections::VecDeque::new();
+        let mut timers = TimerQueue::new();
+        let mut deferred = Vec::new();
+        let mut ctx = headless_ctx(&mut out, &mut timers, &mut deferred);
+        view.reset_current(&mut ctx);
+
+        let dlg = view
+            .as_any_mut()
+            .and_then(|a| a.downcast_mut::<PickerDialog>())
+            .expect("downcast PickerDialog");
+        // Highlight row 0.
+        if let Some(list) = dlg.dlg.child_mut(dlg.list_id) {
+            list.set_value_ctx(FieldValue::Int(0), &mut ctx);
+        }
+        // Press Space — must NOT toggle Alice.
+        let mut ev = Event::KeyDown(KeyEvent::from(Key::Char(' ')));
+        dlg.handle_event(&mut ev, &mut ctx);
+
+        assert_eq!(
+            shared.borrow().staged_commit,
+            Some(CommitOutcome::SetValues(vec![])),
+            "Space must not toggle any candidate — it should reach the search box"
         );
     }
 
@@ -605,22 +651,22 @@ mod tests {
             .and_then(|a| a.downcast_mut::<PickerDialog>())
             .expect("downcast");
 
-        // Pick row 0 (devs → 1001).
+        // Pick row 0 (devs → 1001) via Insert.
         if let Some(list) = dlg.dlg.child_mut(dlg.list_id) {
             list.set_value_ctx(FieldValue::Int(0), &mut ctx);
         }
-        let mut ev = Event::KeyDown(KeyEvent::from(Key::Char(' ')));
+        let mut ev = Event::KeyDown(KeyEvent::from(Key::Insert));
         dlg.handle_event(&mut ev, &mut ctx);
         assert_eq!(
             shared.borrow().staged_commit,
             Some(CommitOutcome::SetValues(vec!["1001".to_string()]))
         );
 
-        // Pick row 1 (ops → 1002): single-select must REPLACE, not add.
+        // Pick row 1 (ops → 1002) via Insert: single-select must REPLACE, not add.
         if let Some(list) = dlg.dlg.child_mut(dlg.list_id) {
             list.set_value_ctx(FieldValue::Int(1), &mut ctx);
         }
-        let mut ev = Event::KeyDown(KeyEvent::from(Key::Char(' ')));
+        let mut ev = Event::KeyDown(KeyEvent::from(Key::Insert));
         dlg.handle_event(&mut ev, &mut ctx);
         assert_eq!(
             shared.borrow().staged_commit,
