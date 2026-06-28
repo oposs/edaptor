@@ -248,9 +248,9 @@ pub(crate) fn dispatch(prog: &mut Program, cmd: Command, state: &Shared) {
     }
 }
 
-/// Build a create-mode form for `profile_idx` under `container` and install it.
-/// (Block B posts the autonumber scans for the returned requests; here they are
-/// just dropped until B wires them — `let _ = autonum`.)
+/// Build a create-mode form for `profile_idx` under `container`, install it, and
+/// post a background scan for every autonumber field (`‹allocating…›` placeholder
+/// while the scan is in flight).
 fn open_create(state: &Shared, profile_idx: usize, container: &str) {
     let form_and_reqs = {
         let st = state.borrow();
@@ -258,10 +258,33 @@ fn open_create(state: &Shared, profile_idx: usize, container: &str) {
         let profile = &st.profiles[profile_idx];
         crate::workflows::create::build_create_form(schema, profile, profile_idx, container)
     };
-    let (form, _autonum) = form_and_reqs;
+    let (mut form, autonum) = form_and_reqs;
+    // Set placeholder text in each autonumber field before installing the form.
+    for (attr, _, _) in &autonum {
+        if let Some(f) = form
+            .fields
+            .iter_mut()
+            .find(|f| f.label.eq_ignore_ascii_case(attr))
+        {
+            f.values = vec![crate::tui::state::ALLOC_PLACEHOLDER.to_string()];
+        }
+    }
     let mut st = state.borrow_mut();
     st.edit_form = Some(form);
     st.form_needs_render = true;
+    // Post a background scan for each autonumber field (split-borrow idiom: worker
+    // and alloc_flow are borrowed disjointly from st).
+    if !autonum.is_empty() {
+        let base_dn = st.base_dn.clone();
+        let crate::tui::state::UiState {
+            worker, alloc_flow, ..
+        } = &mut *st;
+        if let Some(w) = worker.as_ref() {
+            for (attr, min, max) in &autonum {
+                let _ = alloc_flow.request(w, &base_dn, attr, *min, *max);
+            }
+        }
+    }
 }
 
 /// Run the guard modal and decode the answer. (`exec_view` re-enters the loop; the

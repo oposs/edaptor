@@ -7,6 +7,7 @@ use crate::config::tree_label::CompiledTreeRule;
 use crate::config::{Config, EntryProfile};
 use crate::ldap::worker::{Request, Response, WorkerHandle};
 use crate::schema::SchemaModel;
+use crate::workflows::alloc_flow::{AllocFlow, AllocOutcome};
 use crate::workflows::edit_form::{build_edit_form, EditForm};
 use crate::workflows::labels::LabelRule;
 use crate::workflows::read_flow::ReadFlow;
@@ -14,6 +15,9 @@ use crate::workflows::structure::Structure;
 #[cfg(test)]
 use crate::workflows::structure::StructureInput;
 use crate::workflows::write_flow::{WriteFlow, WriteOutcome};
+
+/// Placeholder text set in autonumber fields while the background scan is pending.
+pub const ALLOC_PLACEHOLDER: &str = "‹allocating…›";
 
 /// A dirty-blocked navigation awaiting the guard's decision.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -49,6 +53,8 @@ pub struct UiState {
     pub edit_form: Option<EditForm>,
     /// Async write flow (validate/diff/submit/correlate).
     pub write_flow: WriteFlow,
+    /// Async autonumber allocation flow (scan + pick next-free).
+    pub alloc_flow: AllocFlow,
     /// Read-only mode disables editing and the save path.
     pub read_only: bool,
     /// Transient status text (e.g. "Saved.").
@@ -116,6 +122,7 @@ impl UiState {
             search: String::new(),
             edit_form: None,
             write_flow: WriteFlow::new(),
+            alloc_flow: AllocFlow::new(),
             read_only: false,
             status: String::new(),
             form_needs_render: false,
@@ -167,6 +174,12 @@ impl UiState {
                 }
                 ReadOutcome::Ignored => {}
             }
+            // Autonumber allocations: Entries/SearchError with alloc-range IDs.
+            let alloc_out = self.alloc_flow.on_response(resp);
+            if !matches!(alloc_out, AllocOutcome::Ignored) {
+                self.apply_alloc_outcome(alloc_out);
+                out.changed = true;
+            }
             // Then writes (WriteOk/WriteError).
             let outcome = self.write_flow.on_response(resp);
             if !matches!(outcome, WriteOutcome::Ignored) {
@@ -177,6 +190,43 @@ impl UiState {
             }
         }
         out
+    }
+
+    /// Apply one non-ignored alloc outcome to state.
+    ///
+    /// `Filled`: if the matching field is empty or shows the `‹allocating…›`
+    /// placeholder, replace it with the allocated value and flag a re-render.
+    /// `Failed`: set the status message, clear any placeholder (leave empty), flag
+    /// a re-render.
+    pub fn apply_alloc_outcome(&mut self, out: AllocOutcome) {
+        match out {
+            AllocOutcome::Filled { attr, value } => {
+                if let Some(form) = self.edit_form.as_mut() {
+                    if let Some(f) = form
+                        .fields
+                        .iter_mut()
+                        .find(|f| f.label.eq_ignore_ascii_case(&attr))
+                    {
+                        if f.values.is_empty() || f.values == [ALLOC_PLACEHOLDER] {
+                            f.values = vec![value];
+                        }
+                    }
+                }
+                self.form_needs_render = true;
+            }
+            AllocOutcome::Failed(msg) => {
+                self.status = msg;
+                if let Some(form) = self.edit_form.as_mut() {
+                    for f in &mut form.fields {
+                        if f.values == [ALLOC_PLACEHOLDER] {
+                            f.values = Vec::new();
+                        }
+                    }
+                }
+                self.form_needs_render = true;
+            }
+            AllocOutcome::Ignored => {}
+        }
     }
 
     /// Apply one non-ignored write outcome to state, returning the pump action.
@@ -460,6 +510,7 @@ pub(crate) fn bootstrap(config: Config, password: String) -> Result<UiState> {
         search: String::new(),
         edit_form: None,
         write_flow: WriteFlow::new(),
+        alloc_flow: AllocFlow::new(),
         read_only: false,
         status: String::new(),
         form_needs_render: false,
@@ -668,6 +719,60 @@ mod tests {
             vec!["top".to_string()],
             "SetValues must not touch object_classes"
         );
+    }
+
+    /// TDD Step 1 (RED → GREEN): apply_alloc_outcome Filled replaces the
+    /// ‹allocating…› placeholder with the allocated value and flags form_needs_render.
+    #[test]
+    fn apply_alloc_outcome_filled_sets_field_value() {
+        use crate::schema::FieldKind;
+        use crate::workflows::alloc_flow::AllocOutcome;
+        use crate::workflows::edit_form::{EditField, EditForm, FormMode};
+        use crate::workflows::form_model::WidgetSpec;
+
+        let raw = RawSubschema::default();
+        let schema = SchemaModel::from_raw(&raw);
+        let structure = Structure::build("dc=x", vec![]);
+        let mut st =
+            UiState::new_for_test(structure, schema, "dc=x".into(), Vec::new(), Vec::new());
+
+        let uid_field = EditField {
+            label: "uidNumber".into(),
+            must: false,
+            editable: true,
+            multi: false,
+            secret: false,
+            ordered: false,
+            orphaned: false,
+            kind: FieldKind::Integer,
+            widget: WidgetSpec::ReadOnlyText,
+            widget_binding: None,
+            values: vec![ALLOC_PLACEHOLDER.to_string()],
+            baseline: vec![],
+        };
+        st.edit_form = Some(EditForm {
+            dn: String::new(),
+            mode: FormMode::Create {
+                profile_idx: 0,
+                container: "ou=people,dc=x".into(),
+            },
+            object_classes: vec![],
+            fields: vec![uid_field],
+        });
+        st.form_needs_render = false;
+
+        st.apply_alloc_outcome(AllocOutcome::Filled {
+            attr: "uidNumber".into(),
+            value: "10006".into(),
+        });
+
+        let form = st.edit_form.as_ref().unwrap();
+        assert_eq!(
+            form.fields[0].values,
+            vec!["10006".to_string()],
+            "Filled should replace the placeholder with the allocated value"
+        );
+        assert!(st.form_needs_render, "form_needs_render must be set");
     }
 }
 
