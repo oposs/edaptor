@@ -476,10 +476,7 @@ mod tests {
         key(view.as_mut(), &mut ctx, Key::Delete, false);
         key(view.as_mut(), &mut ctx, Key::Down, false);
         key(view.as_mut(), &mut ctx, Key::Up, false);
-        assert_eq!(
-            staged(&shared),
-            Some(CommitOutcome::SetValues(Vec::new()))
-        );
+        assert_eq!(staged(&shared), Some(CommitOutcome::SetValues(Vec::new())));
     }
 
     #[test]

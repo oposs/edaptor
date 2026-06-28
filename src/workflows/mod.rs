@@ -6,15 +6,15 @@
 //! ([`crate::ui::view`]).
 
 pub mod alloc_flow;
-pub mod pick_state;
-pub mod search_flow;
 pub mod create;
 pub mod edit_form;
 pub mod form_model;
 pub mod labels;
+pub mod pick_state;
 pub mod read_flow;
 pub mod samba_compute;
 pub mod save;
+pub mod search_flow;
 pub mod structure;
 pub mod widget_bind;
 pub mod write_flow;

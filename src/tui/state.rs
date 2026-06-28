@@ -320,7 +320,9 @@ impl UiState {
         store_attr: Option<&str>,
     ) {
         if let Some(w) = self.worker.as_ref() {
-            let _ = self.search_flow.request(w, base, oc, term, attrs, store_attr);
+            let _ = self
+                .search_flow
+                .request(w, base, oc, term, attrs, store_attr);
         }
     }
 
@@ -1212,7 +1214,10 @@ mod tests {
 
         let result = st.pump_responses_for_test(&[resp]);
 
-        assert!(result.changed, "pump must signal changed when search results arrive");
+        assert!(
+            result.changed,
+            "pump must signal changed when search results arrive"
+        );
         assert_eq!(st.search_results.len(), 2, "both candidates must be stored");
         assert_eq!(st.search_results[0].label, "Alice");
         assert_eq!(st.search_results[1].label, "uid=bob,dc=x");
@@ -1239,8 +1244,14 @@ mod tests {
         };
 
         let result = st.pump_responses_for_test(&[resp]);
-        assert!(!result.changed, "stale search response must not signal changed");
-        assert!(st.search_results.is_empty(), "stale response must not populate results");
+        assert!(
+            !result.changed,
+            "stale search response must not signal changed"
+        );
+        assert!(
+            st.search_results.is_empty(),
+            "stale response must not populate results"
+        );
     }
 
     /// Task 12: new_for_test must default connection_encrypted to false.

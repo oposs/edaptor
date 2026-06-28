@@ -5,8 +5,8 @@
 mod app;
 // Keep `pub`: builders and guard_decision are not yet called from non-test code
 // (wired in Task 8). `pub` suppresses the dead_code lint without `#[allow]`.
-pub mod dialog;
 pub(crate) mod choice;
+pub mod dialog;
 pub(crate) mod multivalue;
 pub(crate) mod oc_picker;
 pub(crate) mod panes;

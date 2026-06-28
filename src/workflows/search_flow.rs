@@ -336,7 +336,10 @@ mod tests {
         };
         match sf.on_response(&resp) {
             SearchOutcome::Results { rows, .. } => {
-                assert_eq!(rows[0].label, "uid=nobody,dc=x", "label must fall back to DN");
+                assert_eq!(
+                    rows[0].label, "uid=nobody,dc=x",
+                    "label must fall back to DN"
+                );
             }
             other => panic!("expected Results, got {other:?}"),
         }
@@ -363,7 +366,10 @@ mod tests {
         match sf.on_response(&resp) {
             SearchOutcome::Results { rows, .. } => {
                 assert_eq!(rows[0].dn, "cn=devs,ou=groups,dc=x");
-                assert_eq!(rows[0].store_value, "1234", "store_value from gidNumber attr");
+                assert_eq!(
+                    rows[0].store_value, "1234",
+                    "store_value from gidNumber attr"
+                );
                 assert_eq!(rows[0].label, "devs", "label still from cn");
             }
             other => panic!("expected Results, got {other:?}"),

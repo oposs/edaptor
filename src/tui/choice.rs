@@ -68,7 +68,11 @@ impl FieldEditor for ChoiceEditor {
         _schema: &SchemaModel,
         shared: Shared,
     ) -> (Box<dyn View>, tv::ViewId) {
-        let ChoiceEditor { label, cfg, current } = *self;
+        let ChoiceEditor {
+            label,
+            cfg,
+            current,
+        } = *self;
         let dlg = ChoiceDialog::new(label, cfg, current, shared);
         let focus = dlg.list_id;
         (Box::new(dlg), focus)
@@ -186,8 +190,7 @@ impl ChoiceDialog {
     /// Write the prospective commit into shared state. Short borrow only.
     fn update_staged(&self) {
         let value = self.cfg.commit_value(&self.current, &self.checked);
-        self.shared.borrow_mut().staged_commit =
-            Some(CommitOutcome::SetValues(vec![value]));
+        self.shared.borrow_mut().staged_commit = Some(CommitOutcome::SetValues(vec![value]));
     }
 
     /// The option index under the list highlight, if any.
@@ -353,10 +356,7 @@ mod tests {
             list.set_value_ctx(FieldValue::Int(idx as i32), ctx);
         }
         // send Space to toggle
-        let mut ev = Event::KeyDown(KeyEvent::new(
-            Key::Char(' '),
-            KeyModifiers::default(),
-        ));
+        let mut ev = Event::KeyDown(KeyEvent::new(Key::Char(' '), KeyModifiers::default()));
         dlg.handle_event(&mut ev, ctx);
     }
 

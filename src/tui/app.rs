@@ -155,10 +155,9 @@ pub(crate) fn dispatch(prog: &mut Program, cmd: Command, state: &Shared) {
             };
             match res {
                 Some(Ok(sid)) => {
-                    state.borrow_mut().apply_commit(
-                        idx,
-                        crate::tui::widget::CommitOutcome::SetValues(vec![sid]),
-                    );
+                    state
+                        .borrow_mut()
+                        .apply_commit(idx, crate::tui::widget::CommitOutcome::SetValues(vec![sid]));
                 }
                 Some(Err(msg)) => {
                     let (view, ok) = error::build(&msg);

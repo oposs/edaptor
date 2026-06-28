@@ -77,10 +77,7 @@ pub struct Candidate {
 }
 
 /// Pull the scalar `value_attr` from a candidate's attributes (first value).
-pub fn pick_value(
-    attrs: &BTreeMap<String, Vec<String>>,
-    value_attr: &str,
-) -> Option<String> {
+pub fn pick_value(attrs: &BTreeMap<String, Vec<String>>, value_attr: &str) -> Option<String> {
     attrs
         .iter()
         .find(|(k, _)| k.eq_ignore_ascii_case(value_attr))
@@ -400,12 +397,32 @@ mod tests {
         p.search_active = true;
         let rows = p.visible();
         let dns: Vec<_> = rows.iter().map(|r| r.candidate.dn.clone()).collect();
-        assert_eq!(dns, vec!["C", "D", "B", "A"], "results first, then unmatched selected");
+        assert_eq!(
+            dns,
+            vec!["C", "D", "B", "A"],
+            "results first, then unmatched selected"
+        );
         let b_count = rows.iter().filter(|r| r.candidate.dn == "B").count();
         assert_eq!(b_count, 1, "B not duplicated");
-        assert!(rows.iter().find(|r| r.candidate.dn == "B").unwrap().selected);
-        assert!(rows.iter().find(|r| r.candidate.dn == "A").unwrap().selected);
-        assert!(!rows.iter().find(|r| r.candidate.dn == "C").unwrap().selected);
+        assert!(
+            rows.iter()
+                .find(|r| r.candidate.dn == "B")
+                .unwrap()
+                .selected
+        );
+        assert!(
+            rows.iter()
+                .find(|r| r.candidate.dn == "A")
+                .unwrap()
+                .selected
+        );
+        assert!(
+            !rows
+                .iter()
+                .find(|r| r.candidate.dn == "C")
+                .unwrap()
+                .selected
+        );
     }
 
     // --- scalar (exact) store ---
@@ -437,8 +454,16 @@ mod tests {
     fn selected_values_returns_store_values() {
         let mut p = PickState::new(vec![], false);
         p.set_results(vec![
-            Candidate { dn: "uid=a,o=x".into(), label: "A".into(), store_value: "1001".into() },
-            Candidate { dn: "uid=b,o=x".into(), label: "B".into(), store_value: "1002".into() },
+            Candidate {
+                dn: "uid=a,o=x".into(),
+                label: "A".into(),
+                store_value: "1001".into(),
+            },
+            Candidate {
+                dn: "uid=b,o=x".into(),
+                label: "B".into(),
+                store_value: "1002".into(),
+            },
         ]);
         p.cursor = 0;
         p.toggle_cursor();
