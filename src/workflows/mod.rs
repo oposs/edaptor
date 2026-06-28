@@ -6,6 +6,7 @@
 //! ([`crate::ui::view`]).
 
 pub mod alloc_flow;
+pub mod pick_state;
 pub mod create;
 pub mod edit_form;
 pub mod form_model;
