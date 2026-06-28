@@ -8,6 +8,12 @@ All notable changes to eDAPtor are documented here. The format follows
 
 ### New
 
+- **tvision UI:** `choice` widgets (`loginShell`, `sambaAcctFlags`, …) are now
+  editable via a modal radio / checkbox list. Single-select (Plain format)
+  replaces the selection; multi-select (Bracketed format) toggles tokens while
+  preserving any unmanaged letters (lossless merge). The dialog seeds the
+  pre-checked state from the field's current value and stages the result live.
+
 - Passwords can be set via a masked New/Confirm editor (create and edit),
   writing the configured attribute (plus the Samba NT hash when enabled); the
   editor refuses on an unencrypted connection.

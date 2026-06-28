@@ -107,6 +107,8 @@ pub fn widget_for(field: &EditField) -> Box<dyn FieldWidget> {
         Box::new(crate::tui::oc_picker::ObjectClassWidget)
     } else if matches!(field.widget_binding, Some(WidgetKind::Password(_))) {
         Box::new(crate::tui::pw_editor::PasswordWidget)
+    } else if matches!(field.widget_binding, Some(WidgetKind::Choice(_))) {
+        Box::new(crate::tui::choice::ChoiceWidget)
     } else if field.editable && field.multi && !field.orphaned && field.widget_binding.is_none() {
         Box::new(crate::tui::multivalue::MultiValueWidget)
     } else {
@@ -121,6 +123,7 @@ pub fn is_modal_field(field: &EditField) -> bool {
     use crate::config::widget::WidgetKind;
     field.label.eq_ignore_ascii_case("objectClass")
         || matches!(field.widget_binding, Some(WidgetKind::Password(_)))
+        || matches!(field.widget_binding, Some(WidgetKind::Choice(_)))
         || (field.editable && field.multi && !field.orphaned && field.widget_binding.is_none())
 }
 
