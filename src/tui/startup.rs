@@ -80,7 +80,7 @@ pub fn run_config_picker(items: Vec<PickerItem>) -> Result<Option<PathBuf>> {
     use tvision_rs::{Command, CrosstermBackend, Desktop, Program, Rect, SystemClock, Theme, View};
 
     let paths: Vec<PathBuf> = items.iter().map(|it| it.path.clone()).collect();
-    let selected: Rc<RefCell<Option<usize>>> = Rc::new(RefCell::new(None));
+    let cell: Rc<RefCell<Option<usize>>> = Rc::new(RefCell::new(None));
     let chosen: Rc<RefCell<Option<usize>>> = Rc::new(RefCell::new(None));
 
     let backend = Box::new(CrosstermBackend::new()?);
@@ -97,9 +97,8 @@ pub fn run_config_picker(items: Vec<PickerItem>) -> Result<Option<PathBuf>> {
         |_r| None,
     );
 
-    // `items`/`selected` move into the closure; `chosen` is cloned out for reading.
+    // `items`/`cell` clone move into the closure; `chosen` is cloned out for reading.
     let chosen_w = chosen.clone();
-    let cell = selected.clone();
     let mut items_opt = Some(items);
     program.run_app(move |prog, cmd| {
         if cmd == SHOW_PICKER {
@@ -109,8 +108,8 @@ pub fn run_config_picker(items: Vec<PickerItem>) -> Result<Option<PathBuf>> {
                 if answer == Command::OK {
                     *chosen_w.borrow_mut() = *cell.borrow();
                 }
-                prog.end_modal(Command::QUIT);
             }
+            prog.end_modal(Command::QUIT);
         }
     });
 
