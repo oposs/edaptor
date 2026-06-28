@@ -1,35 +1,34 @@
-//! Dev binary for the in-progress tvision UI (M1-M4). Deleted at the M5 cutover.
-//! Usage: `cargo run -j4 --bin edaptor-tv -- [--config <path> | <path>]`
-//! Config path defaults to examples/demo-config.toml; password from
-//! EDAPTOR_TEST_ADMIN_PW (demo: adminpassword).
+//! Dev binary for the in-progress tvision UI (M1-M5a). Deleted at the M5b cutover.
+//! Usage: `cargo run -j4 --bin edaptor-tv -- [--config <path>]`
+//! With no --config, discovers configs in ~/.config/edaptor and /etc/edaptor and
+//! shows the picker if more than one is found. Password from EDAPTOR_TEST_ADMIN_PW
+//! (demo: adminpassword).
 
 use std::path::PathBuf;
 
 use anyhow::{anyhow, Result};
 use edaptor::config::Config;
 
-/// Resolve the config path from CLI args. Accepts `--config <path>`,
-/// `--config=<path>`, or a bare positional path; falls back to the demo config.
-/// (Mirrors the main `edaptor` binary's `--config` flag so the same invocation
-/// works against either binary.)
-fn config_path_from_args<I: IntoIterator<Item = String>>(args: I) -> PathBuf {
+/// Parse only the `--config <path>` / `--config=<path>` flag; everything else is
+/// ignored. Returns `None` when no flag is present (→ discovery + picker).
+fn config_flag<I: IntoIterator<Item = String>>(args: I) -> Option<PathBuf> {
     let mut iter = args.into_iter();
     while let Some(a) = iter.next() {
         if a == "--config" {
-            if let Some(p) = iter.next() {
-                return PathBuf::from(p);
-            }
+            return iter.next().map(PathBuf::from);
         } else if let Some(p) = a.strip_prefix("--config=") {
-            return PathBuf::from(p);
-        } else if !a.starts_with('-') {
-            return PathBuf::from(a);
+            return Some(PathBuf::from(p));
         }
     }
-    PathBuf::from("examples/demo-config.toml")
+    None
 }
 
 fn main() -> Result<()> {
-    let path = config_path_from_args(std::env::args().skip(1));
+    let cli_config = config_flag(std::env::args().skip(1));
+    let path = match edaptor::tui::startup::resolve_config_path(cli_config)? {
+        Some(p) => p,
+        None => return Ok(()), // user cancelled the picker
+    };
     let config = Config::load(&path)?;
     let password = std::env::var("EDAPTOR_TEST_ADMIN_PW")
         .map_err(|_| anyhow!("set EDAPTOR_TEST_ADMIN_PW (demo: adminpassword)"))?;
@@ -40,38 +39,23 @@ fn main() -> Result<()> {
 mod tests {
     use super::*;
 
-    fn p(args: &[&str]) -> String {
-        config_path_from_args(args.iter().map(|s| s.to_string()))
-            .to_string_lossy()
-            .into_owned()
+    fn flag(args: &[&str]) -> Option<String> {
+        config_flag(args.iter().map(|s| s.to_string())).map(|p| p.to_string_lossy().into_owned())
     }
 
     #[test]
     fn flag_with_separate_value() {
-        assert_eq!(
-            p(&["--config", "examples/demo-config.toml"]),
-            "examples/demo-config.toml"
-        );
+        assert_eq!(flag(&["--config", "a.toml"]).as_deref(), Some("a.toml"));
     }
 
     #[test]
     fn flag_with_equals() {
-        assert_eq!(p(&["--config=foo.toml"]), "foo.toml");
+        assert_eq!(flag(&["--config=foo.toml"]).as_deref(), Some("foo.toml"));
     }
 
     #[test]
-    fn bare_positional() {
-        assert_eq!(p(&["foo.toml"]), "foo.toml");
-    }
-
-    #[test]
-    fn default_when_empty() {
-        assert_eq!(p(&[]), "examples/demo-config.toml");
-    }
-
-    #[test]
-    fn flag_takes_precedence_over_trailing_positional_form() {
-        // `--config X` consumes X as the value (not treated as a bare positional).
-        assert_eq!(p(&["--config", "a.toml"]), "a.toml");
+    fn no_flag_is_none() {
+        assert_eq!(flag(&[]), None);
+        assert_eq!(flag(&["something"]), None);
     }
 }

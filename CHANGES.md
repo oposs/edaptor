@@ -8,6 +8,12 @@ All notable changes to eDAPtor are documented here. The format follows
 
 ### New
 
+- **tvision UI: config picker at startup.** When more than one config is
+  discovered in `~/.config/edaptor/` or `/etc/edaptor/`, a Turbo-Vision
+  "Select configuration" dialog now lists them (name + description + path) so
+  you can choose one; a single discovered config or an explicit `--config`
+  skips the picker. (Startup-flow groundwork for the M5 cutover.)
+
 - **tvision UI:** Save now performs the combined membership write end-to-end. When
   a form's membership (fan-out) field has staged changes, Save plans a combined
   save — the user's own MODIFY plus one MODIFY per touched group — previews the
