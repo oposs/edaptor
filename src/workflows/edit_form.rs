@@ -183,6 +183,30 @@ impl EditForm {
     }
 }
 
+/// The fan-out back-ref attr for a field — the holder attribute a membership
+/// change writes into each group (e.g. `member`), if the field carries a picker
+/// binding whose `fanout_attr` is set. `None` for plain / choice / password
+/// fields. Neutral port of `ui::edit_form::fanout_attr_of` (reads
+/// [`EditField::widget_binding`] for `WidgetKind::Picker(b)` with `b.fanout_attr`).
+pub fn fanout_attr_of(f: &EditField) -> Option<&str> {
+    match &f.widget_binding {
+        Some(WidgetKind::Picker(b)) => b.fanout_attr.as_deref(),
+        _ => None,
+    }
+}
+
+impl EditForm {
+    /// Labels of fields whose picker binding fans out (excluded from the own-entry
+    /// diff; their baseline→selection delta drives the per-holder fan-out save).
+    pub fn fanout_labels(&self) -> Vec<String> {
+        self.fields
+            .iter()
+            .filter(|f| fanout_attr_of(f).is_some())
+            .map(|f| f.label.clone())
+            .collect()
+    }
+}
+
 /// Order-insensitive value-set equality (same length, each element of each side
 /// present in the other). The dirty-check sibling of `changeset::diff`.
 pub fn value_set_eq(a: &[String], b: &[String]) -> bool {
@@ -510,6 +534,35 @@ mod tests {
         let cn = f.fields.iter().find(|x| x.label == "cn").unwrap();
         assert_eq!(cn.values, vec!["Bob".to_string()]);
         assert!(!cn.orphaned);
+    }
+
+    #[test]
+    fn fanout_labels_come_from_picker_binding_with_fanout_attr() {
+        use crate::config::relation::{CandidateScope, PickerBinding, StoreKey};
+        use crate::config::widget::WidgetKind;
+
+        let scope = CandidateScope {
+            base: "ou=groups,dc=x".into(),
+            object_classes: vec!["groupOfNames".into()],
+            search_attrs: vec!["cn".into()],
+            label_template: None,
+        };
+        let binding = |fanout: Option<&str>| {
+            Some(WidgetKind::Picker(PickerBinding {
+                attr: "memberOf".into(),
+                scope: scope.clone(),
+                store: StoreKey::Dn,
+                select: None,
+                fanout_attr: fanout.map(|s| s.to_string()),
+            }))
+        };
+        let mut f = build_edit_form(&model(), &schema(), false);
+        // A picker with fanout_attr → a fan-out label; without → not.
+        f.fields[0].widget_binding = binding(Some("member"));
+        f.fields[1].widget_binding = binding(None);
+        assert_eq!(fanout_attr_of(&f.fields[0]), Some("member"));
+        assert_eq!(fanout_attr_of(&f.fields[1]), None);
+        assert_eq!(f.fanout_labels(), vec![f.fields[0].label.clone()]);
     }
 
     #[test]
