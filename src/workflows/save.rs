@@ -260,6 +260,20 @@ pub enum PlanCombined {
 /// baseline can never diff to a spurious Delete — exactly as the single-entry path
 /// does via [`stage_pending_password`].
 ///
+/// # Caller contract — password attrs MUST always be in `mask_attrs`
+///
+/// [`stage_pending_password`] **always** strips the password primary and derived
+/// attributes from the entry maps it receives, regardless of whether a password is
+/// staged. This function mirrors that guarantee by stripping every attr in
+/// `mask_attrs` from BOTH the baseline and the edited side before diffing. For the
+/// guarantee to hold, callers MUST include the password primary and all derived
+/// attributes in `mask_attrs` even when no password change is staged (i.e. even
+/// when `password_mods` is empty). Passing only the result of
+/// `stage_pending_password` as `mask_attrs` is **not sufficient** when
+/// `pending_password` is `None`, because that returns an empty mask — leaving a
+/// stored baseline hash visible to the diff and causing a spurious
+/// `Delete userPassword`.
+///
 /// When no fan-out field changed the result still holds (empty `fanout`); callers
 /// that know there is no membership change may use [`prepare_save`] directly.
 /// A rename combined with a membership change yields
@@ -759,6 +773,82 @@ mod tests {
             ),
             "rename combined with a membership change must be unsupported in v1"
         );
+    }
+
+    /// A user form whose memberOf field changes (g1→g2, fan-out) AND whose
+    /// userPassword field carries the directory's stored hash on the baseline but
+    /// no value on the edited side — the typical state when the password widget
+    /// hides the hash from the form. Used to test that no-pending-password saves
+    /// do not emit a spurious Delete for userPassword.
+    fn user_form_with_password_baseline_and_memberof_change() -> EditForm {
+        EditForm {
+            dn: "uid=ann,ou=people,dc=x".into(),
+            mode: FormMode::Edit,
+            object_classes: vec!["testUser".into()],
+            fields: vec![
+                plain_field("uid", vec!["ann"], vec!["ann"]),
+                // Password field: the directory stores a hash on the baseline but the
+                // password widget does not surface the hash value to the form editor.
+                // values = [] simulates the hidden-hash state; baseline = ["{SSHA}…"]
+                // is what was loaded from the directory. Without proper stripping, the
+                // diff would produce a spurious Delete for userPassword.
+                plain_field("userPassword", vec![], vec!["{SSHA}oldhash"]),
+                // Fan-out: g1 → g2.
+                memberof_field(vec!["cn=g2,ou=groups,dc=x"], vec!["cn=g1,ou=groups,dc=x"]),
+            ],
+        }
+    }
+
+    /// Regression: when a combined (membership fan-out) save happens and there is
+    /// NO staged password change, a password attribute whose baseline holds the
+    /// stored directory hash must NOT produce a spurious `Delete userPassword` in
+    /// `own_mods`.
+    ///
+    /// The property is guaranteed by stripping `mask_attrs` from BOTH the baseline
+    /// and the edited entry before diffing. Per the caller contract on
+    /// [`plan_combined_save`], the caller MUST include the password primary (and
+    /// any derived attrs) in `mask_attrs` unconditionally — not only when a
+    /// password change is staged.
+    #[test]
+    fn combined_no_pending_password_does_not_clobber_baseline_hash() {
+        let form = user_form_with_password_baseline_and_memberof_change();
+        // Correct caller behavior: always include the password primary in mask_attrs
+        // even when no password is staged (password_mods is empty).
+        let password_primary = "userPassword".to_string();
+        match plan_combined_save(
+            &user_schema(),
+            &form,
+            &[],                 // no staged password mods
+            &[password_primary], // primary always in mask_attrs (caller contract)
+            &[],
+            &[],
+            &Default::default(),
+        ) {
+            PlanCombined::Ready(cs) => {
+                let touches_password = cs.own_mods.iter().any(|m| {
+                    let attr = match m {
+                        ModOp::Add { attr, .. }
+                        | ModOp::Delete { attr, .. }
+                        | ModOp::Replace { attr, .. } => attr,
+                    };
+                    attr.eq_ignore_ascii_case("userPassword")
+                });
+                assert!(
+                    !touches_password,
+                    "no staged password must not emit a userPassword mod (clobber!); \
+                     got own_mods: {:?}",
+                    cs.own_mods
+                );
+                // Sanity: the fan-out change IS captured.
+                assert_eq!(
+                    cs.fanout.len(),
+                    2,
+                    "expected g1 Delete + g2 Add in fanout; got {:?}",
+                    cs.fanout
+                );
+            }
+            other => panic!("expected PlanCombined::Ready, got {other:?}"),
+        }
     }
 
     #[test]
