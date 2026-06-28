@@ -1,10 +1,7 @@
 //! Neutral selection state for picker and membership widgets.
 //!
-//! Framework-free parity copy of the pure logic in `src/ui/picker.rs`.
-//! Backs the tvision-side picker and membership widgets (M4).
-//! No ratatui, no tui_*, no tvision_rs, no crate::ui, no crate::tui.
-//!
-//! Deduplication with `ui::picker` is deferred to M5.
+//! Framework-free pure logic backing the tvision picker and membership widgets.
+//! No ratatui, no tui_*, no tvision_rs, no crate::tui.
 
 use std::collections::BTreeMap;
 

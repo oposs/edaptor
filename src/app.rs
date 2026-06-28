@@ -1,8 +1,7 @@
 //! Application-level domain logic: the backend-agnostic UI action vocabulary.
 
-/// A backend-agnostic UI intent produced by the event loop's key dispatch
-/// ([`crate::ui::app::dispatch_key`]) and serviced by
-/// [`crate::ui::app::handle_action`]. Keeping it framework-free is what lets the
+/// A backend-agnostic UI intent produced by the tvision event loop's key dispatch
+/// and serviced by the tvision action handler. Keeping it framework-free lets the
 /// key/dispatch layer stay testable without a terminal.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UiAction {

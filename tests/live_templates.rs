@@ -28,7 +28,7 @@ use edaptor::config::{
 };
 use edaptor::ldap::worker::{Request, Response, SearchScope, WorkerHandle};
 use edaptor::samba::password::password_add_attrs;
-use edaptor::ui::picker::{build_member_filter, pick_value};
+use edaptor::workflows::pick_state::{build_member_filter, pick_value};
 
 /// Resolve the `[profile.widget.<attr>]` picker/membership binding for `attr`
 /// from the given profiles. Pickers are driven through the widget palette
@@ -389,7 +389,7 @@ fn autonumber_allocation_and_multi_oc_create() {
 
 /// Task 5.3 — value-lookup picker yields the right scalar (gated).
 ///
-/// Proves `edaptor::ui::picker::pick_value` (the lookup picker's commit path)
+/// Proves `edaptor::workflows::pick_state::pick_value` (the lookup picker's commit path)
 /// reads the correct scalar attribute (`gidNumber`) from a REAL directory entry,
 /// and returns `None` for an absent attribute. Requires the posix schema
 /// (posixGroup); SKIPs with a clear message if it is absent.
@@ -463,12 +463,12 @@ fn lookup_pick_value_yields_gidnumber() {
 
     // --- The picker commit path reads the right scalar from the real entry. ---
     assert_eq!(
-        edaptor::ui::picker::pick_value(&entry.attrs, "gidNumber"),
+        pick_value(&entry.attrs, "gidNumber"),
         Some("54321".to_string()),
         "pick_value must read the gidNumber scalar from the real entry"
     );
     assert_eq!(
-        edaptor::ui::picker::pick_value(&entry.attrs, "noSuchAttr"),
+        pick_value(&entry.attrs, "noSuchAttr"),
         None,
         "pick_value must return None for an absent attribute"
     );

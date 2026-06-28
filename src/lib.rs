@@ -1,5 +1,5 @@
-//! edaptor — a schema-driven OpenLDAP TUI. M1 exposes a headless check pipeline;
-//! the ratatui UI adds the three-pane browser (tree / leaf list / entry form).
+//! edaptor — a schema-driven OpenLDAP TUI. The tvision UI provides the three-pane
+//! browser (tree / leaf list / entry form).
 
 pub mod app;
 pub mod config;
@@ -10,7 +10,6 @@ pub mod samba;
 pub mod schema;
 pub mod testdata;
 pub mod tui;
-pub mod ui;
 pub mod workflows;
 
 use std::time::{SystemTime, UNIX_EPOCH};

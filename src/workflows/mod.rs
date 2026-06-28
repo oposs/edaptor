@@ -2,8 +2,8 @@
 //! helpers, and their pure helpers.
 //!
 //! Everything here is tty-free domain logic. Rendering the [`structure::Structure`]
-//! and the [`crate::workflows::form_model::FormModel`]s happens in the ratatui UI
-//! ([`crate::ui::view`]).
+//! and the [`crate::workflows::form_model::FormModel`]s happens in the tvision UI
+//! (`crate::tui`).
 
 pub mod alloc_flow;
 pub mod create;

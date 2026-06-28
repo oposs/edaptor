@@ -4,8 +4,6 @@
 
 use std::collections::BTreeMap;
 
-use crate::config::label::Piece;
-use crate::config::tree_label::{eval_tree_label, fit_label, CompiledTreeRule, Segment};
 use crate::config::EntryProfile;
 use crate::ldap::worker::StructureNodeRaw;
 use crate::workflows::structure::{Structure, StructureInput};
@@ -108,33 +106,6 @@ pub(crate) fn compute_rows(
     rows
 }
 
-/// Build the eager-[`Structure`] input row for a freshly created entry from its
-/// DN and the attributes that were sent (the structure model derives the display
-/// label from cn → description → RDN). Pure.
-pub(crate) fn structure_input_from_attrs(
-    dn: &str,
-    attrs: &BTreeMap<String, Vec<String>>,
-) -> StructureInput {
-    let first = |name: &str| {
-        attrs
-            .iter()
-            .find(|(k, _)| k.eq_ignore_ascii_case(name))
-            .and_then(|(_, v)| v.first().cloned())
-    };
-    let object_classes = attrs
-        .iter()
-        .find(|(k, _)| k.eq_ignore_ascii_case("objectClass"))
-        .map(|(_, v)| v.clone())
-        .unwrap_or_default();
-    StructureInput {
-        dn: dn.to_string(),
-        cn: first("cn"),
-        description: first("description"),
-        object_classes,
-        attrs: attrs.clone(),
-    }
-}
-
 /// Map the worker's raw structure rows into the pure model's input rows. Pure.
 pub(crate) fn structure_inputs(nodes: Vec<StructureNodeRaw>) -> Vec<StructureInput> {
     nodes
@@ -149,31 +120,6 @@ pub(crate) fn structure_inputs(nodes: Vec<StructureNodeRaw>) -> Vec<StructureInp
         .collect()
 }
 
-/// The fitted label for one branch node at `depth`, given the DIT pane's inner
-/// width. Text x-offset inside the tree = per-depth indent (2 cols/level) +
-/// node symbol (2 cols) + highlight symbol (0, none configured).
-pub(crate) fn node_label(
-    structure: &Structure,
-    dn: &str,
-    rules: &[CompiledTreeRule],
-    inner_width: usize,
-    depth: usize,
-) -> String {
-    let avail = inner_width.saturating_sub(depth * 2 + 2);
-    let rdn = dn.split(',').next().unwrap_or(dn).trim();
-    match structure.get(dn) {
-        Some(n) => fit_label(&eval_tree_label(rules, &n.attrs, rdn), avail),
-        None => fit_label(
-            &[Segment {
-                pieces: vec![Piece {
-                    text: rdn.to_string(),
-                    from_field: true,
-                }],
-            }],
-            avail,
-        ),
-    }
-}
 
 #[cfg(test)]
 mod tests {
