@@ -10,6 +10,7 @@ use std::rc::Rc;
 use anyhow::Result;
 use tvision_rs::{self as tv, Context, DrawCtx, Event, View};
 
+use crate::config::discovery;
 use crate::tui::dialog::config_picker::{self, PickerItem};
 
 /// Posted once by `PickerTrigger` on the first timer tick; the picker program's
@@ -69,6 +70,63 @@ impl View for PickerTrigger {
     }
 }
 
+/// The outcome of inspecting the CLI flag + discovered candidates.
+enum PathDecision {
+    /// `--config <p>` was given; use it verbatim (discovery skipped).
+    Explicit(PathBuf),
+    /// Exactly one config discovered; use it (no picker).
+    Single(PathBuf),
+    /// More than one discovered; show the picker over these items.
+    Picker(Vec<PickerItem>),
+    /// No config found anywhere.
+    NoneFound,
+}
+
+/// Pure decision: map the CLI flag + discovered candidates to a `PathDecision`.
+/// Discovery itself (filesystem) is done by the caller so this stays testable.
+fn decide_config_path(
+    cli_config: Option<PathBuf>,
+    candidates: Vec<discovery::ConfigCandidate>,
+) -> PathDecision {
+    if let Some(p) = cli_config {
+        return PathDecision::Explicit(p);
+    }
+    match candidates.len() {
+        0 => PathDecision::NoneFound,
+        1 => PathDecision::Single(candidates.into_iter().next().unwrap().path),
+        _ => PathDecision::Picker(
+            candidates
+                .into_iter()
+                .map(|c| PickerItem {
+                    name: c.display_name(),
+                    description: c.meta.description.clone().unwrap_or_default(),
+                    path: c.path,
+                })
+                .collect(),
+        ),
+    }
+}
+
+/// Resolve the config path for startup. `--config` wins; otherwise discover
+/// configs and pick (0 → error, 1 → use it, many → picker dialog).
+/// `Ok(None)` means the user cancelled the picker — the caller should exit cleanly.
+pub fn resolve_config_path(cli_config: Option<PathBuf>) -> Result<Option<PathBuf>> {
+    // Skip discovery entirely when an explicit path is given.
+    let candidates = if cli_config.is_some() {
+        Vec::new()
+    } else {
+        discovery::discover_configs()
+    };
+    match decide_config_path(cli_config, candidates) {
+        PathDecision::Explicit(p) | PathDecision::Single(p) => Ok(Some(p)),
+        PathDecision::NoneFound => Err(anyhow::anyhow!(
+            "no config found in ~/.config/edaptor/ or /etc/edaptor/; \
+             use --config to specify one"
+        )),
+        PathDecision::Picker(items) => run_config_picker(items),
+    }
+}
+
 /// Run the config picker in its own short-lived `Program`. Returns the chosen
 /// path, or `None` if the user cancelled (caller exits cleanly).
 ///
@@ -120,7 +178,57 @@ pub fn run_config_picker(items: Vec<PickerItem>) -> Result<Option<PathBuf>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::discovery::ConfigCandidate;
+    use crate::config::MetaConfig;
     use std::collections::VecDeque;
+    use std::path::Path;
+
+    fn candidate(path: &str, name: Option<&str>) -> ConfigCandidate {
+        ConfigCandidate {
+            path: PathBuf::from(path),
+            meta: MetaConfig {
+                name: name.map(|s| s.to_string()),
+                description: None,
+            },
+        }
+    }
+
+    #[test]
+    fn explicit_flag_short_circuits_discovery() {
+        let d = decide_config_path(Some(PathBuf::from("/x/my.toml")), Vec::new());
+        assert!(matches!(d, PathDecision::Explicit(p) if p == Path::new("/x/my.toml")));
+    }
+
+    #[test]
+    fn zero_candidates_is_none_found() {
+        let d = decide_config_path(None, Vec::new());
+        assert!(matches!(d, PathDecision::NoneFound));
+    }
+
+    #[test]
+    fn one_candidate_is_used_directly() {
+        let d = decide_config_path(None, vec![candidate("/etc/edaptor/a.toml", Some("a"))]);
+        assert!(matches!(d, PathDecision::Single(p) if p == Path::new("/etc/edaptor/a.toml")));
+    }
+
+    #[test]
+    fn many_candidates_request_the_picker() {
+        let d = decide_config_path(
+            None,
+            vec![
+                candidate("/etc/edaptor/a.toml", Some("a")),
+                candidate("/etc/edaptor/b.toml", Some("b")),
+            ],
+        );
+        match d {
+            PathDecision::Picker(items) => {
+                assert_eq!(items.len(), 2);
+                assert_eq!(items[0].name, "a");
+                assert_eq!(items[1].path, Path::new("/etc/edaptor/b.toml"));
+            }
+            _ => panic!("expected Picker"),
+        }
+    }
 
     fn headless<'a>(
         out: &'a mut VecDeque<Event>,
