@@ -99,22 +99,26 @@ pub fn inline_editable(field: &EditField) -> bool {
     field.editable && !field.multi && !field.orphaned && field.widget_binding.is_none()
 }
 
-/// The widget plugin for a field. M3 Phase 2a: the objectClass field gets the
-/// objectClass picker; everything else is plain. (M4 extends this to dispatch on
-/// `field.widget_binding` — no form-core change.)
+/// The widget plugin for a field. objectClass → ObjectClassWidget; password-bound
+/// fields → PasswordWidget; everything else → PlainWidget.
 pub fn widget_for(field: &EditField) -> Box<dyn FieldWidget> {
+    use crate::config::widget::WidgetKind;
     if field.label.eq_ignore_ascii_case("objectClass") {
         Box::new(crate::tui::oc_picker::ObjectClassWidget)
+    } else if matches!(field.widget_binding, Some(WidgetKind::Password(_))) {
+        Box::new(crate::tui::pw_editor::PasswordWidget)
     } else {
         Box::new(PlainWidget)
     }
 }
 
 /// Whether a field opens a modal editor on activation (vs inline edit). Cheap
-/// label-based check used by the form pane for focus/nav/Enter without building
-/// an editor. Mirrors the `widget_for` routing.
+/// check used by the form pane for focus/nav/Enter without building an editor.
+/// Mirrors the `widget_for` routing.
 pub fn is_modal_field(field: &EditField) -> bool {
+    use crate::config::widget::WidgetKind;
     field.label.eq_ignore_ascii_case("objectClass")
+        || matches!(field.widget_binding, Some(WidgetKind::Password(_)))
 }
 
 #[cfg(test)]
@@ -212,5 +216,19 @@ mod tests {
         let f = field(&["x"], WidgetSpec::ReadOnlyText);
         assert!(!is_modal_field(&f));
         assert!(matches!(widget_for(&f).activate(&f), Activation::Inline));
+    }
+
+    #[test]
+    fn password_field_routes_to_password_widget_and_is_modal() {
+        use crate::config::widget::{PasswordWidget as PwCfg, WidgetKind};
+        let mut f = field(&[], WidgetSpec::ReadOnlyText);
+        f.label = "userPassword".into();
+        f.widget_binding = Some(WidgetKind::Password(PwCfg {
+            primary: "userPassword".into(),
+            derived: vec![],
+            samba: false,
+        }));
+        assert!(is_modal_field(&f));
+        assert!(matches!(widget_for(&f).activate(&f), Activation::Modal(_)));
     }
 }

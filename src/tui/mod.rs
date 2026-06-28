@@ -9,6 +9,7 @@ pub mod dialog;
 pub(crate) mod oc_picker;
 pub(crate) mod panes;
 pub(crate) mod pump;
+pub(crate) mod pw_editor;
 pub(crate) mod scroll_group;
 mod state;
 // Keep `pub`: the FieldWidget plugin contract is defined here for M1 and
