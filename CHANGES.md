@@ -8,6 +8,11 @@ All notable changes to eDAPtor are documented here. The format follows
 
 ### New
 
+- **tvision UI:** activating a `sambaSID` field auto-generates the SID
+  immediately (no popup) from the entry's `uidNumber` and the configured Samba
+  domain. A missing `uidNumber` or unconfigured domain SID shows an error dialog
+  and leaves the field manually editable.
+
 - **tvision UI:** `choice` widgets (`loginShell`, `sambaAcctFlags`, …) are now
   editable via a modal radio / checkbox list. Single-select (Plain format)
   replaces the selection; multi-select (Bracketed format) toggles tokens while

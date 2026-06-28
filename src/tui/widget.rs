@@ -73,6 +73,32 @@ impl FieldWidget for PlainWidget {
     }
 }
 
+/// The `sambaSID` presenter/activation marker. The actual SID computation is a
+/// dispatch special-case in `app.rs` (it needs the sibling `uidNumber` value and
+/// the `UiState.samba_domain` — context this trait can't see), so `activate`
+/// here is never reached: the ACTIVATE handler intercepts `SambaSid`-bound
+/// fields before building an editor. This widget exists for read-only
+/// presentation and to keep `widget_for` total.
+pub struct SambaSidWidget;
+
+impl FieldWidget for SambaSidWidget {
+    fn capability(&self) -> Capability {
+        Capability::Static
+    }
+
+    fn present(&self, field: &EditField) -> String {
+        match field.values.first() {
+            Some(v) if !v.is_empty() => v.clone(),
+            _ => "‹unset›".to_string(),
+        }
+    }
+
+    fn activate(&self, _field: &EditField) -> Activation {
+        // Unreachable in practice: the ACTIVATE dispatch special-cases SambaSid.
+        Activation::Inline
+    }
+}
+
 /// Registry entry point M1 uses for read-only display. Renders a field's value
 /// cell from its `WidgetSpec` and value cardinality. (M2 swaps this for a
 /// registry keyed by `WidgetKind` that also dispatches `activate`.)
@@ -109,6 +135,8 @@ pub fn widget_for(field: &EditField) -> Box<dyn FieldWidget> {
         Box::new(crate::tui::pw_editor::PasswordWidget)
     } else if matches!(field.widget_binding, Some(WidgetKind::Choice(_))) {
         Box::new(crate::tui::choice::ChoiceWidget)
+    } else if matches!(field.widget_binding, Some(WidgetKind::SambaSid)) {
+        Box::new(SambaSidWidget)
     } else if field.editable && field.multi && !field.orphaned && field.widget_binding.is_none() {
         Box::new(crate::tui::multivalue::MultiValueWidget)
     } else {
@@ -124,6 +152,7 @@ pub fn is_modal_field(field: &EditField) -> bool {
     field.label.eq_ignore_ascii_case("objectClass")
         || matches!(field.widget_binding, Some(WidgetKind::Password(_)))
         || matches!(field.widget_binding, Some(WidgetKind::Choice(_)))
+        || matches!(field.widget_binding, Some(WidgetKind::SambaSid))
         || (field.editable && field.multi && !field.orphaned && field.widget_binding.is_none())
 }
 
@@ -222,6 +251,20 @@ mod tests {
         let f = field(&["x"], WidgetSpec::ReadOnlyText);
         assert!(!is_modal_field(&f));
         assert!(matches!(widget_for(&f).activate(&f), Activation::Inline));
+    }
+
+    #[test]
+    fn sambasid_field_routes_and_is_modal() {
+        use crate::config::widget::WidgetKind;
+        let mut f = field(&[], WidgetSpec::ReadOnlyText);
+        f.label = "sambaSID".into();
+        f.widget_binding = Some(WidgetKind::SambaSid);
+        assert!(is_modal_field(&f));
+        // Empty value presents as the unset marker.
+        assert_eq!(widget_for(&f).present(&f), "‹unset›");
+        // A populated value presents verbatim.
+        f.values = vec!["S-1-5-21-1-2-3-3000".into()];
+        assert_eq!(widget_for(&f).present(&f), "S-1-5-21-1-2-3-3000");
     }
 
     #[test]

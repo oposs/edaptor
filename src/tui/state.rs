@@ -794,6 +794,77 @@ mod tests {
         );
     }
 
+    /// Dispatch semantics for a `sambaSID`-bound field: compute the SID from the
+    /// sibling `uidNumber` + `samba_domain` (as the ACTIVATE handler does) and
+    /// `apply_commit(SetValues)` fills the field. Mirrors the app.rs special-case
+    /// without a live `Program`.
+    #[test]
+    fn sambasid_dispatch_computes_and_fills_field() {
+        use crate::config::widget::WidgetKind;
+        use crate::schema::FieldKind;
+        use crate::tui::widget::CommitOutcome;
+        use crate::workflows::edit_form::{EditField, EditForm, FormMode};
+        use crate::workflows::form_model::WidgetSpec;
+
+        let raw = crate::ldap::worker::RawSubschema::default();
+        let schema = crate::schema::SchemaModel::from_raw(&raw);
+        let structure = Structure::build("dc=example,dc=org", vec![]);
+        let mut st = UiState::new_for_test(
+            structure,
+            schema,
+            "dc=example,dc=org".into(),
+            Vec::new(),
+            Vec::new(),
+        );
+        st.samba_domain = Some(crate::samba::SambaDomainInfo {
+            domain_sid: "S-1-5-21-1-2-3".into(),
+            algorithmic_rid_base: 1000,
+        });
+        let mk = |label: &str, binding: Option<WidgetKind>, values: Vec<String>| EditField {
+            label: label.into(),
+            must: false,
+            editable: true,
+            multi: false,
+            secret: false,
+            ordered: false,
+            orphaned: false,
+            kind: FieldKind::Text,
+            widget: WidgetSpec::ReadOnlyText,
+            widget_binding: binding,
+            baseline: values.clone(),
+            values,
+        };
+        st.edit_form = Some(EditForm {
+            dn: "cn=test,dc=example,dc=org".into(),
+            mode: FormMode::Edit,
+            object_classes: vec!["top".into()],
+            fields: vec![
+                mk("uidNumber", None, vec!["1000".into()]),
+                mk("sambaSID", Some(WidgetKind::SambaSid), vec![]),
+            ],
+        });
+
+        // Ok branch: compute (helper) + apply_commit, as the dispatch does.
+        let sid = crate::workflows::samba_compute::samba_sid_for_form(
+            st.edit_form.as_ref().unwrap(),
+            st.samba_domain.as_ref(),
+        )
+        .expect("sid computes");
+        st.apply_commit(1, CommitOutcome::SetValues(vec![sid]));
+        assert_eq!(
+            st.edit_form.as_ref().unwrap().fields[1].values,
+            vec!["S-1-5-21-1-2-3-3000".to_string()],
+        );
+
+        // Err branch: clearing uidNumber makes generation fail (no field write).
+        st.edit_form.as_mut().unwrap().fields[0].values.clear();
+        assert!(crate::workflows::samba_compute::samba_sid_for_form(
+            st.edit_form.as_ref().unwrap(),
+            st.samba_domain.as_ref(),
+        )
+        .is_err());
+    }
+
     /// TDD Step 1 (RED → GREEN): apply_alloc_outcome Filled replaces the
     /// ‹allocating…› placeholder with the allocated value and flags form_needs_render.
     #[test]

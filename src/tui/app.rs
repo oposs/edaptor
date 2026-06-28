@@ -126,6 +126,48 @@ pub(crate) fn dispatch(prog: &mut Program, cmd: Command, state: &Shared) {
         let Some(idx) = idx else {
             return;
         };
+        // sambaSID: immediate compute, no modal. Needs the sibling `uidNumber`
+        // value + `samba_domain` — context the FieldWidget trait can't see — so
+        // it's handled here as a dispatch special-case rather than via `activate`.
+        let is_sid = {
+            let st = state.borrow();
+            st.edit_form
+                .as_ref()
+                .and_then(|f| f.fields.get(idx))
+                .map(|f| {
+                    matches!(
+                        f.widget_binding,
+                        Some(crate::config::widget::WidgetKind::SambaSid)
+                    )
+                })
+                .unwrap_or(false)
+        };
+        if is_sid {
+            // Compute into a local, dropping the borrow before any mutation/exec.
+            let res = {
+                let st = state.borrow();
+                st.edit_form.as_ref().map(|form| {
+                    crate::workflows::samba_compute::samba_sid_for_form(
+                        form,
+                        st.samba_domain.as_ref(),
+                    )
+                })
+            };
+            match res {
+                Some(Ok(sid)) => {
+                    state.borrow_mut().apply_commit(
+                        idx,
+                        crate::tui::widget::CommitOutcome::SetValues(vec![sid]),
+                    );
+                }
+                Some(Err(msg)) => {
+                    let (view, ok) = error::build(&msg);
+                    prog.exec_view_focused(view, ok);
+                }
+                None => {}
+            }
+            return;
+        }
         // Build the editor from the field (drops the borrow before exec_view).
         let editor = {
             let st = state.borrow();
