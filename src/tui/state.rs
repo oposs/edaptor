@@ -10,7 +10,9 @@ use crate::schema::SchemaModel;
 use crate::workflows::alloc_flow::{AllocFlow, AllocOutcome};
 use crate::workflows::edit_form::{build_edit_form, EditForm};
 use crate::workflows::labels::LabelRule;
+use crate::workflows::pick_state::Candidate;
 use crate::workflows::read_flow::ReadFlow;
+use crate::workflows::search_flow::{SearchFlow, SearchOutcome};
 use crate::workflows::structure::Structure;
 #[cfg(test)]
 use crate::workflows::structure::StructureInput;
@@ -55,6 +57,12 @@ pub struct UiState {
     pub write_flow: WriteFlow,
     /// Async autonumber allocation flow (scan + pick next-free).
     pub alloc_flow: AllocFlow,
+    /// Async candidate search flow for picker / membership widgets.
+    pub search_flow: SearchFlow,
+    /// Last search results delivered by `search_flow` (via `pump_worker`).
+    pub search_results: Vec<Candidate>,
+    /// True when the last search was truncated at `PICKER_SEARCH_CAP`.
+    pub search_truncated: bool,
     /// Read-only mode disables editing and the save path.
     pub read_only: bool,
     /// Transient status text (e.g. "Saved.").
@@ -139,6 +147,9 @@ impl UiState {
             edit_form: None,
             write_flow: WriteFlow::new(),
             alloc_flow: AllocFlow::new(),
+            search_flow: SearchFlow::new(),
+            search_results: Vec::new(),
+            search_truncated: false,
             read_only: false,
             status: String::new(),
             form_needs_render: false,
@@ -166,15 +177,22 @@ impl UiState {
     /// Drain ready worker responses: install a fresh `EditForm` on a read, and
     /// apply write outcomes. Returns what the pump view should do.
     pub fn pump_worker(&mut self) -> PumpResult {
-        use crate::workflows::read_flow::ReadOutcome;
         let mut resps = Vec::new();
         if let Some(w) = self.worker.as_ref() {
             while let Some(r) = w.poll() {
                 resps.push(r);
             }
         }
+        self.process_responses(&resps)
+    }
+
+    /// Process a batch of worker responses through all correlation branches.
+    ///
+    /// Extracted so tests can supply responses without a live [`WorkerHandle`].
+    fn process_responses(&mut self, resps: &[Response]) -> PumpResult {
+        use crate::workflows::read_flow::ReadOutcome;
         let mut out = PumpResult::default();
-        for resp in &resps {
+        for resp in resps {
             // Reads first (Entries/SearchError); disjoint from write variants.
             match self.read_flow.on_response(resp) {
                 ReadOutcome::Form {
@@ -216,6 +234,13 @@ impl UiState {
                 self.apply_alloc_outcome(alloc_out);
                 out.changed = true;
             }
+            // Candidate search: Entries/SearchError with search-range IDs (3_000_000+).
+            let s_out = self.search_flow.on_response(resp);
+            if !matches!(s_out, SearchOutcome::Ignored) {
+                self.apply_search_results(s_out);
+                out.changed = true;
+                continue;
+            }
             // Then writes (WriteOk/WriteError).
             let outcome = self.write_flow.on_response(resp);
             if !matches!(outcome, WriteOutcome::Ignored) {
@@ -226,6 +251,14 @@ impl UiState {
             }
         }
         out
+    }
+
+    /// Test-only: drive the same processing pipeline as `pump_worker` with
+    /// externally-supplied responses. Allows unit tests to verify pump
+    /// correlation branches without a live [`WorkerHandle`].
+    #[cfg(test)]
+    pub fn pump_responses_for_test(&mut self, resps: &[Response]) -> PumpResult {
+        self.process_responses(resps)
     }
 
     /// Apply one non-ignored alloc outcome to state.
@@ -266,6 +299,26 @@ impl UiState {
                 self.form_needs_render = true;
             }
             AllocOutcome::Ignored => {}
+        }
+    }
+
+    /// Apply one non-ignored search outcome to state.
+    ///
+    /// `Results`: store the rows and truncated flag.
+    /// `Failed`: set status and clear results.
+    /// `Ignored`: must not be passed here (callers should check before calling).
+    pub fn apply_search_results(&mut self, out: SearchOutcome) {
+        match out {
+            SearchOutcome::Results { rows, truncated } => {
+                self.search_results = rows;
+                self.search_truncated = truncated;
+            }
+            SearchOutcome::Failed(msg) => {
+                self.status = msg;
+                self.search_results = Vec::new();
+                self.search_truncated = false;
+            }
+            SearchOutcome::Ignored => {}
         }
     }
 
@@ -579,6 +632,9 @@ pub(crate) fn bootstrap(config: Config, password: String) -> Result<UiState> {
         edit_form: None,
         write_flow: WriteFlow::new(),
         alloc_flow: AllocFlow::new(),
+        search_flow: SearchFlow::new(),
+        search_results: Vec::new(),
+        search_truncated: false,
         read_only: false,
         status: String::new(),
         form_needs_render: false,
@@ -1092,7 +1148,80 @@ mod tests {
         );
     }
 
-    /// Task 13 (RED → GREEN): new_for_test must default connection_encrypted to false.
+    /// Task 12 (RED → GREEN): a `Response::Entries` carrying the latest search id
+    /// must populate `search_results` and return `PumpResult.changed = true` when
+    /// driven through `pump_worker` (via the test helper that bypasses the worker).
+    #[test]
+    fn pump_search_flow_populates_results_and_signals_changed() {
+        use crate::ldap::worker::{LdapEntry, Response};
+        use std::collections::BTreeMap;
+
+        let structure = Structure::build("dc=x", vec![si("dc=x", None)]);
+        let schema = SchemaModel::from_raw(&RawSubschema::default());
+        let mut st =
+            UiState::new_for_test(structure, schema, "dc=x".into(), Vec::new(), Vec::new());
+
+        // Set the latest id without a live worker.
+        let search_id = 3_000_000u64;
+        st.search_flow.force_latest(search_id);
+
+        // Build two candidate entries.
+        let entries = vec![
+            {
+                let mut attrs: BTreeMap<String, Vec<String>> = BTreeMap::new();
+                attrs.insert("cn".to_string(), vec!["Alice".to_string()]);
+                LdapEntry {
+                    dn: "uid=alice,dc=x".to_string(),
+                    attrs,
+                    bin_attrs: Default::default(),
+                }
+            },
+            LdapEntry {
+                dn: "uid=bob,dc=x".to_string(),
+                attrs: BTreeMap::new(),
+                bin_attrs: Default::default(),
+            },
+        ];
+        let resp = Response::Entries {
+            id: search_id,
+            entries,
+            truncated: false,
+        };
+
+        let result = st.pump_responses_for_test(&[resp]);
+
+        assert!(result.changed, "pump must signal changed when search results arrive");
+        assert_eq!(st.search_results.len(), 2, "both candidates must be stored");
+        assert_eq!(st.search_results[0].label, "Alice");
+        assert_eq!(st.search_results[1].label, "uid=bob,dc=x");
+        assert!(!st.search_truncated, "truncated flag must be forwarded");
+    }
+
+    /// Task 12: a `Response::Entries` for a STALE search id must NOT populate
+    /// results and must NOT signal changed.
+    #[test]
+    fn pump_search_flow_stale_response_is_ignored() {
+        use crate::ldap::worker::Response;
+
+        let structure = Structure::build("dc=x", vec![si("dc=x", None)]);
+        let schema = SchemaModel::from_raw(&RawSubschema::default());
+        let mut st =
+            UiState::new_for_test(structure, schema, "dc=x".into(), Vec::new(), Vec::new());
+
+        // latest is 3_000_001 but we send a response for 3_000_000.
+        st.search_flow.force_latest(3_000_001);
+        let resp = Response::Entries {
+            id: 3_000_000,
+            entries: vec![],
+            truncated: false,
+        };
+
+        let result = st.pump_responses_for_test(&[resp]);
+        assert!(!result.changed, "stale search response must not signal changed");
+        assert!(st.search_results.is_empty(), "stale response must not populate results");
+    }
+
+    /// Task 12: new_for_test must default connection_encrypted to false.
     #[test]
     fn new_for_test_defaults_connection_encrypted_false() {
         let structure = Structure::build("dc=x", vec![si("dc=x", None)]);
