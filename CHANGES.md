@@ -8,6 +8,8 @@ All notable changes to eDAPtor are documented here. The format follows
 
 ### New
 
+- Create-form numeric fields with a `{next:MIN-MAX}` default auto-allocate the
+  next free value via a background directory scan.
 - New entries can be created from a profile in the tvision UI (Alt+N): a profile
   chooser (or single-profile fast path), a create-mode form with
   auto-injected/editable objectClass and live DN, validated and submitted as an

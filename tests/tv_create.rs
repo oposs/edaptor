@@ -23,6 +23,7 @@ use edaptor::config::{
 };
 use edaptor::ldap::worker::{Request, Response, SearchScope, WorkerHandle};
 use edaptor::schema::SchemaModel;
+use edaptor::workflows::alloc_flow::{AllocFlow, AllocOutcome};
 use edaptor::workflows::create::{build_create_form, plan_create, CreatePrep};
 
 // ---------------------------------------------------------------------------
@@ -343,4 +344,64 @@ fn create_entry_via_neutral_create_path() {
         read_entry(&worker, &confirm_dn, 21).is_none(),
         "deleted entry must no longer exist"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Autonumber scan test (read-only)
+// ---------------------------------------------------------------------------
+
+/// Verifies that `AllocFlow` can scan the demo directory for the next free
+/// `uidNumber` within [10000, 19999].
+///
+/// The demo seed populates uidNumber 10000–10599 (600 users), so the
+/// allocated value must be > 10000 (at minimum the lowest seed entry is
+/// taken) and ≤ 19999.  The test is read-only (no writes).
+#[test]
+fn autonumber_scan_via_alloc_flow() {
+    let Ok(uri) = std::env::var("EDAPTOR_TEST_LDAP_URI") else {
+        eprintln!("SKIP autonumber_scan_via_alloc_flow: set EDAPTOR_TEST_LDAP_URI to run");
+        return;
+    };
+
+    let (config, password) = test_config(uri);
+    let worker = WorkerHandle::spawn(config, password).expect("spawn worker");
+
+    let base = "ou=people,dc=example,dc=org";
+    let min: u64 = 10_000;
+    let max: u64 = 19_999;
+
+    let mut alloc_flow = AllocFlow::new();
+    let scan_id = alloc_flow
+        .request(&worker, base, "uidNumber", min, max)
+        .expect("submit alloc scan");
+
+    let resp = poll_for_id(&worker, scan_id, Duration::from_secs(15))
+        .expect("alloc scan must return Entries within 15 s");
+
+    let outcome = alloc_flow.on_response(&resp);
+
+    match outcome {
+        AllocOutcome::Filled { attr, value } => {
+            assert_eq!(attr, "uidNumber", "outcome attr must be uidNumber");
+            let n: u64 = value
+                .parse()
+                .unwrap_or_else(|_| panic!("Filled value must be a valid u64; got {value:?}"));
+            assert!(
+                n >= min && n <= max,
+                "allocated value {n} must be within [{min}, {max}]"
+            );
+            // The demo seed starts at uidNumber 10000; the next-free value
+            // must therefore be strictly above the minimum.
+            assert!(
+                n > min,
+                "allocated value {n} must be > {min} (seed entries occupy that number)"
+            );
+        }
+        AllocOutcome::Failed { attr, msg } => {
+            panic!("AllocFlow scan failed for {attr}: {msg}");
+        }
+        AllocOutcome::Ignored => {
+            panic!("AllocFlow returned Ignored — response id mismatch (scan_id={scan_id})");
+        }
+    }
 }
