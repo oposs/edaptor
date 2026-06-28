@@ -103,6 +103,10 @@ pub struct UiState {
     pub pending_password: Option<String>,
     /// The attribute names the staged password targets (primary first).
     pub pending_password_attrs: Vec<String>,
+    /// Samba domain context resolved from the config `[samba]` table (or later from
+    /// a live `sambaDomain` LDAP entry). `None` when no Samba domain is configured;
+    /// drives `samba_enabled` in the widget resolver so SambaSid widgets activate.
+    pub samba_domain: Option<crate::samba::SambaDomainInfo>,
 }
 
 impl UiState {
@@ -153,6 +157,7 @@ impl UiState {
             resolved_widgets: Vec::new(),
             pending_password: None,
             pending_password_attrs: Vec::new(),
+            samba_domain: None,
         }
     }
 }
@@ -182,12 +187,12 @@ impl UiState {
                         // Build a resolver from &self fields (disjoint from the local
                         // `form`); apply profile-driven bindings before installing.
                         let ocs = form.object_classes.clone();
-                        // samba_enabled: false for now — UiState has no samba context yet (SambaSid widget is a later phase).
+                        let samba_enabled = self.samba_domain.is_some();
                         let resolver = crate::config::resolver::WidgetResolver::new(
                             self.read_flow.schema(),
                             &self.profiles,
                             &self.resolved_widgets,
-                            false,
+                            samba_enabled,
                         );
                         crate::workflows::widget_bind::apply_widget_bindings(
                             &mut form, &resolver, &ocs,
@@ -502,6 +507,19 @@ impl UiState {
     }
 }
 
+/// Derive a `SambaDomainInfo` from the config `[samba]` table.
+/// Returns `None` when no `domain_sid` is configured.
+pub(crate) fn samba_info_from_config(config: &Config) -> Option<crate::samba::SambaDomainInfo> {
+    config
+        .samba
+        .domain_sid
+        .as_deref()
+        .map(|sid| crate::samba::SambaDomainInfo {
+            domain_sid: sid.to_string(),
+            algorithmic_rid_base: config.samba.algorithmic_rid_base,
+        })
+}
+
 /// First profile whose declared object_classes are all present on the entry.
 pub fn profile_for<'a>(profiles: &'a [EntryProfile], ocs: &[String]) -> Option<&'a EntryProfile> {
     profiles.iter().find(|p| {
@@ -526,6 +544,7 @@ pub(crate) fn bootstrap(config: Config, password: String) -> Result<UiState> {
     let scan_attrs = structure_scan_attrs(&label_rules, &tree_rules);
 
     let connection_encrypted = config.is_encrypted();
+    let samba_domain = samba_info_from_config(&config);
     let worker = WorkerHandle::spawn(config, password)?;
 
     let raw = match worker.request(Request::FetchSubschema)? {
@@ -578,6 +597,7 @@ pub(crate) fn bootstrap(config: Config, password: String) -> Result<UiState> {
         resolved_widgets,
         pending_password: None,
         pending_password_attrs: Vec::new(),
+        samba_domain,
     })
 }
 
@@ -948,6 +968,57 @@ mod tests {
             "field must show masked sentinel"
         );
         assert!(st.form_needs_render, "form_needs_render must be set");
+    }
+
+    /// Task 8 (RED): samba_domain defaults to None from new_for_test; Some when Config
+    /// has domain_sid set.
+    #[test]
+    fn samba_domain_threaded_from_config() {
+        use crate::samba::SambaDomainInfo;
+        let structure = Structure::build("dc=x", vec![]);
+        let schema = SchemaModel::from_raw(&RawSubschema::default());
+        let st = UiState::new_for_test(structure, schema, "dc=x".into(), Vec::new(), Vec::new());
+        assert!(
+            st.samba_domain.is_none(),
+            "samba_domain must be None in new_for_test"
+        );
+
+        // Verify the config → SambaDomainInfo mapping via the pure helper.
+        let cfg: crate::config::Config = toml::from_str(
+            r#"
+            [server]
+            uri = "ldap://x"
+            base_dn = "dc=x"
+            [auth]
+            [samba]
+            domain_sid = "S-1-5-21-1-2-3"
+        "#,
+        )
+        .unwrap();
+        let info = samba_info_from_config(&cfg);
+        assert_eq!(
+            info,
+            Some(SambaDomainInfo {
+                domain_sid: "S-1-5-21-1-2-3".to_string(),
+                algorithmic_rid_base: 1000,
+            }),
+            "samba_domain must be Some with correct SID and default rid_base=1000"
+        );
+
+        // When domain_sid is absent, must be None.
+        let cfg_no_samba: crate::config::Config = toml::from_str(
+            r#"
+            [server]
+            uri = "ldap://x"
+            base_dn = "dc=x"
+            [auth]
+        "#,
+        )
+        .unwrap();
+        assert!(
+            samba_info_from_config(&cfg_no_samba).is_none(),
+            "samba_domain must be None when domain_sid not configured"
+        );
     }
 
     /// Task 13 (RED → GREEN): new_for_test must default connection_encrypted to false.
