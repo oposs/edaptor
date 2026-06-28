@@ -24,28 +24,23 @@ All notable changes to eDAPtor are documented here. The format follows
   `picker` fields (a `picker` with a `fanout` attribute, e.g. a user's group
   memberships). The left **Available** column is a search box over live LDAP
   candidates (groups) that refreshes as you type; the right **Members** column is
-  the staged set, seeded from the field's current values. Enter / → moves the
+  the staged set, seeded from the field's current values. Insert / → moves the
   highlighted Available row into Members (de-duplicated by DN, case-insensitive);
   Delete / ← removes the highlighted Members row; Tab flips which column Up/Down
-  navigate; Space types into the search box. OK stages the chosen member set
-  (the per-group fan-out write is produced by the combined-save path); Cancel
-  discards it.
-
-- **tvision UI (membership writes, plumbing):** the write flow can now perform a
-  combined membership save — the user's own MODIFY plus one MODIFY per touched
-  group — correlated as a single batch that reports success only once every leg
-  has landed. A last-member safeguard pre-validates every group removal *before*
-  anything is submitted: if removing the user would leave a `groupOfNames` empty,
-  the whole save is refused (nothing is written) with an error naming the group.
-  Wiring this into the editor follows in a later step.
+  navigate; Space types into the search box; Enter confirms the dialog. OK stages
+  the chosen member set (the per-group fan-out write is produced by the
+  combined-save path); Cancel discards it. The underlying write flow correlates
+  the user's own MODIFY plus one MODIFY per touched group as a single batch that
+  reports success only once every leg has landed.
 
 - **tvision UI:** picker widget with live LDAP search. A `picker`-bound field
   (e.g. `gidNumber`, `member`, `memberUid`) opens a modal with a search box over
   a candidate list that refreshes as you type (server-side capped at 100).
   Single-select uses radio markers (a pick replaces); multi-select uses
-  checkboxes (Space toggles), with the current selection shown selected-first.
-  A pick stores the candidate DN (`store = "dn"`) or a chosen scalar attribute
-  (e.g. the group's `gidNumber`). Membership/fan-out pickers remain a later step.
+  checkboxes (Insert toggles), with the current selection shown selected-first.
+  Space types into the search box (so multi-word substring searches work); Enter
+  confirms the dialog. A pick stores the candidate DN (`store = "dn"`) or a chosen
+  scalar attribute (e.g. the group's `gidNumber`).
 
 - **tvision UI:** activating a `sambaSID` field auto-generates the SID
   immediately (no popup) from the entry's `uidNumber` and the configured Samba
