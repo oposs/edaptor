@@ -175,11 +175,12 @@ impl UiState {
                         // Build a resolver from &self fields (disjoint from the local
                         // `form`); apply profile-driven bindings before installing.
                         let ocs = form.object_classes.clone();
+                        // samba_enabled: false for now — UiState has no samba context yet (SambaSid widget is a later phase).
                         let resolver = crate::config::resolver::WidgetResolver::new(
                             self.read_flow.schema(),
                             &self.profiles,
                             &self.resolved_widgets,
-                            self.read_only,
+                            false,
                         );
                         crate::workflows::widget_bind::apply_widget_bindings(
                             &mut form, &resolver, &ocs,
