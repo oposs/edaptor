@@ -91,6 +91,9 @@ pub struct UiState {
     /// Profile chooser → controller: the index the user highlighted when OK was
     /// pressed. Set by `ProfileChooser`; read by `dispatch` to select a profile.
     pub chosen_profile: Option<usize>,
+    /// True when the LDAP connection is encrypted (LDAPS, StartTLS, or ldapi://).
+    /// The password widget refuses to operate when this is false.
+    pub connection_encrypted: bool,
 }
 
 impl UiState {
@@ -137,6 +140,7 @@ impl UiState {
             activate_field: None,
             staged_commit: None,
             chosen_profile: None,
+            connection_encrypted: false,
         }
     }
 }
@@ -481,6 +485,7 @@ pub(crate) fn bootstrap(config: Config, password: String) -> Result<UiState> {
     // Fetch the attributes the label/tree templates reference, so labels render.
     let scan_attrs = structure_scan_attrs(&label_rules, &tree_rules);
 
+    let connection_encrypted = config.is_encrypted();
     let worker = WorkerHandle::spawn(config, password)?;
 
     let raw = match worker.request(Request::FetchSubschema)? {
@@ -529,6 +534,7 @@ pub(crate) fn bootstrap(config: Config, password: String) -> Result<UiState> {
         activate_field: None,
         staged_commit: None,
         chosen_profile: None,
+        connection_encrypted,
     })
 }
 
@@ -835,6 +841,18 @@ mod tests {
         assert!(
             !st.form_needs_render,
             "form_needs_render must not be set when no field was updated"
+        );
+    }
+
+    /// Task 13 (RED → GREEN): new_for_test must default connection_encrypted to false.
+    #[test]
+    fn new_for_test_defaults_connection_encrypted_false() {
+        let structure = Structure::build("dc=x", vec![si("dc=x", None)]);
+        let schema = SchemaModel::from_raw(&RawSubschema::default());
+        let st = UiState::new_for_test(structure, schema, "dc=x".into(), Vec::new(), Vec::new());
+        assert!(
+            !st.connection_encrypted,
+            "connection_encrypted must default to false"
         );
     }
 
