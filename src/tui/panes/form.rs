@@ -13,7 +13,7 @@ use tvision_rs::{
 };
 
 use crate::tui::scroll_group::ScrollGroup;
-use crate::tui::widget::{inline_editable, is_modal_field, present_field};
+use crate::tui::widget::{inline_editable, is_modal_field, widget_for};
 use crate::tui::{Shared, ACTIVATE, REFRESH};
 use crate::workflows::edit_form::{composed_create_dn, FormMode};
 
@@ -245,7 +245,7 @@ impl FormPane {
                         let marker = if f.must { "*" } else { "" };
                         (
                             format!("{}{}", f.label, marker),
-                            present_field(f),
+                            widget_for(f).present(f),
                             cell_focusable(f),
                         )
                     })

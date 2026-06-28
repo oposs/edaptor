@@ -87,6 +87,26 @@ pub(crate) fn save_flow_action(prepared: &PrepareSave) -> SaveAction {
     }
 }
 
+/// Strip the staged-password sentinel from `pending_pw_attrs` entries in `attrs`.
+/// Called when `fold_create_password` returns `None` (no matching widget) but a
+/// password was staged. Restricted to the staged attr names so a real user value
+/// that coincidentally matches the sentinel in another attr is never touched.
+pub(crate) fn strip_sentinel_from_attrs(
+    attrs: &mut std::collections::BTreeMap<String, Vec<String>>,
+    pending_pw_attrs: &[String],
+) {
+    use crate::workflows::write_flow::STAGED_PASSWORD_SENTINEL;
+    for attr in pending_pw_attrs {
+        let has_sentinel = attrs
+            .get(attr)
+            .map(|vs| vs.iter().any(|v| v == STAGED_PASSWORD_SENTINEL))
+            .unwrap_or(false);
+        if has_sentinel {
+            attrs.remove(attr);
+        }
+    }
+}
+
 /// The single seam that opens modal dialogs (has `&mut Program`). Triggered by
 /// commands posted from panes / the pump.
 pub(crate) fn dispatch(prog: &mut Program, cmd: Command, state: &Shared) {
@@ -319,6 +339,16 @@ fn do_save(
     nav: Option<(String, Vec<String>)>,
     quit_after: bool,
 ) -> SaveOutcome {
+    // Fix 3: TLS gate — belt-and-suspenders (editor already refuses when unencrypted).
+    {
+        let st = state.borrow();
+        if st.pending_password.is_some() && !st.connection_encrypted {
+            drop(st);
+            let (view, ok) = error::build("Changing a password requires an encrypted connection.");
+            prog.exec_view_focused(view, ok);
+            return SaveOutcome::NotSubmitted;
+        }
+    }
     // 1. Prepare (borrow, compute, drop borrow before any exec_view / submit).
     let prepared = {
         let st = state.borrow();
@@ -381,7 +411,7 @@ fn do_create(prog: &mut Program, state: &Shared) {
     };
     use crate::workflows::edit_form::FormMode;
     // 1. Compute the plan + extract pending password (borrow drops before exec_view).
-    let (prep, pending, resolved_widgets) = {
+    let (prep, pending, pending_pw_attrs, resolved_widgets) = {
         let st = state.borrow();
         let Some(form) = st.edit_form.as_ref() else {
             return;
@@ -401,8 +431,9 @@ fn do_create(prog: &mut Program, state: &Shared) {
             &form.to_edit_entry(),
         );
         let pending = st.pending_password.clone();
+        let pending_pw_attrs = st.pending_password_attrs.clone();
         let resolved_widgets = st.resolved_widgets.clone();
-        (prep, pending, resolved_widgets)
+        (prep, pending, pending_pw_attrs, resolved_widgets)
     };
     match prep {
         CreatePrep::Error(msg) => {
@@ -415,6 +446,14 @@ fn do_create(prog: &mut Program, state: &Shared) {
             ldif,
             ..
         } => {
+            // Fix 3: TLS gate — belt-and-suspenders (editor already refuses when unencrypted).
+            if pending.is_some() && !state.borrow().connection_encrypted {
+                let (view, ok) = crate::tui::dialog::error::build(
+                    "Changing a password requires an encrypted connection.",
+                );
+                prog.exec_view_focused(view, ok);
+                return;
+            }
             // Fold any staged password into attrs; get the masked LDIF preview.
             let masked = fold_create_password(
                 &dn,
@@ -423,6 +462,12 @@ fn do_create(prog: &mut Program, state: &Shared) {
                 &resolved_widgets,
                 now_unix_secs_or_zero(),
             );
+            // Fix 1: if no password widget matched the entry's object classes, the
+            // sentinel was NOT replaced by the real password — strip it so the ADD
+            // never sends "••••••" as an attribute value.
+            if masked.is_none() && pending.is_some() {
+                strip_sentinel_from_attrs(&mut attrs, &pending_pw_attrs);
+            }
             let ldif = masked.unwrap_or(ldif);
             let (view, save) = crate::tui::dialog::confirm::build(&ldif);
             if prog.exec_view_focused(view, save) != Command::OK {
@@ -593,6 +638,53 @@ mod tests {
         );
         assert!(st.guard_target.is_none());
         assert!(st.pending_nav.is_none());
+    }
+
+    /// Fix 1 TDD (RED→GREEN): strip_sentinel_from_attrs removes the sentinel
+    /// from staged password attrs and leaves real values and other attrs untouched.
+    #[test]
+    fn strip_sentinel_removes_only_staged_sentinel_attrs() {
+        use crate::workflows::write_flow::STAGED_PASSWORD_SENTINEL;
+        use std::collections::BTreeMap;
+
+        let mut attrs: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        attrs.insert(
+            "userPassword".into(),
+            vec![STAGED_PASSWORD_SENTINEL.to_string()],
+        );
+        attrs.insert("cn".into(), vec!["Alice".into()]);
+
+        strip_sentinel_from_attrs(&mut attrs, &["userPassword".to_string()]);
+
+        assert!(
+            !attrs.contains_key("userPassword"),
+            "sentinel attr must be stripped from attrs"
+        );
+        assert_eq!(
+            attrs.get("cn"),
+            Some(&vec!["Alice".into()]),
+            "cn must be untouched"
+        );
+    }
+
+    /// Fix 1 TDD: a real password value (not the sentinel) must never be stripped.
+    #[test]
+    fn strip_sentinel_preserves_real_password_value() {
+        use std::collections::BTreeMap;
+
+        let mut attrs: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        attrs.insert("userPassword".into(), vec!["{SSHA}realhash".to_string()]);
+
+        strip_sentinel_from_attrs(&mut attrs, &["userPassword".to_string()]);
+
+        assert!(
+            attrs.contains_key("userPassword"),
+            "real hash must not be stripped"
+        );
+        assert_eq!(
+            attrs.get("userPassword"),
+            Some(&vec!["{SSHA}realhash".to_string()])
+        );
     }
 
     #[test]

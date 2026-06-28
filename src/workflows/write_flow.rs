@@ -54,6 +54,11 @@ pub enum WriteOutcome {
     Created { dn: String, quit_after: bool },
 }
 
+/// The masked sentinel set in a password field by `CommitOutcome::StageSecret`.
+/// Defined here (neutral module, no UI imports) so the create and edit submit
+/// paths can both reference the same byte sequence. Must never reach the server.
+pub const STAGED_PASSWORD_SENTINEL: &str = "••••••"; // 6 × U+2022 BULLET
+
 /// Tracks in-flight writes and turns the edit form into a save plan.
 pub struct WriteFlow {
     next_id: u64,
@@ -134,7 +139,18 @@ impl WriteFlow {
                     &mut original.attrs,
                     &mut edited.attrs,
                 ),
-                None => (Vec::new(), Vec::new()),
+                None => {
+                    // No matching widget: strip the staged sentinel from secret fields so
+                    // the diff cannot emit ••••••. Only removes attrs whose edited value is
+                    // exactly the sentinel; leaves all other attrs intact.
+                    for f in form.fields.iter().filter(|f| f.secret) {
+                        if f.values.iter().any(|v| v == STAGED_PASSWORD_SENTINEL) {
+                            original.attrs.remove(&f.label);
+                            edited.attrs.remove(&f.label);
+                        }
+                    }
+                    (Vec::new(), Vec::new())
+                }
             };
         prepare_save(
             schema,
@@ -551,6 +567,101 @@ mod tests {
             },
             other => panic!("expected Ready, got {other:?}"),
         }
+    }
+
+    /// Fix 1 TDD (RED→GREEN): a staged sentinel with object_classes that match NO
+    /// password widget must never appear in the SavePlan. Before the fix, `prepare`
+    /// emits `Replace userPassword ["••••••"]` — this test catches that regression.
+    #[test]
+    fn prepare_sentinel_not_submitted_when_no_widget_matches() {
+        use crate::config::widget::{PasswordWidget as PwCfg, ResolvedWidget, WidgetKind};
+        use crate::form::validate::SavePlan;
+
+        let wf = WriteFlow::new();
+
+        // Password field showing the staged sentinel; baseline is the old hash.
+        let pw_field = EditField {
+            label: "userPassword".into(),
+            must: false,
+            editable: false,
+            multi: false,
+            secret: true,
+            ordered: false,
+            orphaned: false,
+            kind: FieldKind::Text,
+            widget: WidgetSpec::ReadOnlyText,
+            widget_binding: None,
+            values: vec![STAGED_PASSWORD_SENTINEL.to_string()],
+            baseline: vec!["{SSHA}oldhash".into()],
+        };
+        // sn changed so we get a Ready result (not just NoChanges).
+        let sn_changed = field("sn", "Allen", "Adams");
+        // objectClass is only "top" → the inetOrgPerson widget does NOT match.
+        let oc_top = EditField {
+            label: "objectClass".into(),
+            must: true,
+            editable: false,
+            multi: true,
+            secret: false,
+            ordered: false,
+            orphaned: false,
+            kind: FieldKind::Text,
+            widget: WidgetSpec::ReadOnlyText,
+            widget_binding: None,
+            values: vec!["top".into()],
+            baseline: vec!["top".into()],
+        };
+        let f = EditForm {
+            dn: "cn=Alice,dc=example,dc=org".into(),
+            mode: FormMode::Edit,
+            object_classes: vec!["top".into()], // no inetOrgPerson → no widget match
+            fields: vec![oc_top, field("cn", "Alice", "Alice"), sn_changed, pw_field],
+        };
+
+        // Widget requires inetOrgPerson; form has only "top" → no match.
+        let widgets = vec![ResolvedWidget {
+            owner_object_classes: vec!["inetOrgPerson".into()],
+            attr: "userPassword".into(),
+            kind: WidgetKind::Password(PwCfg {
+                primary: "userPassword".into(),
+                derived: vec![],
+                samba: false,
+            }),
+        }];
+
+        let result = wf.prepare(&f, &schema(), Some("staged"), &widgets);
+
+        let mods = match result {
+            PrepareSave::Ready {
+                plan: SavePlan::Modify(m),
+                ..
+            } => m,
+            PrepareSave::Ready { .. } => vec![],
+            PrepareSave::NoChanges => panic!("sn changed → expected Ready, not NoChanges"),
+            PrepareSave::Invalid(e) => panic!("unexpected Invalid: {e:?}"),
+            PrepareSave::DiffError(e) => panic!("DiffError: {e}"),
+        };
+
+        // The sentinel must not appear in any mod value.
+        for m in &mods {
+            let (attr, values) = match m {
+                ModOp::Replace { attr, values } | ModOp::Add { attr, values } => (attr, values),
+                _ => continue,
+            };
+            assert!(
+                !values.iter().any(|v| v == STAGED_PASSWORD_SENTINEL),
+                "sentinel must not appear in mod for {attr}: {values:?}"
+            );
+        }
+        // No Replace/Delete for userPassword at all — the attr is stripped entirely.
+        assert!(
+            !mods.iter().any(|m| matches!(
+                m,
+                ModOp::Replace { attr, .. } | ModOp::Add { attr, .. } | ModOp::Delete { attr, .. }
+                if attr.eq_ignore_ascii_case("userPassword")
+            )),
+            "userPassword must not appear in the plan when no widget matches; mods={mods:?}"
+        );
     }
 
     #[test]

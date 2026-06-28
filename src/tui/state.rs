@@ -14,7 +14,7 @@ use crate::workflows::read_flow::ReadFlow;
 use crate::workflows::structure::Structure;
 #[cfg(test)]
 use crate::workflows::structure::StructureInput;
-use crate::workflows::write_flow::{WriteFlow, WriteOutcome};
+use crate::workflows::write_flow::{WriteFlow, WriteOutcome, STAGED_PASSWORD_SENTINEL};
 
 /// Placeholder text set in autonumber fields while the background scan is pending.
 pub const ALLOC_PLACEHOLDER: &str = "‹allocating…›";
@@ -383,7 +383,7 @@ impl UiState {
                 *pending_password_attrs = attrs;
                 if let Some(form) = edit_form.as_mut() {
                     if let Some(f) = form.fields.get_mut(field_idx) {
-                        f.values = vec!["••••••".to_string()];
+                        f.values = vec![STAGED_PASSWORD_SENTINEL.to_string()];
                     }
                 }
             }
