@@ -272,7 +272,15 @@ Files stay small and focused (the opposite of the old `value_editor.rs` monolith
 ## 8. Out of scope
 
 - X-ORDERED `{n}` prefix strip/reconstruct on save (incomplete in ratatui too;
-  later save-path task). M4 only wires the `ordered` flag (4.2).
+  later save-path task). M4 only wires the `ordered` flag (4.2). **Consequence
+  (confirmed in the M4 final review):** because the `{n}` handling is deferred,
+  M4 deliberately does **not** add an `XOrdered` arm to `widget_for`/`is_modal_field`,
+  so X-ORDERED multi-valued fields stay **read-only** in the tvision UI (routing
+  to `PlainWidget`). The `field.ordered` flag (4.2) and the multivalue editor's
+  order-awareness are forward-prep for when `{n}` handling lands. **M5 cutover must
+  reconcile this**: either implement X-ORDERED editing (`{n}` strip/reconstruct +
+  the routing arm) or update `docs/src/configuration/widgets.md` (which currently
+  documents X-ORDERED editing for the shipping ratatui UI).
 - Dedup of the `pick_state` / `edit_form` parity copies (M5 cutover).
 - Startup config-discovery dialog, mouse polish (M5).
 - Any new LDAP feature or domain-layer change.

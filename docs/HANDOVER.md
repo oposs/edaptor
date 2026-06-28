@@ -81,8 +81,16 @@ auto-gen. **M5 (startup flow + cutover) is the only milestone left.**
 >   `EditForm.object_classes` is a mirror kept by `apply_commit` for the save path.
 > - **RESOLVED in M4:** `UiState.samba_domain` is now threaded from config and both
 >   `WidgetResolver::new` sites pass `samba_domain.is_some()` for `samba_enabled`
->   (live `sambaDomain` LDAP discovery is still deferred to M5). `apply_widget_bindings`
->   now sets `field.ordered=true` for `XOrdered` bindings (order-sensitive dirty).
+>   (live `sambaDomain` LDAP discovery is still deferred to M5).
+> - **X-ORDERED — M5 reconciliation item (final-review finding #6):**
+>   `apply_widget_bindings` sets `field.ordered=true` for `XOrdered`, but `widget_for`
+>   has **no `XOrdered` arm**, so X-ORDERED multi-valued fields route to `PlainWidget`
+>   and are **read-only** in tvision (deliberate — editing them needs the deferred
+>   `{n}` strip/reconstruct, else data corruption). The `ordered` flag + multivalue
+>   order-awareness are dead forward-prep until then. The shipping ratatui UI + the
+>   mdBook (`widgets.md`) still describe X-ORDERED as editable, so **at cutover M5
+>   must either implement X-ORDERED editing (`{n}` + the routing arm) or correct
+>   `widgets.md`.**
 >
 > _Closed P1 items, for the record:_
 > 1. ✅ **RESOLVED — bottom `░` strip (`bc64274`).** Root cause (verified vs
