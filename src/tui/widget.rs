@@ -140,6 +140,11 @@ pub fn widget_for(field: &EditField) -> Box<dyn FieldWidget> {
         Some(WidgetKind::Picker(b)) if b.fanout_attr.is_none()
     ) {
         Box::new(crate::tui::picker::PickerWidget)
+    } else if matches!(
+        &field.widget_binding,
+        Some(WidgetKind::Picker(b)) if b.fanout_attr.is_some()
+    ) {
+        Box::new(crate::tui::membership::MembershipWidget)
     } else if matches!(field.widget_binding, Some(WidgetKind::SambaSid)) {
         Box::new(SambaSidWidget)
     } else if field.editable && field.multi && !field.orphaned && field.widget_binding.is_none() {
@@ -160,6 +165,10 @@ pub fn is_modal_field(field: &EditField) -> bool {
         || matches!(
             &field.widget_binding,
             Some(WidgetKind::Picker(b)) if b.fanout_attr.is_none()
+        )
+        || matches!(
+            &field.widget_binding,
+            Some(WidgetKind::Picker(b)) if b.fanout_attr.is_some()
         )
         || matches!(field.widget_binding, Some(WidgetKind::SambaSid))
         || (field.editable && field.multi && !field.orphaned && field.widget_binding.is_none())

@@ -7,6 +7,7 @@ mod app;
 // (wired in Task 8). `pub` suppresses the dead_code lint without `#[allow]`.
 pub(crate) mod choice;
 pub mod dialog;
+pub(crate) mod membership;
 pub(crate) mod multivalue;
 pub(crate) mod oc_picker;
 pub(crate) mod panes;
