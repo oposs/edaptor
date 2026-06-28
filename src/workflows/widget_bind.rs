@@ -37,6 +37,10 @@ pub fn apply_widget_bindings(
         if !f.label.eq_ignore_ascii_case("objectClass") {
             f.widget_binding = kind;
         }
+        // X-ORDERED attrs are order-sensitive: drive the dirty check + editor.
+        if matches!(f.widget_binding, Some(WidgetKind::XOrdered)) {
+            f.ordered = true;
+        }
     }
 }
 
@@ -150,6 +154,56 @@ mod tests {
             form.fields[0].widget_binding.is_none(),
             "objectClass must not receive a widget_binding from apply_widget_bindings"
         );
+    }
+
+    /// TDD RED → GREEN: a field bound to `XOrdered` must have `ordered = true`
+    /// so the dirty check and multi-value editor treat the values as order-sensitive.
+    #[test]
+    fn xordered_binding_sets_ordered_flag() {
+        use crate::config::widget::WidgetKind;
+        let mut profile = EntryProfile {
+            name: "posixgroup".into(),
+            object_classes: vec!["posixGroup".into()],
+            ..Default::default()
+        };
+        profile
+            .widgets
+            .insert("memberUid".into(), WidgetSpecCfg::XOrdered);
+        let profiles = vec![profile];
+        let resolved_widgets = resolve_widgets(&profiles).expect("resolve ok");
+        let schema = empty_schema();
+        let resolver = WidgetResolver::new(&schema, &profiles, &resolved_widgets, false);
+
+        let member_field = EditField {
+            label: "memberUid".into(),
+            must: false,
+            editable: true,
+            multi: true,
+            secret: false,
+            ordered: false,
+            orphaned: false,
+            kind: crate::schema::FieldKind::Text,
+            widget: WidgetSpec::ReadOnlyText,
+            widget_binding: None,
+            values: vec![],
+            baseline: vec![],
+        };
+        let mut form = EditForm {
+            dn: "cn=testgroup,dc=example,dc=org".into(),
+            mode: FormMode::Edit,
+            object_classes: vec!["posixGroup".into()],
+            fields: vec![member_field],
+        };
+
+        apply_widget_bindings(&mut form, &resolver, &["posixGroup".to_string()]);
+
+        let f = form.fields.iter().find(|f| f.label == "memberUid").unwrap();
+        assert!(
+            matches!(f.widget_binding, Some(WidgetKind::XOrdered)),
+            "memberUid must have XOrdered widget binding, got {:?}",
+            f.widget_binding
+        );
+        assert!(f.ordered, "XOrdered binding must set field.ordered = true");
     }
 
     /// A field with an existing `widget_binding` must not be overwritten.
