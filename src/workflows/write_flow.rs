@@ -16,8 +16,8 @@ use crate::schema::SchemaModel;
 use crate::workflows::create::now_unix_secs_or_zero;
 use crate::workflows::edit_form::EditForm;
 use crate::workflows::save::{
-    compose_renamed_dn, prepare_save, stage_pending_password, would_empty, CombinedSave,
-    PrepareSave,
+    compose_renamed_dn, plan_combined_save, prepare_save, stage_pending_password, would_empty,
+    CombinedSave, PlanCombined, PrepareSave,
 };
 
 /// What a pending write means once its `WriteOk` arrives.
@@ -179,6 +179,78 @@ impl WriteFlow {
             &original,
             &edited,
             &form.object_classes,
+            &password_mods,
+            &mask_attrs,
+            &secret_attrs,
+            &orphaned,
+            &x_ordered,
+        )
+    }
+
+    /// Plan a combined membership save: the own-entry diff plus the per-holder
+    /// fan-out MODIFYs, for a form whose fan-out (membership) field changed.
+    /// Mirrors [`Self::prepare`] but routes through
+    /// [`plan_combined_save`](crate::workflows::save::plan_combined_save).
+    ///
+    /// **Caller contract (honoured here):** the password primary and every derived
+    /// attr are placed in `mask_attrs` UNCONDITIONALLY — even when no password is
+    /// staged — so the stored baseline hash is stripped from BOTH sides and can
+    /// never diff into a spurious `Delete userPassword`. `password_mods` is
+    /// non-empty only when a cleartext is actually staged. See the caller-contract
+    /// section on `plan_combined_save`.
+    pub fn prepare_combined(
+        &self,
+        form: &EditForm,
+        schema: &SchemaModel,
+        pending_password: Option<&str>,
+        resolved_widgets: &[ResolvedWidget],
+    ) -> PlanCombined {
+        let secret_attrs: Vec<String> = form
+            .fields
+            .iter()
+            .filter(|f| f.secret)
+            .map(|f| f.label.clone())
+            .collect();
+        let orphaned: Vec<&str> = form
+            .fields
+            .iter()
+            .filter(|f| f.orphaned)
+            .map(|f| f.label.as_str())
+            .collect();
+        let x_ordered: std::collections::HashSet<String> = form
+            .fields
+            .iter()
+            .filter(|f| f.ordered)
+            .map(|f| f.label.clone())
+            .collect();
+        // Caller contract: ALWAYS mask (and thus strip) the password primary +
+        // derived attrs, even with no staged change — otherwise a stored baseline
+        // hash diffs to a spurious Delete. `password_mods` is populated only when a
+        // cleartext is staged (mirrors `stage_pending_password`'s REPLACE set).
+        let (password_mods, mask_attrs) =
+            match password_widget_for(resolved_widgets, &form.object_classes) {
+                Some(pw) => {
+                    let mut mask = vec![pw.primary.clone()];
+                    mask.extend(pw.derived.iter().cloned());
+                    let mods = match pending_password {
+                        Some(cleartext) => crate::samba::password::password_add_attrs(
+                            cleartext,
+                            &pw.primary,
+                            pw.samba,
+                            now_unix_secs_or_zero(),
+                        )
+                        .into_iter()
+                        .map(|(attr, values)| ModOp::Replace { attr, values })
+                        .collect(),
+                        None => Vec::new(),
+                    };
+                    (mods, mask)
+                }
+                None => (Vec::new(), Vec::new()),
+            };
+        plan_combined_save(
+            schema,
+            form,
             &password_mods,
             &mask_attrs,
             &secret_attrs,
@@ -555,6 +627,99 @@ mod tests {
                 assert!(ldif.contains("sn"));
             }
             other => panic!("expected Ready, got {other:?}"),
+        }
+    }
+
+    /// A memberOf field bound to a fan-out picker (`fanout_attr = member`).
+    fn memberof_field(values: Vec<&str>, baseline: Vec<&str>) -> EditField {
+        use crate::config::relation::{CandidateScope, PickerBinding, StoreKey};
+        use crate::config::widget::WidgetKind;
+        EditField {
+            label: "memberOf".into(),
+            must: false,
+            editable: true,
+            multi: true,
+            secret: false,
+            ordered: false,
+            orphaned: false,
+            kind: FieldKind::Text,
+            widget: WidgetSpec::ReadOnlyText,
+            widget_binding: Some(WidgetKind::Picker(PickerBinding {
+                attr: "memberOf".into(),
+                scope: CandidateScope {
+                    base: "ou=groups,dc=example,dc=org".into(),
+                    object_classes: vec!["groupOfNames".into()],
+                    search_attrs: vec!["cn".into()],
+                    label_template: None,
+                },
+                store: StoreKey::Dn,
+                select: None,
+                fanout_attr: Some("member".into()),
+            })),
+            values: values.into_iter().map(|s| s.to_string()).collect(),
+            baseline: baseline.into_iter().map(|s| s.to_string()).collect(),
+        }
+    }
+
+    /// A resolved password widget bound to the `person` object class.
+    fn person_password_widget() -> ResolvedWidget {
+        use crate::config::widget::{PasswordWidget, WidgetKind};
+        ResolvedWidget {
+            owner_object_classes: vec!["person".into()],
+            attr: "userPassword".into(),
+            kind: WidgetKind::Password(PasswordWidget {
+                primary: "userPassword".into(),
+                derived: Vec::new(),
+                samba: false,
+            }),
+        }
+    }
+
+    /// Caller contract: with NO staged password, `prepare_combined` must still
+    /// mask (and strip) the password primary so a stored baseline hash never diffs
+    /// into a spurious `Delete userPassword`. The fan-out change is still captured.
+    #[test]
+    fn prepare_combined_no_pending_password_keeps_baseline_hash() {
+        let wf = WriteFlow::new();
+        let f = form_with(vec![
+            oc_field(),
+            field("cn", "Alice", "Alice"),
+            field("sn", "Adams", "Adams"),
+            // Hidden-hash state: directory holds a hash on the baseline, the widget
+            // surfaces no value to the form editor.
+            EditField {
+                values: vec![],
+                baseline: vec!["{SSHA}oldhash".into()],
+                ..field("userPassword", "", "")
+            },
+            memberof_field(
+                vec!["cn=g2,ou=groups,dc=example,dc=org"],
+                vec!["cn=g1,ou=groups,dc=example,dc=org"],
+            ),
+        ]);
+        match wf.prepare_combined(&f, &schema(), None, &[person_password_widget()]) {
+            PlanCombined::Ready(cs) => {
+                let touches_pw = cs.own_mods.iter().any(|m| {
+                    let attr = match m {
+                        ModOp::Add { attr, .. }
+                        | ModOp::Delete { attr, .. }
+                        | ModOp::Replace { attr, .. } => attr,
+                    };
+                    attr.eq_ignore_ascii_case("userPassword")
+                });
+                assert!(
+                    !touches_pw,
+                    "no staged password must not emit a userPassword mod; got {:?}",
+                    cs.own_mods
+                );
+                assert_eq!(
+                    cs.fanout.len(),
+                    2,
+                    "expected g1 Delete + g2 Add fan-out; got {:?}",
+                    cs.fanout
+                );
+            }
+            other => panic!("expected PlanCombined::Ready, got {other:?}"),
         }
     }
 

@@ -8,6 +8,18 @@ All notable changes to eDAPtor are documented here. The format follows
 
 ### New
 
+- **tvision UI:** Save now performs the combined membership write end-to-end. When
+  a form's membership (fan-out) field has staged changes, Save plans a combined
+  save — the user's own MODIFY plus one MODIFY per touched group — previews the
+  full multi-stanza LDIF in the confirm dialog, and on OK submits the multi-entry
+  fan-out batch. The user's own `memberOf` is never written directly (it is
+  overlay-maintained); only each group's `member` is modified. Forms without a
+  membership change keep the existing single-entry Save path. A rename combined
+  with a membership change is refused with a clear message (do them as separate
+  saves). Client-side last-member pre-validation is best-effort in this release —
+  emptying a `groupOfNames` is rejected by the server and surfaced as an error;
+  full client-side pre-validation is deferred.
+
 - **tvision UI:** membership editor — a two-column "mover" dialog for fan-out
   `picker` fields (a `picker` with a `fanout` attribute, e.g. a user's group
   memberships). The left **Available** column is a search box over live LDAP

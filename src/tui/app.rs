@@ -390,6 +390,20 @@ fn do_save(
             return SaveOutcome::NotSubmitted;
         }
     }
+    // Combined membership save: when a fan-out (membership) field changed, plan a
+    // multi-entry write (own MODIFY + one MODIFY per touched group) instead of a
+    // single-entry MODIFY. A membership change MUST take this branch — the
+    // overlay-maintained back-ref (e.g. `memberOf`) is never written directly.
+    let is_combined = {
+        let st = state.borrow();
+        st.edit_form
+            .as_ref()
+            .map(form_has_fanout_change)
+            .unwrap_or(false)
+    };
+    if is_combined {
+        return do_combined_save(prog, state, nav, quit_after);
+    }
     // 1. Prepare (borrow, compute, drop borrow before any exec_view / submit).
     let prepared = {
         let st = state.borrow();
@@ -439,6 +453,113 @@ fn do_save(
                 }
             }
             SaveOutcome::Submitted
+        }
+    }
+}
+
+/// True when the form has a fan-out (membership) field whose current value set
+/// differs from its baseline — the trigger for the combined-save path.
+fn form_has_fanout_change(form: &crate::workflows::edit_form::EditForm) -> bool {
+    let fanout = form.fanout_labels();
+    if fanout.is_empty() {
+        return false;
+    }
+    form.fields.iter().any(|f| {
+        fanout.contains(&f.label)
+            && !crate::workflows::edit_form::value_set_eq(&f.current_values(), &f.baseline)
+    })
+}
+
+/// Combined membership save: plan a multi-entry write (own MODIFY + one MODIFY per
+/// touched group), confirm the combined LDIF, then submit the fan-out batch.
+/// Mirrors [`do_save`]'s borrow discipline — the planning borrow drops before any
+/// `exec_view_focused`; the submit takes a fresh `borrow_mut` scoped so the
+/// `UiState` destructure drops before the dialog calls.
+fn do_combined_save(
+    prog: &mut Program,
+    state: &Shared,
+    nav: Option<(String, Vec<String>)>,
+    quit_after: bool,
+) -> SaveOutcome {
+    use crate::workflows::save::PlanCombined;
+    // 1. Plan (borrow, compute, drop borrow before any exec_view / submit).
+    let plan = {
+        let st = state.borrow();
+        match st.edit_form.as_ref() {
+            None => return SaveOutcome::NotSubmitted,
+            Some(form) => st.write_flow.prepare_combined(
+                form,
+                st.read_flow.schema(),
+                st.pending_password.as_deref(),
+                &st.resolved_widgets,
+            ),
+        }
+    };
+    match plan {
+        PlanCombined::NoChanges => {
+            let mut st = state.borrow_mut();
+            st.status = "No changes.".to_string();
+            st.guard_target = None;
+            st.form_needs_render = true; // repaints on the next pump tick
+            SaveOutcome::NotSubmitted
+        }
+        PlanCombined::Invalid(errs) => {
+            let (view, ok) = error::build(&format_validation_errors(&errs));
+            prog.exec_view_focused(view, ok);
+            SaveOutcome::NotSubmitted
+        }
+        PlanCombined::DiffError(e) => {
+            let (view, ok) = error::build(&e);
+            prog.exec_view_focused(view, ok);
+            SaveOutcome::NotSubmitted
+        }
+        PlanCombined::RenameWithMembershipUnsupported => {
+            let (view, ok) = error::build(
+                "Rename and membership changes can't be saved together — \
+                 do them as separate saves.",
+            );
+            prog.exec_view_focused(view, ok);
+            SaveOutcome::NotSubmitted
+        }
+        PlanCombined::Ready(combined) => {
+            // Focus the Save button so Enter confirms (firstMatch would otherwise
+            // pick Cancel). The confirm sizes itself to the combined multi-stanza LDIF.
+            let (view, save) = confirm::build(&combined.ldif);
+            if prog.exec_view_focused(view, save) != Command::OK {
+                return SaveOutcome::NotSubmitted; // Cancel: keep editing.
+            }
+            // Client-side last-member pre-validation is best-effort in M4: an empty
+            // `group_members` map means `would_empty` always returns false, so the
+            // LDAP server is the backstop — emptying a `groupOfNames` is rejected
+            // server-side and surfaces as a `WriteOutcome::Error`. Full client-side
+            // pre-validation (a sync group-member fetch) is deferred to M5.
+            let reread_dn = combined.own_dn.clone();
+            let group_members: std::collections::HashMap<String, Vec<String>> =
+                std::collections::HashMap::new();
+            // 2. Submit the batch. Scope the borrow so the `UiState` destructure
+            //    drops before any error dialog `exec_view_focused`.
+            let submit_result = {
+                let mut st = state.borrow_mut();
+                st.pending_nav = nav;
+                st.guard_target = None;
+                st.pending_password = None; // cleartext consumed; clear before worker picks it up
+                let crate::tui::state::UiState {
+                    worker, write_flow, ..
+                } = &mut *st;
+                worker.as_ref().map(|w| {
+                    write_flow.submit_combined(w, combined, &group_members, &reread_dn, quit_after)
+                })
+            };
+            match submit_result {
+                Some(Ok(())) => SaveOutcome::Submitted,
+                Some(Err(msg)) => {
+                    // A last-member pre-validation abort (nothing was submitted).
+                    let (view, ok) = error::build(&msg);
+                    prog.exec_view_focused(view, ok);
+                    SaveOutcome::NotSubmitted
+                }
+                None => SaveOutcome::NotSubmitted,
+            }
         }
     }
 }
