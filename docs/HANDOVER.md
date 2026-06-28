@@ -4,42 +4,58 @@ Carries the **current concerns** into the next session. Not a project history �
 for that see git log, the specs under `docs/superpowers/specs/`, the SDD ledger
 (`.superpowers/sdd/progress.md`), and project memory (`…/memory/MEMORY.md`).
 
-**Date:** 2026-06-27 · **Where we are: the tvision-rs UI migration is mid-flight.
+**Date:** 2026-06-28 · **Where we are: the tvision-rs UI migration is mid-flight.
 M1 (read core) and M2 (edit + write spine) are COMPLETE, reviewed, and
 LIVE-ACCEPTED. edaptor depends on the released `tvision-rs` 0.3.0 (no pin) and the
 main window runs frameless full-screen (`Fullscreen::Desktop`). M3 was split into
 Phase 1 (stabilize) + Phase 2 (the M3 core); Phase 2 was further split into
-2a (objectClass widget + live resync) + 2b (create flow). **M3 Phase 1 and
-Phase 2a are both COMPLETE and LIVE-ACCEPTED.** Phase 2a executed subagent-driven
-(8 TDD tasks, each reviewed clean), two fix passes (reset_current list seed; a
-borrow-panic on picker open found in live acceptance), a whole-branch review
-(COMPLETE & SOUND with fixes, now applied), and a full live tmux acceptance.
-**M3 Phase 2b (the create flow) is next.**
+2a (objectClass widget + live resync) + 2b (create flow). **M3 Phase 1, Phase 2a,
+and Phase 2b are ALL COMPLETE and LIVE-ACCEPTED — the entire M3 milestone is done,
+and the password widget (an M4 item) was pulled forward into 2b.** Phase 2b ran
+subagent-driven (18 TDD tasks across blocks A/B/C, each reviewed clean), multiple
+fix passes, a whole-branch review (COMPLETE & SOUND with fixes applied), and a full
+live tmux acceptance. **M4 (the remaining rich widgets) is next.**
 
-> **▶ NEXT ACTION — start M3 Phase 2b (the create flow).** Phase 2a landed on
-> `feat/tvision-ui` @ `1e1263d` (527 lib tests, clippy/fmt clean, `make check`
-> green, both facade guards clean). Begin 2b with its own brainstorming →
-> writing-plans cycle: Alt+N profile chooser, single-profile fast path,
-> `FormMode::Create`, create-mode form, objectClass auto-injection, and the
-> `plan_create`/`build_add_entry` submit path. The neutral `workflows::create`
-> helpers are already implemented + tested; 2a's modal seam + `sync_schema_fields`
-> + `apply_commit` are the machinery 2b reuses. Spec+plan for 2a:
-> [`specs/2026-06-27-tvision-m3-phase2a-objectclass-resync-design.md`](superpowers/specs/2026-06-27-tvision-m3-phase2a-objectclass-resync-design.md),
-> [`plans/2026-06-27-tvision-m3-phase2a-objectclass-resync.md`](superpowers/plans/2026-06-27-tvision-m3-phase2a-objectclass-resync.md).
+> **▶ NEXT ACTION — start M4 (remaining rich widgets).** Phase 2b landed on
+> `feat/tvision-ui` @ `772b8b9` (554 lib tests, clippy/fmt clean, `make check`
+> green, both facade guards clean). The password widget already shipped in 2b, so
+> M4 = **choice / picker / membership / free-text multi-value editor** — each a
+> `FieldWidget` impl reusing the 2a/2b modal seam, registered via `widget_for`'s
+> `widget_binding` dispatch, with NO form-core changes. Picker/membership add live
+> LDAP search via the worker + a new flow (mirror `AllocFlow`/`read_flow`). Start
+> with its own brainstorming → writing-plans cycle. Spec+plan for 2b:
+> [`specs/2026-06-28-tvision-m3-phase2b-create-flow-design.md`](superpowers/specs/2026-06-28-tvision-m3-phase2b-create-flow-design.md),
+> [`plans/2026-06-28-tvision-m3-phase2b-create-flow.md`](superpowers/plans/2026-06-28-tvision-m3-phase2b-create-flow.md).
 >
-> _Phase 2a load-bearing facts (so the next session doesn't rediscover them):_
+> _M3 load-bearing facts (so the next session doesn't rediscover them):_
 > - **`reset_current` is THE modal-open init hook** in tvision-rs 0.3.0
 >   (`program.rs:1710`, runs before first draw/event), NOT `on_bounds_changed`
 >   (dead for modal inserts — `Group::insert` calls `set_bounds` directly). Any M4
 >   modal widget that must seed a list / stage state on open uses `reset_current`.
-> - **Borrow trap (fixed, but the pattern recurs):** a `FieldEditor` must NOT
->   `borrow_mut()` the shared state during construction/`into_view`, because
->   `dispatch` holds `state.borrow()` to pass the schema in. Stage in
->   `reset_current` (borrow-safe, post-dispatch-borrow), not in `new()`.
+> - **Borrow trap (the pattern recurs):** a `FieldEditor` must NOT `borrow_mut()`
+>   the shared state during construction/`into_view`, because `dispatch` holds
+>   `state.borrow()` to pass the schema in. Stage in `reset_current` / on events
+>   (borrow-safe), not in `new()`. (Two real panics this milestone came from this.)
+> - **The modal seam M4 reuses:** `widget_for(field)` routes objectClass→picker,
+>   `widget_binding==Password`→PasswordWidget, else Plain — extend it for
+>   choice/picker/membership. `is_modal_field` makes a field focusable + edit-key-
+>   swallowing in the form pane (so it's read-only-but-activatable). The editor
+>   stages a typed `CommitOutcome` live into `UiState.staged_commit`; `app::dispatch`
+>   ACTIVATE applies it on the modal's `OK` return (`take()` on OK, `=None` on CANCEL).
+> - **Async data flows** (picker/membership live search) mirror `AllocFlow`
+>   (`workflows/alloc_flow.rs`): a dedicated flow with a disjoint id range, posted by
+>   the controller, correlated in `pump_worker`, applied via an `apply_*` method.
+> - **Password masking:** tvision `InputLine` has NO built-in masking; the editor
+>   owns cleartext buffers + renders bullets in disabled cells. The staged sentinel
+>   is `write_flow::PW_SENTINEL` (•••••• ); it is stripped before submit in BOTH
+>   create (do_create) and edit (WriteFlow::prepare) and must NEVER reach the server.
 > - The objectClass **field's values are authoritative** for `sync_schema_fields`;
 >   `EditForm.object_classes` is a mirror kept by `apply_commit` for the save path.
-> - `widget_for(field)` routes objectClass→picker else plain; M4 extends it to
->   dispatch on `field.widget_binding` with no form-core change.
+> - **Deferred (out of M3, for M4/later):** the `samba_enabled` flag is hard-`false`
+>   at both `WidgetResolver::new` sites (UiState has no samba context) — wire it from
+>   config when the SambaSid auto-gen widget lands. `apply_widget_bindings` sets
+>   `widget_binding=Some(XOrdered)` but not the ratatui `ordered=true` side-effect —
+>   port that when the X-ORDERED multi-value editor lands.
 >
 > _Closed P1 items, for the record:_
 > 1. ✅ **RESOLVED — bottom `░` strip (`bc64274`).** Root cause (verified vs
@@ -256,19 +272,25 @@ the typed outcome (no global flag). See the spec/plan dated 2026-06-27 and the N
 ACTION banner's load-bearing facts (`reset_current` hook; the construction-time
 borrow trap; objectClass-field-is-authoritative).
 
-### ▶ Phase 2b — the create flow (NEXT, not yet specced)
+### ✅ Phase 2b — create flow + autonumber + password widget (DONE — live-accepted @ `772b8b9`)
 
-Per umbrella §6 M3, the remaining half: Alt+N profile chooser dialog; single-profile
-fast path; `FormMode::Create`; create-mode form; objectClass auto-injection on create;
-the `plan_create`/`build_add_entry` submit path. **Accept:** create a new entry from a
-profile end-to-end. Start with its own **brainstorming → writing-plans** cycle. The
-neutral layer is well-prepared: `workflows::create` has `profiles_for_container`,
-`empty_form_for_profile`, `build_add_entry`, `plan_create`, defaults/autonumber/
-password-fold (all tested); Phase 2a's modal seam, `sync_schema_fields`, and
-`apply_commit` are the machinery 2b reuses. The create form has a wrinkle to resolve
-in design: `empty_form_for_profile` excludes objectClass from fields, but the
-objectClass widget needs a row to activate the picker — decide how create-mode seeds
-the objectClass field (and pre-injects the profile's classes).
+The full create story (user chose the full scope, pulling the M4 password widget
+forward), delivered in three blocks: **A core create** — `FormMode::Create`,
+`build_create_form` (objectClass auto-injected + editable, MUST/MAY via
+`sync_schema_fields`, static defaults), Alt+N (`CREATE`) → profile chooser /
+single-profile fast path → create form, `write_flow::submit_create` (`Request::Add`)
++ `WriteOutcome::Created` → navigate, `do_create`. **B autonumber** —
+`workflows::alloc_flow::AllocFlow` (async next-free-number scan, ids 2M+) + pump
+correlation + `‹allocating…›` placeholder. **C password widget** —
+`connection_encrypted`, neutral `apply_widget_bindings` (widget_binding + secret,
+wired into edit + create), `PasswordWidget`/`PasswordEditor` (TLS-gated New+Confirm
+masked → `StageSecret`), create-fold + edit-fold, sentinel-never-submitted guard.
+**Accept (met):** new entry created from a profile end-to-end (live-verified:
+fast-path, objectClass auto-inject, autonumber, live DN; real ADD/read/delete by the
+gated `tests/tv_create.rs`); password edits masked + TLS-gated. The create-form
+wrinkle (`empty_form_for_profile` excludes objectClass) was resolved in
+`build_create_form` by injecting an editable objectClass field seeded with
+`["top"]+profile.object_classes` then running `sync_schema_fields`.
 
 ---
 
