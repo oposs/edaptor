@@ -10,8 +10,8 @@ use tvision_rs::{
 
 use crate::config::widget::WidgetKind;
 use crate::schema::SchemaModel;
-use crate::tui::widget::{Activation, Capability, CommitOutcome, FieldEditor, FieldWidget};
-use crate::tui::Shared;
+use crate::ui::widget::{Activation, Capability, CommitOutcome, FieldEditor, FieldWidget};
+use crate::ui::Shared;
 use crate::workflows::edit_form::EditField;
 
 /// The plugin for password fields (bound via `WidgetKind::Password`).
@@ -263,7 +263,7 @@ mod tests {
         use crate::workflows::structure::Structure;
         let raw = RawSubschema::default();
         let schema = crate::schema::SchemaModel::from_raw(&raw);
-        let mut st = crate::tui::state::UiState::new_for_test(
+        let mut st = crate::ui::state::UiState::new_for_test(
             Structure::build("dc=example,dc=org", vec![]),
             schema,
             "dc=example,dc=org".into(),

@@ -13,7 +13,7 @@ use tvision_rs::{
     Key, ListBox, Rect, View,
 };
 
-use crate::tui::Shared;
+use crate::ui::Shared;
 
 /// The profile chooser dialog.
 pub struct ProfileChooser {
@@ -140,7 +140,7 @@ mod tests {
     fn shared() -> Shared {
         use crate::workflows::structure::Structure;
         let schema = crate::schema::SchemaModel::from_raw(&RawSubschema::default());
-        let st = crate::tui::state::UiState::new_for_test(
+        let st = crate::ui::state::UiState::new_for_test(
             Structure::build("dc=example,dc=org", vec![]),
             schema,
             "dc=example,dc=org".into(),

@@ -95,7 +95,7 @@ pub struct UiState {
     pub activate_field: Option<usize>,
     /// Modal editor → controller: the prospective commit an open editor would
     /// apply. Maintained live by the editor view; applied by `dispatch` on OK.
-    pub staged_commit: Option<crate::tui::widget::CommitOutcome>,
+    pub staged_commit: Option<crate::ui::widget::CommitOutcome>,
     /// Profile chooser → controller: the index the user highlighted when OK was
     /// pressed. Set by `ProfileChooser`; read by `dispatch` to select a profile.
     pub chosen_profile: Option<usize>,
@@ -446,8 +446,8 @@ impl UiState {
     /// resync variant: write the objectClass field values, mirror them into
     /// `object_classes`, then regenerate fields. Reads schema from `read_flow`
     /// (split-borrow so `edit_form` and `read_flow` are borrowed disjointly).
-    pub fn apply_commit(&mut self, field_idx: usize, outcome: crate::tui::widget::CommitOutcome) {
-        use crate::tui::widget::CommitOutcome;
+    pub fn apply_commit(&mut self, field_idx: usize, outcome: crate::ui::widget::CommitOutcome) {
+        use crate::ui::widget::CommitOutcome;
         let UiState {
             edit_form,
             read_flow,
@@ -758,7 +758,7 @@ mod tests {
     #[test]
     fn apply_commit_resyncs_on_objectclass_change() {
         use crate::schema::FieldKind;
-        use crate::tui::widget::CommitOutcome;
+        use crate::ui::widget::CommitOutcome;
         use crate::workflows::edit_form::{EditField, EditForm, FormMode};
         use crate::workflows::form_model::WidgetSpec;
 
@@ -838,7 +838,7 @@ mod tests {
     #[test]
     fn apply_commit_set_values_updates_field_and_flags_render() {
         use crate::schema::FieldKind;
-        use crate::tui::widget::CommitOutcome;
+        use crate::ui::widget::CommitOutcome;
         use crate::workflows::edit_form::{EditField, EditForm, FormMode};
         use crate::workflows::form_model::WidgetSpec;
 
@@ -900,7 +900,7 @@ mod tests {
     fn sambasid_dispatch_computes_and_fills_field() {
         use crate::config::widget::WidgetKind;
         use crate::schema::FieldKind;
-        use crate::tui::widget::CommitOutcome;
+        use crate::ui::widget::CommitOutcome;
         use crate::workflows::edit_form::{EditField, EditForm, FormMode};
         use crate::workflows::form_model::WidgetSpec;
 
@@ -1080,7 +1080,7 @@ mod tests {
     #[test]
     fn apply_commit_stage_secret_sets_pending_and_masks_field() {
         use crate::schema::FieldKind;
-        use crate::tui::widget::CommitOutcome;
+        use crate::ui::widget::CommitOutcome;
         use crate::workflows::edit_form::{EditField, EditForm, FormMode};
         use crate::workflows::form_model::WidgetSpec;
 

@@ -4,7 +4,7 @@
 //! [`ReadFlow::request_entry`] submits a base-scope search for that DN (all user
 //! attributes). The event loop drains the worker and feeds responses to
 //! [`ReadFlow::on_response`], which correlates by id (D4) and builds the
-//! schema-driven [`FormModel`]; the tvision UI (`crate::tui`) renders it.
+//! schema-driven [`FormModel`]; the tvision UI (`crate::ui`) renders it.
 
 use std::collections::HashMap;
 

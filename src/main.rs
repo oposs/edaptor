@@ -46,7 +46,7 @@ enum Command {
 fn main() -> Result<()> {
     let cli = Cli::parse();
     let Cli { config, command } = cli;
-    let config_path: PathBuf = match edaptor::tui::startup::resolve_config_path(config)? {
+    let config_path: PathBuf = match edaptor::ui::startup::resolve_config_path(config)? {
         Some(p) => p,
         None => return Ok(()), // user cancelled the config picker
     };
@@ -102,10 +102,10 @@ fn prompt_new_password() -> Result<String> {
 }
 
 /// Launch the three-pane tvision TUI. The event loop, state, rendering and the
-/// write-path orchestration all live in [`edaptor::tui`]; this just hands off
+/// write-path orchestration all live in [`edaptor::ui`]; this just hands off
 /// the connection details.
 fn run_tui(config: Config, password: String) -> Result<()> {
-    edaptor::tui::run(config, password)
+    edaptor::ui::run(config, password)
 }
 
 fn print_schema(report: &SchemaReport) {

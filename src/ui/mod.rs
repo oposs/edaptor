@@ -16,7 +16,7 @@ pub(crate) mod pump;
 pub(crate) mod pw_editor;
 pub(crate) mod scroll_group;
 // `pub` (not `pub(crate)`): the external `edaptor-tv` binary calls
-// `edaptor::tui::startup::resolve_config_path`, so the module must be a
+// `edaptor::ui::startup::resolve_config_path`, so the module must be a
 // crate-external item.
 pub mod startup;
 mod state;

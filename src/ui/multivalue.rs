@@ -10,8 +10,8 @@ use tvision_rs::{
 };
 
 use crate::schema::SchemaModel;
-use crate::tui::widget::{Activation, Capability, CommitOutcome, FieldEditor, FieldWidget};
-use crate::tui::Shared;
+use crate::ui::widget::{Activation, Capability, CommitOutcome, FieldEditor, FieldWidget};
+use crate::ui::Shared;
 use crate::workflows::edit_form::EditField;
 
 /// The plugin for plain editable multi-value fields (no widget binding, not
@@ -355,7 +355,7 @@ mod tests {
 
     fn test_shared() -> Shared {
         use crate::workflows::structure::Structure;
-        let st = crate::tui::state::UiState::new_for_test(
+        let st = crate::ui::state::UiState::new_for_test(
             Structure::build("dc=example,dc=org", vec![]),
             schema_for_test(),
             "dc=example,dc=org".into(),

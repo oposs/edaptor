@@ -2,7 +2,7 @@
 
 use tvision_rs::{self as tv, Context, DrawCtx, Event, View};
 
-use crate::tui::{Shared, REFRESH};
+use crate::ui::{Shared, REFRESH};
 
 /// Arms a ~20Hz periodic timer on its first event, then drains the worker each
 /// tick. `Event::Timer` is broadcast-class in tvision-rs, so this zero-area,
@@ -77,10 +77,10 @@ impl View for PumpView {
                 ctx.broadcast(REFRESH, None);
             }
             if need_guard || need_branch_guard {
-                ctx.post(crate::tui::GUARD_NAV);
+                ctx.post(crate::ui::GUARD_NAV);
             }
             if r.error {
-                ctx.post(crate::tui::SHOW_ERROR);
+                ctx.post(crate::ui::SHOW_ERROR);
             }
             if r.quit {
                 ctx.post(tv::Command::QUIT);
@@ -119,7 +119,7 @@ mod tests {
 
         let structure = Structure::build("dc=x", Vec::new());
         let schema = SchemaModel::from_raw(&crate::ldap::worker::RawSubschema::default());
-        let mut state = crate::tui::state::UiState::new_for_test(
+        let mut state = crate::ui::state::UiState::new_for_test(
             structure,
             schema,
             "dc=x".into(),
@@ -172,7 +172,7 @@ mod tests {
     fn posts_fullscreen_command_once() {
         let structure = Structure::build("dc=x", Vec::new());
         let schema = SchemaModel::from_raw(&crate::ldap::worker::RawSubschema::default());
-        let state = crate::tui::state::UiState::new_for_test(
+        let state = crate::ui::state::UiState::new_for_test(
             structure,
             schema,
             "dc=x".into(),
@@ -227,7 +227,7 @@ mod tests {
 
         let structure = crate::workflows::structure::Structure::build("dc=x", Vec::new());
         let schema = SchemaModel::from_raw(&crate::ldap::worker::RawSubschema::default());
-        let mut state = crate::tui::state::UiState::new_for_test(
+        let mut state = crate::ui::state::UiState::new_for_test(
             structure,
             schema,
             "dc=x".into(),
@@ -279,7 +279,7 @@ mod tests {
 
         let guard_count = out
             .iter()
-            .filter(|e| matches!(e, Event::Command(c) if *c == crate::tui::GUARD_NAV))
+            .filter(|e| matches!(e, Event::Command(c) if *c == crate::ui::GUARD_NAV))
             .count();
         assert_eq!(
             guard_count,

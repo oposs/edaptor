@@ -4,7 +4,7 @@ use tvision_rs::{
     self as tv, delegate, Context, Event, FieldValue, Group, InputLine, Key, ListBox, Rect, View,
 };
 
-use crate::tui::{Shared, REFRESH};
+use crate::ui::{Shared, REFRESH};
 
 /// A search `InputLine` (row 0) above a `ListBox`. Recomputes rows from the
 /// shared state on REFRESH and whenever the search text changes; submits a base
@@ -188,7 +188,7 @@ mod tests {
     use super::*;
     use crate::ldap::worker::RawSubschema;
     use crate::schema::SchemaModel;
-    use crate::tui::state::UiState;
+    use crate::ui::state::UiState;
     use crate::workflows::structure::{Structure, StructureInput};
     use std::cell::RefCell;
     use std::collections::{BTreeMap, VecDeque};

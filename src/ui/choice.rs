@@ -13,8 +13,8 @@ use tvision_rs::{
 use crate::config::relation::Cardinality;
 use crate::config::widget::{ChoiceWidget as CfgChoice, WidgetKind};
 use crate::schema::SchemaModel;
-use crate::tui::widget::{Activation, Capability, CommitOutcome, FieldEditor, FieldWidget};
-use crate::tui::Shared;
+use crate::ui::widget::{Activation, Capability, CommitOutcome, FieldEditor, FieldWidget};
+use crate::ui::Shared;
 use crate::workflows::edit_form::EditField;
 
 // ---------------------------------------------------------------------------
@@ -35,7 +35,7 @@ impl FieldWidget for ChoiceWidget {
             Some(WidgetKind::Choice(cfg)) => {
                 cfg.present_summary(field.values.first().map(|s| s.as_str()).unwrap_or(""))
             }
-            _ => crate::tui::widget::present_field(field),
+            _ => crate::ui::widget::present_field(field),
         }
     }
 
@@ -286,7 +286,7 @@ mod tests {
     use crate::config::ChoiceOption as Opt;
     use crate::ldap::worker::RawSubschema;
     use crate::schema::{FieldKind, SchemaModel};
-    use crate::tui::widget::CommitOutcome;
+    use crate::ui::widget::CommitOutcome;
     use crate::workflows::form_model::WidgetSpec;
     use std::cell::RefCell;
     use std::rc::Rc;
@@ -302,7 +302,7 @@ mod tests {
 
     fn test_shared() -> Shared {
         use crate::workflows::structure::Structure;
-        let st = crate::tui::state::UiState::new_for_test(
+        let st = crate::ui::state::UiState::new_for_test(
             Structure::build("dc=example,dc=org", vec![]),
             schema_for_test(),
             "dc=example,dc=org".into(),

@@ -11,8 +11,8 @@ use tvision_rs::{
 };
 
 use crate::schema::SchemaModel;
-use crate::tui::widget::{Activation, Capability, CommitOutcome, FieldEditor, FieldWidget};
-use crate::tui::Shared;
+use crate::ui::widget::{Activation, Capability, CommitOutcome, FieldEditor, FieldWidget};
+use crate::ui::Shared;
 use crate::workflows::edit_form::EditField;
 
 /// The plugin for the objectClass field.
@@ -23,7 +23,7 @@ impl FieldWidget for ObjectClassWidget {
         Capability::NeedsSchema
     }
     fn present(&self, field: &EditField) -> String {
-        crate::tui::widget::present_field(field)
+        crate::ui::widget::present_field(field)
     }
     fn activate(&self, field: &EditField) -> Activation {
         Activation::Modal(Box::new(ObjectClassEditor {
@@ -273,7 +273,7 @@ mod tests {
     // empty input list (no StructureInput::default — the type does not impl Default).
     fn shared() -> Shared {
         use crate::workflows::structure::Structure;
-        let st = crate::tui::state::UiState::new_for_test(
+        let st = crate::ui::state::UiState::new_for_test(
             Structure::build("dc=example,dc=org", vec![]),
             schema(),
             "dc=example,dc=org".into(),

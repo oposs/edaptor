@@ -11,7 +11,7 @@ use anyhow::Result;
 use tvision_rs::{self as tv, Context, DrawCtx, Event, View};
 
 use crate::config::discovery;
-use crate::tui::dialog::config_picker::{self, PickerItem};
+use crate::ui::dialog::config_picker::{self, PickerItem};
 
 /// Posted once by `PickerTrigger` on the first timer tick; the picker program's
 /// `run_app` closure responds by exec-viewing the dialog.

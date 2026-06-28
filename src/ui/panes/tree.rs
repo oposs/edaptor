@@ -3,8 +3,8 @@
 use tvision_rs::{self as tv, delegate, Context, Event, FieldValue, Rect, View};
 
 use crate::config::tree_label::{eval_tree_label, fit_label};
-use crate::tui::state::UiState;
-use crate::tui::Shared;
+use crate::ui::state::UiState;
+use crate::ui::Shared;
 
 /// Build a tvision `Node` tree and a parallel DFS pre-order DN index from the
 /// structure's branch hierarchy. Only branches (nodes with ≥1 child) appear;
@@ -154,7 +154,7 @@ mod tests {
     use crate::config::TreeConfig;
     use crate::ldap::worker::RawSubschema;
     use crate::schema::SchemaModel;
-    use crate::tui::REFRESH;
+    use crate::ui::REFRESH;
     use crate::workflows::structure::{Structure, StructureInput};
     use std::collections::BTreeMap;
 

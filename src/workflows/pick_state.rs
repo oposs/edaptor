@@ -1,7 +1,7 @@
 //! Neutral selection state for picker and membership widgets.
 //!
 //! Framework-free pure logic backing the tvision picker and membership widgets.
-//! No ratatui, no tui_*, no tvision_rs, no crate::tui.
+//! No tvision_rs, no crate::ui — pure domain logic.
 
 use std::collections::BTreeMap;
 

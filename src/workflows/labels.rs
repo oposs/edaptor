@@ -120,7 +120,6 @@ pub(crate) fn structure_inputs(nodes: Vec<StructureNodeRaw>) -> Vec<StructureInp
         .collect()
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -2,7 +2,7 @@
 //! surface; M2 adds `activate`/`inline_editable`.
 
 use crate::schema::SchemaModel;
-use crate::tui::Shared;
+use crate::ui::Shared;
 use crate::workflows::edit_form::EditField;
 use crate::workflows::form_model::WidgetSpec;
 use tvision_rs::{self as tv, View};
@@ -130,25 +130,25 @@ pub fn inline_editable(field: &EditField) -> bool {
 pub fn widget_for(field: &EditField) -> Box<dyn FieldWidget> {
     use crate::config::widget::WidgetKind;
     if field.label.eq_ignore_ascii_case("objectClass") {
-        Box::new(crate::tui::oc_picker::ObjectClassWidget)
+        Box::new(crate::ui::oc_picker::ObjectClassWidget)
     } else if matches!(field.widget_binding, Some(WidgetKind::Password(_))) {
-        Box::new(crate::tui::pw_editor::PasswordWidget)
+        Box::new(crate::ui::pw_editor::PasswordWidget)
     } else if matches!(field.widget_binding, Some(WidgetKind::Choice(_))) {
-        Box::new(crate::tui::choice::ChoiceWidget)
+        Box::new(crate::ui::choice::ChoiceWidget)
     } else if matches!(
         &field.widget_binding,
         Some(WidgetKind::Picker(b)) if b.fanout_attr.is_none()
     ) {
-        Box::new(crate::tui::picker::PickerWidget)
+        Box::new(crate::ui::picker::PickerWidget)
     } else if matches!(
         &field.widget_binding,
         Some(WidgetKind::Picker(b)) if b.fanout_attr.is_some()
     ) {
-        Box::new(crate::tui::membership::MembershipWidget)
+        Box::new(crate::ui::membership::MembershipWidget)
     } else if matches!(field.widget_binding, Some(WidgetKind::SambaSid)) {
         Box::new(SambaSidWidget)
     } else if field.editable && field.multi && !field.orphaned && field.widget_binding.is_none() {
-        Box::new(crate::tui::multivalue::MultiValueWidget)
+        Box::new(crate::ui::multivalue::MultiValueWidget)
     } else {
         Box::new(PlainWidget)
     }

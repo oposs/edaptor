@@ -6,16 +6,16 @@ use tvision_rs::{
 };
 
 use crate::form::validate::format_validation_errors;
-use crate::tui::dialog::{confirm, error, guard, guard_decision, GuardDecision};
-use crate::tui::panes::{
+use crate::ui::dialog::{confirm, error, guard, guard_decision, GuardDecision};
+use crate::ui::panes::{
     form::FormPane,
     leaf::LeafPane,
     tree::{build_branch_nodes, TreePane},
 };
-use crate::tui::pump::PumpView;
-use crate::tui::state::GuardTarget;
-use crate::tui::widget::{widget_for, Activation};
-use crate::tui::{Shared, ACTIVATE, CREATE, GUARD_NAV, REQUEST_QUIT, SAVE, SHOW_ERROR};
+use crate::ui::pump::PumpView;
+use crate::ui::state::GuardTarget;
+use crate::ui::widget::{widget_for, Activation};
+use crate::ui::{Shared, ACTIVATE, CREATE, GUARD_NAV, REQUEST_QUIT, SAVE, SHOW_ERROR};
 use crate::workflows::save::PrepareSave;
 
 fn init_status_line(r: Rect) -> Option<Box<dyn View>> {
@@ -57,7 +57,7 @@ pub(crate) enum SaveOutcome {
 /// Snap the leaf highlight back to the pinned form and clear nav targets.
 /// Called when the guard→Save path does not submit (cancelled confirm == Stay).
 /// Pure (no ctx); unit-tested.
-pub(crate) fn apply_cancelled_guard_save(st: &mut crate::tui::state::UiState) {
+pub(crate) fn apply_cancelled_guard_save(st: &mut crate::ui::state::UiState) {
     st.set_leaf_row = st.current_leaf_row();
     st.guard_target = None;
     st.pending_nav = None;
@@ -65,7 +65,7 @@ pub(crate) fn apply_cancelled_guard_save(st: &mut crate::tui::state::UiState) {
 
 /// Snap the tree highlight back to `current_branch` and clear the guard target.
 /// Called on guard "Stay" for a Branch target. Pure (no ctx); unit-tested.
-pub(crate) fn apply_branch_guard_stay(st: &mut crate::tui::state::UiState) {
+pub(crate) fn apply_branch_guard_stay(st: &mut crate::ui::state::UiState) {
     st.set_tree_row = st.current_branch_row();
     st.guard_target = None;
 }
@@ -157,7 +157,7 @@ pub(crate) fn dispatch(prog: &mut Program, cmd: Command, state: &Shared) {
                 Some(Ok(sid)) => {
                     state
                         .borrow_mut()
-                        .apply_commit(idx, crate::tui::widget::CommitOutcome::SetValues(vec![sid]));
+                        .apply_commit(idx, crate::ui::widget::CommitOutcome::SetValues(vec![sid]));
                 }
                 Some(Err(msg)) => {
                     let (view, ok) = error::build(&msg);
@@ -286,8 +286,7 @@ pub(crate) fn dispatch(prog: &mut Program, cmd: Command, state: &Shared) {
                     let st = state.borrow();
                     idxs.iter().map(|i| st.profiles[*i].name.clone()).collect()
                 };
-                let (view, focus) =
-                    crate::tui::dialog::profile_chooser::build(names, state.clone());
+                let (view, focus) = crate::ui::dialog::profile_chooser::build(names, state.clone());
                 if prog.exec_view_focused(view, focus) == Command::OK {
                     let chosen = state.borrow_mut().chosen_profile.take();
                     if let Some(rel) = chosen {
@@ -327,7 +326,7 @@ fn open_create(state: &Shared, profile_idx: usize, container: &str) {
             .iter_mut()
             .find(|f| f.label.eq_ignore_ascii_case(attr))
         {
-            f.values = vec![crate::tui::state::ALLOC_PLACEHOLDER.to_string()];
+            f.values = vec![crate::ui::state::ALLOC_PLACEHOLDER.to_string()];
         }
     }
     // Apply profile-driven widget bindings (Password / Choice / Picker / …) before
@@ -351,7 +350,7 @@ fn open_create(state: &Shared, profile_idx: usize, container: &str) {
     // and alloc_flow are borrowed disjointly from st).
     if !autonum.is_empty() {
         let base_dn = st.base_dn.clone();
-        let crate::tui::state::UiState {
+        let crate::ui::state::UiState {
             worker, alloc_flow, ..
         } = &mut *st;
         if let Some(w) = worker.as_ref() {
@@ -443,7 +442,7 @@ fn do_save(
                 st.pending_nav = nav;
                 st.guard_target = None;
                 st.pending_password = None; // cleartext consumed; clear before worker picks it up
-                let crate::tui::state::UiState {
+                let crate::ui::state::UiState {
                     worker, write_flow, ..
                 } = &mut *st;
                 if let Some(w) = worker.as_ref() {
@@ -543,7 +542,7 @@ fn do_combined_save(
                 st.pending_nav = nav;
                 st.guard_target = None;
                 st.pending_password = None; // cleartext consumed; clear before worker picks it up
-                let crate::tui::state::UiState {
+                let crate::ui::state::UiState {
                     worker, write_flow, ..
                 } = &mut *st;
                 worker.as_ref().map(|w| {
@@ -599,7 +598,7 @@ fn do_create(prog: &mut Program, state: &Shared) {
     };
     match prep {
         CreatePrep::Error(msg) => {
-            let (view, ok) = crate::tui::dialog::error::build(&msg);
+            let (view, ok) = crate::ui::dialog::error::build(&msg);
             prog.exec_view_focused(view, ok);
         }
         CreatePrep::Confirm {
@@ -610,7 +609,7 @@ fn do_create(prog: &mut Program, state: &Shared) {
         } => {
             // Fix 3: TLS gate — belt-and-suspenders (editor already refuses when unencrypted).
             if pending.is_some() && !state.borrow().connection_encrypted {
-                let (view, ok) = crate::tui::dialog::error::build(
+                let (view, ok) = crate::ui::dialog::error::build(
                     "Changing a password requires an encrypted connection.",
                 );
                 prog.exec_view_focused(view, ok);
@@ -631,13 +630,13 @@ fn do_create(prog: &mut Program, state: &Shared) {
                 strip_sentinel_from_attrs(&mut attrs, &pending_pw_attrs);
             }
             let ldif = masked.unwrap_or(ldif);
-            let (view, save) = crate::tui::dialog::confirm::build(&ldif);
+            let (view, save) = crate::ui::dialog::confirm::build(&ldif);
             if prog.exec_view_focused(view, save) != Command::OK {
                 return; // cancel: keep editing the create form.
             }
             let mut st = state.borrow_mut();
             st.pending_password = None; // cleartext consumed; clear before worker picks it up
-            let crate::tui::state::UiState {
+            let crate::ui::state::UiState {
                 worker, write_flow, ..
             } = &mut *st;
             if let Some(w) = worker.as_ref() {
@@ -726,7 +725,7 @@ mod tests {
     fn guard_stay_on_branch_target_reverts_tree() {
         use crate::ldap::worker::RawSubschema;
         use crate::schema::SchemaModel;
-        use crate::tui::state::{GuardTarget, UiState};
+        use crate::ui::state::{GuardTarget, UiState};
         use crate::workflows::structure::Structure;
         let structure = Structure::build("dc=x", vec![]);
         let schema = SchemaModel::from_raw(&RawSubschema::default());
@@ -752,7 +751,7 @@ mod tests {
         // pinned form's row and clear the stashed nav targets (like Stay).
         use crate::ldap::worker::RawSubschema;
         use crate::schema::SchemaModel;
-        use crate::tui::state::UiState;
+        use crate::ui::state::UiState;
         use crate::workflows::structure::{Structure, StructureInput};
         use std::collections::BTreeMap;
 
@@ -785,7 +784,7 @@ mod tests {
             UiState::new_for_test(structure, schema, "dc=x".into(), Vec::new(), Vec::new());
         st.current_branch = Some("ou=p,dc=x".into());
         st.current_leaf = Some("cn=a,ou=p,dc=x".into());
-        st.guard_target = Some(crate::tui::state::GuardTarget::Leaf(
+        st.guard_target = Some(crate::ui::state::GuardTarget::Leaf(
             "cn=b,ou=p,dc=x".into(),
             vec![],
         ));

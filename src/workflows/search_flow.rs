@@ -18,7 +18,7 @@
 //! the returned `Candidate`'s `dn` or by re-querying the attrs — the flow
 //! itself remains agnostic of the binding configuration.
 //!
-//! No ratatui, no tvision_rs, no crate::tui, no crate::ui — pure domain logic.
+//! No tvision_rs, no crate::ui — pure domain logic.
 
 use anyhow::Result;
 

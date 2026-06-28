@@ -12,9 +12,9 @@ use tvision_rs::{
     self as tv, delegate, Context, Event, FieldValue, Group, InputLine, Key, Rect, View,
 };
 
-use crate::tui::scroll_group::ScrollGroup;
-use crate::tui::widget::{inline_editable, is_modal_field, widget_for};
-use crate::tui::{Shared, ACTIVATE, REFRESH};
+use crate::ui::scroll_group::ScrollGroup;
+use crate::ui::widget::{inline_editable, is_modal_field, widget_for};
+use crate::ui::{Shared, ACTIVATE, REFRESH};
 use crate::workflows::edit_form::{composed_create_dn, FormMode};
 
 /// Columns reserved for the label before the value `InputLine`.
@@ -461,7 +461,7 @@ impl View for FormPane {
 mod tests {
     use super::*;
     use crate::schema::{FieldKind, SchemaModel};
-    use crate::tui::UiState;
+    use crate::ui::UiState;
     use crate::workflows::edit_form::{EditField, EditForm, FormMode};
     use crate::workflows::form_model::WidgetSpec;
     use crate::workflows::structure::Structure;
