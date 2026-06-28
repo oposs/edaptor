@@ -1,6 +1,6 @@
-//! tvision-rs UI (migration target). Built under `src/tui/` during M1-M4 and
-//! run via the `edaptor-tv` dev binary; renamed to `src/ui/` at the M5 cutover.
-//! Only this module tree (and `src/bin/edaptor-tv.rs`) may `use tvision_rs`.
+//! tvision-rs UI: the three-pane LDAP browser/editor. Built under `src/tui/`
+//! during M1-M4 and renamed to `src/ui/` at the M5b cutover; it is now the sole
+//! UI. Only this module tree may `use tvision_rs`.
 
 mod app;
 // Keep `pub`: builders and guard_decision are not yet called from non-test code
@@ -15,7 +15,7 @@ pub(crate) mod picker;
 pub(crate) mod pump;
 pub(crate) mod pw_editor;
 pub(crate) mod scroll_group;
-// `pub` (not `pub(crate)`): the external `edaptor-tv` binary calls
+// `pub` (not `pub(crate)`): the `edaptor` binary (`src/main.rs`) calls
 // `edaptor::ui::startup::resolve_config_path`, so the module must be a
 // crate-external item.
 pub mod startup;

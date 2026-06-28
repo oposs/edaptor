@@ -1,6 +1,6 @@
 //! Modal dialogs for the edit/write spine. Builders return `Box<dyn View>` run via
 //! `Program::exec_view`; buttons use the modal-exit commands so `exec_view` returns
-//! which was pressed. All `exec_view` calls live in `tui::app::dispatch`.
+//! which was pressed. All `exec_view` calls live in `ui::app::dispatch`.
 
 // Submodules declared here — implementations live in their own files.
 // pub(crate) keeps them visible within the crate while avoiding dead_code

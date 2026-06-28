@@ -1,7 +1,7 @@
 //! Profile-chooser dialog: lists profile names for the user to pick one when
 //! Alt+N finds more than one matching profile for a container.
 //!
-//! Pattern mirrors `src/tui/oc_picker.rs`: a `Dialog`-wrapping `View` with
+//! Pattern mirrors `src/ui/oc_picker.rs`: a `Dialog`-wrapping `View` with
 //! `#[delegate(to = dlg)]`, a `ListBox` seeded in `reset_current` (NOT in
 //! `new()` — the 2a borrow lesson: never `borrow_mut` shared during
 //! construction), and the highlighted index written to
