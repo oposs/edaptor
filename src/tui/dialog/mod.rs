@@ -5,6 +5,7 @@
 // Submodules declared here — implementations live in their own files.
 // pub(crate) keeps them visible within the crate while avoiding dead_code
 // warnings (each is referenced from the smoke tests below).
+pub(crate) mod config_picker;
 pub mod confirm;
 pub mod error;
 pub mod guard;
@@ -66,6 +67,19 @@ mod tests {
     #[test]
     fn guard_builds_without_panic() {
         let _v = guard::build();
+    }
+
+    #[test]
+    fn config_picker_builds_without_panic() {
+        use std::cell::RefCell;
+        use std::path::PathBuf;
+        use std::rc::Rc;
+        let items = vec![config_picker::PickerItem {
+            name: "a".into(),
+            description: "desc".into(),
+            path: PathBuf::from("/tmp/a.toml"),
+        }];
+        let (_v, _id) = config_picker::build(items, Rc::new(RefCell::new(None)));
     }
 
     #[test]
