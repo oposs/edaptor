@@ -141,10 +141,10 @@ a **widget palette** (`[profile.widget.<attr>]` kinds: `choice` / `password` /
 
 ## Git topology (read before you branch)
 
-- **Branch `feat/tvision-ui`** (HEAD `93b84cc`: full-screen + 0.3.0 shipped, M3
-  Phase 1 spec+plan committed) — the long-lived migration branch. ALL migration work
-  lives here. **It does NOT merge to `main` until the M5 cutover** (umbrella §7) —
-  the ratatui UI stays the shipping `edaptor` binary through M1–M4.
+- **Branch `feat/tvision-ui`** (HEAD `98e8913`: M4 complete + docs reconciled) —
+  the long-lived migration branch. ALL migration work lives here. **It does NOT
+  merge to `main` until the M5 cutover** (umbrella §7) — the ratatui UI stays the
+  shipping `edaptor` binary through M1–M4. M4 last code commit: `a08008d`.
 - `main` is behind/unpushed (origin at v0.4.0). Pushing / CI / release are a
   separate concern, not gated by the migration.
 - `Cargo.toml` version is `0.4.0`. Dependency: **`tvision-rs = "0.3"`** from
@@ -159,6 +159,29 @@ Each milestone gets its own spec → plan → implement cycle.
 ---
 
 ## What's done
+
+**M4 — rich widgets (DONE @ `a08008d`; final review READY)** (spec
+`specs/2026-06-28-tvision-m4-rich-widgets-design.md`, plan
+`plans/2026-06-28-tvision-m4-rich-widgets.md`). 19 subagent-driven TDD tasks, 5
+parts, each reviewed clean (5 fix passes) + a whole-milestone review (verdict
+READY). Delivered, all via the M3 `widget_for`→`Activation::Modal`→`staged_commit`
+seam with NO form-core changes:
+- `src/tui/multivalue.rs` — free-text multi-value editor (add/del/reorder); the
+  X-ORDERED `ordered` flag is set but those fields stay **read-only** (see the
+  banner's X-ORDERED M5 item).
+- `src/tui/choice.rs` — radio/checkbox over the neutral `config::widget::ChoiceWidget`.
+- `src/tui/picker.rs` — live-search picker (single/multi, DN/scalar store); the new
+  async `workflows::search_flow::SearchFlow` (id 3M+) + neutral `workflows::pick_state`
+  (parity copy of `ui::picker`) + `UiState::{submit_search,search_results}`.
+- `src/tui/membership.rs` — two-column mover; the multi-entry fan-out write
+  (`workflows::save::plan_combined_save` parity port + `WriteFlow::submit_combined`
+  + `WriteOutcome::CombinedSaved`); confirm dialog renders the combined LDIF.
+- sambaSID immediate auto-gen (dispatch special-case → `workflows::samba_compute`),
+  `UiState.samba_domain` wired from config.
+Full per-task + review ledger: `.superpowers/sdd/progress.md` (M4 section). Gate
+green: 637 lib tests + all gated live tests (`tv_picker`, `tv_membership` round-trip
+vs the real demo server), clippy `-D warnings` + `fmt --check` clean, facade guards
+clean. **Read the top banner's "M4 load-bearing facts / divergences" before M5.**
 
 **M1 — three-pane read core** (plan `plans/2026-06-24-tvision-m1-read-core.md`).
 DIT `Outline` (tree) | leaf `ListBox`+search | read-only form `Group`, driven by
@@ -383,7 +406,7 @@ command was swallowed). The model now (user-chosen "B"):
 ```bash
 cargo build -j4                 # both bins (edaptor ratatui + edaptor-tv tvision)
 cargo build -j4 --bin edaptor-tv
-cargo test  -j4                 # ~495 lib tests + gated integration (skip w/o env)
+cargo test  -j4                 # 637 lib tests + gated integration (skip w/o env)
 cargo clippy -j4 --all-targets -- -D warnings
 cargo fmt --check
 make check                      # fmt + clippy + tests
@@ -414,8 +437,8 @@ Facade guards (must print nothing):
   wholesale at the M5 cutover. Editing the live UI mid-migration is the wrong risk.
 - **Widget palette** is the one config-driven "rich field" home: a
   `[profile.widget.<attr>]` `kind` → `config::widget::WidgetKind`. The form honours
-  `EditField.widget_binding`. M4 adds the rich widgets (choice/password/picker/
-  membership) as `FieldWidget` impls with NO form-core changes.
+  `EditField.widget_binding`. M4 added the rich widgets (choice/password/picker/
+  membership/multi-value/sambaSID) as `FieldWidget` impls with NO form-core changes.
 - **Borrow discipline:** never hold a `RefCell`/`UiState` borrow across
   `ctx.broadcast`/`ctx.post`/`Program::exec_view`/`worker.submit`/`new_list`/
   `child_mut`/`set_value`. Collect into locals → drop the borrow → call.
