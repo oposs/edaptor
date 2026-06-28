@@ -13,27 +13,48 @@ passes), full gate green (637 lib tests + all gated live tests, clippy `-D
 warnings` + `fmt --check` clean, both facade guards clean). M4 delivered the
 free-text multi-value editor, choice, picker (live LDAP search), the two-column
 membership mover with the multi-entry fan-out write, and sambaSID immediate
-auto-gen. **M5 was split into M5a (startup flow) → M5b (cutover); M5a is now DONE
-— the only thing left is M5b.**
+auto-gen. **M5 was split: M5a (startup flow, DONE) → M5b (cutover) → M5c (the
+three reconciliations). M5a is DONE; M5b's spec + plan are WRITTEN and committed,
+ready to execute — but NOT yet run (the tree is still dual-UI right now).**
 
-> **▶ NEXT ACTION — start M5b (cutover + carried reconciliations).** M5a landed
-> on `feat/tvision-ui` @ `3344b77` (spec `specs/2026-06-28-tvision-m5a-startup-flow-design.md`,
-> plan `plans/2026-06-28-tvision-m5a-startup-flow.md`). M5b per umbrella §6 M5:
-> **cutover** — point `main.rs` at the tvision UI, rename `src/tui/` → `src/ui/`,
-> delete the old ratatui `src/ui` tree + the `edaptor-tv` dev binary + spike
-> artifacts (`src/bin/spike-tv.rs`, `tests/spike_tv_umlaut.rs`), drop the
-> `ratatui`/`tui-*` deps; final polish (status-line/menu wiring, mouse); **dedup
-> the intentional parity copies** (only possible once `src/ui` is deleted); plus
-> the **three reconciliations the user approved for real implementation** (see the
-> M5a spec §9): (1) **X-ORDERED editing** — `{n}` strip/reconstruct + the
-> `widget_for` routing arm (today X-ORDERED routes to read-only `PlainWidget`; the
-> docs claim editable — see the X-ORDERED item below); (2) **schema-aware
-> last-member pre-validation** — block last-member removal ONLY when the
-> membership attr is MUST for the entry's objectClasses (`groupOfNames`/
-> `groupOfUniqueNames`); `posixGroup`'s `memberUid` is MAY, so an empty posixGroup
-> is LEGAL and must NOT be blocked (M4 relies on the server to reject the MUST
-> case); (3) **live `sambaDomain` LDAP discovery**. Start M5b with its own
-> brainstorming → writing-plans cycle.
+> **▶ NEXT ACTION — execute the M5b cutover plan (subagent-driven).** Spec
+> [`specs/2026-06-28-tvision-m5b-cutover-design.md`](superpowers/specs/2026-06-28-tvision-m5b-cutover-design.md),
+> plan [`plans/2026-06-28-tvision-m5b-cutover.md`](superpowers/plans/2026-06-28-tvision-m5b-cutover.md)
+> committed @ `ca69c36`. **M5b is the cutover ONLY** — the three reconciliations
+> were split out to M5c (below). 4 staged, compiler-guided tasks, each green +
+> bisectable: (1) rewire `main.rs` → `tui::run` + `tui::startup::resolve_config_path`
+> (the ratatui tree goes dead-but-compiling); (2) `git rm -r src/ui` (ratatui,
+> ~9.4k LOC) + delete `edaptor-tv` + drop `ratatui`/`tui-tree-widget`/`tui-prompts`/
+> `crossterm` from `Cargo.toml`; (3) `git mv src/tui` → `src/ui` + `crate::tui`→
+> `crate::ui` / `edaptor::tui`→`edaptor::ui`; (4) rewrite facade guards (tvision
+> only under `src/ui`; zero `ratatui`/`tui_*` anywhere) + docs (CLAUDE/README/
+> CHANGES/HANDOVER/mdBook) + gated-live + live tmux acceptance of the real
+> `edaptor` binary. **Refactor discipline** (no behavior change; the 644-test
+> suite is the safety net). _Recon-confirmed simplifications:_ spike artifacts
+> (`spike-tv.rs`, `spike_tv_umlaut.rs`) **already don't exist** (no-op);
+> `crossterm` is droppable (tvision pulls its own; zero direct uses outside
+> `src/ui`); the parity-copy 'dedup' is **automatic** (the neutral `workflows::*`
+> are already the sole versions — only stale "dedup at M5" doc-comments need
+> rewording); the gated `tv_*` tests don't reference the UI module (no path
+> changes). Leave `src/app.rs` (`pub mod app`, neutral) and `unicode-width`
+> (used by `config::tree_label`) alone.
+>
+> **▶ AFTER M5b — M5c (the three reconciliations; own brainstorm → plan →
+> implement cycle):** (1) **X-ORDERED editing** — the `{n}` diff/save plumbing
+> ALREADY exists in the neutral layer (`form::changeset::diff` takes an
+> `x_ordered_attrs` set; `write_flow.rs:145` builds + passes it), so M5c is the
+> tvision **display** side only: a `widget_for` `XOrdered` arm → an ordered
+> multivalue editor that strips `{n}` on display and reconstructs it from row order
+> on commit. (2) **schema-aware last-member pre-validation** — block last-member
+> removal ONLY when the membership attr is MUST (`groupOfNames`/`groupOfUniqueNames`);
+> `posixGroup.memberUid` is MAY so an empty posixGroup is LEGAL and must NOT be
+> blocked. Needs a live group-member fetch before the confirm dialog (today
+> `submit_combined` gets an EMPTY map → never blocks; server enforces). (3) **live
+> `sambaDomain` LDAP discovery** — port `ui::app::discover_samba_domain`
+> (`src/ui/app/mod.rs:140`, ratatui) into `tui::state::bootstrap`: search
+> `(objectClass=sambaDomain)`, parse `sambaSID` via the existing
+> `samba::sid::parse_samba_domain`. M5b's spec §4 deliberately leaves
+> `widgets.md`'s X-ORDERED-editable claim as-is for M5c (which makes it true again).
 >
 > _M5a load-bearing facts (for M5b cutover):_
 > - **Startup lives in `src/tui/startup.rs`** (renamed to `src/ui/startup.rs` at
@@ -116,10 +137,12 @@ auto-gen. **M5 was split into M5a (startup flow) → M5b (cutover); M5a is now D
 >   has **no `XOrdered` arm**, so X-ORDERED multi-valued fields route to `PlainWidget`
 >   and are **read-only** in tvision (deliberate — editing them needs the deferred
 >   `{n}` strip/reconstruct, else data corruption). The `ordered` flag + multivalue
->   order-awareness are dead forward-prep until then. The shipping ratatui UI + the
->   mdBook (`widgets.md`) still describe X-ORDERED as editable, so **at cutover M5
->   must either implement X-ORDERED editing (`{n}` + the routing arm) or correct
->   `widgets.md`.**
+>   order-awareness are dead forward-prep until then. **Resolution (decided):** M5b
+>   (cutover) deliberately leaves X-ORDERED read-only AND leaves `widgets.md`'s
+>   editable claim as-is; **M5c implements X-ORDERED editing** (the display-side
+>   `{n}` strip/reconstruct + the `widget_for` arm), which makes `widgets.md` true
+>   again. See the banner's AFTER-M5b section. (The neutral `{n}` diff/save
+>   plumbing already exists — `form::changeset::diff` + `write_flow.rs:145`.)
 >
 > _Closed P1 items, for the record:_
 > 1. ✅ **RESOLVED — bottom `░` strip (`bc64274`).** Root cause (verified vs
