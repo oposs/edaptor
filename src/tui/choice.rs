@@ -250,7 +250,7 @@ impl View for ChoiceDialog {
             self.update_staged();
         }
 
-        let space = matches!(ev, Event::KeyDown(k) if k.key == Key::Char(' ') || k.key == Key::Enter);
+        let space = matches!(ev, Event::KeyDown(k) if k.key == Key::Char(' '));
         let nav = matches!(
             ev,
             Event::KeyDown(k)
