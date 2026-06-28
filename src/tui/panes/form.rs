@@ -601,8 +601,10 @@ mod tests {
         let structure = Structure::build("dc=x", vec![]);
         let mut st =
             UiState::new_for_test(structure, schema, "dc=x".into(), Vec::new(), Vec::new());
-        let mut cn = ef("cn", "a", true);
-        cn.multi = true; // multi-valued → not inline-editable
+        // A read-only field is neither inline-editable nor modal, so it is
+        // skipped by focus cycling. (Multi-value editable fields ARE now modal —
+        // see `multivalue` — so they are focusable and can't serve as the skip.)
+        let cn = ef("cn", "a", false);
         st.edit_form = Some(EditForm {
             dn: "cn=a,dc=x".into(),
             mode: FormMode::Edit,
@@ -627,7 +629,7 @@ mod tests {
         assert_eq!(
             focusable.len(),
             2,
-            "cn (multi, non-modal) is not focusable; gidNumber+sn are"
+            "cn (read-only) is not focusable; gidNumber+sn are"
         );
         // Focus lives inside the ScrollGroup; query it via scroll_mut().
         let cur = pane.scroll_mut().and_then(|sg| sg.current());

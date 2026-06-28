@@ -17,6 +17,11 @@ All notable changes to eDAPtor are documented here. The format follows
   chooser (or single-profile fast path), a create-mode form with
   auto-injected/editable objectClass and live DN, validated and submitted as an
   LDAP ADD.
+- **tvision UI:** multi-valued attributes are now editable via a modal editor
+  (a row list plus an edit line): add (Alt+a / Insert), delete (Alt+d /
+  Delete), reorder (Alt+Up / Alt+Down), and edit the selected row. Empty rows
+  are dropped on commit. This unblocks editing every multi-valued attribute
+  (the form previously only allowed single-valued ones).
 - **tvision UI:** the `objectClass` field is now editable via a schema-seeded
   multi-select picker (search + tick). Changing the set regenerates the form's
   fields live — newly-allowed attributes appear, now-disallowed ones are marked
