@@ -384,11 +384,78 @@ pub fn would_empty(current_members: &[String], member: &str) -> bool {
     current_members.len() == 1 && current_members[0].eq_ignore_ascii_case(member)
 }
 
+/// True when `attr` is a MUST (required) attribute for any of `object_classes`
+/// per `schema` (case-insensitive). Gates last-member pre-validation: only block
+/// removing a group's final member when its membership attribute is MUST (e.g.
+/// `member` in `groupOfNames`), never for MAY (`memberUid` in `posixGroup`,
+/// where an empty group is legal).
+pub fn membership_attr_is_must(schema: &SchemaModel, object_classes: &[&str], attr: &str) -> bool {
+    schema
+        .effective_attributes(object_classes)
+        .must
+        .iter()
+        .any(|m| m.eq_ignore_ascii_case(attr))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::workflows::test_fixtures::user_schema;
     use std::collections::BTreeMap;
+
+    fn group_schema() -> SchemaModel {
+        use crate::ldap::worker::RawSubschema;
+        SchemaModel::from_raw(&RawSubschema {
+            object_classes: vec![
+                "( 2.5.6.0 NAME 'top' ABSTRACT MUST objectClass )".to_string(),
+                "( 2.5.6.9 NAME 'groupOfNames' SUP top STRUCTURAL MUST ( member $ cn ) \
+                  MAY ( description $ owner ) )"
+                    .to_string(),
+                "( 2.5.6.17 NAME 'groupOfUniqueNames' SUP top STRUCTURAL \
+                  MUST ( uniqueMember $ cn ) MAY ( description ) )"
+                    .to_string(),
+                "( 1.3.6.1.1.1.2.2 NAME 'posixGroup' SUP top STRUCTURAL \
+                  MUST ( cn $ gidNumber ) MAY ( userPassword $ memberUid $ description ) )"
+                    .to_string(),
+            ],
+            attribute_types: vec![],
+            ldap_syntaxes: vec![],
+        })
+    }
+
+    #[test]
+    fn member_is_must_for_group_of_names() {
+        let s = group_schema();
+        assert!(membership_attr_is_must(&s, &["groupOfNames"], "member"));
+        assert!(membership_attr_is_must(&s, &["groupOfNames"], "MEMBER")); // case-insensitive
+    }
+
+    #[test]
+    fn unique_member_is_must_for_group_of_unique_names() {
+        let s = group_schema();
+        assert!(membership_attr_is_must(
+            &s,
+            &["groupOfUniqueNames"],
+            "uniqueMember"
+        ));
+    }
+
+    #[test]
+    fn member_uid_is_may_for_posix_group() {
+        let s = group_schema();
+        assert!(!membership_attr_is_must(&s, &["posixGroup"], "memberUid"));
+    }
+
+    #[test]
+    fn unknown_class_or_attr_is_not_must() {
+        let s = group_schema();
+        assert!(!membership_attr_is_must(&s, &["doesNotExist"], "member"));
+        assert!(!membership_attr_is_must(
+            &s,
+            &["groupOfNames"],
+            "noSuchAttr"
+        ));
+    }
 
     #[test]
     fn mask_changeset_secrets_masks_secret_attrs_even_without_mask_list() {
