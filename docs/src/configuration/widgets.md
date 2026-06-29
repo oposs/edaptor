@@ -343,7 +343,10 @@ needed. The editor presents a row list of current values above an edit line:
 | Reorder rows | Alt+↑ / Alt+↓ | — |
 | Edit the selected row | ↵ | — |
 
-Empty rows are dropped automatically when the editor is committed. The committed
+Empty rows are dropped automatically when the editor is committed. Row order is
+preserved in the stored values; it is only semantically meaningful for
+`x_ordered` attributes (e.g. `olcAccess`), but reordering is available for all
+multi-value fields. The committed
 result is staged in the form and written as part of the normal Save flow.
 
 X-ORDERED attributes (e.g. `olcAccess`) use the [`x_ordered`](#x_ordered)
@@ -365,7 +368,7 @@ entry. Pressing Enter on the `objectClass` field opens a two-column picker:
 | Add (move available → active) | Insert or → |
 | Remove (move active → available) | Delete or ← |
 | Filter the available column | type in the search box |
-| Commit | Alt+S |
+| Commit | Enter (OK button) |
 
 **STRUCTURAL** classes are shown in the active column but are **locked** — they
 cannot be removed.
