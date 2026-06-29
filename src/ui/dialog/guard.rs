@@ -6,11 +6,11 @@ use tvision_rs::{ButtonFlags, ButtonRowAlign, Command, Dialog, Rect, StaticText,
 /// open (so Enter saves, not the firstMatch-focused Stay). The dialog returns
 /// `Command::YES` (Save), `Command::NO` (Discard), or `Command::CANCEL` (Stay).
 pub fn build() -> (Box<dyn View>, ViewId) {
-    let mut dlg = Dialog::new(Rect::new(0, 0, 56, 9), Some("Unsaved changes".to_string()));
+    let mut dlg = Dialog::new(Rect::new(0, 0, 64, 9), Some("Unsaved changes".to_string()));
     dlg.state_mut().options.center_x = true;
     dlg.state_mut().options.center_y = true;
     dlg.insert_child(Box::new(StaticText::new(
-        Rect::new(2, 2, 54, 4),
+        Rect::new(2, 2, 62, 4),
         "This entry has unsaved changes.".to_string(),
     )));
     let ids = dlg.button_row(
@@ -23,8 +23,8 @@ pub fn build() -> (Box<dyn View>, ViewId) {
                     ..ButtonFlags::new()
                 },
             ),
-            ("~D~iscard", Command::NO, ButtonFlags::new()),
-            ("S~t~ay", Command::CANCEL, ButtonFlags::new()),
+            (" ~D~iscard ", Command::NO, ButtonFlags::new()),
+            (" S~t~ay ", Command::CANCEL, ButtonFlags::new()),
         ],
         ButtonRowAlign::Right,
     );
