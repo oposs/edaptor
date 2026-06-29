@@ -11,14 +11,58 @@ use anyhow::Result;
 use crate::config::widget::{password_widget_for, ResolvedWidget};
 use crate::form::changeset::{EditEntry, ModOp};
 use crate::form::validate::SavePlan;
-use crate::ldap::worker::{Request, Response, WorkerHandle};
+use crate::ldap::worker::{Request, Response, SearchScope, WorkerHandle};
 use crate::schema::SchemaModel;
 use crate::workflows::create::now_unix_secs_or_zero;
 use crate::workflows::edit_form::EditForm;
 use crate::workflows::save::{
-    compose_renamed_dn, plan_combined_save, prepare_save, stage_pending_password, CombinedSave,
-    PlanCombined, PrepareSave,
+    compose_renamed_dn, membership_attr_is_must, plan_combined_save, prepare_save,
+    stage_pending_password, CombinedSave, PlanCombined, PrepareSave,
 };
+
+/// Blocking, schema-gated populate of the `group_members` map that
+/// [`WriteFlow::submit_combined`] consumes. For each fan-out `Delete` op, fetch
+/// the group's `objectClass` + membership attr (a single Base-scoped search) and
+/// — only when that attr is MUST for the group ([`membership_attr_is_must`]) —
+/// record the group's current members. MAY-membership groups (e.g. `posixGroup`
+/// `memberUid`) are deliberately omitted so emptying them is allowed. Best-effort:
+/// a failed/empty fetch leaves the group out (the server remains the backstop).
+pub fn fetch_group_members_for_must(
+    worker: &WorkerHandle,
+    schema: &SchemaModel,
+    fanout: &[(String, ModOp)],
+) -> std::collections::HashMap<String, Vec<String>> {
+    let mut map = std::collections::HashMap::new();
+    for (group_dn, op) in fanout {
+        let ModOp::Delete { attr, .. } = op else {
+            continue;
+        };
+        let resp = worker.request(Request::Search {
+            id: 0,
+            base: group_dn.clone(),
+            scope: SearchScope::Base,
+            filter: "(objectClass=*)".to_string(),
+            attrs: vec!["objectClass".to_string(), attr.clone()],
+            size_limit: Some(1),
+        });
+        let Ok(Response::Entries { entries, .. }) = resp else {
+            continue;
+        };
+        let Some(entry) = entries.first() else {
+            continue;
+        };
+        let ocs: Vec<&str> = entry
+            .attrs
+            .get("objectClass")
+            .map(|v| v.iter().map(String::as_str).collect())
+            .unwrap_or_default();
+        if membership_attr_is_must(schema, &ocs, attr) {
+            let members = entry.attrs.get(attr).cloned().unwrap_or_default();
+            map.insert(group_dn.clone(), members);
+        }
+    }
+    map
+}
 
 /// What a pending write means once its `WriteOk` arrives.
 #[derive(Debug, Clone)]
@@ -1166,6 +1210,88 @@ mod tests {
             other => panic!("expected Ignored after batch abort, got {other:?}"),
         }
         assert!(wf.pending.is_empty());
+    }
+
+    #[test]
+    fn fetch_populates_only_must_membership_groups() {
+        use crate::form::changeset::ModOp;
+        use crate::ldap::worker::{LdapEntry, Response, SearchScope};
+        use std::collections::BTreeMap;
+
+        let (worker, rx) = WorkerHandle::recording();
+        // Responder: answer each Base search by the requested base DN.
+        let responder = std::thread::spawn(move || {
+            while let Ok((req, reply)) = rx.recv() {
+                let crate::ldap::worker::Request::Search { base, scope, .. } = req else {
+                    continue;
+                };
+                assert!(matches!(scope, SearchScope::Base));
+                let mut attrs = BTreeMap::new();
+                if base.starts_with("cn=admins") {
+                    // groupOfNames: member is MUST.
+                    attrs.insert("objectClass".to_string(), vec!["groupOfNames".to_string()]);
+                    attrs.insert("member".to_string(), vec!["uid=ann,ou=people".to_string()]);
+                } else {
+                    // posixGroup: memberUid is MAY.
+                    attrs.insert("objectClass".to_string(), vec!["posixGroup".to_string()]);
+                    attrs.insert("memberUid".to_string(), vec!["ann".to_string()]);
+                }
+                let _ = reply.send(Response::Entries {
+                    id: 0,
+                    entries: vec![LdapEntry {
+                        dn: base.clone(),
+                        attrs,
+                        bin_attrs: BTreeMap::new(),
+                    }],
+                    truncated: false,
+                });
+            }
+        });
+
+        let schema = group_schema_for_write_flow();
+        let fanout = vec![
+            (
+                "cn=admins,ou=groups".to_string(),
+                ModOp::Delete {
+                    attr: "member".into(),
+                    values: vec!["uid=ann,ou=people".into()],
+                },
+            ),
+            (
+                "cn=staff,ou=groups".to_string(),
+                ModOp::Delete {
+                    attr: "memberUid".into(),
+                    values: vec!["ann".into()],
+                },
+            ),
+        ];
+        let map = fetch_group_members_for_must(&worker, &schema, &fanout);
+        // MUST group included; MAY group omitted.
+        assert!(map.contains_key("cn=admins,ou=groups"));
+        assert!(!map.contains_key("cn=staff,ou=groups"));
+        assert_eq!(
+            map["cn=admins,ou=groups"],
+            vec!["uid=ann,ou=people".to_string()]
+        );
+
+        drop(worker); // closes rx so the responder thread exits
+        let _ = responder.join();
+    }
+
+    fn group_schema_for_write_flow() -> SchemaModel {
+        use crate::ldap::worker::RawSubschema;
+        SchemaModel::from_raw(&RawSubschema {
+            object_classes: vec![
+                "( 2.5.6.0 NAME 'top' ABSTRACT MUST objectClass )".to_string(),
+                "( 2.5.6.9 NAME 'groupOfNames' SUP top STRUCTURAL MUST ( member $ cn ) )"
+                    .to_string(),
+                "( 1.3.6.1.1.1.2.2 NAME 'posixGroup' SUP top STRUCTURAL \
+                  MUST ( cn $ gidNumber ) MAY ( memberUid ) )"
+                    .to_string(),
+            ],
+            attribute_types: vec![],
+            ldap_syntaxes: vec![],
+        })
     }
 
     #[test]
