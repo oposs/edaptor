@@ -37,7 +37,6 @@ const MARK_LOCKED: &str = "* ";
 /// One row in either column. Domain-free: `key` is the host's stable identity
 /// (a DN, an object-class name, …) used for de-duplication and reported back in
 /// [`DualEvent`]s; `label` is the display text; `removable` gates Delete/Left.
-#[allow(dead_code)]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct DualRow {
     pub key: String,
@@ -47,7 +46,6 @@ pub(crate) struct DualRow {
 
 /// What a `handle_event` call did, for the host to react to. At most one is
 /// reported per event.
-#[allow(dead_code)]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum DualEvent {
     /// Nothing the host needs to act on (also: a rejected/no-op move).
@@ -64,7 +62,6 @@ pub(crate) enum DualEvent {
 
 /// The two-column mover. Not a `View` itself — it manipulates child views inside
 /// the host's `Dialog`, identified by the `ViewId`s captured in [`DualList::new`].
-#[allow(dead_code)]
 pub(crate) struct DualList {
     /// `ListBox` showing the Available rows.
     avail_id: ViewId,
@@ -84,7 +81,6 @@ pub(crate) struct DualList {
     with_search: bool,
 }
 
-#[allow(dead_code)]
 impl DualList {
     /// Build the two columns inside `dlg`, laid out within `area` (typically the
     /// dialog's content rect). `left_title`/`right_title` label the physical
@@ -187,11 +183,13 @@ impl DualList {
     }
 
     /// The current Available set.
+    #[allow(dead_code)] // used by the object-class picker (Task 12), not membership
     pub(crate) fn available(&self) -> &[DualRow] {
         &self.available
     }
 
     /// The last-observed search-box text.
+    #[allow(dead_code)] // used by the object-class picker (Task 12), not membership
     pub(crate) fn search_text(&self) -> String {
         self.last_search.clone()
     }
@@ -442,6 +440,17 @@ impl DualList {
 
     fn move_out_highlighted_for_test(&mut self, idx: usize) -> DualEvent {
         self.do_move_out(idx)
+    }
+
+    /// The Available `ListBox`'s `ViewId` — lets a host's tests drive the real
+    /// column (set the highlight, dispatch a key event) through `handle_event`.
+    pub(crate) fn avail_id_for_test(&self) -> ViewId {
+        self.avail_id
+    }
+
+    /// The Selected `ListBox`'s `ViewId` (see [`DualList::avail_id_for_test`]).
+    pub(crate) fn selected_id_for_test(&self) -> ViewId {
+        self.selected_id
     }
 }
 
