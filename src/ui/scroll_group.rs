@@ -167,7 +167,13 @@ impl View for ScrollGroup {
     }
 
     fn draw(&mut self, ctx: &mut DrawCtx) {
-        let style = ctx.style(Role::Background);
+        // Match the owning pane: brightest when the pane is the active one.
+        let role = if self.group.state().state.active {
+            Role::ListNormalActive
+        } else {
+            Role::ListNormalInactive
+        };
+        let style = ctx.style(role);
         let extent = self.group.state().get_extent();
         ctx.fill(extent, ' ', style);
         self.group.draw(ctx);
