@@ -5,40 +5,39 @@ for that see git log, the specs under `docs/superpowers/specs/`, the SDD ledger
 (`.superpowers/sdd/progress.md`), and project memory (`…/memory/MEMORY.md`).
 
 **Date:** 2026-06-29 · **Where we are: the tvision-rs UI migration is COMPLETE
-through M5b.** M1–M5b are DONE and committed on `feat/tvision-ui`. edaptor
+through M5c.** M1–M5c are DONE and committed on `feat/tvision-ui`. edaptor
 depends on released `tvision-rs` 0.3.0 (no pin); the main window runs frameless
 full-screen (`Fullscreen::Desktop`). **M5b (the cutover) is DONE** — the ratatui
 UI (`src/ui/`, ~9.4k LOC), the `edaptor-tv` dev binary, and the
 `ratatui`/`tui-tree-widget`/`tui-prompts`/`crossterm` deps are deleted; `src/tui/`
 was renamed to `src/ui/`; `crate::tui` → `crate::ui`. The `edaptor` binary now
-runs the tvision UI end-to-end. Gate green: 499 lib tests, clippy `-D warnings` +
-`fmt --check` clean, both facade guards empty, gated live tests pass.
+runs the tvision UI end-to-end. **M5c (the three reconciliations) is DONE** —
+X-ORDERED fields are now editable (`{n}` strip/reconstruct + `XOrdered` widget arm);
+schema-aware client-side last-member pre-validation blocks removal only when the
+membership attr is MUST; live `sambaDomain` discovery at startup with config fallback.
+Gate green: both facade guards empty, `make check` clean (fmt + clippy `-D warnings`),
+all 7 gated live tests pass. **The branch is ready to merge to `main`.**
 
-> **▶ NEXT ACTION — M5c (the three reconciliations; own brainstorm → plan →
-> implement cycle):**
+> **✅ M5c DONE — three reconciliations complete:**
 >
-> **(1) X-ORDERED editing** — the `{n}` diff/save plumbing ALREADY exists in the
-> neutral layer (`form::changeset::diff` takes an `x_ordered_attrs` set;
-> `write_flow.rs:145` builds + passes it), so M5c is the tvision **display** side
-> only: a `widget_for` `XOrdered` arm → an ordered multivalue editor that strips
-> `{n}` on display and reconstructs it from row order on commit.
+> **(1) X-ORDERED editing** — `{n}` prefixes are stripped on display and
+> reconstructed from row order on commit; the `widget_for` `XOrdered` arm routes
+> to the ordered multivalue editor. `widgets.md`'s X-ORDERED-editable claim is now
+> true. (The neutral `{n}` diff/save plumbing in `form::changeset::diff` +
+> `write_flow.rs:145` was already in place; M5c added the display side.)
 >
-> **(2) Schema-aware last-member pre-validation** — block last-member removal ONLY
-> when the membership attr is MUST (`groupOfNames`/`groupOfUniqueNames`);
-> `posixGroup.memberUid` is MAY so an empty posixGroup is LEGAL and must NOT be
-> blocked. Needs a live group-member fetch before the confirm dialog (today
-> `submit_combined` gets an EMPTY map → never blocks; server enforces).
+> **(2) Schema-aware last-member pre-validation** — blocks last-member removal
+> ONLY when the membership attr is MUST (`groupOfNames`/`groupOfUniqueNames`);
+> `posixGroup.memberUid` is MAY so an empty posixGroup is LEGAL and not blocked.
+> A live group-member fetch is now performed before the confirm dialog
+> (`fetch_group_members_for_must`); `submit_combined` receives the real map.
 >
-> **(3) Live `sambaDomain` LDAP discovery** — port the former ratatui
-> `discover_samba_domain` logic into `ui::state::bootstrap`
-> (the `bootstrap` fn in `src/ui/state.rs`, ~L630 — `src/ui/` is now the tvision
-> tree since M5b; the ratatui `discover_samba_domain` source was deleted at the
-> cutover, recover it from git history before `c7d6a04`):
-> search `(objectClass=sambaDomain)`, parse `sambaSID` via the existing
-> `samba::sid::parse_samba_domain`.
+> **(3) Live `sambaDomain` LDAP discovery** — `ui::state::bootstrap` searches
+> `(objectClass=sambaDomain)` at startup and parses `sambaSID` via the existing
+> `samba::sid::parse_samba_domain`; falls back to the config-derived domain if
+> the LDAP search finds nothing or the server has no Samba objects.
 >
-> M5b's spec §4 deliberately left `widgets.md`'s X-ORDERED-editable claim as-is;
-> M5c makes it true again.
+> The tvision migration is complete. **The branch is ready to merge to `main`.**
 >
 > _M4 load-bearing facts / divergences (for M5c):_
 > - **`Activation::Immediate` was NOT added** (the M4 spec/plan proposed it for
@@ -159,10 +158,9 @@ removed at the M5b cutover.)
 
 ## Git topology (read before you branch)
 
-- **Branch `feat/tvision-ui`** (HEAD: M5b cutover docs, closing the milestone) —
-  the long-lived migration branch. ALL tvision work lives here. M5b cutover is
-  DONE; the branch is ready to merge to `main` after M5c (or earlier if the owner
-  decides).
+- **Branch `feat/tvision-ui`** (HEAD: M5c gate closed) —
+  the long-lived migration branch. ALL tvision work lives here. M5c is DONE;
+  the branch is ready to merge to `main`.
 - `main` is behind/unpushed (origin at v0.4.0). Pushing / CI / release are a
   separate concern, not gated by M5c.
 - `Cargo.toml` version is `0.4.0`. Dependency: **`tvision-rs = "0.3"`** from
