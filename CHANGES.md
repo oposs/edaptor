@@ -114,6 +114,13 @@ All notable changes to eDAPtor are documented here. The format follows
 
 ### Changed
 
+- tvision UI (preview): the objectClass editor is now a two-column "mover" (the
+  shared dual-list): the active classes sit on the left, the remaining known
+  classes on the right. Move a class right→left (Insert/→) to add it, left→right
+  (Delete/←) to remove it; the search box filters the available column.
+  STRUCTURAL classes are shown but locked (non-removable). The committed class set
+  and downstream schema resync are unchanged.
+
 - tvision UI (preview): now builds against the released `tvision-rs` 0.3.0; the
   temporary git-pin for `exec_view_focused` has been removed.
 

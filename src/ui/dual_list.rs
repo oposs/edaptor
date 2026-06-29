@@ -182,18 +182,6 @@ impl DualList {
         &self.selected
     }
 
-    /// The current Available set.
-    #[allow(dead_code)] // used by the object-class picker (Task 12), not membership
-    pub(crate) fn available(&self) -> &[DualRow] {
-        &self.available
-    }
-
-    /// The last-observed search-box text.
-    #[allow(dead_code)] // used by the object-class picker (Task 12), not membership
-    pub(crate) fn search_text(&self) -> String {
-        self.last_search.clone()
-    }
-
     /// Replace the Available rows and re-render the column (marking rows already
     /// in Selected with a ✓).
     pub(crate) fn set_available(&mut self, rows: Vec<DualRow>, dlg: &mut Dialog, ctx: &mut Context) {
