@@ -10,6 +10,7 @@ pub mod dialog;
 pub(crate) mod membership;
 pub(crate) mod multivalue;
 pub(crate) mod oc_picker;
+pub(crate) mod ordered;
 pub(crate) mod panes;
 pub(crate) mod picker;
 pub(crate) mod pump;
