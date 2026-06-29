@@ -3,10 +3,12 @@
 //! UI. Only this module tree may `use tvision_rs`.
 
 mod app;
+pub(crate) mod theme;
 // Keep `pub`: builders and guard_decision are not yet called from non-test code
 // (wired in Task 8). `pub` suppresses the dead_code lint without `#[allow]`.
 pub(crate) mod choice;
 pub mod dialog;
+pub(crate) mod dual_list;
 pub(crate) mod membership;
 pub(crate) mod multivalue;
 pub(crate) mod oc_picker;

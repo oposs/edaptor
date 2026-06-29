@@ -1,7 +1,8 @@
 //! Leaf list pane: a search box over a ListBox of the current branch's leaves.
 
 use tvision_rs::{
-    self as tv, delegate, Context, Event, FieldValue, Group, InputLine, Key, ListBox, Rect, View,
+    self as tv, delegate, Context, Event, FieldValue, Group, InputLine, Key, ListBox, Rect,
+    ScrollBar, StaticText, View,
 };
 
 use crate::ui::{Shared, REFRESH};
@@ -13,6 +14,10 @@ pub(crate) struct LeafPane {
     group: Group,
     search_id: tv::ViewId,
     list_id: tv::ViewId,
+    /// Vertical scroll bar in the right column. Wired as the list's `v_bar`, so
+    /// the list widget publishes its range/value/page; this pane owns only the
+    /// focus + overflow visibility gate and the matching width reflow (Task 7).
+    v_bar: tv::ViewId,
     state: Shared,
     last_sel: i32,
     last_search: String,
@@ -30,13 +35,33 @@ impl LeafPane {
         // it); a plain Group does not, so set it explicitly.
         group.state_mut().options.first_click = true;
         let w = bounds.b.x - bounds.a.x;
+        // Static "Filter:" label at the left of row 0 — makes the search box's
+        // purpose obvious. px is label width + 1 space so the InputLine sits right
+        // after it without overlap.
+        const PROMPT: &str = "Filter:";
+        let px = PROMPT.chars().count() as i32 + 1; // 7 + 1 = 8
+        group.insert(Box::new(StaticText::new(
+            Rect::new(0, 0, px, 1),
+            PROMPT.to_string(),
+        )));
         // grow_mode so Group::change_bounds (driven by the Splitter) resizes children:
-        // search bar widens with the pane (stays at row 0, height 1).
-        let mut search = InputLine::with_limit(Rect::new(0, 0, w, 1), 256);
+        // search bar widens with the pane (stays at row 0, height 1, starts after label).
+        let mut search = InputLine::with_limit(Rect::new(px, 0, w, 1), 256);
         search.state.grow_mode.hi_x = true;
         let search_id = group.insert(Box::new(search));
-        // list fills all remaining width + height.
-        let mut list = ListBox::new(Rect::new(0, 1, w, bounds.b.y - bounds.a.y), 1, None, None);
+        let h = bounds.b.y - bounds.a.y;
+        // Vertical scroll bar in the right column (width 1 ⇒ vertical, which
+        // ScrollBar::new detects and gives the right grow_mode). Hidden until the
+        // pane is focused AND the list overflows — sync_scrollbar() owns that
+        // gate and the matching one-column width reflow.
+        let mut v_bar = ScrollBar::new(Rect::new(w - 1, 1, w, h));
+        v_bar.state_mut().state.visible = false;
+        let v_bar = group.insert(Box::new(v_bar));
+        // List fills the remaining height and — while the bar is hidden — the
+        // full width. It is wired as the list's vertical bar, so the list widget
+        // publishes the bar's range/value/page itself on every (re)population and
+        // a bar drag scrolls the list; this pane only gates visibility + width.
+        let mut list = ListBox::new(Rect::new(0, 1, w, h), 1, None, Some(v_bar));
         list.state_mut().grow_mode.hi_x = true;
         list.state_mut().grow_mode.hi_y = true;
         let list_id = group.insert(Box::new(list));
@@ -44,6 +69,7 @@ impl LeafPane {
             group,
             search_id,
             list_id,
+            v_bar,
             state,
             last_sel: -1,
             last_search: String::new(),
@@ -65,6 +91,57 @@ impl LeafPane {
             }
         }
         self.last_sel = -1;
+        self.sync_scrollbar(ctx);
+    }
+
+    /// Pure layout decision for the focus-gated scroll bar. Given the list's
+    /// total `rows`, the visible `page` (rows that fit), whether the pane is
+    /// `active`, and the pane width `w`, decide whether the bar is shown and how
+    /// wide the list should be. The bar is shown iff the pane is active AND the
+    /// content overflows the page; when shown the list yields one column to the
+    /// bar, otherwise it spans the full width. Kept side-effect free so the
+    /// behaviour is unit-testable (mirrors scroll_group.rs's test-seam style).
+    fn bar_layout(rows: i32, page: i32, active: bool, w: i32) -> (bool, i32) {
+        let overflow = rows > page;
+        let show = active && overflow;
+        let list_w = if show { (w - 1).max(0) } else { w };
+        (show, list_w)
+    }
+
+    /// Focus + overflow gate for the scroll bar, plus the one-column width
+    /// reflow. The wired list already publishes the bar's range/value/page, so
+    /// this never touches scroll params — it only decides visibility/geometry.
+    ///
+    /// The list's own `set_state` toggles the bar visible on `active` alone
+    /// (overflow-blind) via a deferred `SetVisible`; we re-assert the
+    /// overflow-aware decision through `request_set_visible` so a focused but
+    /// non-overflowing list still hides the bar (later deferred op wins).
+    fn sync_scrollbar(&mut self, ctx: &mut Context) {
+        let active = self.group.state().state.active;
+        let extent = self.group.state().get_extent();
+        let (w, h) = (extent.b.x, extent.b.y);
+        // The list occupies rows 1..h, so its visible page height is h - 1.
+        let page = (h - 1).max(0);
+        let rows = self
+            .group
+            .child_mut(self.list_id)
+            .and_then(|v| v.as_any_mut())
+            .and_then(|a| a.downcast_mut::<ListBox>())
+            .map(|lb| lb.list().len() as i32)
+            .unwrap_or(0);
+        let (show, list_w) = Self::bar_layout(rows, page, active, w);
+        // Reserve / reclaim the bar lane.
+        if let Some(list) = self.group.child_mut(self.list_id) {
+            list.change_bounds(Rect::new(0, 1, list_w, h));
+        }
+        // Pin the bar to the right column (idempotent with its grow_mode) and
+        // toggle its visibility directly for the steady state.
+        if let Some(bar) = self.group.child_mut(self.v_bar) {
+            bar.change_bounds(Rect::new(w - 1, 1, w, h));
+            bar.state_mut().state.visible = show;
+        }
+        // Compete with the list's overflow-blind SetVisible in the deferred drain.
+        ctx.request_set_visible(self.v_bar, show);
     }
 
     #[cfg(test)]
@@ -145,6 +222,13 @@ impl View for LeafPane {
             self.state.borrow_mut().list_dirty = false;
         }
 
+        // Tab is reserved for switching panes. Do not let the inner group consume
+        // it for intra-pane focus cycling (search-box ↔ list) — return without
+        // clearing so the parent Splitter receives it and moves to the next pane.
+        if matches!(ev, Event::KeyDown(k) if k.key == Key::Tab) {
+            return;
+        }
+
         // Arrow/page keys navigate the LIST even while the search box holds text
         // focus (the search-over-list idiom): forward them straight to the list so
         // the user can move the selection while typing a filter. Tab is reserved for
@@ -180,6 +264,10 @@ impl View for LeafPane {
         // (a cheap no-op when unchanged) rather than inspecting the cleared event.
         self.apply_set_row(ctx);
         self.report_selection();
+
+        // Re-evaluate the bar's focus + overflow gate now that the list length
+        // and the pane's active state are current for this frame.
+        self.sync_scrollbar(ctx);
     }
 }
 
@@ -217,16 +305,35 @@ mod tests {
         let mut pane = LeafPane::new(Rect::new(0, 0, 30, 10), shared);
         // Simulate Splitter driving a resize: just change_bounds, no on_bounds_changed.
         <LeafPane as View>::change_bounds(&mut pane, Rect::new(0, 0, 50, 20));
+        // The "Filter:" label (7 chars + 1 space = px=8) is pinned at x=0..8; the
+        // InputLine starts at x=8 and its hi_x grow_mode tracks the pane's right edge.
         assert_eq!(
             pane.search_bounds_for_test(),
-            Rect::new(0, 0, 50, 1),
-            "search InputLine must widen (hi_x)"
+            Rect::new(8, 0, 50, 1),
+            "search InputLine must start at px=8 (after Filter: label) and widen (hi_x)"
         );
         assert_eq!(
             pane.list_bounds_for_test(),
             Rect::new(0, 1, 50, 20),
             "list ListBox must fill width+height (hi_x+hi_y)"
         );
+    }
+
+    /// Pure focus + overflow gate (Task 7). The bar shows only when the pane is
+    /// active AND the rows overflow the page; when shown the list yields one
+    /// column, otherwise it keeps the full width.
+    #[test]
+    fn bar_layout_gates_on_focus_and_overflow() {
+        // Active + overflow → bar shown, list narrowed by one column.
+        assert_eq!(LeafPane::bar_layout(20, 9, true, 30), (true, 29));
+        // Active but fits exactly (rows == page) → no overflow → hidden, full width.
+        assert_eq!(LeafPane::bar_layout(9, 9, true, 30), (false, 30));
+        // Overflow but pane not active → hidden, list reclaims full width.
+        assert_eq!(LeafPane::bar_layout(20, 9, false, 30), (false, 30));
+        // Empty list while active → hidden, full width.
+        assert_eq!(LeafPane::bar_layout(0, 9, true, 30), (false, 30));
+        // Degenerate width clamps to 0 rather than going negative.
+        assert_eq!(LeafPane::bar_layout(20, 9, true, 0), (true, 0));
     }
 
     #[test]

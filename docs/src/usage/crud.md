@@ -25,12 +25,18 @@ read-only / system attributes are shown but not editable.
 
 ### Changing objectClasses
 
-The `objectClass` field opens a schema-seeded multi-select picker. Tick or untick
-classes and press **Alt+S** to commit. The form immediately updates: new
-MUST/MAY fields appear for the added classes, and any attribute no longer
-permitted by the remaining classes is shown **crossed out** (it will be deleted
-on save). Press **Alt+C** to discard the objectClass change and return to the
-server state. See [objectClass Picker](../configuration/widgets.md#objectclass-picker-auto-injected)
+The `objectClass` field opens a schema-seeded **dual-list editor**: active
+(current) classes on the left, available classes on the right. **Insert** or
+**→** moves the highlighted available class into the active set; **Delete** or
+**←** removes the highlighted active class. **Tab** flips which column the arrow
+keys drive; typing in the search box (above the right column) filters the
+available list. STRUCTURAL classes are shown but cannot be removed. Press
+**Enter** to confirm (OK button) or the **Cancel** button to close the editor
+without committing. The form immediately updates: new MUST/MAY fields appear for
+added classes, and any attribute no longer permitted by the remaining classes is
+shown **crossed out** (it will be deleted on save). Press **Alt+C** in the form
+to discard all objectClass changes and revert to the server state. See
+[objectClass Editor](../configuration/widgets.md#objectclass-editor-auto-injected)
 for full details.
 
 ### The dirty-guard

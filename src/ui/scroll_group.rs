@@ -118,13 +118,21 @@ impl ScrollGroup {
         self.group.current()
     }
 
-    #[allow(dead_code)]
     pub(crate) fn focus_child(&mut self, id: ViewId, ctx: &mut Context) {
         self.group.focus_child(id, ctx);
     }
 
     pub(crate) fn logical_of(&self, id: ViewId) -> Option<Rect> {
         self.content.iter().find(|(i, _)| *i == id).map(|(_, r)| *r)
+    }
+
+    /// The child's current bounds in this group's local (viewport) coordinates:
+    /// its logical rect shifted up by the active scroll `top` — exactly the rect
+    /// `reposition_one` assigns to the child. `None` if `id` is not a content
+    /// child. Used for hit-testing a child cell against a (group-local) point.
+    pub(crate) fn local_bounds_of(&self, id: ViewId) -> Option<Rect> {
+        self.logical_of(id)
+            .map(|r| Rect::new(r.a.x, r.a.y - self.top, r.b.x, r.b.y - self.top))
     }
 
     pub(crate) fn ensure_visible(&mut self, logical: Rect, ctx: &mut Context) {
@@ -167,7 +175,13 @@ impl View for ScrollGroup {
     }
 
     fn draw(&mut self, ctx: &mut DrawCtx) {
-        let style = ctx.style(Role::Background);
+        // Match the owning pane: brightest when the pane is the active one.
+        let role = if self.group.state().state.active {
+            Role::ListNormalActive
+        } else {
+            Role::ListNormalInactive
+        };
+        let style = ctx.style(role);
         let extent = self.group.state().get_extent();
         ctx.fill(extent, ' ', style);
         self.group.draw(ctx);
@@ -258,6 +272,23 @@ mod tests {
         sg.set_top_for_test(2);
         assert_eq!(sg.child_mut(ids[0]).unwrap().state().get_bounds().a.y, -2);
         assert_eq!(sg.child_mut(ids[5]).unwrap().state().get_bounds().a.y, 3);
+    }
+
+    #[test]
+    fn local_bounds_of_tracks_scroll_top() {
+        let mut sg = ScrollGroup::new(Rect::new(0, 0, 20, 5));
+        let w = sg.inner_width();
+        let mut ids = Vec::new();
+        for y in 0..8 {
+            ids.push(sg.add_content(cell(y, w), Rect::new(0, y, w, y + 1)));
+        }
+        // At top=0 the local bounds equal the logical rect.
+        assert_eq!(sg.local_bounds_of(ids[3]), Some(Rect::new(0, 3, w, 4)));
+        // After scrolling, the local bounds shift up by `top`.
+        sg.set_top_for_test(2);
+        assert_eq!(sg.local_bounds_of(ids[3]), Some(Rect::new(0, 1, w, 2)));
+        // The scroll bar is not content → no local bounds.
+        assert_eq!(sg.local_bounds_of(sg.v_bar), None);
     }
 
     #[test]

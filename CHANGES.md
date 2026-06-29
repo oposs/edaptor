@@ -8,6 +8,16 @@ All notable changes to eDAPtor are documented here. The format follows
 
 ### New
 
+- tvision UI: clicking a form **label** now focuses the corresponding input field
+  directly, without needing to navigate to it with the arrow keys.
+
+- tvision UI: the multi-value attribute editor now shows visible **[+ Add]** /
+  **[- Del]** buttons; the keyboard shortcuts Insert / Delete continue to work as
+  before.
+
+- tvision UI: the entry list now shows a **`Filter:`** label to the left of the
+  incremental-search box, making the filter prompt immediately recognisable.
+
 - The samba domain SID is now discovered live from a `sambaDomain` directory
   entry at startup (when a `sambaSID` widget is configured), falling back to the
   configured `[samba] domain_sid`. When discovery succeeds, the algorithmic RID
@@ -114,10 +124,38 @@ All notable changes to eDAPtor are documented here. The format follows
 
 ### Changed
 
+- tvision UI: the interface now uses a **light Solarized-Light colour scheme** —
+  cream/tan panels, dark slate text, blue accent — replacing the previous
+  dark classic-blue palette. The theme is applied uniformly and is not
+  user-configurable.
+
+- tvision UI: all three panes share a uniform background; the focused pane is
+  rendered in a brighter cream tone, unfocused panes are slightly greyed. Within
+  the entry form, editable fields have a visibly brighter background than
+  read-only labels, making edit affordances immediately apparent.
+
+- tvision UI: **Tab / Shift-Tab now cycle the three panes only** — they no longer
+  descend into a pane's internal fields. Use the arrow keys to move within a pane.
+
+- tvision UI: the tree and entry-list panes, and the entry form, now show a
+  vertical scrollbar **only while focused and when content overflows**; the
+  scrollbar disappears when the pane loses focus.
+
+- tvision UI: the `objectClass` editor is now a two-column "mover" (the shared
+  dual-list): the active classes sit on the left, the remaining known classes on
+  the right. Move a class right→left (Insert/→) to add it, left→right (Delete/←)
+  to remove it; Tab flips the active column; the search box filters the available
+  column. STRUCTURAL classes are shown but locked (non-removable). The committed
+  class set and downstream schema resync are unchanged.
+
 - tvision UI (preview): now builds against the released `tvision-rs` 0.3.0; the
   temporary git-pin for `exec_view_focused` has been removed.
 
 ### Fixed
+
+- tvision UI: the unsaved-changes guard dialog (Save / Discard / Stay) was too
+  narrow — buttons touched the dialog edge. It is now wider so all three buttons
+  have adequate spacing.
 
 - tvision UI (preview): the Save-confirm and unsaved-changes guard dialogs opened
   with the wrong button focused (Cancel / Stay), so pressing Enter cancelled the

@@ -1,6 +1,8 @@
 //! DIT tree pane: an `Outline` over the structure's branch hierarchy.
 
-use tvision_rs::{self as tv, delegate, Context, Event, FieldValue, Rect, View};
+use tvision_rs::{
+    self as tv, delegate, Context, DrawCtx, Event, FieldValue, OutlineViewer, Rect, Role, View,
+};
 
 use crate::config::tree_label::{eval_tree_label, fit_label};
 use crate::ui::state::UiState;
@@ -93,45 +95,154 @@ pub(crate) fn build_branch_nodes(
 /// outline highlight back when a guard returns "Stay". (Auto-seeds on first event;
 /// call `ov_update` only after a tree mutation — none here.)
 pub(crate) struct TreePane {
-    outline: tv::Outline,
+    /// Owning container holding the `Outline` plus its vertical `ScrollBar` as
+    /// siblings (an `Outline` cannot host a sibling bar by itself). The pane
+    /// delegates the `View` surface to this group (Task 8 restructure).
+    group: tv::Group,
+    /// Child id of the `Outline` inside `group` (reached via `child_mut` +
+    /// downcast for the selection-tracking and snap-back logic).
+    outline_id: tv::ViewId,
+    /// Vertical scroll bar in the right column. Wired as the outline's `v_bar`,
+    /// so the outline widget publishes its range/value/page itself; this pane
+    /// owns only the focus + overflow visibility gate and the matching one-column
+    /// width reflow (Task 8, mirroring the leaf pane's Task 7).
+    v_bar: tv::ViewId,
     state: Shared,
     last_sel: i32,
 }
 
 impl TreePane {
     pub(crate) fn new(bounds: Rect, root: Option<Box<tv::Node>>, state: Shared) -> Self {
+        let w = bounds.b.x - bounds.a.x;
+        let h = bounds.b.y - bounds.a.y;
+        let mut group = tv::Group::new(bounds);
+        // ofFirstClick: the click that focuses this pane (when another pane was
+        // active) must ALSO reach the outline, so a single click both focuses and
+        // moves the highlight. The bare `Outline` set this for the pane via the old
+        // delegation; a plain `Group` does not, so set it explicitly (matches the
+        // leaf/form panes).
+        group.state_mut().options.first_click = true;
+        // Vertical scroll bar in the right column (width 1 ⇒ vertical, which
+        // ScrollBar::new detects and gives the right grow_mode). Hidden until the
+        // pane is focused AND the tree overflows — sync_scrollbar() owns that gate
+        // and the matching one-column width reflow.
+        let mut v_bar = tv::ScrollBar::new(Rect::new(w - 1, 0, w, h));
+        v_bar.state_mut().state.visible = false;
+        let v_bar = group.insert(Box::new(v_bar));
+        // The outline fills the full height and — while the bar is hidden — the
+        // full width. It is wired as the outline's vertical bar, so the outline
+        // widget publishes the bar's range/value/page itself on every (re)count
+        // and a bar drag scrolls it; this pane only gates visibility + width.
+        let mut outline = tv::Outline::new(Rect::new(0, 0, w, h), None, Some(v_bar), root);
+        outline.state_mut().grow_mode.hi_x = true;
+        outline.state_mut().grow_mode.hi_y = true;
+        let outline_id = group.insert(Box::new(outline));
         TreePane {
-            outline: tv::Outline::new(bounds, None, None, root),
+            group,
+            outline_id,
+            v_bar,
             state,
             last_sel: -1,
         }
+    }
+
+    /// Typed accessor for the `Outline` child (downcast through the group). All
+    /// selection-tracking, snap-back and overflow reads go through here so the
+    /// data-logic stays byte-for-byte equivalent to the pre-restructure pane.
+    fn outline_mut(&mut self) -> Option<&mut tv::Outline> {
+        self.group
+            .child_mut(self.outline_id)
+            .and_then(|v| v.as_any_mut())
+            .and_then(|a| a.downcast_mut::<tv::Outline>())
+    }
+
+    /// Pure layout decision for the focus-gated scroll bar (mirrors the leaf
+    /// pane's Task 7 helper). Given the outline's total `rows`, the visible
+    /// `page` (rows that fit), whether the pane is `active`, and the pane width
+    /// `w`, decide whether the bar is shown and how wide the outline should be.
+    /// The bar is shown iff the pane is active AND the content overflows the
+    /// page; when shown the outline yields one column to the bar, otherwise it
+    /// spans the full width. Side-effect free so it is unit-testable.
+    fn bar_layout(rows: i32, page: i32, active: bool, w: i32) -> (bool, i32) {
+        let overflow = rows > page;
+        let show = active && overflow;
+        let outline_w = if show { (w - 1).max(0) } else { w };
+        (show, outline_w)
+    }
+
+    /// Focus + overflow gate for the scroll bar, plus the one-column width
+    /// reflow. The wired outline already publishes the bar's range/value/page, so
+    /// this never touches scroll params — it only decides visibility/geometry.
+    ///
+    /// The outline toggles the bar visible on `active` alone (overflow-blind) via
+    /// a deferred `SetVisible`; we re-assert the overflow-aware decision through
+    /// `request_set_visible` so a focused but non-overflowing tree still hides the
+    /// bar (the later deferred op wins).
+    fn sync_scrollbar(&mut self, ctx: &mut Context) {
+        let active = self.group.state().state.active;
+        let extent = self.group.state().get_extent();
+        let (w, h) = (extent.b.x, extent.b.y);
+        // The outline fills the full pane height, so its visible page is h rows.
+        let page = h.max(0);
+        // Total visible node count published by the outline's last (re)count.
+        let rows = self.outline_mut().map(|o| o.ov().limit.y).unwrap_or(0);
+        let (show, outline_w) = Self::bar_layout(rows, page, active, w);
+        // Reserve / reclaim the bar lane.
+        if let Some(outline) = self.group.child_mut(self.outline_id) {
+            outline.change_bounds(Rect::new(0, 0, outline_w, h));
+        }
+        // Pin the bar to the right column (idempotent with its grow_mode) and
+        // toggle its visibility directly for the steady state.
+        if let Some(bar) = self.group.child_mut(self.v_bar) {
+            bar.change_bounds(Rect::new(w - 1, 0, w, h));
+            bar.state_mut().state.visible = show;
+        }
+        // Compete with the outline's overflow-blind SetVisible in the deferred drain.
+        ctx.request_set_visible(self.v_bar, show);
     }
 
     /// Test seam: directly set the outline's focused row (bypasses `set_value_ctx`
     /// which is a no-op on `Outline` since it does not override `set_value`).
     #[cfg(test)]
     pub(crate) fn select_row_for_test(&mut self, row: i32, _ctx: &mut Context) {
-        use tv::OutlineViewer;
-        self.outline.ov_mut().foc = row;
+        if let Some(outline) = self.outline_mut() {
+            outline.ov_mut().foc = row;
+        }
     }
 }
 
-#[delegate(to = outline)]
+#[delegate(to = group)]
 impl View for TreePane {
     fn as_any_mut(&mut self) -> Option<&mut dyn core::any::Any> {
         Some(self)
+    }
+
+    fn draw(&mut self, ctx: &mut DrawCtx) {
+        // Active pane = brightest (base3); inactive = base2. Mirrors the form pane
+        // and the list panes which get this from ListNormalActive/Inactive automatically.
+        let role = if self.group.state().state.active {
+            Role::ListNormalActive
+        } else {
+            Role::ListNormalInactive
+        };
+        let style = ctx.style(role);
+        let extent = self.group.state().get_extent();
+        ctx.fill(extent, ' ', style);
+        self.group.draw(ctx);
     }
 
     fn handle_event(&mut self, ev: &mut Event, ctx: &mut Context) {
         // Controller → pane: snap the selection back (guard "Stay") before reporting.
         let snap = self.state.borrow_mut().set_tree_row.take();
         if let Some(row) = snap {
-            tv::widgets::outline::adjust_focus(&mut self.outline, row, ctx);
+            if let Some(outline) = self.outline_mut() {
+                tv::widgets::outline::adjust_focus(outline, row, ctx);
+            }
             self.last_sel = row;
         }
 
-        self.outline.handle_event(ev, ctx);
-        let sel = match self.outline.value() {
+        self.group.handle_event(ev, ctx);
+        let sel = match self.outline_mut().and_then(|o| o.value()) {
             Some(FieldValue::Int(i)) => i,
             _ => 0,
         };
@@ -144,6 +255,10 @@ impl View for TreePane {
                 }
             }
         }
+
+        // Re-evaluate the bar's focus + overflow gate now that the node count and
+        // the pane's active state are current for this frame.
+        self.sync_scrollbar(ctx);
     }
 }
 
@@ -166,6 +281,23 @@ mod tests {
             object_classes: vec![],
             attrs: BTreeMap::new(),
         }
+    }
+
+    /// Pure focus + overflow gate (mirrors the leaf pane's Task 7 test). The bar
+    /// shows only when the pane is active AND the nodes overflow the page; when
+    /// shown the outline yields one column, otherwise it keeps the full width.
+    #[test]
+    fn bar_layout_gates_on_focus_and_overflow() {
+        // Active + overflow → bar shown, outline narrowed by one column.
+        assert_eq!(TreePane::bar_layout(20, 10, true, 30), (true, 29));
+        // Active but fits exactly (rows == page) → no overflow → hidden, full width.
+        assert_eq!(TreePane::bar_layout(10, 10, true, 30), (false, 30));
+        // Overflow but pane not active → hidden, outline reclaims full width.
+        assert_eq!(TreePane::bar_layout(20, 10, false, 30), (false, 30));
+        // Empty tree while active → hidden, full width.
+        assert_eq!(TreePane::bar_layout(0, 10, true, 30), (false, 30));
+        // Degenerate width clamps to 0 rather than going negative.
+        assert_eq!(TreePane::bar_layout(20, 10, true, 0), (true, 0));
     }
 
     #[test]
