@@ -9,7 +9,8 @@
 //! `EditForm.fields` whenever the shown entry changes.
 
 use tvision_rs::{
-    self as tv, delegate, Context, Event, FieldValue, Group, InputLine, Key, Rect, View,
+    self as tv, delegate, Context, DrawCtx, Event, FieldValue, Group, InputLine, Key, Rect, Role,
+    View,
 };
 
 use crate::ui::scroll_group::ScrollGroup;
@@ -407,6 +408,20 @@ impl FormPane {
 impl View for FormPane {
     fn as_any_mut(&mut self) -> Option<&mut dyn core::any::Any> {
         Some(self)
+    }
+
+    fn draw(&mut self, ctx: &mut DrawCtx) {
+        // Active pane = brightest (base3); inactive = base2. Mirrors the list panes
+        // which get this from ListNormalActive/Inactive automatically.
+        let role = if self.group.state().state.active {
+            Role::ListNormalActive
+        } else {
+            Role::ListNormalInactive
+        };
+        let style = ctx.style(role);
+        let extent = self.group.state().get_extent();
+        ctx.fill(extent, ' ', style);
+        self.group.draw(ctx);
     }
 
     fn handle_event(&mut self, ev: &mut Event, ctx: &mut Context) {
