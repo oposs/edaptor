@@ -147,6 +147,8 @@ pub fn widget_for(field: &EditField) -> Box<dyn FieldWidget> {
         Box::new(crate::ui::membership::MembershipWidget)
     } else if matches!(field.widget_binding, Some(WidgetKind::SambaSid)) {
         Box::new(SambaSidWidget)
+    } else if matches!(field.widget_binding, Some(WidgetKind::XOrdered)) {
+        Box::new(crate::ui::ordered::OrderedWidget)
     } else if field.editable && field.multi && !field.orphaned && field.widget_binding.is_none() {
         Box::new(crate::ui::multivalue::MultiValueWidget)
     } else {
@@ -171,6 +173,7 @@ pub fn is_modal_field(field: &EditField) -> bool {
             Some(WidgetKind::Picker(b)) if b.fanout_attr.is_some()
         )
         || matches!(field.widget_binding, Some(WidgetKind::SambaSid))
+        || matches!(field.widget_binding, Some(WidgetKind::XOrdered))
         || (field.editable && field.multi && !field.orphaned && field.widget_binding.is_none())
 }
 
@@ -283,6 +286,20 @@ mod tests {
         // A populated value presents verbatim.
         f.values = vec!["S-1-5-21-1-2-3-3000".into()];
         assert_eq!(widget_for(&f).present(&f), "S-1-5-21-1-2-3-3000");
+    }
+
+    #[test]
+    fn xordered_field_routes_and_is_modal() {
+        use crate::config::widget::WidgetKind;
+        let mut f = field(&["{0}a", "{1}b"], WidgetSpec::ReadOnlyText);
+        f.label = "olcAccess".into();
+        f.multi = true;
+        f.ordered = true;
+        f.widget_binding = Some(WidgetKind::XOrdered);
+        assert!(is_modal_field(&f));
+        assert!(matches!(widget_for(&f).activate(&f), Activation::Modal(_)));
+        // Presented with {n} stripped.
+        assert_eq!(widget_for(&f).present(&f), "a, b");
     }
 
     #[test]
