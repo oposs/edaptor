@@ -118,7 +118,6 @@ impl ScrollGroup {
         self.group.current()
     }
 
-    #[allow(dead_code)]
     pub(crate) fn focus_child(&mut self, id: ViewId, ctx: &mut Context) {
         self.group.focus_child(id, ctx);
     }
