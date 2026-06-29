@@ -457,6 +457,14 @@ impl View for FormPane {
             return;
         }
 
+        // Tab is reserved for switching panes. Do not let the inner group consume
+        // it for intra-pane focus cycling — return without clearing so the parent
+        // Splitter receives it and moves to the next pane.
+        if matches!(ev, Event::KeyDown(k) if k.key == Key::Tab) {
+            self.sync_into_form();
+            return;
+        }
+
         // Up/Down move focus between focusable fields (Tab is reserved for switching
         // panes, consumed by the Splitter). Consume the key so it stays in this pane.
         let nav = matches!(ev, Event::KeyDown(k) if matches!(k.key, Key::Up | Key::Down));

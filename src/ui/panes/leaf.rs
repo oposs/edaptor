@@ -145,6 +145,13 @@ impl View for LeafPane {
             self.state.borrow_mut().list_dirty = false;
         }
 
+        // Tab is reserved for switching panes. Do not let the inner group consume
+        // it for intra-pane focus cycling (search-box ↔ list) — return without
+        // clearing so the parent Splitter receives it and moves to the next pane.
+        if matches!(ev, Event::KeyDown(k) if k.key == Key::Tab) {
+            return;
+        }
+
         // Arrow/page keys navigate the LIST even while the search box holds text
         // focus (the search-over-list idiom): forward them straight to the list so
         // the user can move the selection while typing a filter. Tab is reserved for
