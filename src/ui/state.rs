@@ -5,7 +5,7 @@ use anyhow::{anyhow, Result};
 
 use crate::config::tree_label::CompiledTreeRule;
 use crate::config::{Config, EntryProfile};
-use crate::ldap::worker::{Request, Response, WorkerHandle};
+use crate::ldap::worker::{Request, Response, SearchScope, WorkerHandle};
 use crate::schema::SchemaModel;
 use crate::workflows::alloc_flow::{AllocFlow, AllocOutcome};
 use crate::workflows::edit_form::{build_edit_form, EditForm};
@@ -615,6 +615,45 @@ pub(crate) fn samba_info_from_config(config: &Config) -> Option<crate::samba::Sa
         })
 }
 
+/// True when any resolved widget is a `sambaSID` field — i.e. the samba domain
+/// is actually needed, so a live discovery search at startup is worth issuing.
+fn samba_in_use(widgets: &[crate::config::widget::ResolvedWidget]) -> bool {
+    use crate::config::widget::WidgetKind;
+    widgets
+        .iter()
+        .any(|w| matches!(w.kind, WidgetKind::SambaSid))
+}
+
+/// Discover the samba domain context from a live `sambaDomain` entry under
+/// `base` (best-effort). Returns the first entry that parses via
+/// [`crate::samba::sid::parse_samba_domain`]; `None` when none is found, the
+/// search fails, or access is denied — callers fall back to the config
+/// `domain_sid`.
+fn discover_samba_domain(
+    worker: &WorkerHandle,
+    base: &str,
+) -> Option<crate::samba::SambaDomainInfo> {
+    let resp = worker
+        .request(Request::Search {
+            id: 0,
+            base: base.to_string(),
+            scope: SearchScope::Subtree,
+            filter: "(objectClass=sambaDomain)".to_string(),
+            attrs: vec![
+                "sambaSID".to_string(),
+                "sambaAlgorithmicRidBase".to_string(),
+            ],
+            size_limit: Some(5),
+        })
+        .ok()?;
+    let Response::Entries { entries, .. } = resp else {
+        return None;
+    };
+    entries
+        .iter()
+        .find_map(|e| crate::samba::sid::parse_samba_domain(&e.attrs))
+}
+
 /// First profile whose declared object_classes are all present on the entry.
 pub fn profile_for<'a>(profiles: &'a [EntryProfile], ocs: &[String]) -> Option<&'a EntryProfile> {
     profiles.iter().find(|p| {
@@ -639,8 +678,15 @@ pub(crate) fn bootstrap(config: Config, password: String) -> Result<UiState> {
     let scan_attrs = structure_scan_attrs(&label_rules, &tree_rules);
 
     let connection_encrypted = config.is_encrypted();
-    let samba_domain = samba_info_from_config(&config);
+    let samba_from_config = samba_info_from_config(&config);
     let worker = WorkerHandle::spawn(config, password)?;
+    // M5c: prefer a live sambaDomain entry when a sambaSID widget is configured;
+    // fall back to the static config domain_sid (or no samba at all).
+    let samba_domain = if samba_in_use(&resolved_widgets) {
+        discover_samba_domain(&worker, &base_dn).or(samba_from_config)
+    } else {
+        samba_from_config
+    };
 
     let raw = match worker.request(Request::FetchSubschema)? {
         Response::Subschema(raw) => raw,
@@ -704,6 +750,24 @@ mod tests {
     use super::*;
     use crate::ldap::worker::RawSubschema;
     use std::collections::BTreeMap;
+
+    #[test]
+    fn samba_in_use_true_only_with_samba_sid_widget() {
+        use crate::config::widget::{ResolvedWidget, WidgetKind};
+        let none: Vec<ResolvedWidget> = vec![ResolvedWidget {
+            owner_object_classes: vec!["posixGroup".into()],
+            attr: "memberUid".into(),
+            kind: WidgetKind::XOrdered,
+        }];
+        assert!(!super::samba_in_use(&none));
+
+        let with_samba = vec![ResolvedWidget {
+            owner_object_classes: vec!["sambaSamAccount".into()],
+            attr: "sambaSID".into(),
+            kind: WidgetKind::SambaSid,
+        }];
+        assert!(super::samba_in_use(&with_samba));
+    }
 
     fn si(dn: &str, child_hint: Option<&str>) -> StructureInput {
         StructureInput {
