@@ -2,7 +2,7 @@
 
 use tvision_rs::{
     self as tv, delegate, Context, Event, FieldValue, Group, InputLine, Key, ListBox, Rect,
-    ScrollBar, View,
+    ScrollBar, StaticText, View,
 };
 
 use crate::ui::{Shared, REFRESH};
@@ -35,9 +35,15 @@ impl LeafPane {
         // it); a plain Group does not, so set it explicitly.
         group.state_mut().options.first_click = true;
         let w = bounds.b.x - bounds.a.x;
+        // Static "Filter:" label at the left of row 0 — makes the search box's
+        // purpose obvious. px is label width + 1 space so the InputLine sits right
+        // after it without overlap.
+        const PROMPT: &str = "Filter:";
+        let px = PROMPT.chars().count() as i32 + 1; // 7 + 1 = 8
+        group.insert(Box::new(StaticText::new(Rect::new(0, 0, px, 1), PROMPT.to_string())));
         // grow_mode so Group::change_bounds (driven by the Splitter) resizes children:
-        // search bar widens with the pane (stays at row 0, height 1).
-        let mut search = InputLine::with_limit(Rect::new(0, 0, w, 1), 256);
+        // search bar widens with the pane (stays at row 0, height 1, starts after label).
+        let mut search = InputLine::with_limit(Rect::new(px, 0, w, 1), 256);
         search.state.grow_mode.hi_x = true;
         let search_id = group.insert(Box::new(search));
         let h = bounds.b.y - bounds.a.y;
@@ -296,10 +302,12 @@ mod tests {
         let mut pane = LeafPane::new(Rect::new(0, 0, 30, 10), shared);
         // Simulate Splitter driving a resize: just change_bounds, no on_bounds_changed.
         <LeafPane as View>::change_bounds(&mut pane, Rect::new(0, 0, 50, 20));
+        // The "Filter:" label (7 chars + 1 space = px=8) is pinned at x=0..8; the
+        // InputLine starts at x=8 and its hi_x grow_mode tracks the pane's right edge.
         assert_eq!(
             pane.search_bounds_for_test(),
-            Rect::new(0, 0, 50, 1),
-            "search InputLine must widen (hi_x)"
+            Rect::new(8, 0, 50, 1),
+            "search InputLine must start at px=8 (after Filter: label) and widen (hi_x)"
         );
         assert_eq!(
             pane.list_bounds_for_test(),
