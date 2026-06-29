@@ -17,7 +17,7 @@ configuration:
 | [`picker`](#the-picker-kind) | a live candidate search; stores the picked value(s) in this entry | value lookup (`gidNumber`) and DN/scalar lists (`member`, `memberUid`) |
 | [`membership`](#the-membership-kind) | a live candidate search; fans this entry's DN into a back-ref attr on each pick | back-reference views (`memberOf`) |
 
-Additionally, the **`objectClass` field** receives an [auto-injected picker](#objectclass-picker-auto-injected)
+Additionally, the **`objectClass` field** receives an [auto-injected dual-list editor](#objectclass-editor-auto-injected)
 with no configuration required — it is always present when editing any entry.
 
 A widget is declared as a sub-table of an [entry profile](entry-profiles.md),
@@ -330,13 +330,45 @@ Built-in assignments: `olcAccess`, `olcDbIndex`, `olcSuffix`, `olcRootDN`,
 `olcLimits`, `olcSyncrepl` (all under the `olcGlobal` / `olcDatabaseConfig`
 object classes).
 
-## `objectClass` Picker (auto-injected)
+## Multi-value Editor (auto-injected)
 
-The `objectClass` field automatically receives a schema-seeded picker. No
-configuration is needed — it is always present when editing any entry. When you
-press Enter on the `objectClass` field, a multi-select popup opens listing all
-objectClass names known from the server's subschema. Tick or untick classes; press
-**Alt+S** to commit.
+Any attribute that holds more than one value receives an **auto-injected
+multi-value editor** when you press Enter on the field. No configuration is
+needed. The editor presents a row list of current values above an edit line:
+
+| Action | Keyboard | Button |
+|--------|----------|--------|
+| Add a new value | Insert | **[+ Add]** |
+| Delete the selected row | Delete | **[- Del]** |
+| Reorder rows | Alt+↑ / Alt+↓ | — |
+| Edit the selected row | ↵ | — |
+
+Empty rows are dropped automatically when the editor is committed. The committed
+result is staged in the form and written as part of the normal Save flow.
+
+X-ORDERED attributes (e.g. `olcAccess`) use the [`x_ordered`](#x_ordered)
+widget instead, which manages the `{n}` ordering prefix automatically.
+
+## `objectClass` Editor (auto-injected)
+
+The `objectClass` field automatically receives a schema-seeded **dual-list
+editor**. No configuration is needed — it is always present when editing any
+entry. Pressing Enter on the `objectClass` field opens a two-column picker:
+
+- **Left column** — the entry's *active* objectClasses (currently applied).
+- **Right column** — the *available* objectClasses known from the server's
+  subschema, filtered by the search box at the top of the right column.
+
+| Action | Keys |
+|--------|------|
+| Flip between the two columns | Tab |
+| Add (move available → active) | Insert or → |
+| Remove (move active → available) | Delete or ← |
+| Filter the available column | type in the search box |
+| Commit | Alt+S |
+
+**STRUCTURAL** classes are shown in the active column but are **locked** — they
+cannot be removed.
 
 After committing, the edit form immediately reflects the schema change:
 

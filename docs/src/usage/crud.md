@@ -30,7 +30,7 @@ classes and press **Alt+S** to commit. The form immediately updates: new
 MUST/MAY fields appear for the added classes, and any attribute no longer
 permitted by the remaining classes is shown **crossed out** (it will be deleted
 on save). Press **Alt+C** to discard the objectClass change and return to the
-server state. See [objectClass Picker](../configuration/widgets.md#objectclass-picker-auto-injected)
+server state. See [objectClass Editor](../configuration/widgets.md#objectclass-editor-auto-injected)
 for full details.
 
 ### The dirty-guard

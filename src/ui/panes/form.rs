@@ -969,7 +969,10 @@ mod tests {
         // The header row (y=0) is not a label cell.
         assert_eq!(pane.value_id_for_label_hit(Point::new(5, 0)), None);
         // A point in the value column (x >= LABEL_W) is not a label hit.
-        assert_eq!(pane.value_id_for_label_hit(Point::new(LABEL_W + 2, 1)), None);
+        assert_eq!(
+            pane.value_id_for_label_hit(Point::new(LABEL_W + 2, 1)),
+            None
+        );
         // A point below the last field is not a label hit.
         assert_eq!(pane.value_id_for_label_hit(Point::new(5, 8)), None);
     }

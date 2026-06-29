@@ -184,7 +184,12 @@ impl DualList {
 
     /// Replace the Available rows and re-render the column (marking rows already
     /// in Selected with a ✓).
-    pub(crate) fn set_available(&mut self, rows: Vec<DualRow>, dlg: &mut Dialog, ctx: &mut Context) {
+    pub(crate) fn set_available(
+        &mut self,
+        rows: Vec<DualRow>,
+        dlg: &mut Dialog,
+        ctx: &mut Context,
+    ) {
         self.available = rows;
         self.rebuild_avail(dlg, ctx, false);
     }
@@ -210,10 +215,8 @@ impl DualList {
         dlg: &mut Dialog,
         ctx: &mut Context,
     ) -> DualEvent {
-        let move_in =
-            matches!(ev, Event::KeyDown(k) if matches!(k.key, Key::Insert | Key::Right));
-        let move_out =
-            matches!(ev, Event::KeyDown(k) if matches!(k.key, Key::Delete | Key::Left));
+        let move_in = matches!(ev, Event::KeyDown(k) if matches!(k.key, Key::Insert | Key::Right));
+        let move_out = matches!(ev, Event::KeyDown(k) if matches!(k.key, Key::Delete | Key::Left));
         let toggle_focus = matches!(ev, Event::KeyDown(k) if k.key == Key::Tab);
         let nav = matches!(
             ev,
@@ -281,7 +284,9 @@ impl DualList {
 
     /// Whether `key` is already in the Selected set (case-insensitive).
     fn is_selected(&self, key: &str) -> bool {
-        self.selected.iter().any(|r| r.key.eq_ignore_ascii_case(key))
+        self.selected
+            .iter()
+            .any(|r| r.key.eq_ignore_ascii_case(key))
     }
 
     /// Move the Available row at `idx` into Selected. De-duped: a no-op (`None`)
@@ -482,7 +487,11 @@ mod tests {
         dl.set_available_rows(vec![row("a")]);
         dl.set_selected_rows(vec![row("a")]);
         let ev = dl.move_in_highlighted_for_test(0);
-        assert_eq!(ev, DualEvent::None, "already-selected row must not duplicate");
+        assert_eq!(
+            ev,
+            DualEvent::None,
+            "already-selected row must not duplicate"
+        );
         assert_eq!(keys(dl.selected()), ["a"]);
     }
 

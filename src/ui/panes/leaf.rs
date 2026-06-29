@@ -40,7 +40,10 @@ impl LeafPane {
         // after it without overlap.
         const PROMPT: &str = "Filter:";
         let px = PROMPT.chars().count() as i32 + 1; // 7 + 1 = 8
-        group.insert(Box::new(StaticText::new(Rect::new(0, 0, px, 1), PROMPT.to_string())));
+        group.insert(Box::new(StaticText::new(
+            Rect::new(0, 0, px, 1),
+            PROMPT.to_string(),
+        )));
         // grow_mode so Group::change_bounds (driven by the Splitter) resizes children:
         // search bar widens with the pane (stays at row 0, height 1, starts after label).
         let mut search = InputLine::with_limit(Rect::new(px, 0, w, 1), 256);

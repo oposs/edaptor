@@ -21,8 +21,9 @@ context to a modal dialog every time you edit.
  ↑↓ Field · ↵ Edit · Alt+S Save · Alt+C Cancel · Alt+X Quit
 ```
 
-*(The form pane is focused here, so it carries the bold double border. In a real
-terminal the active border is also drawn in cyan, which ASCII cannot show.)*
+*(The form pane is focused here, so it carries the bold double border and a
+brighter background. In a real terminal the active border is drawn in a blue
+accent colour, which ASCII cannot show.)*
 
 - **DIT (navigation tree)** — the directory's branch structure: every container
   (an entry that has children), with the base DN as the root. The whole
@@ -31,7 +32,7 @@ terminal the active border is also drawn in cyan, which ASCII cannot show.)*
   drives the entry list. Move with `↑↓`, fold/unfold a branch with `←→`.
 
 - **Entries (entry list)** — the entries directly under the selected branch. The
-  top row is an incremental-search box (shown as `/ …`); below it is a
+  top row is an incremental-search box with a `Filter:` label; below it is a
   `‹self›` row representing the branch entry itself (editable like any other
   entry), followed by the branch's leaf entries. Each entry is shown with its
   profile **label** — for example `Bob Baker (bob)` from a `label = "{cn} ({uid})"`
@@ -49,14 +50,19 @@ terminal the active border is also drawn in cyan, which ASCII cannot show.)*
 
 ## Focus and the status line
 
-Exactly one pane is focused at a time. The focused pane is marked by a **bold,
-double-line border** (drawn in cyan); the other two panes get a dim single-line
-border. There is no background inversion — eDAPtor uses the terminal's default
-(typically light/white) background everywhere, so it reads cleanly in any
-color scheme.
+Exactly one pane is focused at a time. The interface uses a **light Solarized-Light
+colour scheme**: cream/tan panels, dark slate text, and a blue accent. The focused
+pane is rendered in a brighter cream tone; unfocused panes are slightly greyed.
+Within the entry form, **editable fields have a visibly brighter background** than
+read-only labels, making the edit affordance immediately apparent. A vertical
+scrollbar appears in a pane **only while it is focused** and only when the content
+overflows the visible height.
 
-- **`Tab`** moves focus forward (DIT → Entries → Entry → DIT).
+- **`Tab`** moves focus forward (DIT → Entries → Entry → DIT) — it cycles panes
+  only and does **not** descend into a pane's internal fields.
 - **`Shift-Tab`** moves focus backward.
+- Use the **arrow keys** to move within the focused pane.
+- **Clicking a form label** moves focus to that field's input directly.
 
 Moving focus off the form pane while it has unsaved edits opens the dirty-guard
 (see [Creating, Editing, Renaming, Deleting](crud.md)).

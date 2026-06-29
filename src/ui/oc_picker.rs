@@ -507,7 +507,8 @@ mod tests {
 
         let v = staged(&sh);
         assert!(
-            v.iter().any(|s| s.eq_ignore_ascii_case("organizationalPerson")),
+            v.iter()
+                .any(|s| s.eq_ignore_ascii_case("organizationalPerson")),
             "moved-in class must be ticked, got {v:?}"
         );
         assert!(
@@ -515,6 +516,9 @@ mod tests {
             "person must remain ticked, got {v:?}"
         );
         // Canonical, candidate-sorted order is preserved in the staged commit.
-        assert_eq!(v, vec!["organizationalPerson".to_string(), "person".to_string()]);
+        assert_eq!(
+            v,
+            vec!["organizationalPerson".to_string(), "person".to_string()]
+        );
     }
 }
