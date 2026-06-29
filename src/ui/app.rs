@@ -2,7 +2,7 @@
 
 use tvision_rs::{
     self as tv, alt, Command, Constraints, Desktop, Program, Rect, Splitter, StatusDef, StatusLine,
-    SystemClock, Theme, View, Window,
+    SystemClock, View, Window,
 };
 
 use crate::form::validate::format_validation_errors;
@@ -728,7 +728,7 @@ pub(crate) fn build_program(backend: Box<dyn tv::Backend>, state: Shared) -> Pro
     Program::new(
         backend,
         Box::new(SystemClock::new()),
-        Theme::classic_blue(),
+        crate::ui::theme::edaptor_theme(),
         move |r| init_desktop(r, s.clone()),
         init_status_line,
         init_menu_bar,
