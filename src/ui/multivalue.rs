@@ -5,9 +5,14 @@
 //! `Static` (no worker, no schema). Mirrors the `oc_picker` modal pattern.
 
 use tvision_rs::{
-    self as tv, delegate, ButtonFlags, ButtonRowAlign, Command, Context, Dialog, Event, FieldValue,
-    InputLine, Key, ListBox, Rect, View,
+    self as tv, delegate, Button, ButtonFlags, ButtonRowAlign, Command, Context, Dialog, Event,
+    FieldValue, InputLine, Key, ListBox, Rect, View,
 };
+
+// Custom commands for the Add/Del buttons — namespaced to avoid collisions with
+// the framework's tv.* vocabulary and with any other app-level commands.
+const CMD_MV_ADD: Command = Command::custom("edaptor.mv.add");
+const CMD_MV_DEL: Command = Command::custom("edaptor.mv.del");
 
 use crate::schema::SchemaModel;
 use crate::ui::widget::{Activation, Capability, CommitOutcome, FieldEditor, FieldWidget};
@@ -94,6 +99,21 @@ impl MultiValueDialog {
         let list_id = dlg.insert_child(Box::new(list));
         let input = InputLine::with_limit(Rect::new(2, 16, 58, 17), 1024);
         let input_id = dlg.insert_child(Box::new(input));
+        // Add/Del buttons on the left of the button row (row 17, same row as
+        // OK/Cancel) so the affordance is visible.  The existing Insert/Alt+a
+        // and Delete/Alt+d key bindings remain fully functional.
+        dlg.insert_child(Box::new(Button::new(
+            Rect::new(2, 17, 12, 19),
+            "~+~ Add",
+            CMD_MV_ADD,
+            ButtonFlags::new(),
+        )));
+        dlg.insert_child(Box::new(Button::new(
+            Rect::new(14, 17, 24, 19),
+            "~-~ Del",
+            CMD_MV_DEL,
+            ButtonFlags::new(),
+        )));
         dlg.button_row(
             &[
                 (
@@ -256,6 +276,23 @@ impl View for MultiValueDialog {
     }
 
     fn handle_event(&mut self, ev: &mut Event, ctx: &mut Context) {
+        // Intercept button-press commands so clicking [+ Add] / [- Del] calls
+        // the same logic as the Insert / Delete key paths.  Must happen before
+        // delegating to `dlg` so the dialog's own command routing does not eat
+        // the events first.
+        if let Event::Command(cmd) = ev {
+            if *cmd == CMD_MV_ADD {
+                self.add_row(ctx);
+                ev.clear();
+                return;
+            }
+            if *cmd == CMD_MV_DEL {
+                self.delete_row(ctx);
+                ev.clear();
+                return;
+            }
+        }
+
         let (key, alt) = match ev {
             Event::KeyDown(k) => (k.key, k.modifiers.alt),
             _ => {
@@ -499,6 +536,66 @@ mod tests {
         assert_eq!(
             staged(&shared),
             Some(CommitOutcome::SetValues(vec!["a".into(), "z".into()]))
+        );
+    }
+
+    // ----- Task 13: Add/Del button command path ----------------------------
+
+    /// Dispatching CMD_MV_ADD via Event::Command triggers add_row: a new empty
+    /// row appears in the staged values and the existing rows are preserved.
+    #[test]
+    fn button_add_command_inserts_row() {
+        let shared = test_shared();
+        let ed = Box::new(MultiValueEditor {
+            label: "mail".into(),
+            values: vec!["a@x".into()],
+            ordered: false,
+        });
+        let (mut view, _focus) = ed.into_view(&schema_for_test(), shared.clone());
+        let mut out = std::collections::VecDeque::new();
+        let mut timers = TimerQueue::new();
+        let mut deferred = Vec::new();
+        let mut ctx = headless(&mut out, &mut timers, &mut deferred);
+        view.reset_current(&mut ctx);
+
+        // Simulate the button posting Event::Command(CMD_MV_ADD).
+        let mut ev = Event::Command(super::CMD_MV_ADD);
+        view.handle_event(&mut ev, &mut ctx);
+
+        // The event should be consumed and a new empty row staged after "a@x".
+        assert!(ev.is_nothing(), "CMD_MV_ADD command is consumed");
+        // The empty new row is trimmed/filtered out by update_staged, so the
+        // staged result still contains only the non-empty original row.
+        assert_eq!(
+            staged(&shared),
+            Some(CommitOutcome::SetValues(vec!["a@x".into()]))
+        );
+    }
+
+    /// Dispatching CMD_MV_DEL via Event::Command triggers delete_row: the
+    /// currently selected row is removed and the staged values are updated.
+    #[test]
+    fn button_del_command_removes_row() {
+        let shared = test_shared();
+        let ed = Box::new(MultiValueEditor {
+            label: "mail".into(),
+            values: vec!["a".into(), "b".into(), "c".into()],
+            ordered: false,
+        });
+        let (mut view, _focus) = ed.into_view(&schema_for_test(), shared.clone());
+        let mut out = std::collections::VecDeque::new();
+        let mut timers = TimerQueue::new();
+        let mut deferred = Vec::new();
+        let mut ctx = headless(&mut out, &mut timers, &mut deferred);
+        view.reset_current(&mut ctx);
+        // sel = 0 initially; Del command removes "a".
+        let mut ev = Event::Command(super::CMD_MV_DEL);
+        view.handle_event(&mut ev, &mut ctx);
+
+        assert!(ev.is_nothing(), "CMD_MV_DEL command is consumed");
+        assert_eq!(
+            staged(&shared),
+            Some(CommitOutcome::SetValues(vec!["b".into(), "c".into()]))
         );
     }
 }
