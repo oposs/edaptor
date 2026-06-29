@@ -8,6 +8,10 @@ All notable changes to eDAPtor are documented here. The format follows
 
 ### New
 
+- X-ORDERED attributes (`kind = "x_ordered"`) are now editable in the UI: an
+  ordered list editor (add / delete / Alt+↑/↓ reorder) that hides the `{n}`
+  ordering prefix and regenerates it from row order on save.
+
 - **The TUI is now Turbo-Vision–based.** The user interface was migrated from
   ratatui to [tvision-rs](https://github.com/oetiker/tvision-rs): a frameless
   full-screen three-pane browser/editor with modal rich-field editors. The old

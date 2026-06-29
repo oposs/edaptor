@@ -84,6 +84,13 @@ label          = "{cn}"
 kind      = "picker"
 candidate = "user"
 
+# DEMO ONLY: treat the group's multi-valued `description` as an X-ORDERED
+# editable list so the ordered editor is drivable against the demo server.
+# Note: saving writes `{n}`-prefixed values; edaptor strips them on read, so
+# round-trips stay self-consistent (other tools will see the `{n}` tags).
+[profile.widget.description]
+kind = "x_ordered"
+
 [[profile]]
 name           = "posixgroup"
 object_classes = ["posixGroup"]

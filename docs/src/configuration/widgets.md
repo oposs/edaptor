@@ -315,9 +315,11 @@ Built-in assignments: `memberOf` (all standard object classes), `sambaNTPassword
 ### `x_ordered`
 
 For OpenLDAP **X-ORDERED** multi-value attributes (e.g. `olcAccess`,
-`olcDbIndex`). The `{n}` ordering prefix is stripped for display and
-reconstructed on save. Changing the set of values or their order produces a
-single `REPLACE` operation.
+`olcDbIndex`). Pressing Enter opens an ordered list editor where you can add
+new values, delete existing ones, and reorder them with **Alt+↑** / **Alt+↓**.
+The `{n}` ordering prefix is hidden in the editor and regenerated from row
+order when the entry is saved. Changing the set of values or their order
+produces a single `REPLACE` operation.
 
 ```toml
 [profile.widget.myOrderedAttr]
