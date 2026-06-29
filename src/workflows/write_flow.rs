@@ -16,8 +16,8 @@ use crate::schema::SchemaModel;
 use crate::workflows::create::now_unix_secs_or_zero;
 use crate::workflows::edit_form::EditForm;
 use crate::workflows::save::{
-    compose_renamed_dn, plan_combined_save, prepare_save, stage_pending_password, would_empty,
-    CombinedSave, PlanCombined, PrepareSave,
+    compose_renamed_dn, plan_combined_save, prepare_save, stage_pending_password, CombinedSave,
+    PlanCombined, PrepareSave,
 };
 
 /// What a pending write means once its `WriteOk` arrives.
@@ -382,21 +382,12 @@ impl WriteFlow {
             ..
         } = combined;
 
-        // 1. Pre-validate ALL removals before submitting a single leg.
-        for (group_dn, op) in &fanout {
-            if let ModOp::Delete { .. } = op {
-                let current = group_members
-                    .get(group_dn)
-                    .map(Vec::as_slice)
-                    .unwrap_or(&[]);
-                if would_empty(current, &own_dn) {
-                    return Err(format!(
-                        "Refusing to save: removing {own_dn} from {group_dn} would leave the \
-                         group with no members (groupOfNames requires at least one member). \
-                         Add another member to the group first, or delete the group."
-                    ));
-                }
-            }
+        // Last-member pre-validation (schema-gated by the caller's populate of
+        // `group_members`): refuse before submitting anything.
+        if let Some(msg) =
+            crate::workflows::save::last_member_block(&fanout, group_members, &own_dn)
+        {
+            return Err(msg);
         }
 
         // 2. Assemble the legs: own entry first (if any own changes), then groups.

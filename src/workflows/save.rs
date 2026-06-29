@@ -384,6 +384,35 @@ pub fn would_empty(current_members: &[String], member: &str) -> bool {
     current_members.len() == 1 && current_members[0].eq_ignore_ascii_case(member)
 }
 
+/// Pre-validation for a combined membership save: scan the fan-out `Delete`
+/// ops and, for any group present in `group_members` whose sole member is
+/// `own_dn`, return a refusal message. Groups absent from `group_members` are
+/// treated as having no known members (`would_empty` returns false) — this is
+/// how MAY-membership groups are exempted: the caller only populates the map
+/// for groups whose membership attribute is MUST (see
+/// [`membership_attr_is_must`]). Returns `None` when nothing would be emptied.
+pub fn last_member_block(
+    fanout: &[(String, ModOp)],
+    group_members: &std::collections::HashMap<String, Vec<String>>,
+    own_dn: &str,
+) -> Option<String> {
+    for (group_dn, op) in fanout {
+        if let ModOp::Delete { .. } = op {
+            let current = group_members
+                .get(group_dn)
+                .map(Vec::as_slice)
+                .unwrap_or(&[]);
+            if would_empty(current, own_dn) {
+                return Some(format!(
+                    "Refusing to save: removing {own_dn} from {group_dn} would leave \
+                     the group with no members (a required attribute)."
+                ));
+            }
+        }
+    }
+    None
+}
+
 /// True when `attr` is a MUST (required) attribute for any of `object_classes`
 /// per `schema` (case-insensitive). Gates last-member pre-validation: only block
 /// removing a group's final member when its membership attribute is MUST (e.g.
@@ -926,5 +955,54 @@ mod tests {
             10001
         );
         assert_eq!(decide_allocation(&[], false, 10000, 60000).unwrap(), 10000);
+    }
+
+    #[test]
+    fn last_member_block_fires_only_for_known_sole_member() {
+        use std::collections::HashMap;
+        let fanout = vec![(
+            "cn=admins,ou=groups".to_string(),
+            ModOp::Delete {
+                attr: "member".into(),
+                values: vec!["uid=ann,ou=people".into()],
+            },
+        )];
+        // Group known with ann as the sole member → blocked.
+        let mut gm: HashMap<String, Vec<String>> = HashMap::new();
+        gm.insert(
+            "cn=admins,ou=groups".into(),
+            vec!["uid=ann,ou=people".into()],
+        );
+        assert!(last_member_block(&fanout, &gm, "uid=ann,ou=people").is_some());
+
+        // Group not in the map (e.g. MAY membership, never fetched) → no block.
+        let empty: HashMap<String, Vec<String>> = HashMap::new();
+        assert!(last_member_block(&fanout, &empty, "uid=ann,ou=people").is_none());
+
+        // Group with another member too → no block.
+        let mut gm2: HashMap<String, Vec<String>> = HashMap::new();
+        gm2.insert(
+            "cn=admins,ou=groups".into(),
+            vec!["uid=ann,ou=people".into(), "uid=bob,ou=people".into()],
+        );
+        assert!(last_member_block(&fanout, &gm2, "uid=ann,ou=people").is_none());
+    }
+
+    #[test]
+    fn last_member_block_ignores_add_ops() {
+        use std::collections::HashMap;
+        let fanout = vec![(
+            "cn=admins,ou=groups".to_string(),
+            ModOp::Add {
+                attr: "member".into(),
+                values: vec!["uid=ann,ou=people".into()],
+            },
+        )];
+        let mut gm: HashMap<String, Vec<String>> = HashMap::new();
+        gm.insert(
+            "cn=admins,ou=groups".into(),
+            vec!["uid=ann,ou=people".into()],
+        );
+        assert!(last_member_block(&fanout, &gm, "uid=ann,ou=people").is_none());
     }
 }
