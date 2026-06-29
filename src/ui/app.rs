@@ -526,6 +526,8 @@ fn do_combined_save(
             // pre-validation runs client-side. Only MUST-membership groups are
             // populated; MAY groups (e.g. posixGroup memberUid) are exempt.
             let group_members = {
+                // Safe to hold this read borrow across the blocking worker.request: it's a
+                // synchronous channel round-trip in dispatch (no event-loop pump → no reentrant borrow).
                 let st = state.borrow();
                 match (st.worker.as_ref(), st.edit_form.as_ref()) {
                     (Some(w), Some(_)) => {

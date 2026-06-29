@@ -10,7 +10,9 @@ All notable changes to eDAPtor are documented here. The format follows
 
 - The samba domain SID is now discovered live from a `sambaDomain` directory
   entry at startup (when a `sambaSID` widget is configured), falling back to the
-  configured `[samba] domain_sid`.
+  configured `[samba] domain_sid`. When discovery succeeds, the algorithmic RID
+  base is also taken from the directory (`sambaAlgorithmicRidBase`, default 1000),
+  overriding any `[samba] algorithmic_rid_base` in config.
 
 - X-ORDERED attributes (`kind = "x_ordered"`) are now editable in the UI: an
   ordered list editor (add / delete / Alt+↑/↓ reorder) that hides the `{n}`
