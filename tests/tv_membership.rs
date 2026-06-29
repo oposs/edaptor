@@ -24,8 +24,8 @@ use edaptor::ldap::worker::{Request, Response, SearchScope, WorkerHandle};
 use edaptor::schema::{FieldKind, SchemaModel};
 use edaptor::workflows::edit_form::{EditField, EditForm, FormMode};
 use edaptor::workflows::form_model::WidgetSpec;
-use edaptor::workflows::save::{plan_combined_save, PlanCombined};
-use edaptor::workflows::write_flow::{WriteFlow, WriteOutcome};
+use edaptor::workflows::save::{last_member_block, plan_combined_save, PlanCombined};
+use edaptor::workflows::write_flow::{fetch_group_members_for_must, WriteFlow, WriteOutcome};
 
 // ---------------------------------------------------------------------------
 // DN constants
@@ -37,6 +37,9 @@ const GROUP_DN: &str = "cn=tvm-group,ou=users,dc=example,dc=org";
 // never empty (groupOfNames requires >= 1 member). Lets us add/remove the temp user
 // without ever tripping the last-member rule.
 const PLACEHOLDER_DN: &str = "cn=admin,dc=example,dc=org";
+// A separate temp group used by the last-member-block live test; sole member is
+// PLACEHOLDER_DN so the block fires when we attempt to remove it.
+const SOLE_GROUP_DN: &str = "cn=tvm-sole-group,ou=users,dc=example,dc=org";
 
 // ---------------------------------------------------------------------------
 // Helpers (mirrored from tests/tv_edit_write.rs — each tests/ file is standalone)
@@ -492,4 +495,130 @@ fn combined_membership_save_round_trips_via_write_flow() {
     );
 
     // _cleanup drops here -> deletes group then user.
+}
+
+// ---------------------------------------------------------------------------
+// M5c B4: gated live assertion — last-member removal is blocked client-side
+// ---------------------------------------------------------------------------
+//
+// Creates a temporary `groupOfNames` with PLACEHOLDER_DN as its sole member,
+// then calls `fetch_group_members_for_must` + `last_member_block` to confirm
+// the client-side pre-validation fires before any write. No permanent writes
+// are made to demo data; cleanup deletes the temp group on exit.
+
+#[test]
+fn last_member_removal_blocked_client_side() {
+    let Ok(uri) = std::env::var("EDAPTOR_TEST_LDAP_URI") else {
+        eprintln!("SKIP last_member_removal_blocked_client_side: set EDAPTOR_TEST_LDAP_URI to run");
+        return;
+    };
+
+    let (config, password) = test_config(uri);
+    let worker = WorkerHandle::spawn(config, password).expect("spawn worker");
+
+    // Idempotent cleanup from any prior aborted run.
+    {
+        let _ = worker.submit(Request::Delete {
+            id: 1,
+            dn: SOLE_GROUP_DN.to_string(),
+        });
+        let _ = poll_for_id(&worker, 1, Duration::from_secs(5));
+    }
+
+    // Fetch the subschema so fetch_group_members_for_must can check membership_attr_is_must.
+    worker
+        .submit(Request::FetchSubschema)
+        .expect("submit FetchSubschema");
+    let raw =
+        poll_for_subschema(&worker, Duration::from_secs(10)).expect("subschema within deadline");
+    let schema = SchemaModel::from_raw(&raw);
+
+    // Create a groupOfNames with PLACEHOLDER_DN as its sole member.
+    {
+        let mut attrs = BTreeMap::new();
+        attrs.insert(
+            "objectClass".to_string(),
+            vec!["top".to_string(), "groupOfNames".to_string()],
+        );
+        attrs.insert("cn".to_string(), vec!["tvm-sole-group".to_string()]);
+        attrs.insert("member".to_string(), vec![PLACEHOLDER_DN.to_string()]);
+        worker
+            .submit(Request::Add {
+                id: 10,
+                dn: SOLE_GROUP_DN.to_string(),
+                attrs,
+            })
+            .expect("submit ADD sole group");
+        match poll_for_id(&worker, 10, Duration::from_secs(10)) {
+            Some(Response::WriteOk { .. }) => {}
+            other => panic!("ADD sole group failed: {}", describe(&other)),
+        }
+    }
+
+    // RAII: delete the temp group on any exit path.
+    let _cleanup = Cleanup {
+        worker: &worker,
+        dns: vec![SOLE_GROUP_DN.to_string()],
+        next_id: Cell::new(9000),
+    };
+
+    // Build the fan-out that would remove PLACEHOLDER_DN (the sole member).
+    let fanout: Vec<(String, ModOp)> = vec![(
+        SOLE_GROUP_DN.to_string(),
+        ModOp::Delete {
+            attr: "member".into(),
+            values: vec![PLACEHOLDER_DN.to_string()],
+        },
+    )];
+
+    // Schema-gated live fetch: `member` is MUST for groupOfNames, so the map is populated.
+    let group_members = fetch_group_members_for_must(&worker, &schema, &fanout);
+    assert!(
+        group_members.contains_key(SOLE_GROUP_DN),
+        "fetch_group_members_for_must must populate the map for a MUST-membership group \
+         (groupOfNames); got {group_members:?}"
+    );
+    let stored = group_members
+        .get(SOLE_GROUP_DN)
+        .expect("group must be in map");
+    assert_eq!(
+        stored.len(),
+        1,
+        "sole group must have exactly one member; got {stored:?}"
+    );
+    assert!(
+        stored[0].eq_ignore_ascii_case(PLACEHOLDER_DN),
+        "stored member must be PLACEHOLDER_DN (case-insensitive); got {:?}",
+        stored[0]
+    );
+
+    // Pre-validation: last_member_block must refuse removing the sole member.
+    let block = last_member_block(&fanout, &group_members, PLACEHOLDER_DN);
+    assert!(
+        block.is_some(),
+        "last_member_block must block removing the sole member of a groupOfNames"
+    );
+    let msg = block.unwrap();
+    assert!(
+        msg.contains("would leave"),
+        "block message must contain \"would leave\"; got: {msg}"
+    );
+
+    // Verify demo data is intact: the group still has its member (no write was submitted).
+    let group_attrs =
+        read_entry(&worker, SOLE_GROUP_DN, 50, &["member"]).expect("sole group must still exist");
+    let members: Vec<String> = group_attrs
+        .get("member")
+        .cloned()
+        .unwrap_or_default()
+        .iter()
+        .map(|m| m.to_lowercase())
+        .collect();
+    assert!(
+        members.contains(&PLACEHOLDER_DN.to_lowercase()),
+        "sole group member must be intact after a client-side block (no write happened); \
+         got {members:?}"
+    );
+
+    // _cleanup drops here -> deletes SOLE_GROUP_DN.
 }

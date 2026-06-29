@@ -521,22 +521,41 @@ fn do_combined_save(
             SaveOutcome::NotSubmitted
         }
         PlanCombined::Ready(combined) => {
-            // Focus the Save button so Enter confirms (firstMatch would otherwise
-            // pick Cancel). The confirm sizes itself to the combined multi-stanza LDIF.
+            let reread_dn = combined.own_dn.clone();
+            // M5c: live, schema-gated group-member fetch (blocking) so last-member
+            // pre-validation runs client-side. Only MUST-membership groups are
+            // populated; MAY groups (e.g. posixGroup memberUid) are exempt.
+            let group_members = {
+                let st = state.borrow();
+                match (st.worker.as_ref(), st.edit_form.as_ref()) {
+                    (Some(w), Some(_)) => {
+                        crate::workflows::write_flow::fetch_group_members_for_must(
+                            w,
+                            st.read_flow.schema(),
+                            &combined.fanout,
+                        )
+                    }
+                    _ => std::collections::HashMap::new(),
+                }
+            };
+            // Refuse BEFORE showing the confirm if a removal would empty a MUST group.
+            if let Some(msg) = crate::workflows::save::last_member_block(
+                &combined.fanout,
+                &group_members,
+                &combined.own_dn,
+            ) {
+                let (view, ok) = error::build(&msg);
+                prog.exec_view_focused(view, ok);
+                return SaveOutcome::NotSubmitted;
+            }
+            // Focus the Save button so Enter confirms (firstMatch would pick Cancel).
             let (view, save) = confirm::build(&combined.ldif);
             if prog.exec_view_focused(view, save) != Command::OK {
                 return SaveOutcome::NotSubmitted; // Cancel: keep editing.
             }
-            // Client-side last-member pre-validation is best-effort in M4: an empty
-            // `group_members` map means `would_empty` always returns false, so the
-            // LDAP server is the backstop — emptying a `groupOfNames` is rejected
-            // server-side and surfaces as a `WriteOutcome::Error`. Full client-side
-            // pre-validation (a sync group-member fetch) is deferred to M5.
-            let reread_dn = combined.own_dn.clone();
-            let group_members: std::collections::HashMap<String, Vec<String>> =
-                std::collections::HashMap::new();
-            // 2. Submit the batch. Scope the borrow so the `UiState` destructure
-            //    drops before any error dialog `exec_view_focused`.
+            // Submit the batch. Scope the borrow so the `UiState` destructure drops
+            // before any error dialog `exec_view_focused`. `submit_combined` re-runs
+            // `last_member_block` as defense-in-depth.
             let submit_result = {
                 let mut st = state.borrow_mut();
                 st.pending_nav = nav;
@@ -552,7 +571,6 @@ fn do_combined_save(
             match submit_result {
                 Some(Ok(())) => SaveOutcome::Submitted,
                 Some(Err(msg)) => {
-                    // A last-member pre-validation abort (nothing was submitted).
                     let (view, ok) = error::build(&msg);
                     prog.exec_view_focused(view, ok);
                     SaveOutcome::NotSubmitted

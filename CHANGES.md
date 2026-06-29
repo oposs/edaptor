@@ -33,9 +33,11 @@ All notable changes to eDAPtor are documented here. The format follows
   overlay-maintained); only each group's `member` is modified. Forms without a
   membership change keep the existing single-entry Save path. A rename combined
   with a membership change is refused with a clear message (do them as separate
-  saves). Client-side last-member pre-validation is best-effort in this release —
-  emptying a `groupOfNames` is rejected by the server and surfaced as an error;
-  full client-side pre-validation is deferred.
+  saves).
+
+- Removing the last member of a required-membership group (`groupOfNames` /
+  `groupOfUniqueNames`) is now blocked client-side before saving, with a clear
+  message; emptying a `posixGroup` (`memberUid` is optional) is still allowed.
 
 - **tvision UI:** membership editor — a two-column "mover" dialog for fan-out
   `picker` fields (a `picker` with a `fanout` attribute, e.g. a user's group
