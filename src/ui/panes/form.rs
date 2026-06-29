@@ -9,8 +9,8 @@
 //! `EditForm.fields` whenever the shown entry changes.
 
 use tvision_rs::{
-    self as tv, delegate, Context, DrawCtx, Event, FieldValue, Group, InputLine, Key, Rect, Role,
-    View,
+    self as tv, delegate, Context, DrawCtx, Event, FieldValue, Group, InputLine, Key, Point, Rect,
+    Role, View,
 };
 
 use crate::ui::scroll_group::ScrollGroup;
@@ -328,6 +328,45 @@ impl FormPane {
         }
     }
 
+    /// If pane-local point `pt` falls inside a field's read-only label cell,
+    /// return that field's paired value-editor id so a click on the label can
+    /// focus the value editor.
+    ///
+    /// Coordinates: `pt` is pane-local — the owning Group translates a mouse
+    /// position into this pane's frame before delivery (`Group::deliver`
+    /// subtracts the child origin). A label's pane-local rect is its
+    /// ScrollGroup-local bounds (`local_bounds_of`, which already accounts for
+    /// the scroll `top`) offset by the ScrollGroup's origin within this pane.
+    /// Label cells are disabled InputLines, so the inner group never focuses
+    /// them on a click; this lookup lets the caller redirect that click.
+    fn value_id_for_label_hit(&mut self, pt: Point) -> Option<tv::ViewId> {
+        // Top-left of the ScrollGroup within this pane (pane-local origin).
+        let sg_origin = self.group.child_mut(self.scroll_id)?.state().get_bounds().a;
+        // Snapshot the parallel ids so the ScrollGroup borrow below does not
+        // overlap the `self.label_ids` / `self.value_ids` reads.
+        let pairs: Vec<(tv::ViewId, tv::ViewId)> = self
+            .label_ids
+            .iter()
+            .copied()
+            .zip(self.value_ids.iter().copied())
+            .collect();
+        let sg = self.scroll_mut()?;
+        for (label_id, value_id) in pairs {
+            if let Some(lr) = sg.local_bounds_of(label_id) {
+                let r = Rect::new(
+                    lr.a.x + sg_origin.x,
+                    lr.a.y + sg_origin.y,
+                    lr.b.x + sg_origin.x,
+                    lr.b.y + sg_origin.y,
+                );
+                if r.contains(pt) {
+                    return Some(value_id);
+                }
+            }
+        }
+        None
+    }
+
     /// The field index whose value cell currently holds focus, if any.
     fn focused_field_idx(&mut self) -> Option<usize> {
         let cur = self.scroll_mut().and_then(|sg| sg.current())?;
@@ -434,6 +473,27 @@ impl View for FormPane {
             self.render(ctx);
         }
         let _ = REFRESH; // REFRESH still drives other panes; retained import
+
+        // A click on a field's read-only label cell focuses that field's value
+        // editor. Label cells are disabled InputLines, so the inner group never
+        // focuses them itself; intercept the click here and redirect focus to
+        // the paired value editor, mirroring `render()`'s focus landing (focus
+        // the ScrollGroup in the outer group, then the value cell within it).
+        // `me.position` is already pane-local (the parent group translates it
+        // before delivery).
+        if let Event::MouseDown(me) = ev {
+            let pos = me.position;
+            if let Some(vid) = self.value_id_for_label_hit(pos) {
+                let scroll_id = self.scroll_id;
+                self.group.focus_child(scroll_id, ctx);
+                if let Some(sg) = self.scroll_mut() {
+                    sg.focus_child(vid, ctx);
+                }
+                ev.clear();
+                self.sync_into_form();
+                return;
+            }
+        }
 
         // Enter on a modal row (objectClass) opens its editor via the controller:
         // record the field index, post ACTIVATE (capture-free), consume the key.
@@ -872,6 +932,46 @@ mod tests {
             hdr.contains("(new)"),
             "header must contain (new); got: {hdr:?}"
         );
+    }
+
+    #[test]
+    fn click_on_label_maps_to_paired_value_field() {
+        // A pane-local point inside a field's label cell must resolve to that
+        // field's value-editor id (so a label click can focus the value editor).
+        // Geometry: LABEL_W-wide label column at x 0..LABEL_W; the ScrollGroup
+        // starts at pane row 1 (header is row 0) with scroll top=0, so field row
+        // i's label occupies pane-local y = i + 1.
+        let shared = state_with_form();
+        let mut pane = FormPane::new(Rect::new(0, 0, 80, 20), shared);
+        let mut out = VecDeque::new();
+        let mut timers = tv::timer::TimerQueue::new();
+        let mut deferred = Vec::new();
+        let mut ctx = headless_ctx(&mut out, &mut timers, &mut deferred);
+        let mut ev = Event::Broadcast {
+            command: REFRESH,
+            source: None,
+        };
+        pane.handle_event(&mut ev, &mut ctx); // build cells
+
+        let v0 = pane.value_ids[0];
+        let v1 = pane.value_ids[1];
+        // Inside row-0 / row-1 label cells → paired value ids.
+        assert_eq!(
+            pane.value_id_for_label_hit(Point::new(5, 1)),
+            Some(v0),
+            "click inside row-0 label maps to field 0's value editor"
+        );
+        assert_eq!(
+            pane.value_id_for_label_hit(Point::new(5, 2)),
+            Some(v1),
+            "click inside row-1 label maps to field 1's value editor"
+        );
+        // The header row (y=0) is not a label cell.
+        assert_eq!(pane.value_id_for_label_hit(Point::new(5, 0)), None);
+        // A point in the value column (x >= LABEL_W) is not a label hit.
+        assert_eq!(pane.value_id_for_label_hit(Point::new(LABEL_W + 2, 1)), None);
+        // A point below the last field is not a label hit.
+        assert_eq!(pane.value_id_for_label_hit(Point::new(5, 8)), None);
     }
 
     #[test]
