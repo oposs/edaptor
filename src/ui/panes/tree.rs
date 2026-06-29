@@ -1,6 +1,6 @@
 //! DIT tree pane: an `Outline` over the structure's branch hierarchy.
 
-use tvision_rs::{self as tv, delegate, Context, Event, FieldValue, Rect, View};
+use tvision_rs::{self as tv, delegate, Context, DrawCtx, Event, FieldValue, Rect, Role, View};
 
 use crate::config::tree_label::{eval_tree_label, fit_label};
 use crate::ui::state::UiState;
@@ -120,6 +120,20 @@ impl TreePane {
 impl View for TreePane {
     fn as_any_mut(&mut self) -> Option<&mut dyn core::any::Any> {
         Some(self)
+    }
+
+    fn draw(&mut self, ctx: &mut DrawCtx) {
+        // Active pane = brightest (base3); inactive = base2. Mirrors the form pane
+        // and the list panes which get this from ListNormalActive/Inactive automatically.
+        let role = if self.outline.state().state.active {
+            Role::ListNormalActive
+        } else {
+            Role::ListNormalInactive
+        };
+        let style = ctx.style(role);
+        let extent = self.outline.state().get_extent();
+        ctx.fill(extent, ' ', style);
+        self.outline.draw(ctx);
     }
 
     fn handle_event(&mut self, ev: &mut Event, ctx: &mut Context) {
