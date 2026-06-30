@@ -8,12 +8,6 @@
 //! column logic — move / de-dup / lock — lives in [`ShuttleModel`], which is
 //! tvision-free and unit-testable without a `Dialog`.
 
-// The Shuttle is not yet wired into the app: `membership.rs` / `oc_picker.rs`
-// migrate onto it next. Until then its public surface is unreferenced from
-// production code (only the tests exercise it), so the whole module reads as
-// dead. Remove this once a consumer constructs a `Shuttle`.
-#![allow(dead_code)]
-
 use tvision_rs::{
     delegate, Button, ButtonFlags, Command, Context, Event, FieldValue, Group, InputLine, Key,
     Label, ListBox, Rect, ScrollBar, SortedListBox, View, ViewId,
@@ -512,6 +506,12 @@ impl Shuttle {
             .and_then(|a| a.downcast_mut::<SortedListBox>())
             .map(|lb| lb.list().to_vec())
             .unwrap_or_default()
+    }
+
+    /// Focus the child `id` within the embedded group (mirrors the dialog's
+    /// open-time focus cascade, which a headless host test cannot drive).
+    pub(crate) fn focus_for_test(&mut self, id: ViewId, ctx: &mut Context) {
+        self.group.focus_child(id, ctx);
     }
 
     /// Set the highlighted (focused) row of list `id` to display index `idx`.

@@ -1,23 +1,25 @@
 //! Membership (fan-out) picker — a two-column "mover" dialog. A
 //! `WidgetKind::Picker` binding with `fanout_attr.is_some()` (the back-reference
-//! holder attribute, e.g. a group's `member`) opens a modal built on the shared
-//! [`DualList`] mover (`ui::dual_list`):
+//! holder attribute, e.g. a group's `member`) opens a modal with an embedded
+//! [`Shuttle`] view (`ui::shuttle`):
 //!
 //! - **Available** (left): a search box on top + a list of live LDAP candidates.
-//!   Typing submits an async candidate search (`SearchFlow`) via the worker
-//!   exactly like the plain picker; results arrive on the next pump tick and are
-//!   broadcast as `REFRESH`, which the dialog maps into `DualList::set_available`.
-//!   Candidates already in Members are marked.
+//!   Typing broadcasts `CMD_SHUTTLE_SEARCH`; this dialog submits an async candidate
+//!   search (`SearchFlow`) via the worker exactly like the plain picker; results
+//!   arrive on the next pump tick and are broadcast as `REFRESH`, which the dialog
+//!   maps into `Shuttle::set_available`. Candidates already in Members are filtered
+//!   out (the staged set is never offered for re-adding).
 //! - **Members** (right): the staged member DN set, seeded from `field.values`
-//!   (the user's current memberships / baseline) via `DualList::set_selected`.
+//!   (the user's current memberships / baseline) via `Shuttle::set_selected`.
 //!
-//! `DualList` owns the column geometry and move actions (Insert/→ move into
-//! Members, Delete/← remove, plus [Add]/[Remove] buttons, and search-box
-//! reporting); Tab/Shift-Tab focus traversal, list navigation and the
-//! pass-through of Space/Enter to the search box and the default OK button are
-//! handled by the dialog. This module keeps the membership-specific plumbing: the
-//! async candidate-search submit, the pump/`REFRESH` seam that refreshes the
-//! Available column, member seeding, and the `staged_commit` write-back.
+//! The `Shuttle` owns the column geometry and move actions (Insert moves into
+//! Members, Delete removes, plus [Add]/[Remove] buttons, Enter-on-a-list moves, and
+//! search-box reporting); Tab/Shift-Tab focus traversal and the pass-through of the
+//! default OK button (Enter from the search box) are handled by the dialog. The
+//! Shuttle notifies via broadcast (`CMD_SHUTTLE_CHANGED` / `CMD_SHUTTLE_SEARCH`);
+//! this module keeps the membership-specific plumbing: the async candidate-search
+//! submit, the pump/`REFRESH` seam that refreshes the Available column, member
+//! seeding, and the `staged_commit` write-back.
 //!
 //! The staged set is mirrored into `staged_commit` as `SetValues(member_dns)`
 //! after every move; OK applies it, Cancel discards it. The fan-out write (one
@@ -26,14 +28,17 @@
 //! holds `MembershipWidget` (FieldWidget), `MembershipEditor` (FieldEditor) and
 //! `MembershipDialog` (the interactive `Dialog` view).
 
+use std::collections::HashSet;
+
 use tvision_rs::{
     self as tv, delegate, ButtonFlags, ButtonRowAlign, Command, Context, Dialog, Event, Rect, View,
+    ViewId,
 };
 
 use crate::config::relation::{PickerBinding, StoreKey};
 use crate::config::widget::WidgetKind;
 use crate::schema::SchemaModel;
-use crate::ui::dual_list::{DualEvent, DualList, DualRow};
+use crate::ui::shuttle::{Shuttle, ShuttleRow, CMD_SHUTTLE_CHANGED, CMD_SHUTTLE_SEARCH};
 use crate::ui::widget::{Activation, Capability, CommitOutcome, FieldEditor, FieldWidget};
 use crate::ui::{Shared, REFRESH};
 use crate::workflows::edit_form::EditField;
@@ -97,11 +102,8 @@ impl FieldEditor for MembershipEditor {
         } = *self;
         let dlg = MembershipDialog::new(label, binding, current, shared);
         // Focus the search box so typing searches immediately (search-as-you-type);
-        // arrow keys are routed by `DualList::handle_event` to the lists.
-        let focus = dlg
-            .dual
-            .search_id()
-            .expect("membership DualList is built with a search box");
+        // Tab/Shift-Tab then move focus to the lists and buttons the standard way.
+        let focus = dlg.search_focus;
         (Box::new(dlg), focus)
     }
 }
@@ -111,13 +113,16 @@ impl FieldEditor for MembershipEditor {
 // ---------------------------------------------------------------------------
 
 /// Available list (search box + candidates) on the left, Members list on the
-/// right — both owned by the shared [`DualList`]. Candidate results arrive via
+/// right — both owned by the embedded [`Shuttle`]. Candidate results arrive via
 /// the pump and the `REFRESH` broadcast.
 pub(crate) struct MembershipDialog {
     dlg: Dialog,
-    /// The two-column mover: owns the column geometry, the staged Members set
-    /// (Selected) and the live candidate set (Available), plus move/flip/search.
-    dual: DualList,
+    /// The embedded two-list transfer widget (a child of `dlg`). Owns the column
+    /// geometry, the staged Members set (Selected) and the live candidate set
+    /// (Available), plus the moves and the search box; it notifies us by broadcast.
+    shuttle_id: ViewId,
+    /// The Shuttle's search box — focused on open (`into_view` returns it).
+    search_focus: ViewId,
     shared: Shared,
     /// Resolved candidate-search scope (groups).
     base: String,
@@ -126,8 +131,8 @@ pub(crate) struct MembershipDialog {
     /// `Some(attr)` for a scalar store; `None` for a DN store (the usual case).
     store_attr: Option<String>,
     /// The initial Members rows, seeded from the field's values; moved into the
-    /// `DualList` on first open (when a `Dialog`/`Context` is available).
-    seed_members: Vec<DualRow>,
+    /// Shuttle on first open (when a `Context` is available).
+    seed_members: Vec<ShuttleRow>,
     seeded: bool,
 }
 
@@ -139,15 +144,21 @@ impl MembershipDialog {
         dlg.state_mut().options.center_y = true;
 
         // Build the two columns. Available on the left (membership convention), a
-        // search box above it; Members (Selected) on the right.
-        let dual = DualList::new(
-            &mut dlg,
+        // search box above it; Members (Selected) on the right. Insert the Shuttle
+        // FIRST so it is the dialog's first selectable child (the modal's open-time
+        // reset_current then makes it current, and focus_descendant reaches the
+        // search box inside it).
+        let shuttle = Shuttle::new(
             Rect::new(0, 0, 80, 22),
             "Available",
             "Members",
             /* with_search */ true,
             /* selected_on_left */ false,
         );
+        let search_focus = shuttle
+            .search_id()
+            .expect("membership Shuttle is built with a search box");
+        let shuttle_id = dlg.insert_child(Box::new(shuttle));
 
         dlg.button_row(
             &[
@@ -189,19 +200,20 @@ impl MembershipDialog {
 
         // Seed the staged members from the field's current values. Each value is a
         // member DN (the store value / `key` and the friendly label until a search
-        // reveals a nicer one). Members are always removable.
-        let seed_members: Vec<DualRow> = current
+        // reveals a nicer one). Members are never locked.
+        let seed_members: Vec<ShuttleRow> = current
             .into_iter()
-            .map(|v| DualRow {
+            .map(|v| ShuttleRow {
                 key: v.clone(),
                 label: v,
-                removable: true,
+                locked: false,
             })
             .collect();
 
         MembershipDialog {
             dlg,
-            dual,
+            shuttle_id,
+            search_focus,
             shared,
             base: binding.scope.base.clone(),
             oc,
@@ -212,30 +224,56 @@ impl MembershipDialog {
         }
     }
 
-    /// Copy the latest pump-delivered search results into the Available column.
-    /// Borrow-safe: clones out of `shared`, drops the borrow before touching the
-    /// `DualList`. Candidates map to `DualRow { key: store_value, label,
-    /// removable: true }`.
+    /// The embedded `Shuttle`, downcast out of the dialog's children.
+    fn shuttle_mut(&mut self) -> Option<&mut Shuttle> {
+        self.dlg
+            .child_mut(self.shuttle_id)?
+            .as_any_mut()?
+            .downcast_mut::<Shuttle>()
+    }
+
+    /// The Shuttle's current search-box text (owned copy; releases the borrow).
+    fn shuttle_search_text(&mut self) -> String {
+        self.shuttle_mut()
+            .map(|sh| sh.search_text().to_string())
+            .unwrap_or_default()
+    }
+
+    /// Copy the latest pump-delivered search results into the Available column,
+    /// dropping any candidate already in Members (the Selected set is never offered
+    /// for re-adding — Available rows render plain, with no "already a member" mark).
+    /// Borrow-safe: clones out of `shared` and reads the staged set into locals,
+    /// dropping both borrows before touching the Shuttle.
     fn sync_results(&mut self, ctx: &mut Context) {
         let results = {
             let st = self.shared.borrow();
             st.search_results.clone()
         };
-        let rows: Vec<DualRow> = results
+        let already: HashSet<String> = match self.shuttle_mut() {
+            Some(sh) => sh.selected().iter().map(|r| r.key.to_lowercase()).collect(),
+            None => return,
+        };
+        let rows: Vec<ShuttleRow> = results
             .into_iter()
-            .map(|c| DualRow {
+            .filter(|c| !already.contains(&c.store_value.to_lowercase()))
+            .map(|c| ShuttleRow {
                 key: c.store_value,
                 label: c.label,
-                removable: true,
+                locked: false,
             })
             .collect();
-        self.dual.set_available(rows, &mut self.dlg, ctx);
+        if let Some(sh) = self.shuttle_mut() {
+            sh.set_available(rows, ctx);
+        }
     }
 
     /// Mirror the staged member set into shared state as the prospective commit.
-    /// The `DualList` Selected rows' `key`s are the member store values.
-    fn update_staged(&self) {
-        let values: Vec<String> = self.dual.selected().iter().map(|r| r.key.clone()).collect();
+    /// The Shuttle's Selected rows' `key`s are the member store values.
+    fn update_staged(&mut self) {
+        let values: Vec<String> = match self.shuttle_mut() {
+            Some(sh) => sh.selected().iter().map(|r| r.key.clone()).collect(),
+            None => return,
+        };
         self.shared.borrow_mut().staged_commit = Some(CommitOutcome::SetValues(values));
     }
 
@@ -256,7 +294,9 @@ impl MembershipDialog {
     fn seed(&mut self, ctx: &mut Context) {
         self.seeded = true;
         let seed = std::mem::take(&mut self.seed_members);
-        self.dual.set_selected(seed, &mut self.dlg, ctx);
+        if let Some(sh) = self.shuttle_mut() {
+            sh.set_selected(seed, ctx);
+        }
         self.sync_results(ctx);
         self.update_staged();
         self.submit_search("");
@@ -290,13 +330,32 @@ impl View for MembershipDialog {
             return;
         }
 
-        // Delegate the column interaction (move/flip/nav/search) to the DualList.
-        // Space and Enter are intentionally not intercepted, so they reach the
-        // search box and the dialog's default OK button respectively.
-        match self.dual.handle_event(ev, &mut self.dlg, ctx) {
-            DualEvent::SearchChanged(term) => self.submit_search(&term),
-            DualEvent::MovedIn(_) | DualEvent::MovedOut(_) => self.update_staged(),
-            DualEvent::FlippedFocus | DualEvent::None => {}
+        // Delegate first: the Shuttle (the dialog's current child) handles the move
+        // keys / search edits and broadcasts the outcome; the dialog's OK/Cancel and
+        // Tab traversal are handled here too. We then react to the Shuttle's own
+        // broadcasts when they are delivered (a later loop iteration).
+        self.dlg.handle_event(ev, ctx);
+
+        let notice = match &*ev {
+            Event::Broadcast { command, source } if *source == Some(self.shuttle_id) => {
+                Some(*command)
+            }
+            _ => None,
+        };
+        match notice {
+            // A search-box edit: submit an async candidate search. Results land on
+            // the next pump's REFRESH broadcast and refill the Available column.
+            Some(cmd) if cmd == CMD_SHUTTLE_SEARCH => {
+                let term = self.shuttle_search_text();
+                self.submit_search(&term);
+            }
+            // A move: restage the member set and re-filter Available so the moved
+            // candidate leaves (move-in) or a freed member reappears (move-out).
+            Some(cmd) if cmd == CMD_SHUTTLE_CHANGED => {
+                self.sync_results(ctx);
+                self.update_staged();
+            }
+            _ => {}
         }
     }
 }
@@ -315,7 +374,7 @@ mod tests {
     use crate::workflows::pick_state::Candidate;
     use std::cell::RefCell;
     use std::rc::Rc;
-    use tvision_rs::{timer::TimerQueue, Deferred, FieldValue, Key, KeyEvent};
+    use tvision_rs::{timer::TimerQueue, Deferred, Key, KeyEvent};
 
     const G1: &str = "cn=devs,ou=groups,dc=example,dc=org";
     const G2: &str = "cn=ops,ou=groups,dc=example,dc=org";
@@ -334,14 +393,6 @@ mod tests {
             Vec::new(),
         );
         Rc::new(RefCell::new(st))
-    }
-
-    fn headless_ctx<'a>(
-        out: &'a mut std::collections::VecDeque<tv::Event>,
-        timers: &'a mut TimerQueue,
-        deferred: &'a mut Vec<Deferred>,
-    ) -> Context<'a> {
-        Context::new(out, timers, 0, deferred)
     }
 
     fn group_scope() -> CandidateScope {
@@ -405,6 +456,85 @@ mod tests {
         }
     }
 
+    fn dialog_mut(view: &mut Box<dyn View>) -> &mut MembershipDialog {
+        view.as_any_mut()
+            .and_then(|a| a.downcast_mut::<MembershipDialog>())
+            .expect("downcast MembershipDialog")
+    }
+
+    /// Run `f` with a fresh headless `Context` over the given backing stores.
+    fn with_ctx<R>(
+        out: &mut std::collections::VecDeque<tv::Event>,
+        timers: &mut TimerQueue,
+        deferred: &mut Vec<Deferred>,
+        f: impl FnOnce(&mut Context) -> R,
+    ) -> R {
+        let mut ctx = Context::new(out, timers, 0, deferred);
+        f(&mut ctx)
+    }
+
+    /// Highlight `label` in the Available column (plain rows — matched directly).
+    fn highlight_avail_by_label(d: &mut MembershipDialog, label: &str, ctx: &mut Context) {
+        let sh = d.shuttle_mut().expect("shuttle present");
+        let id = sh.avail_id_for_test();
+        let idx = sh
+            .avail_text()
+            .iter()
+            .position(|s| s.eq_ignore_ascii_case(label))
+            .unwrap_or_else(|| panic!("{label} not displayed in Available"));
+        sh.highlight(id, idx as i32, ctx);
+    }
+
+    /// Highlight `label` in the Members column (Selected rows carry a 2-char marker).
+    fn highlight_member_by_label(d: &mut MembershipDialog, label: &str, ctx: &mut Context) {
+        let sh = d.shuttle_mut().expect("shuttle present");
+        let id = sh.selected_id_for_test();
+        let idx = sh
+            .selected_text()
+            .iter()
+            .position(|s| {
+                s.chars()
+                    .skip(2)
+                    .collect::<String>()
+                    .eq_ignore_ascii_case(label)
+            })
+            .unwrap_or_else(|| panic!("{label} not displayed in Members"));
+        sh.highlight(id, idx as i32, ctx);
+    }
+
+    /// Pull the next queued `Event::Broadcast` out of the loop output, if any.
+    fn take_broadcast(out: &mut std::collections::VecDeque<tv::Event>) -> Option<tv::Event> {
+        let i = out
+            .iter()
+            .position(|e| matches!(e, Event::Broadcast { .. }))?;
+        out.remove(i)
+    }
+
+    /// Dispatch `key` directly to the embedded Shuttle (the seam the dialog's focus
+    /// routing reaches in the running app), then faithfully deliver any broadcasts
+    /// the Shuttle queued (a move → `CMD_SHUTTLE_CHANGED`) back to the dialog. The
+    /// `CMD_SHUTTLE_SEARCH` broadcast is left in `out` — submitting an async search
+    /// is exercised separately; here we only settle moves.
+    fn press_and_settle(
+        d: &mut MembershipDialog,
+        key: Key,
+        out: &mut std::collections::VecDeque<tv::Event>,
+        timers: &mut TimerQueue,
+        deferred: &mut Vec<Deferred>,
+    ) {
+        {
+            let mut ev = Event::KeyDown(KeyEvent::from(key));
+            let mut ctx = Context::new(out, timers, 0, deferred);
+            if let Some(sh) = d.shuttle_mut() {
+                sh.handle_event(&mut ev, &mut ctx);
+            }
+        }
+        while let Some(mut bev) = take_broadcast(out) {
+            let mut ctx = Context::new(out, timers, 0, deferred);
+            d.handle_event(&mut bev, &mut ctx);
+        }
+    }
+
     // -- widget routing ----------------------------------------------------
 
     #[test]
@@ -443,41 +573,39 @@ mod tests {
         let mut out = std::collections::VecDeque::new();
         let mut timers = TimerQueue::new();
         let mut deferred = Vec::new();
-        let mut ctx = headless_ctx(&mut out, &mut timers, &mut deferred);
-        view.reset_current(&mut ctx);
+        with_ctx(&mut out, &mut timers, &mut deferred, |ctx| {
+            view.reset_current(ctx)
+        });
 
-        // Baseline staged set = [g1].
+        // Baseline staged set = [g1]. g1 (already a member) is filtered out of
+        // Available, which therefore offers only g2.
         assert_eq!(staged_set(&shared), vec![G1.to_string()]);
 
-        let dlg = view
-            .as_any_mut()
-            .and_then(|a| a.downcast_mut::<MembershipDialog>())
-            .expect("downcast MembershipDialog");
-
-        // Highlight g2 (index 1 in Available) and press Right → move into Members.
-        if let Some(list) = dlg.dlg.child_mut(dlg.dual.avail_id_for_test()) {
-            list.set_value_ctx(FieldValue::Int(1), &mut ctx);
-        }
-        let mut ev = Event::KeyDown(KeyEvent::from(Key::Right));
-        dlg.handle_event(&mut ev, &mut ctx);
+        let d = dialog_mut(&mut view);
+        // Highlight g2 in Available and press Insert → move into Members.
+        with_ctx(&mut out, &mut timers, &mut deferred, |ctx| {
+            highlight_avail_by_label(d, G2, ctx)
+        });
+        press_and_settle(d, Key::Insert, &mut out, &mut timers, &mut deferred);
 
         let mut got = staged_set(&shared);
         got.sort();
         assert_eq!(got, vec![G1.to_string(), G2.to_string()]);
 
-        // Highlight g1 (index 0 in Members) and press Delete → remove it.
-        if let Some(list) = dlg.dlg.child_mut(dlg.dual.selected_id_for_test()) {
-            list.set_value_ctx(FieldValue::Int(0), &mut ctx);
-        }
-        let mut ev = Event::KeyDown(KeyEvent::from(Key::Delete));
-        dlg.handle_event(&mut ev, &mut ctx);
+        // Highlight g1 in Members and press Delete → remove it.
+        with_ctx(&mut out, &mut timers, &mut deferred, |ctx| {
+            highlight_member_by_label(d, G1, ctx)
+        });
+        press_and_settle(d, Key::Delete, &mut out, &mut timers, &mut deferred);
 
         assert_eq!(staged_set(&shared), vec![G2.to_string()]);
     }
 
-    /// Moving a row that is already a member is a no-op (no duplicate).
+    /// A candidate already in Members is filtered out of the Available column —
+    /// the staged set is never offered for re-adding (Available rows render plain,
+    /// so there is no "already a member" marker to lean on).
     #[test]
-    fn move_in_is_deduped() {
+    fn already_member_is_filtered_from_available() {
         let shared = test_shared();
         shared.borrow_mut().search_results = vec![cand(G1), cand(G2)];
 
@@ -485,33 +613,27 @@ mod tests {
         let mut out = std::collections::VecDeque::new();
         let mut timers = TimerQueue::new();
         let mut deferred = Vec::new();
-        let mut ctx = headless_ctx(&mut out, &mut timers, &mut deferred);
-        view.reset_current(&mut ctx);
+        with_ctx(&mut out, &mut timers, &mut deferred, |ctx| {
+            view.reset_current(ctx)
+        });
 
-        let dlg = view
-            .as_any_mut()
-            .and_then(|a| a.downcast_mut::<MembershipDialog>())
-            .expect("downcast");
-
-        // Highlight g1 (already a member, index 0 in Available) and press Insert.
-        if let Some(list) = dlg.dlg.child_mut(dlg.dual.avail_id_for_test()) {
-            list.set_value_ctx(FieldValue::Int(0), &mut ctx);
-        }
-        let mut ev = Event::KeyDown(KeyEvent::from(Key::Insert));
-        dlg.handle_event(&mut ev, &mut ctx);
-
-        assert_eq!(
-            staged_set(&shared),
-            vec![G1.to_string()],
-            "moving an existing member must not duplicate it"
+        let d = dialog_mut(&mut view);
+        let avail = d.shuttle_mut().expect("shuttle").avail_text();
+        assert!(
+            !avail.iter().any(|s| s.eq_ignore_ascii_case(G1)),
+            "the existing member g1 must not appear in Available, got {avail:?}"
+        );
+        assert!(
+            avail.iter().any(|s| s.eq_ignore_ascii_case(G2)),
+            "the non-member g2 must appear in Available, got {avail:?}"
         );
     }
 
-    /// Enter must NOT move a row — it is reserved for the dialog's default OK
-    /// button (mirrors `space_does_not_move_a_row`; guards against the M4 parity
-    /// regression where Enter was consumed by the custom handler).
+    /// Enter on the search box must NOT move a row — it passes through to the
+    /// dialog's default OK button. (Enter on a *list* moves; that is a Shuttle
+    /// concern covered by the widget's own tests.)
     #[test]
-    fn enter_does_not_move_a_row() {
+    fn enter_on_search_box_does_not_move() {
         let shared = test_shared();
         shared.borrow_mut().search_results = vec![cand(G1), cand(G2)];
 
@@ -519,30 +641,36 @@ mod tests {
         let mut out = std::collections::VecDeque::new();
         let mut timers = TimerQueue::new();
         let mut deferred = Vec::new();
-        let mut ctx = headless_ctx(&mut out, &mut timers, &mut deferred);
-        view.reset_current(&mut ctx);
+        with_ctx(&mut out, &mut timers, &mut deferred, |ctx| {
+            view.reset_current(ctx)
+        });
 
-        let dlg = view
-            .as_any_mut()
-            .and_then(|a| a.downcast_mut::<MembershipDialog>())
-            .expect("downcast");
+        let d = dialog_mut(&mut view);
+        // Focus the search box, then press Enter on the Shuttle.
+        with_ctx(&mut out, &mut timers, &mut deferred, |ctx| {
+            let sh = d.shuttle_mut().expect("shuttle");
+            let search = sh.search_id().expect("search box");
+            sh.focus_for_test(search, ctx);
+            let mut ev = Event::KeyDown(KeyEvent::from(Key::Enter));
+            sh.handle_event(&mut ev, ctx);
+        });
 
-        // Highlight g2 in Available, press Enter — must NOT move it into Members.
-        if let Some(list) = dlg.dlg.child_mut(dlg.dual.avail_id_for_test()) {
-            list.set_value_ctx(FieldValue::Int(1), &mut ctx);
-        }
-        let mut ev = Event::KeyDown(KeyEvent::from(Key::Enter));
-        dlg.handle_event(&mut ev, &mut ctx);
-
+        let members: Vec<String> = d
+            .shuttle_mut()
+            .expect("shuttle")
+            .selected()
+            .iter()
+            .map(|r| r.key.clone())
+            .collect();
         assert_eq!(
-            staged_set(&shared),
+            members,
             vec![G1.to_string()],
-            "Enter must not move a candidate — it is reserved for the default OK button"
+            "Enter on the search box must not move a candidate"
         );
     }
 
-    /// Space must NOT move a row — it must reach the search box so users can type
-    /// multi-word queries (guards against the picker's stolen-Space bug).
+    /// Space is never a move key — it reaches the search box so users can type
+    /// multi-word queries (guards against the old picker's stolen-Space bug).
     #[test]
     fn space_does_not_move_a_row() {
         let shared = test_shared();
@@ -552,23 +680,29 @@ mod tests {
         let mut out = std::collections::VecDeque::new();
         let mut timers = TimerQueue::new();
         let mut deferred = Vec::new();
-        let mut ctx = headless_ctx(&mut out, &mut timers, &mut deferred);
-        view.reset_current(&mut ctx);
+        with_ctx(&mut out, &mut timers, &mut deferred, |ctx| {
+            view.reset_current(ctx)
+        });
 
-        let dlg = view
-            .as_any_mut()
-            .and_then(|a| a.downcast_mut::<MembershipDialog>())
-            .expect("downcast");
+        let d = dialog_mut(&mut view);
+        with_ctx(&mut out, &mut timers, &mut deferred, |ctx| {
+            let sh = d.shuttle_mut().expect("shuttle");
+            let search = sh.search_id().expect("search box");
+            sh.focus_for_test(search, ctx);
+            highlight_avail_by_label(d, G2, ctx);
+            let mut ev = Event::KeyDown(KeyEvent::from(Key::Char(' ')));
+            d.shuttle_mut().expect("shuttle").handle_event(&mut ev, ctx);
+        });
 
-        // Highlight g2 in Available, press Space — must NOT move it.
-        if let Some(list) = dlg.dlg.child_mut(dlg.dual.avail_id_for_test()) {
-            list.set_value_ctx(FieldValue::Int(1), &mut ctx);
-        }
-        let mut ev = Event::KeyDown(KeyEvent::from(Key::Char(' ')));
-        dlg.handle_event(&mut ev, &mut ctx);
-
+        let members: Vec<String> = d
+            .shuttle_mut()
+            .expect("shuttle")
+            .selected()
+            .iter()
+            .map(|r| r.key.clone())
+            .collect();
         assert_eq!(
-            staged_set(&shared),
+            members,
             vec![G1.to_string()],
             "Space must not move a candidate — it belongs to the search box"
         );
