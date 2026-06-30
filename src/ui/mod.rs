@@ -18,6 +18,7 @@ pub(crate) mod picker;
 pub(crate) mod pump;
 pub(crate) mod pw_editor;
 pub(crate) mod scroll_group;
+pub(crate) mod shuttle;
 // `pub` (not `pub(crate)`): the `edaptor` binary (`src/main.rs`) calls
 // `edaptor::ui::startup::resolve_config_path`, so the module must be a
 // crate-external item.
