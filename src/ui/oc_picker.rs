@@ -84,9 +84,10 @@ impl FieldEditor for ObjectClassEditor {
             })
             .collect();
         let picker = ObjectClassPicker::new(all_rows, ticked, shared);
-        // Focus the search box so typing filters immediately (search-as-you-type);
-        // Tab/Shift-Tab then move focus to the lists and buttons the standard way.
-        let focus = picker.search_focus;
+        // Focus the Shuttle itself: it is a direct child of the dialog, so this sets
+        // the dialog's current child (events route into it) and cascades focus to the
+        // Shuttle's own open-time target (the search box, for search-as-you-type).
+        let focus = picker.shuttle_id;
         (Box::new(picker), focus)
     }
 }
@@ -98,8 +99,6 @@ pub(crate) struct ObjectClassPicker {
     /// geometry, the active set (Selected) and the available set, plus the moves
     /// and the search box; it notifies us by broadcast.
     shuttle_id: ViewId,
-    /// The Shuttle's search box — focused on open (`into_view` returns it).
-    search_focus: ViewId,
     shared: Shared,
     /// Every known class as a `ShuttleRow` (canonical, sorted, `locked` precomputed).
     /// The source of truth for both columns: the Active column is the subset that
@@ -132,9 +131,6 @@ impl ObjectClassPicker {
             /* with_search */ true,
             /* selected_on_left */ true,
         );
-        let search_focus = shuttle
-            .search_id()
-            .expect("objectClass Shuttle is built with a search box");
         let shuttle_id = dlg.insert_child(Box::new(shuttle));
 
         dlg.button_row(
@@ -163,7 +159,6 @@ impl ObjectClassPicker {
         ObjectClassPicker {
             dlg,
             shuttle_id,
-            search_focus,
             shared,
             all_rows,
             seed_selected,
@@ -258,6 +253,11 @@ impl View for ObjectClassPicker {
         self.dlg.reset_current(ctx);
         if !self.seeded {
             self.seed(ctx);
+        }
+        // Establish the Shuttle's internal currency (its search box) before the
+        // dialog focuses the Shuttle, so focus cascades onto the search box.
+        if let Some(sh) = self.shuttle_mut() {
+            sh.reset_current(ctx);
         }
     }
 

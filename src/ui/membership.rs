@@ -101,9 +101,10 @@ impl FieldEditor for MembershipEditor {
             current,
         } = *self;
         let dlg = MembershipDialog::new(label, binding, current, shared);
-        // Focus the search box so typing searches immediately (search-as-you-type);
-        // Tab/Shift-Tab then move focus to the lists and buttons the standard way.
-        let focus = dlg.search_focus;
+        // Focus the Shuttle itself: it is a direct child of the dialog, so this sets
+        // the dialog's current child (events route into it) and cascades focus to the
+        // Shuttle's own open-time target (the search box, for search-as-you-type).
+        let focus = dlg.shuttle_id;
         (Box::new(dlg), focus)
     }
 }
@@ -121,8 +122,6 @@ pub(crate) struct MembershipDialog {
     /// geometry, the staged Members set (Selected) and the live candidate set
     /// (Available), plus the moves and the search box; it notifies us by broadcast.
     shuttle_id: ViewId,
-    /// The Shuttle's search box — focused on open (`into_view` returns it).
-    search_focus: ViewId,
     shared: Shared,
     /// Resolved candidate-search scope (groups).
     base: String,
@@ -155,9 +154,6 @@ impl MembershipDialog {
             /* with_search */ true,
             /* selected_on_left */ false,
         );
-        let search_focus = shuttle
-            .search_id()
-            .expect("membership Shuttle is built with a search box");
         let shuttle_id = dlg.insert_child(Box::new(shuttle));
 
         dlg.button_row(
@@ -213,7 +209,6 @@ impl MembershipDialog {
         MembershipDialog {
             dlg,
             shuttle_id,
-            search_focus,
             shared,
             base: binding.scope.base.clone(),
             oc,
@@ -314,6 +309,11 @@ impl View for MembershipDialog {
         self.dlg.reset_current(ctx);
         if !self.seeded {
             self.seed(ctx);
+        }
+        // Establish the Shuttle's internal currency (its search box) before the
+        // dialog focuses the Shuttle, so focus cascades onto the search box.
+        if let Some(sh) = self.shuttle_mut() {
+            sh.reset_current(ctx);
         }
     }
 

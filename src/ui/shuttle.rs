@@ -381,10 +381,20 @@ impl Shuttle {
     }
 }
 
-#[delegate(to = group, skip(handle_event, as_any_mut, value, set_value, set_value_ctx))]
+#[delegate(to = group, skip(handle_event, as_any_mut, reset_current, value, set_value, set_value_ctx))]
 impl View for Shuttle {
     fn as_any_mut(&mut self) -> Option<&mut dyn core::any::Any> {
         Some(self)
+    }
+
+    /// Open-time focus inside the Shuttle: the search box (search-as-you-type)
+    /// when present, otherwise the Available list. The host embeds the Shuttle and
+    /// focuses the Shuttle itself (so the dialog routes events here); this decides
+    /// which child lands focus when that happens. Runs before the first draw.
+    fn reset_current(&mut self, ctx: &mut Context) {
+        self.group.reset_current(ctx);
+        let target = self.search_id().unwrap_or(self.avail_id);
+        self.group.focus_child(target, ctx);
     }
 
     /// Gather: the Selected set as a list of keys, so the Shuttle participates
