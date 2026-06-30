@@ -141,11 +141,14 @@ All notable changes to eDAPtor are documented here. The format follows
   light theme (a slate line on the desktop tone; blue while being dragged). They
   previously rendered with the old dark classic-blue defaults.
 
-- tvision UI: the shared dual-list editors (`objectClass` and group membership)
-  gained **scroll bars** on each column (shown when the column overflows) and
-  visible **[Add]** / **[Remove]** buttons on the dialog button row. The
-  Insert/Delete (and →/←) keys continue to work; the buttons also carry Alt-A /
-  Alt-R shortcuts.
+- tvision UI: the shared two-column editors (`objectClass` and group membership)
+  are now a self-contained **Shuttle** view (an embedded `tvision-rs` widget,
+  replacing the old `DualList` controller). Each column has **scroll bars** (shown
+  while active) and the dialog carries visible **[Add]** / **[Remove]** buttons
+  (Alt-A / Alt-R). To move a row: **Insert** (toward Selected) / **Delete** (away),
+  the buttons, or **Enter while a list holds focus** (Enter elsewhere — e.g. the
+  search box — still triggers the dialog's default **OK**). The previous **→/←
+  move keys were removed** — those arrows now do normal focus traversal.
 
 - tvision UI: in the dual-list editors (`objectClass` / membership), **Tab /
   Shift-Tab now move focus between the screen elements** (search box, the two
@@ -166,11 +169,17 @@ All notable changes to eDAPtor are documented here. The format follows
   scrollbar disappears when the pane loses focus.
 
 - tvision UI: the `objectClass` editor is now a two-column "mover" (the shared
-  dual-list): the active classes sit on the left, the remaining known classes on
-  the right. Move a class right→left (Insert/→) to add it, left→right (Delete/←)
-  to remove it; Tab flips the active column; the search box filters the available
-  column. STRUCTURAL classes are shown but locked (non-removable). The committed
-  class set and downstream schema resync are unchanged.
+  Shuttle view): the active classes sit on the left, the remaining known classes
+  on the right. Highlight a class and press **Insert** (or **Enter**, or **[Add]**)
+  to add it, **Delete** (or **[Remove]**) to remove it; Tab moves focus between the
+  search box, the two lists and the buttons; the search box filters the available
+  column. STRUCTURAL classes that were already on the entry are shown but locked
+  (non-removable); a structural class added this session stays removable. The
+  committed class set and downstream schema resync are unchanged.
+
+- tvision UI: the group **membership** editor (the Shuttle's Available column) now
+  hides candidates that are already members — the staged set is no longer offered
+  for re-adding (previously such rows showed with a `✓` marker).
 
 - tvision UI (preview): now builds against the released `tvision-rs` 0.3.0; the
   temporary git-pin for `exec_view_focused` has been removed.

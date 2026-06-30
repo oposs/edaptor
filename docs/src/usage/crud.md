@@ -25,19 +25,22 @@ read-only / system attributes are shown but not editable.
 
 ### Changing objectClasses
 
-The `objectClass` field opens a schema-seeded **dual-list editor**: active
-(current) classes on the left, available classes on the right. **Insert** or
-**→** moves the highlighted available class into the active set; **Delete** or
-**←** removes the highlighted active class. The same actions are available as
-on-screen **[Add]** / **[Remove]** buttons (also reachable with **Alt+A** /
+The `objectClass` field opens a schema-seeded **two-column editor** (the shared
+*Shuttle* view): active (current) classes on the left, available classes on the
+right. Highlight an available class and press **Insert** to move it into the
+active set; highlight an active class and press **Delete** to remove it. **Enter**
+while a list holds focus does the same move (toward the active set from the
+available list, out of it from the active list). The same actions are available
+as on-screen **[Add]** / **[Remove]** buttons (also reachable with **Alt+A** /
 **Alt+R**). Each column shows a scroll bar when its list overflows. **Tab** /
 **Shift-Tab** move focus between the search box, the two lists and the buttons;
 the arrow keys drive whichever list is focused. Typing in the search box (above
 the right column) filters the available list. STRUCTURAL classes that were
 already on the entry are shown locked (marked `*`) and cannot be removed; a
 structural class you add during this edit can still be removed again. Press
-**Enter** to confirm (OK button) or the **Cancel** button to close the editor
-without committing. The form immediately updates: new MUST/MAY fields appear for
+**Enter** while the search box or the **OK** button is focused to confirm, or the
+**Cancel** button to close the editor without committing. The form immediately
+updates: new MUST/MAY fields appear for
 added classes, and any attribute no longer permitted by the remaining classes is
 shown **crossed out** (it will be deleted on save). Press **Alt+C** in the form
 to discard all objectClass changes and revert to the server state. See

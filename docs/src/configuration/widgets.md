@@ -354,9 +354,10 @@ widget instead, which manages the `{n}` ordering prefix automatically.
 
 ## `objectClass` Editor (auto-injected)
 
-The `objectClass` field automatically receives a schema-seeded **dual-list
-editor**. No configuration is needed — it is always present when editing any
-entry. Pressing Enter on the `objectClass` field opens a two-column picker:
+The `objectClass` field automatically receives a schema-seeded **two-column
+editor** (the shared *Shuttle* view). No configuration is needed — it is always
+present when editing any entry. Pressing Enter on the `objectClass` field opens a
+two-column picker:
 
 - **Left column** — the entry's *active* objectClasses (currently applied).
 - **Right column** — the *available* objectClasses known from the server's
@@ -364,14 +365,15 @@ entry. Pressing Enter on the `objectClass` field opens a two-column picker:
 
 | Action | Keys |
 |--------|------|
-| Flip between the two columns | Tab |
-| Add (move available → active) | Insert or → |
-| Remove (move active → available) | Delete or ← |
+| Move focus between search box, lists and buttons | Tab / Shift-Tab |
+| Add (highlighted available → active) | Insert, the **[Add]** button (Alt+A), or Enter on the available list |
+| Remove (highlighted active → available) | Delete, the **[Remove]** button (Alt+R), or Enter on the active list |
 | Filter the available column | type in the search box |
-| Commit | Enter (OK button) |
+| Commit | Enter (while the search box or OK button is focused), or the OK button |
 
-**STRUCTURAL** classes are shown in the active column but are **locked** — they
-cannot be removed.
+**STRUCTURAL** classes that were already on the entry are shown in the active
+column but are **locked** (marked `*`) and cannot be removed; a structural class
+added during this edit can still be removed again.
 
 After committing, the edit form immediately reflects the schema change:
 
