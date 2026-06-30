@@ -228,8 +228,19 @@ impl FormPane {
     /// Repaint header + all cell texts from `edit_form`; rebuild cells first if
     /// the shown entry changed (different `dn`).
     fn render(&mut self, ctx: &mut Context) {
-        let cur_dn = self.state.borrow().edit_form.as_ref().map(|f| f.dn.clone());
-        if cur_dn != self.built_dn {
+        let (cur_dn, field_count) = {
+            let st = self.state.borrow();
+            match st.edit_form.as_ref() {
+                Some(f) => (Some(f.dn.clone()), f.fields.len()),
+                None => (None, 0),
+            }
+        };
+        // Rebuild cells when the entry changes (different dn) OR the field set
+        // changes size. Adding/removing an objectClass regenerates the MUST/MAY
+        // fields on the SAME entry, growing or shrinking the field list while the
+        // dn is unchanged; without the count check the cell vectors go stale and
+        // `focusable_value_ids` would index past `value_ids`.
+        if cur_dn != self.built_dn || field_count != self.value_ids.len() {
             self.rebuild_cells(ctx);
             self.built_dn = cur_dn;
         }
@@ -302,7 +313,10 @@ impl FormPane {
                 .iter()
                 .enumerate()
                 .filter(|(_, f)| cell_focusable(f))
-                .map(|(i, _)| self.value_ids[i])
+                // `get(i)`, not `[i]`: stay panic-proof if the cell vector is ever
+                // momentarily out of sync with `fields` (e.g. mid objectClass
+                // resync, before `render` rebuilds the cells).
+                .filter_map(|(i, _)| self.value_ids.get(i).copied())
                 .collect(),
         }
     }
@@ -325,6 +339,11 @@ impl FormPane {
         let next_id = ids[next];
         if let Some(sg) = self.scroll_mut() {
             sg.focus_child(next_id, ctx);
+            // Scroll immediately so the newly focused field — and thus the
+            // hardware cursor — is on screen this frame, not one pump tick later.
+            if let Some(logical) = sg.logical_of(next_id) {
+                sg.ensure_visible(logical, ctx);
+            }
         }
     }
 
@@ -522,6 +541,32 @@ impl View for FormPane {
         // Splitter receives it and moves to the next pane.
         if matches!(ev, Event::KeyDown(k) if k.key == Key::Tab) {
             self.sync_into_form();
+            return;
+        }
+
+        // Mouse wheel scrolls the form by MOVING FOCUS through fields, not by
+        // sliding content under a stationary cursor. Moving focus lets
+        // `ensure_visible` scroll the form so the focused field — and the hardware
+        // cursor — stays on screen, so the wheel "advances the cursor" and can
+        // never strand it off-screen (which previously wedged the display). Only
+        // the active pane consumes the wheel; otherwise it propagates so the
+        // tree/leaf panes wheel-scroll when they are the active pane. (The form is
+        // the splitter's last child, so reverse-order delivery offers it the wheel
+        // first — the active-gate is what keeps it from hijacking the others.)
+        if let Event::MouseWheel(me) = ev {
+            if !self.group.state().state.active {
+                return; // not the active pane: let the splitter try the next one
+            }
+            let delta = match me.wheel {
+                tv::event::MouseWheel::Down => 1,
+                tv::event::MouseWheel::Up => -1,
+                _ => 0,
+            };
+            if delta != 0 {
+                self.focus_field(delta, ctx);
+                self.sync_into_form();
+            }
+            ev.clear();
             return;
         }
 
@@ -740,6 +785,116 @@ mod tests {
         pane.handle_event(&mut u, &mut ctx);
         let cur = pane.scroll_mut().and_then(|sg| sg.current());
         assert_eq!(cur, Some(focusable[1]), "Up → previous focusable field");
+    }
+
+    #[test]
+    fn mouse_wheel_moves_focus_only_when_pane_active() {
+        // The wheel advances the focused field (so ensure_visible keeps the cursor
+        // on screen) — but only when the form is the active pane; otherwise it
+        // propagates so the tree/leaf panes can wheel-scroll.
+        use crate::ldap::worker::RawSubschema;
+        let schema = SchemaModel::from_raw(&RawSubschema::default());
+        let structure = Structure::build("dc=x", vec![]);
+        let mut st =
+            UiState::new_for_test(structure, schema, "dc=x".into(), Vec::new(), Vec::new());
+        st.edit_form = Some(EditForm {
+            dn: "cn=a,dc=x".into(),
+            mode: FormMode::Edit,
+            object_classes: vec![],
+            fields: vec![ef("gidNumber", "1001", true), ef("sn", "Bar", true)],
+        });
+        st.form_needs_render = true;
+        let shared: Shared = Rc::new(RefCell::new(st));
+        let mut pane = FormPane::new(Rect::new(0, 0, 80, 20), shared.clone());
+        let mut out = VecDeque::new();
+        let mut timers = tv::timer::TimerQueue::new();
+        let mut deferred = Vec::new();
+        let mut ctx = headless_ctx(&mut out, &mut timers, &mut deferred);
+        let mut ev = Event::Broadcast {
+            command: REFRESH,
+            source: None,
+        };
+        pane.handle_event(&mut ev, &mut ctx); // render + focus first focusable
+        let focusable = pane.focusable_value_ids();
+        let cur = pane.scroll_mut().and_then(|sg| sg.current());
+        assert_eq!(cur, Some(focusable[0]));
+
+        // Inactive pane: the wheel is ignored here (left to propagate elsewhere).
+        let mut w = Event::MouseWheel(tv::event::MouseEvent {
+            wheel: tv::event::MouseWheel::Down,
+            ..Default::default()
+        });
+        pane.handle_event(&mut w, &mut ctx);
+        let cur = pane.scroll_mut().and_then(|sg| sg.current());
+        assert_eq!(cur, Some(focusable[0]), "inactive pane ignores the wheel");
+
+        // Active pane: wheel down advances focus to the next field.
+        pane.group.state_mut().state.active = true;
+        let mut w = Event::MouseWheel(tv::event::MouseEvent {
+            wheel: tv::event::MouseWheel::Down,
+            ..Default::default()
+        });
+        pane.handle_event(&mut w, &mut ctx);
+        let cur = pane.scroll_mut().and_then(|sg| sg.current());
+        assert_eq!(cur, Some(focusable[1]), "active pane wheel advances focus");
+    }
+
+    #[test]
+    fn growing_field_set_on_same_dn_rebuilds_cells_without_panic() {
+        // Adding an objectClass regenerates MUST/MAY fields on the SAME entry, so
+        // the field list grows while the dn is unchanged. render() must rebuild the
+        // cell vectors (not skip on the unchanged dn), or focusable_value_ids()
+        // indexes past value_ids and panics (the reported crash).
+        use crate::ldap::worker::RawSubschema;
+        let schema = SchemaModel::from_raw(&RawSubschema::default());
+        let structure = Structure::build("dc=x", vec![]);
+        let mut st =
+            UiState::new_for_test(structure, schema, "dc=x".into(), Vec::new(), Vec::new());
+        st.edit_form = Some(EditForm {
+            dn: "cn=a,dc=x".into(),
+            mode: FormMode::Edit,
+            object_classes: vec![],
+            fields: vec![ef("cn", "a", true), ef("sn", "B", true)],
+        });
+        st.form_needs_render = true;
+        let shared: Shared = Rc::new(RefCell::new(st));
+        let mut pane = FormPane::new(Rect::new(0, 0, 80, 20), shared.clone());
+        let mut out = VecDeque::new();
+        let mut timers = tv::timer::TimerQueue::new();
+        let mut deferred = Vec::new();
+        let mut ev = Event::Broadcast {
+            command: REFRESH,
+            source: None,
+        };
+        pane.handle_event(
+            &mut ev,
+            &mut headless_ctx(&mut out, &mut timers, &mut deferred),
+        );
+        assert_eq!(pane.field_cell_count(), 2);
+
+        // Simulate the objectClass add: same dn, two extra fields.
+        {
+            let mut s = shared.borrow_mut();
+            let form = s.edit_form.as_mut().unwrap();
+            form.fields.push(ef("gidNumber", "1001", true));
+            form.fields.push(ef("uidNumber", "1002", true));
+            s.form_needs_render = true;
+        }
+        let mut ev = Event::Broadcast {
+            command: REFRESH,
+            source: None,
+        };
+        // Must not panic, and the cells must be rebuilt to match the grown field set.
+        pane.handle_event(
+            &mut ev,
+            &mut headless_ctx(&mut out, &mut timers, &mut deferred),
+        );
+        assert_eq!(
+            pane.field_cell_count(),
+            4,
+            "cells rebuilt to match the grown field set"
+        );
+        assert_eq!(pane.focusable_value_ids().len(), 4);
     }
 
     #[test]

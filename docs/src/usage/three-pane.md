@@ -62,6 +62,8 @@ overflows the visible height.
   only and does **not** descend into a pane's internal fields.
 - **`Shift-Tab`** moves focus backward.
 - Use the **arrow keys** to move within the focused pane.
+- The **mouse wheel** in the entry form moves between fields, scrolling the form
+  so the focused field stays on screen.
 - **Clicking a form label** moves focus to that field's input directly.
 
 Moving focus off the form pane while it has unsaved edits opens the dirty-guard

@@ -21,7 +21,10 @@ pub(crate) fn edaptor_theme() -> Theme {
     // Panel surfaces: kill the cyan ListBox background; everything shares base2/base3.
     t.set_style(Role::Background, Style::new(BASE01, DESKTOP));
     t.set_style(Role::Normal, Style::new(BASE01, BASE2));
-    t.set_style(Role::ListNormalInactive, Style::new(BASE01, BASE2));
+    // Active pane = brightest parchment (base3); inactive panes recede to the
+    // desktop tone so the focused pane is unmistakable (base2 vs base3 was one
+    // Solarized step apart — invisible on most terminals).
+    t.set_style(Role::ListNormalInactive, Style::new(BASE01, DESKTOP));
     t.set_style(Role::ListNormalActive, Style::new(BASE01, BASE3));
     t.set_style(Role::OutlineNormal, Style::new(BASE01, BASE2));
     t.set_style(Role::OutlineNotExpanded, Style::new(BASE1, BASE2));
@@ -85,6 +88,17 @@ pub(crate) fn edaptor_theme() -> Theme {
     t.set_style(Role::StatusDisabled, Style::new(BASE1, BASE2));
     t.set_style(Role::StatusSelDisabled, Style::new(BASE1, BLUE));
 
+    // Blue-scheme frame: the three-pane browser's splitter dividers draw their
+    // line glyphs with these roles (FrameActive when the splitter is focused —
+    // the normal case — FrameDragging while a divider is being moved). Untheming
+    // them left the gutters on classic_blue's dark defaults. Paint a slate line
+    // on the desktop tone so the gutter reads as background space; BLUE while
+    // dragging for clear resize feedback.
+    t.set_style(Role::FrameActive, Style::new(BASE01, DESKTOP));
+    t.set_style(Role::FramePassive, Style::new(BASE1, DESKTOP));
+    t.set_style(Role::FrameDragging, Style::new(BLUE, DESKTOP));
+    t.set_style(Role::FrameIcon, Style::new(BASE01, DESKTOP));
+
     // Gray-scheme frame (dialogs): slate/muted-slate on parchment; BLUE while
     // dragging for clear visual feedback. FrameGrayIcon (close/zoom glyphs) gets
     // the same style as the active frame so icons are fully readable.
@@ -113,11 +127,26 @@ mod tests {
     #[test]
     fn panels_share_one_background_family() {
         let t = edaptor_theme();
-        // The leaf ListBox no longer paints cyan: inactive list bg == base2.
-        assert_eq!(bg(&t, Role::ListNormalInactive), BASE2);
+        // The leaf ListBox no longer paints cyan; inactive panes recede to the
+        // desktop tone so the active pane (base3) is clearly distinguishable.
+        assert_eq!(bg(&t, Role::ListNormalInactive), DESKTOP);
         assert_eq!(bg(&t, Role::OutlineNormal), BASE2);
         // Active pane list is the brightest surface.
         assert_eq!(bg(&t, Role::ListNormalActive), BASE3);
+    }
+
+    #[test]
+    fn splitter_dividers_are_themed() {
+        let t = edaptor_theme();
+        // The blue-scheme Frame roles drive the three-pane splitter gutters.
+        // They must be wired into the light palette (desktop-tone background),
+        // not left on classic_blue's dark defaults.
+        assert_eq!(bg(&t, Role::FrameActive), DESKTOP);
+        assert_eq!(bg(&t, Role::FramePassive), DESKTOP);
+        assert_eq!(bg(&t, Role::FrameDragging), DESKTOP);
+        // Active divider line uses dark body-text; dragging flips to the blue accent.
+        assert_eq!(fg(&t, Role::FrameActive), BASE01);
+        assert_eq!(fg(&t, Role::FrameDragging), BLUE);
     }
 
     #[test]

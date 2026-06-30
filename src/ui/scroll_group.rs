@@ -10,7 +10,7 @@
 //! to tvision-rs.
 
 use tvision_rs::{
-    self as tv, delegate, Context, DrawCtx, Event, Rect, Role, ScrollBar, View, ViewId,
+    self as tv, delegate, Context, DrawCtx, Event, Point, Rect, Role, ScrollBar, View, ViewId,
 };
 
 pub(crate) struct ScrollGroup {
@@ -152,10 +152,30 @@ impl ScrollGroup {
         self.publish_bar(ctx);
     }
 
+    /// The bar shows only when this pane is the active one AND the content
+    /// overflows the viewport — mirroring the leaf/tree panes, so scroll bars
+    /// appear on the focused pane alone rather than on every pane at once.
+    fn bar_should_show(&self) -> bool {
+        self.max_top() > 0 && self.group.state().state.active
+    }
+
+    /// Re-assert the bar's focus+overflow visibility. Called every event so a
+    /// pane that loses focus hides its bar on the next tick (the 50ms pump
+    /// reaches this view). `request_set_visible` competes in the deferred drain
+    /// against any overflow-blind toggle, mirroring leaf/tree's `sync_scrollbar`.
+    fn sync_bar_visibility(&mut self, ctx: &mut Context) {
+        let show = self.bar_should_show();
+        if let Some(b) = self.group.child_mut(self.v_bar) {
+            b.state_mut().state.visible = show;
+        }
+        ctx.request_set_visible(self.v_bar, show);
+    }
+
     fn publish_bar(&mut self, ctx: &mut Context) {
         let max = self.max_top();
+        let show = self.bar_should_show();
         if let Some(b) = self.group.child_mut(self.v_bar) {
-            b.state_mut().state.visible = max > 0;
+            b.state_mut().state.visible = show;
         }
         ctx.request_scroll_bar_params(
             self.v_bar,
@@ -172,6 +192,23 @@ impl ScrollGroup {
 impl View for ScrollGroup {
     fn as_any_mut(&mut self) -> Option<&mut dyn core::any::Any> {
         Some(self)
+    }
+
+    /// Where the hardware cursor wants to sit, in this group's local frame. The
+    /// inner group reports the focused child's cursor already shifted by the
+    /// active scroll `top`; we suppress it when the focused field has been
+    /// scrolled outside the viewport. Otherwise the event loop — which clamps
+    /// only the low end of the cursor coordinate (`p.y.max(0)`), never the high
+    /// end — would drive the terminal cursor below the pane and wedge the
+    /// display. Hiding the cursor while the focused field is off-screen is the
+    /// correct, freeze-proof behaviour.
+    fn cursor_request(&self) -> Option<Point> {
+        let p = self.group.cursor_request()?;
+        if p.y < 0 || p.y >= self.viewport_h {
+            None
+        } else {
+            Some(p)
+        }
     }
 
     fn draw(&mut self, ctx: &mut DrawCtx) {
@@ -235,6 +272,9 @@ impl View for ScrollGroup {
                 self.ensure_visible(logical, ctx);
             }
         }
+        // Hide the bar when this pane is not the active one (focus may have just
+        // moved away without any scroll/resize to re-publish params).
+        self.sync_bar_visibility(ctx);
     }
 
     fn apply_scroll_sync(&mut self, _h: Option<i32>, v: Option<i32>, ctx: &mut Context) {
@@ -473,6 +513,69 @@ mod tests {
             sg.child_mut(id0).unwrap().state().get_bounds().a.y,
             0,
             "first content row at screen y=0"
+        );
+    }
+
+    #[test]
+    fn bar_hidden_when_pane_inactive_even_if_overflowing() {
+        let mut sg = ScrollGroup::new(Rect::new(0, 0, 10, 4)); // viewport height 4
+        let w = sg.inner_width();
+        for y in 0..8 {
+            sg.add_content(
+                Box::new(tv::InputLine::with_limit(Rect::new(0, y, w, y + 1), 64)),
+                Rect::new(0, y, w, y + 1),
+            );
+        }
+        assert!(sg.max_top() > 0, "content must overflow the viewport");
+        // Inactive pane → bar hidden despite overflow (scroll bars live on the
+        // active pane only).
+        sg.group.state_mut().state.active = false;
+        assert!(!sg.bar_should_show(), "inactive pane must hide its bar");
+        // Active pane → bar shown.
+        sg.group.state_mut().state.active = true;
+        assert!(
+            sg.bar_should_show(),
+            "active overflowing pane shows its bar"
+        );
+    }
+
+    #[test]
+    fn cursor_suppressed_when_focused_field_scrolled_offscreen() {
+        let mut sg = ScrollGroup::new(Rect::new(0, 0, 10, 4)); // viewport rows 0..4
+        let w = sg.inner_width();
+        let mut ids = Vec::new();
+        for y in 0..8 {
+            ids.push(sg.add_content(
+                Box::new(tv::InputLine::with_limit(Rect::new(0, y, w, y + 1), 64)),
+                Rect::new(0, y, w, y + 1),
+            ));
+        }
+        let mut out = std::collections::VecDeque::new();
+        let mut timers = tv::timer::TimerQueue::new();
+        let mut deferred = Vec::new();
+        let mut ctx = Context::new(&mut out, &mut timers, 0, &mut deferred);
+        sg.group.state_mut().state.active = true;
+        sg.focus_child(ids[7], &mut ctx); // focus the last (row 7) field
+                                          // Make the focused field's cursor visible so group.cursor_request()
+                                          // surfaces a point — otherwise the viewport gate is never exercised.
+        if let Some(c) = sg.group.child_mut(ids[7]) {
+            let st = c.state_mut();
+            st.cursor = Point::new(0, 0);
+            st.state.cursor_vis = true;
+            st.state.focused = true; // the group isn't focused headlessly; force it
+        }
+        // top=0 shows rows 0..4, so row 7 is below the viewport → cursor hidden,
+        // never driven off the pane.
+        assert_eq!(
+            <ScrollGroup as View>::cursor_request(&sg),
+            None,
+            "off-screen focused field must not request a cursor"
+        );
+        // Scroll so row 7 lands inside the viewport → the cursor surfaces again.
+        sg.set_top_for_test(4);
+        assert!(
+            <ScrollGroup as View>::cursor_request(&sg).is_some(),
+            "on-screen focused field must request a cursor"
         );
     }
 

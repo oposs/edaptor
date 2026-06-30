@@ -132,7 +132,18 @@ All notable changes to eDAPtor are documented here. The format follows
 - tvision UI: all three panes share a uniform background; the focused pane is
   rendered in a brighter cream tone, unfocused panes are slightly greyed. Within
   the entry form, editable fields have a visibly brighter background than
-  read-only labels, making edit affordances immediately apparent.
+  read-only labels, making edit affordances immediately apparent. The
+  active/inactive contrast was **strengthened**: inactive panes now recede to the
+  desktop tone (the previous one-step Solarized difference was imperceptible on
+  most terminals).
+
+- tvision UI: the **splitter dividers** between the three panes are now part of the
+  light theme (a slate line on the desktop tone; blue while being dragged). They
+  previously rendered with the old dark classic-blue defaults.
+
+- tvision UI: the **mouse wheel** in the entry form now moves the focused field
+  (scrolling the form to follow it), so wheel scrolling advances the cursor
+  instead of sliding the content out from under a stationary cursor.
 
 - tvision UI: **Tab / Shift-Tab now cycle the three panes only** — they no longer
   descend into a pane's internal fields. Use the arrow keys to move within a pane.
@@ -152,6 +163,23 @@ All notable changes to eDAPtor are documented here. The format follows
   temporary git-pin for `exec_view_focused` has been removed.
 
 ### Fixed
+
+- tvision UI: **adding or removing an objectClass crashed the application**
+  (`index out of bounds` in the form pane). The form only rebuilt its cells when
+  the entry's DN changed, but an objectClass change regenerates the MUST/MAY
+  fields on the *same* entry — so the field list grew while the cell vector went
+  stale. The form now rebuilds its cells whenever the field set changes size.
+
+- tvision UI: the entry form could **freeze the application** when the focused
+  field was scrolled outside the visible area (e.g. via mouse-wheel scrolling) —
+  the hardware cursor was driven off the pane. The form now suppresses the cursor
+  while the focused field is off-screen, and wheel scrolling keeps the focused
+  field (and cursor) on screen, so the freeze can no longer occur.
+
+- tvision UI: the entry form's scrollbar showed whenever the form overflowed, even
+  when the form pane was **not** focused — inconsistent with the tree/list panes.
+  It now follows the same rule: visible only while the form pane is focused and
+  overflowing.
 
 - tvision UI: the unsaved-changes guard dialog (Save / Discard / Stay) was too
   narrow — buttons touched the dialog edge. It is now wider so all three buttons
