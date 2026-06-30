@@ -7,21 +7,25 @@
 //! The prospective `SetValuesThenResyncSchema` outcome is kept in
 //! `UiState::staged_commit`. Capability: `NeedsSchema` (no worker).
 //!
-//! Built on the shared [`DualList`] mover (`ui::dual_list`), with
+//! Built on the embedded [`Shuttle`] view (`ui::shuttle`), with
 //! `selected_on_left = true` so the active set renders on the left per the user's
 //! request. Unlike membership, the Available column is a *static* set computed
 //! locally (all known classes minus the active ones, filtered by the search box),
-//! so there is no async worker search — `SearchChanged` just refilters in place.
+//! so there is no async worker search — `CMD_SHUTTLE_SEARCH` just refilters in
+//! place. The Shuttle notifies via broadcast (`CMD_SHUTTLE_CHANGED` /
+//! `CMD_SHUTTLE_SEARCH`, with the Shuttle's own `ViewId` as `source`); this dialog
+//! reacts in its own `handle_event` after delegating, re-reading `Shuttle::selected`.
 
 use std::collections::{BTreeSet, HashSet};
 
 use ldap_types::schema::ObjectClassType;
 use tvision_rs::{
     self as tv, delegate, ButtonFlags, ButtonRowAlign, Command, Context, Dialog, Event, Rect, View,
+    ViewId,
 };
 
 use crate::schema::SchemaModel;
-use crate::ui::dual_list::{DualEvent, DualList, DualRow};
+use crate::ui::shuttle::{Shuttle, ShuttleRow, CMD_SHUTTLE_CHANGED, CMD_SHUTTLE_SEARCH};
 use crate::ui::widget::{Activation, Capability, CommitOutcome, FieldEditor, FieldWidget};
 use crate::ui::Shared;
 use crate::workflows::edit_form::EditField;
@@ -57,13 +61,13 @@ impl FieldEditor for ObjectClassEditor {
         // The active set at open, lowercased for case-insensitive matching against
         // the canonical candidate spelling.
         let ticked: BTreeSet<String> = self.current.iter().map(|s| s.to_lowercase()).collect();
-        // Every known class becomes a `DualRow`. A STRUCTURAL class is locked
-        // (non-removable) ONLY when it was already on the entry at open — those are
-        // the load-bearing classes worth protecting. A structural class ADDED in
-        // this session stays removable, so the user can undo an add (the reported
-        // bug: you could add a class but then never drop it again). Names keep the
+        // Every known class becomes a `ShuttleRow`. A STRUCTURAL class is locked
+        // ONLY when it was already on the entry at open — those are the
+        // load-bearing classes worth protecting. A structural class ADDED in this
+        // session stays unlocked, so the user can undo an add (the reported bug:
+        // you could add a class but then never drop it again). Names keep the
         // schema's canonical spelling — `object_class_names` is already sorted.
-        let all_rows: Vec<DualRow> = schema
+        let all_rows: Vec<ShuttleRow> = schema
             .object_class_names()
             .into_iter()
             .map(|name| {
@@ -72,60 +76,66 @@ impl FieldEditor for ObjectClassEditor {
                     .map(|oc| oc.object_class_type == ObjectClassType::Structural)
                     .unwrap_or(false);
                 let originally_active = ticked.contains(&name.to_lowercase());
-                DualRow {
+                ShuttleRow {
                     key: name.clone(),
                     label: name,
-                    removable: !(structural && originally_active),
+                    locked: structural && originally_active,
                 }
             })
             .collect();
         let picker = ObjectClassPicker::new(all_rows, ticked, shared);
         // Focus the search box so typing filters immediately (search-as-you-type);
         // Tab/Shift-Tab then move focus to the lists and buttons the standard way.
-        let focus = picker
-            .dual
-            .search_id()
-            .expect("objectClass DualList is built with a search box");
+        let focus = picker.search_focus;
         (Box::new(picker), focus)
     }
 }
 
-/// The interactive dialog: a two-column mover (Active / Available) + OK/Cancel.
+/// The interactive dialog: an embedded [`Shuttle`] (Active / Available) + OK/Cancel.
 pub(crate) struct ObjectClassPicker {
     dlg: Dialog,
-    /// The two-column mover: owns the column geometry, the active set (Selected)
-    /// and the available set, plus move/flip/search.
-    dual: DualList,
+    /// The embedded two-list transfer widget (a child of `dlg`). Owns the column
+    /// geometry, the active set (Selected) and the available set, plus the moves
+    /// and the search box; it notifies us by broadcast.
+    shuttle_id: ViewId,
+    /// The Shuttle's search box — focused on open (`into_view` returns it).
+    search_focus: ViewId,
     shared: Shared,
-    /// Every known class as a `DualRow` (canonical, sorted, `removable` precomputed).
+    /// Every known class as a `ShuttleRow` (canonical, sorted, `locked` precomputed).
     /// The source of truth for both columns: the Active column is the subset that
     /// is ticked, the Available column is the rest filtered by the search term.
-    all_rows: Vec<DualRow>,
+    all_rows: Vec<ShuttleRow>,
     /// The active rows to seed on first open (stashed because `set_selected` needs
-    /// a `Dialog`/`Context`, only available once the modal is inserted).
-    seed_selected: Vec<DualRow>,
+    /// a `Context`, only available once the modal is inserted).
+    seed_selected: Vec<ShuttleRow>,
     /// Last-observed search term (drives the Available filter).
     last_search: String,
     seeded: bool,
 }
 
 impl ObjectClassPicker {
-    fn new(all_rows: Vec<DualRow>, ticked: BTreeSet<String>, shared: Shared) -> Self {
+    fn new(all_rows: Vec<ShuttleRow>, ticked: BTreeSet<String>, shared: Shared) -> Self {
         let mut dlg = Dialog::new(Rect::new(0, 0, 72, 22), Some("Object classes".to_string()));
         dlg.state_mut().options.center_x = true;
         dlg.state_mut().options.center_y = true;
 
         // Active (Selected) on the LEFT, Available on the RIGHT, with a search box
         // above the Available column. `selected_on_left = true` flips only the
-        // rendered layout — Insert/Right still means "move toward Active".
-        let dual = DualList::new(
-            &mut dlg,
+        // rendered layout — Insert still means "move toward Active". Insert the
+        // Shuttle FIRST so it is the dialog's first selectable child: the modal's
+        // open-time `reset_current` then makes it current, so key events route into
+        // it (and `focus_descendant` can reach the search box inside it).
+        let shuttle = Shuttle::new(
             Rect::new(0, 0, 72, 22),
             "Active",
             "Available",
             /* with_search */ true,
             /* selected_on_left */ true,
         );
+        let search_focus = shuttle
+            .search_id()
+            .expect("objectClass Shuttle is built with a search box");
+        let shuttle_id = dlg.insert_child(Box::new(shuttle));
 
         dlg.button_row(
             &[
@@ -144,7 +154,7 @@ impl ObjectClassPicker {
 
         // The active rows to seed: every candidate whose (lowercased) name is in the
         // ticked set, in canonical sorted order.
-        let seed_selected: Vec<DualRow> = all_rows
+        let seed_selected: Vec<ShuttleRow> = all_rows
             .iter()
             .filter(|r| ticked.contains(&r.key.to_lowercase()))
             .cloned()
@@ -152,7 +162,8 @@ impl ObjectClassPicker {
 
         ObjectClassPicker {
             dlg,
-            dual,
+            shuttle_id,
+            search_focus,
             shared,
             all_rows,
             seed_selected,
@@ -161,38 +172,50 @@ impl ObjectClassPicker {
         }
     }
 
+    /// The embedded `Shuttle`, downcast out of the dialog's children.
+    fn shuttle_mut(&mut self) -> Option<&mut Shuttle> {
+        self.dlg
+            .child_mut(self.shuttle_id)?
+            .as_any_mut()?
+            .downcast_mut::<Shuttle>()
+    }
+
+    /// The Shuttle's current search-box text (owned copy; releases the borrow).
+    fn shuttle_search_text(&mut self) -> String {
+        self.shuttle_mut()
+            .map(|sh| sh.search_text().to_string())
+            .unwrap_or_default()
+    }
+
     /// Rebuild the Available column = all known classes minus the active set,
-    /// filtered by the current search term. Borrow-safe: collects the active key
-    /// set first (releasing the `&self.dual` borrow) before touching `set_available`.
+    /// filtered by the current search term. Borrow-safe: reads the active key set
+    /// into a local (releasing the Shuttle borrow) before touching `set_available`.
     fn refresh_available(&mut self, ctx: &mut Context) {
-        let active: HashSet<String> = self
-            .dual
-            .selected()
-            .iter()
-            .map(|r| r.key.to_lowercase())
-            .collect();
+        let active: HashSet<String> = match self.shuttle_mut() {
+            Some(sh) => sh.selected().iter().map(|r| r.key.to_lowercase()).collect(),
+            None => return,
+        };
         let needle = self.last_search.to_lowercase();
-        let rows: Vec<DualRow> = self
+        let rows: Vec<ShuttleRow> = self
             .all_rows
             .iter()
             .filter(|r| !active.contains(&r.key.to_lowercase()))
             .filter(|r| needle.is_empty() || r.label.to_lowercase().contains(&needle))
             .cloned()
             .collect();
-        self.dual.set_available(rows, &mut self.dlg, ctx);
+        if let Some(sh) = self.shuttle_mut() {
+            sh.set_available(rows, ctx);
+        }
     }
 
     /// Write the prospective commit into shared state: the active class names in
     /// canonical, candidate-sorted order (equivalent to the previous single-list
-    /// behaviour — `candidates` filtered by the ticked set). Borrow is taken and
-    /// dropped here only.
-    fn update_staged(&self) {
-        let active: HashSet<String> = self
-            .dual
-            .selected()
-            .iter()
-            .map(|r| r.key.to_lowercase())
-            .collect();
+    /// behaviour — `candidates` filtered by the ticked set).
+    fn update_staged(&mut self) {
+        let active: HashSet<String> = match self.shuttle_mut() {
+            Some(sh) => sh.selected().iter().map(|r| r.key.to_lowercase()).collect(),
+            None => return,
+        };
         let committed: Vec<String> = self
             .all_rows
             .iter()
@@ -208,7 +231,9 @@ impl ObjectClassPicker {
     fn seed(&mut self, ctx: &mut Context) {
         self.seeded = true;
         let seed = std::mem::take(&mut self.seed_selected);
-        self.dual.set_selected(seed, &mut self.dlg, ctx);
+        if let Some(sh) = self.shuttle_mut() {
+            sh.set_selected(seed, ctx);
+        }
         self.refresh_available(ctx);
         self.update_staged();
     }
@@ -243,22 +268,31 @@ impl View for ObjectClassPicker {
             self.seed(ctx);
         }
 
-        // Delegate the column interaction (move/flip/nav/search) to the DualList.
-        // Space and Enter are intentionally not intercepted, so they reach the
-        // search box and the dialog's default OK button respectively.
-        match self.dual.handle_event(ev, &mut self.dlg, ctx) {
-            DualEvent::MovedIn(_) | DualEvent::MovedOut(_) => {
+        // Delegate first: the Shuttle (the dialog's current child) handles the
+        // move keys / search edits and broadcasts the outcome; the dialog's OK/Cancel
+        // and Tab traversal are handled here too. We then react to the Shuttle's own
+        // broadcasts when they are delivered (a later loop iteration).
+        self.dlg.handle_event(ev, ctx);
+
+        let notice = match &*ev {
+            Event::Broadcast { command, source } if *source == Some(self.shuttle_id) => {
+                Some(*command)
+            }
+            _ => None,
+        };
+        match notice {
+            Some(cmd) if cmd == CMD_SHUTTLE_CHANGED => {
                 // A class was (un)ticked: rebuild Available = candidates minus the
-                // new active set, and restage. (`MovedOut` is rejected automatically
-                // for non-removable STRUCTURAL rows, so no special-casing here.)
+                // new active set, and restage. (A locked STRUCTURAL row is rejected
+                // by the Shuttle before it ever broadcasts, so no special-casing.)
                 self.refresh_available(ctx);
                 self.update_staged();
             }
-            DualEvent::SearchChanged(term) => {
-                self.last_search = term;
+            Some(cmd) if cmd == CMD_SHUTTLE_SEARCH => {
+                self.last_search = self.shuttle_search_text();
                 self.refresh_available(ctx);
             }
-            DualEvent::FlippedFocus | DualEvent::None => {}
+            _ => {}
         }
     }
 }
@@ -269,7 +303,7 @@ mod tests {
     use crate::ldap::worker::RawSubschema;
     use std::cell::RefCell;
     use std::rc::Rc;
-    use tvision_rs::{Deferred, FieldValue, Key, KeyEvent};
+    use tvision_rs::{Deferred, Key, KeyEvent};
 
     fn schema() -> SchemaModel {
         let raw = RawSubschema {
@@ -329,60 +363,84 @@ mod tests {
         }
     }
 
-    /// Index of `label` within the Selected (Active) column's current rows.
-    fn active_index(p: &ObjectClassPicker, label: &str) -> usize {
-        p.dual
-            .selected()
-            .iter()
-            .position(|r| r.label.eq_ignore_ascii_case(label))
-            .unwrap_or_else(|| panic!("{label} not in active column"))
-    }
-
-    /// Highlight `label` in list `id` by its **display** position — the index a
-    /// real user lands on, which (because the ListBox re-sorts and the lock marker
-    /// shifts order) differs from the host-order index. Strips the 2-char marker.
-    fn highlight_by_display(
-        p: &mut ObjectClassPicker,
-        id: tv::ViewId,
-        label: &str,
-        ctx: &mut Context,
-    ) {
-        let disp_idx = {
-            let lb = p
-                .dlg
-                .child_mut(id)
-                .unwrap()
-                .as_any_mut()
-                .unwrap()
-                .downcast_mut::<tv::ListBox>()
-                .unwrap();
-            lb.list()
-                .iter()
-                .position(|s| {
-                    s.chars()
-                        .skip(2)
-                        .collect::<String>()
-                        .eq_ignore_ascii_case(label)
-                })
-                .unwrap_or_else(|| panic!("{label} not displayed in list"))
-        };
-        p.dlg
-            .child_mut(id)
-            .unwrap()
-            .set_value_ctx(FieldValue::Int(disp_idx as i32), ctx);
-    }
-
+    /// Highlight `label` in the Active (Selected) column by its display position.
+    /// The Selected column is an unsorted plain `ListBox`, so the display index is
+    /// the model index; rows carry a 2-char lock marker, stripped before matching.
     fn highlight_active_by_label(p: &mut ObjectClassPicker, label: &str, ctx: &mut Context) {
-        let id = p.dual.selected_id_for_test();
-        highlight_by_display(p, id, label, ctx);
+        let sh = p.shuttle_mut().expect("shuttle present");
+        let id = sh.selected_id_for_test();
+        let idx = sh
+            .selected_text()
+            .iter()
+            .position(|s| {
+                s.chars()
+                    .skip(2)
+                    .collect::<String>()
+                    .eq_ignore_ascii_case(label)
+            })
+            .unwrap_or_else(|| panic!("{label} not displayed in Active"));
+        sh.highlight(id, idx as i32, ctx);
     }
 
+    /// Highlight `label` in the Available column. Available rows render plain (no
+    /// marker), so the label is matched directly against the display string.
     fn highlight_avail_by_label(p: &mut ObjectClassPicker, label: &str, ctx: &mut Context) {
-        let id = p.dual.avail_id_for_test();
-        highlight_by_display(p, id, label, ctx);
+        let sh = p.shuttle_mut().expect("shuttle present");
+        let id = sh.avail_id_for_test();
+        let idx = sh
+            .avail_text()
+            .iter()
+            .position(|s| s.eq_ignore_ascii_case(label))
+            .unwrap_or_else(|| panic!("{label} not displayed in Available"));
+        sh.highlight(id, idx as i32, ctx);
     }
 
-    /// A STRUCTURAL class ADDED in this session must stay removable — only the
+    /// Pull the next queued `Event::Broadcast` out of the loop output, if any.
+    fn take_broadcast(out: &mut std::collections::VecDeque<tv::Event>) -> Option<tv::Event> {
+        let i = out
+            .iter()
+            .position(|e| matches!(e, Event::Broadcast { .. }))?;
+        out.remove(i)
+    }
+
+    /// Dispatch `key` directly to the embedded Shuttle (the seam the dialog's focus
+    /// routing reaches in the running app), then faithfully deliver any broadcasts
+    /// the Shuttle queued (a move → `CMD_SHUTTLE_CHANGED`, a search edit →
+    /// `CMD_SHUTTLE_SEARCH`) back to the picker. In the real loop these broadcasts
+    /// are delivered on later iterations; here we drain them so the picker reacts
+    /// within the test.
+    fn press_and_settle(
+        p: &mut ObjectClassPicker,
+        key: Key,
+        out: &mut std::collections::VecDeque<tv::Event>,
+        timers: &mut tv::timer::TimerQueue,
+        deferred: &mut Vec<Deferred>,
+    ) {
+        {
+            let mut ev = Event::KeyDown(KeyEvent::from(key));
+            let mut ctx = Context::new(out, timers, 0, deferred);
+            if let Some(sh) = p.shuttle_mut() {
+                sh.handle_event(&mut ev, &mut ctx);
+            }
+        }
+        while let Some(mut bev) = take_broadcast(out) {
+            let mut ctx = Context::new(out, timers, 0, deferred);
+            p.handle_event(&mut bev, &mut ctx);
+        }
+    }
+
+    /// Run `f` with a fresh headless `Context` over the given backing stores.
+    fn with_ctx<R>(
+        out: &mut std::collections::VecDeque<tv::Event>,
+        timers: &mut tv::timer::TimerQueue,
+        deferred: &mut Vec<Deferred>,
+        f: impl FnOnce(&mut Context) -> R,
+    ) -> R {
+        let mut ctx = Context::new(out, timers, 0, deferred);
+        f(&mut ctx)
+    }
+
+    /// A STRUCTURAL class ADDED in this session must stay unlocked — only the
     /// classes already on the entry at open are locked. (Reported bug: you could
     /// add a `*` class but then never drop it again.)
     #[test]
@@ -394,36 +452,41 @@ mod tests {
         let mut out = std::collections::VecDeque::new();
         let mut timers = tv::timer::TimerQueue::new();
         let mut deferred: Vec<Deferred> = Vec::new();
-        let mut ctx = headless_ctx(&mut out, &mut timers, &mut deferred);
-        view.reset_current(&mut ctx);
+        with_ctx(&mut out, &mut timers, &mut deferred, |ctx| {
+            view.reset_current(ctx)
+        });
 
         let p = picker_mut(&mut view);
         // Add organizationalPerson from the Available column.
-        highlight_avail_by_label(p, "organizationalPerson", &mut ctx);
-        let mut ev = Event::KeyDown(KeyEvent::from(Key::Insert));
-        p.handle_event(&mut ev, &mut ctx);
+        with_ctx(&mut out, &mut timers, &mut deferred, |ctx| {
+            highlight_avail_by_label(p, "organizationalPerson", ctx)
+        });
+        press_and_settle(p, Key::Insert, &mut out, &mut timers, &mut deferred);
         assert!(
             staged(&sh)
                 .iter()
                 .any(|s| s.eq_ignore_ascii_case("organizationalPerson")),
             "organizationalPerson must be added"
         );
-        // It must be removable despite being STRUCTURAL — it wasn't originally active.
-        let added = p
-            .dual
+        // It must be unlocked despite being STRUCTURAL — it wasn't originally active.
+        let added_locked = p
+            .shuttle_mut()
+            .expect("shuttle")
             .selected()
             .iter()
             .find(|r| r.label.eq_ignore_ascii_case("organizationalPerson"))
-            .expect("added class present in Active column");
+            .expect("added class present in Active column")
+            .locked;
         assert!(
-            added.removable,
-            "a structural class added this session must stay removable"
+            !added_locked,
+            "a structural class added this session must stay unlocked"
         );
 
         // Now drop it again.
-        highlight_active_by_label(p, "organizationalPerson", &mut ctx);
-        let mut ev = Event::KeyDown(KeyEvent::from(Key::Delete));
-        p.handle_event(&mut ev, &mut ctx);
+        with_ctx(&mut out, &mut timers, &mut deferred, |ctx| {
+            highlight_active_by_label(p, "organizationalPerson", ctx)
+        });
+        press_and_settle(p, Key::Delete, &mut out, &mut timers, &mut deferred);
         assert!(
             !staged(&sh)
                 .iter()
@@ -431,52 +494,46 @@ mod tests {
             "session-added class must be removable again"
         );
         // The originally-active structural 'person' stays locked.
-        let person = p
-            .dual
+        let person_locked = p
+            .shuttle_mut()
+            .expect("shuttle")
             .selected()
             .iter()
             .find(|r| r.label.eq_ignore_ascii_case("person"))
-            .expect("person still active");
+            .expect("person still active")
+            .locked;
         assert!(
-            !person.removable,
+            person_locked,
             "originally-active structural class stays locked"
         );
     }
 
-    /// Regression: the Active list re-sorts its rows — a removable row's "  "
-    /// marker sorts before a locked row's "* " marker — so the highlight's display
-    /// index differs from the host-order index. Removing the highlighted removable
-    /// class must remove THAT class, not whatever sits at the same host index
-    /// (a locked class → silently rejected → the reported "Remove has no effect").
+    /// Delete removes the *highlighted* Selected row (mapped by label, the index a
+    /// real user lands on), leaving a locked sibling untouched. The Selected column
+    /// is a plain unsorted `ListBox`, so the display index is the model index — but
+    /// this still guards that the highlight, not a fixed slot, drives the removal.
     #[test]
-    fn move_out_uses_displayed_highlight_not_host_index() {
+    fn move_out_removes_highlighted_row_and_keeps_locked() {
         let sh = shared();
-        // Active = {person (STRUCTURAL → locked), top (ABSTRACT → removable)}.
-        // Host order: [person, top]; display order: [top, person] (lock marker
-        // sorts last). Highlighting `top` lands on display index 0 — the same
-        // index that, in host order, is the locked `person`.
+        // Active = {person (STRUCTURAL → locked), top (ABSTRACT → unlocked)}.
         let mut view = build_view(&sh, &["person", "top"]);
         let mut out = std::collections::VecDeque::new();
         let mut timers = tv::timer::TimerQueue::new();
         let mut deferred: Vec<Deferred> = Vec::new();
-        let mut ctx = headless_ctx(&mut out, &mut timers, &mut deferred);
-        view.reset_current(&mut ctx);
+        with_ctx(&mut out, &mut timers, &mut deferred, |ctx| {
+            view.reset_current(ctx)
+        });
 
         let p = picker_mut(&mut view);
-        // Sanity: host order really does put the locked class first.
-        assert_eq!(
-            active_index(p, "person"),
-            0,
-            "locked class first in host order"
-        );
-        highlight_active_by_label(p, "top", &mut ctx);
-        let mut ev = Event::KeyDown(KeyEvent::from(Key::Delete));
-        p.handle_event(&mut ev, &mut ctx);
+        with_ctx(&mut out, &mut timers, &mut deferred, |ctx| {
+            highlight_active_by_label(p, "top", ctx)
+        });
+        press_and_settle(p, Key::Delete, &mut out, &mut timers, &mut deferred);
 
         let v = staged(&sh);
         assert!(
             !v.iter().any(|s| s.eq_ignore_ascii_case("top")),
-            "highlighted removable 'top' must be removed, got {v:?}"
+            "highlighted unlocked 'top' must be removed, got {v:?}"
         );
         assert!(
             v.iter().any(|s| s.eq_ignore_ascii_case("person")),
@@ -516,7 +573,7 @@ mod tests {
             let p = picker_mut(&mut view);
             assert!(!p.seeded, "must not be seeded before reset_current fires");
             assert!(
-                p.dual.selected().is_empty(),
+                p.shuttle_mut().expect("shuttle").selected().is_empty(),
                 "Active column must be empty before reset_current"
             );
             // All three schema classes are tracked as candidates.
@@ -528,17 +585,17 @@ mod tests {
         let mut out = std::collections::VecDeque::new();
         let mut timers = tv::timer::TimerQueue::new();
         let mut deferred: Vec<Deferred> = Vec::new();
-        let mut ctx = headless_ctx(&mut out, &mut timers, &mut deferred);
-        view.reset_current(&mut ctx);
+        with_ctx(&mut out, &mut timers, &mut deferred, |ctx| {
+            view.reset_current(ctx)
+        });
 
         // The two active classes are now in the Active column — no keypress needed.
         let p = picker_mut(&mut view);
         assert!(p.seeded);
         assert_eq!(
-            p.dual.selected().len(),
+            p.shuttle_mut().expect("shuttle").selected().len(),
             2,
-            "top + person must be active after reset_current, got {:?}",
-            p.dual.selected()
+            "top + person must be active after reset_current"
         );
     }
 
@@ -569,9 +626,8 @@ mod tests {
         );
     }
 
-    /// Moving a (removable) active class away via Delete unticks it and restages.
-    /// Replaces the old `space_toggle_preserves_list_cursor` test: ticking is now
-    /// done by moving between columns, and cursor preservation lives in DualList.
+    /// Moving an (unlocked) active class away via Delete unticks it and restages.
+    /// Ticking is done by moving between columns; the staged commit follows.
     #[test]
     fn move_out_removable_class_unticks_and_restages() {
         let sh = shared();
@@ -579,18 +635,17 @@ mod tests {
         let mut out = std::collections::VecDeque::new();
         let mut timers = tv::timer::TimerQueue::new();
         let mut deferred: Vec<Deferred> = Vec::new();
-        let mut ctx = headless_ctx(&mut out, &mut timers, &mut deferred);
-        view.reset_current(&mut ctx);
+        with_ctx(&mut out, &mut timers, &mut deferred, |ctx| {
+            view.reset_current(ctx)
+        });
         assert_eq!(staged(&sh).len(), 2);
 
         let p = picker_mut(&mut view);
-        // `top` is ABSTRACT → removable. Highlight it in the Active column, Delete.
-        let idx = active_index(p, "top");
-        if let Some(list) = p.dlg.child_mut(p.dual.selected_id_for_test()) {
-            list.set_value_ctx(FieldValue::Int(idx as i32), &mut ctx);
-        }
-        let mut ev = Event::KeyDown(KeyEvent::from(Key::Delete));
-        p.handle_event(&mut ev, &mut ctx);
+        // `top` is ABSTRACT → unlocked. Highlight it in the Active column, Delete.
+        with_ctx(&mut out, &mut timers, &mut deferred, |ctx| {
+            highlight_active_by_label(p, "top", ctx)
+        });
+        press_and_settle(p, Key::Delete, &mut out, &mut timers, &mut deferred);
 
         let v = staged(&sh);
         assert!(
@@ -612,29 +667,32 @@ mod tests {
         let mut out = std::collections::VecDeque::new();
         let mut timers = tv::timer::TimerQueue::new();
         let mut deferred: Vec<Deferred> = Vec::new();
-        let mut ctx = headless_ctx(&mut out, &mut timers, &mut deferred);
-        view.reset_current(&mut ctx);
+        with_ctx(&mut out, &mut timers, &mut deferred, |ctx| {
+            view.reset_current(ctx)
+        });
 
         let p = picker_mut(&mut view);
         // `person` is STRUCTURAL → locked. Highlight it in the Active column, Delete.
-        let idx = active_index(p, "person");
-        if let Some(list) = p.dlg.child_mut(p.dual.selected_id_for_test()) {
-            list.set_value_ctx(FieldValue::Int(idx as i32), &mut ctx);
-        }
-        let mut ev = Event::KeyDown(KeyEvent::from(Key::Delete));
-        p.handle_event(&mut ev, &mut ctx);
+        with_ctx(&mut out, &mut timers, &mut deferred, |ctx| {
+            highlight_active_by_label(p, "person", ctx)
+        });
+        press_and_settle(p, Key::Delete, &mut out, &mut timers, &mut deferred);
 
         assert!(
             staged(&sh).iter().any(|s| s.eq_ignore_ascii_case("person")),
-            "structural 'person' must stay ticked — it is non-removable"
+            "structural 'person' must stay ticked — it is locked"
         );
         assert!(
-            p.dual.selected().iter().any(|r| r.label == "person"),
+            p.shuttle_mut()
+                .expect("shuttle")
+                .selected()
+                .iter()
+                .any(|r| r.label == "person"),
             "structural 'person' must remain in the Active column"
         );
     }
 
-    /// Moving an available class toward Active (Right/Insert) ticks it and restages.
+    /// Moving an available class toward Active (Insert) ticks it and restages.
     #[test]
     fn move_in_available_class_ticks_and_restages() {
         let sh = shared();
@@ -643,18 +701,18 @@ mod tests {
         let mut out = std::collections::VecDeque::new();
         let mut timers = tv::timer::TimerQueue::new();
         let mut deferred: Vec<Deferred> = Vec::new();
-        let mut ctx = headless_ctx(&mut out, &mut timers, &mut deferred);
-        view.reset_current(&mut ctx);
+        with_ctx(&mut out, &mut timers, &mut deferred, |ctx| {
+            view.reset_current(ctx)
+        });
         assert_eq!(staged(&sh), vec!["person".to_string()]);
 
         let p = picker_mut(&mut view);
-        // Available column order is candidate-sorted minus active:
-        // [organizationalPerson, top]. Highlight index 0 and move it in.
-        if let Some(list) = p.dlg.child_mut(p.dual.avail_id_for_test()) {
-            list.set_value_ctx(FieldValue::Int(0), &mut ctx);
-        }
-        let mut ev = Event::KeyDown(KeyEvent::from(Key::Right));
-        p.handle_event(&mut ev, &mut ctx);
+        // Available column = candidate-sorted minus active: [organizationalPerson,
+        // top]. Highlight organizationalPerson and move it in with Insert.
+        with_ctx(&mut out, &mut timers, &mut deferred, |ctx| {
+            highlight_avail_by_label(p, "organizationalPerson", ctx)
+        });
+        press_and_settle(p, Key::Insert, &mut out, &mut timers, &mut deferred);
 
         let v = staged(&sh);
         assert!(

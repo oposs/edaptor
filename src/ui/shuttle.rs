@@ -478,6 +478,17 @@ impl View for Shuttle {
 
 #[cfg(test)]
 impl Shuttle {
+    /// The Available `SortedListBox`'s `ViewId` — lets a host's tests drive the
+    /// real column (set a highlight, dispatch a key) through the embedded widget.
+    pub(crate) fn avail_id_for_test(&self) -> ViewId {
+        self.avail_id
+    }
+
+    /// The Selected `ListBox`'s `ViewId` (see [`Shuttle::avail_id_for_test`]).
+    pub(crate) fn selected_id_for_test(&self) -> ViewId {
+        self.selected_id
+    }
+
     /// The display strings currently in list `id` (empty if it does not resolve
     /// to a `ListBox`).
     fn list_text(&mut self, id: ViewId) -> Vec<String> {
@@ -489,12 +500,12 @@ impl Shuttle {
             .unwrap_or_default()
     }
 
-    fn selected_text(&mut self) -> Vec<String> {
+    pub(crate) fn selected_text(&mut self) -> Vec<String> {
         self.list_text(self.selected_id)
     }
 
     /// The display strings in the Available column (a `SortedListBox`).
-    fn avail_text(&mut self) -> Vec<String> {
+    pub(crate) fn avail_text(&mut self) -> Vec<String> {
         self.group
             .child_mut(self.avail_id)
             .and_then(|v| v.as_any_mut())
@@ -504,14 +515,14 @@ impl Shuttle {
     }
 
     /// Set the highlighted (focused) row of list `id` to display index `idx`.
-    fn highlight(&mut self, id: ViewId, idx: i32, ctx: &mut Context) {
+    pub(crate) fn highlight(&mut self, id: ViewId, idx: i32, ctx: &mut Context) {
         if let Some(c) = self.group.child_mut(id) {
             c.set_value_ctx(FieldValue::Int(idx), ctx);
         }
     }
 
     /// Simulate the user having typed `text` into the search box.
-    fn set_search_text(&mut self, text: &str, ctx: &mut Context) {
+    pub(crate) fn set_search_text(&mut self, text: &str, ctx: &mut Context) {
         if let Some(id) = self.search_id {
             if let Some(c) = self.group.child_mut(id) {
                 c.set_value_ctx(FieldValue::Text(text.into()), ctx);
