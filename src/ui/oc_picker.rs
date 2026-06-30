@@ -1,7 +1,9 @@
 //! The objectClass field editor: a schema-seeded two-column mover. The currently
 //! active object classes sit in the **Active** column (left), the remaining known
 //! classes in the **Available** column (right). Moving a class toward Active ticks
-//! it; moving it away unticks it. STRUCTURAL classes are shown but non-removable.
+//! it; moving it away unticks it. STRUCTURAL classes that were already on the
+//! entry are shown locked (non-removable); a structural class added this session
+//! stays removable so an add can be undone.
 //! The prospective `SetValuesThenResyncSchema` outcome is kept in
 //! `UiState::staged_commit`. Capability: `NeedsSchema` (no worker).
 //!
@@ -52,10 +54,15 @@ impl FieldEditor for ObjectClassEditor {
         schema: &SchemaModel,
         shared: Shared,
     ) -> (Box<dyn View>, tv::ViewId) {
-        // Every known class becomes a `DualRow`, with `removable` precomputed from
-        // the schema: STRUCTURAL classes must not be removed (a structural class is
-        // load-bearing for the entry's existence), so they are locked. Names keep
-        // the schema's canonical spelling — `object_class_names` is already sorted.
+        // The active set at open, lowercased for case-insensitive matching against
+        // the canonical candidate spelling.
+        let ticked: BTreeSet<String> = self.current.iter().map(|s| s.to_lowercase()).collect();
+        // Every known class becomes a `DualRow`. A STRUCTURAL class is locked
+        // (non-removable) ONLY when it was already on the entry at open — those are
+        // the load-bearing classes worth protecting. A structural class ADDED in
+        // this session stays removable, so the user can undo an add (the reported
+        // bug: you could add a class but then never drop it again). Names keep the
+        // schema's canonical spelling — `object_class_names` is already sorted.
         let all_rows: Vec<DualRow> = schema
             .object_class_names()
             .into_iter()
@@ -64,19 +71,17 @@ impl FieldEditor for ObjectClassEditor {
                     .object_class(&name)
                     .map(|oc| oc.object_class_type == ObjectClassType::Structural)
                     .unwrap_or(false);
+                let originally_active = ticked.contains(&name.to_lowercase());
                 DualRow {
                     key: name.clone(),
                     label: name,
-                    removable: !structural,
+                    removable: !(structural && originally_active),
                 }
             })
             .collect();
-        // The active set, lowercased for case-insensitive matching against the
-        // canonical candidate spelling.
-        let ticked: BTreeSet<String> = self.current.iter().map(|s| s.to_lowercase()).collect();
         let picker = ObjectClassPicker::new(all_rows, ticked, shared);
         // Focus the search box so typing filters immediately (search-as-you-type);
-        // arrow keys are routed by `DualList::handle_event` to the lists.
+        // Tab/Shift-Tab then move focus to the lists and buttons the standard way.
         let focus = picker
             .dual
             .search_id()
@@ -331,6 +336,152 @@ mod tests {
             .iter()
             .position(|r| r.label.eq_ignore_ascii_case(label))
             .unwrap_or_else(|| panic!("{label} not in active column"))
+    }
+
+    /// Highlight `label` in list `id` by its **display** position — the index a
+    /// real user lands on, which (because the ListBox re-sorts and the lock marker
+    /// shifts order) differs from the host-order index. Strips the 2-char marker.
+    fn highlight_by_display(
+        p: &mut ObjectClassPicker,
+        id: tv::ViewId,
+        label: &str,
+        ctx: &mut Context,
+    ) {
+        let disp_idx = {
+            let lb = p
+                .dlg
+                .child_mut(id)
+                .unwrap()
+                .as_any_mut()
+                .unwrap()
+                .downcast_mut::<tv::ListBox>()
+                .unwrap();
+            lb.list()
+                .iter()
+                .position(|s| {
+                    s.chars()
+                        .skip(2)
+                        .collect::<String>()
+                        .eq_ignore_ascii_case(label)
+                })
+                .unwrap_or_else(|| panic!("{label} not displayed in list"))
+        };
+        p.dlg
+            .child_mut(id)
+            .unwrap()
+            .set_value_ctx(FieldValue::Int(disp_idx as i32), ctx);
+    }
+
+    fn highlight_active_by_label(p: &mut ObjectClassPicker, label: &str, ctx: &mut Context) {
+        let id = p.dual.selected_id_for_test();
+        highlight_by_display(p, id, label, ctx);
+    }
+
+    fn highlight_avail_by_label(p: &mut ObjectClassPicker, label: &str, ctx: &mut Context) {
+        let id = p.dual.avail_id_for_test();
+        highlight_by_display(p, id, label, ctx);
+    }
+
+    /// A STRUCTURAL class ADDED in this session must stay removable — only the
+    /// classes already on the entry at open are locked. (Reported bug: you could
+    /// add a `*` class but then never drop it again.)
+    #[test]
+    fn session_added_structural_class_can_be_removed() {
+        let sh = shared();
+        // person (STRUCTURAL) is the only originally-active class → locked.
+        // organizationalPerson (STRUCTURAL) is available; adding it must NOT lock it.
+        let mut view = build_view(&sh, &["person"]);
+        let mut out = std::collections::VecDeque::new();
+        let mut timers = tv::timer::TimerQueue::new();
+        let mut deferred: Vec<Deferred> = Vec::new();
+        let mut ctx = headless_ctx(&mut out, &mut timers, &mut deferred);
+        view.reset_current(&mut ctx);
+
+        let p = picker_mut(&mut view);
+        // Add organizationalPerson from the Available column.
+        highlight_avail_by_label(p, "organizationalPerson", &mut ctx);
+        let mut ev = Event::KeyDown(KeyEvent::from(Key::Insert));
+        p.handle_event(&mut ev, &mut ctx);
+        assert!(
+            staged(&sh)
+                .iter()
+                .any(|s| s.eq_ignore_ascii_case("organizationalPerson")),
+            "organizationalPerson must be added"
+        );
+        // It must be removable despite being STRUCTURAL — it wasn't originally active.
+        let added = p
+            .dual
+            .selected()
+            .iter()
+            .find(|r| r.label.eq_ignore_ascii_case("organizationalPerson"))
+            .expect("added class present in Active column");
+        assert!(
+            added.removable,
+            "a structural class added this session must stay removable"
+        );
+
+        // Now drop it again.
+        highlight_active_by_label(p, "organizationalPerson", &mut ctx);
+        let mut ev = Event::KeyDown(KeyEvent::from(Key::Delete));
+        p.handle_event(&mut ev, &mut ctx);
+        assert!(
+            !staged(&sh)
+                .iter()
+                .any(|s| s.eq_ignore_ascii_case("organizationalPerson")),
+            "session-added class must be removable again"
+        );
+        // The originally-active structural 'person' stays locked.
+        let person = p
+            .dual
+            .selected()
+            .iter()
+            .find(|r| r.label.eq_ignore_ascii_case("person"))
+            .expect("person still active");
+        assert!(
+            !person.removable,
+            "originally-active structural class stays locked"
+        );
+    }
+
+    /// Regression: the Active list re-sorts its rows — a removable row's "  "
+    /// marker sorts before a locked row's "* " marker — so the highlight's display
+    /// index differs from the host-order index. Removing the highlighted removable
+    /// class must remove THAT class, not whatever sits at the same host index
+    /// (a locked class → silently rejected → the reported "Remove has no effect").
+    #[test]
+    fn move_out_uses_displayed_highlight_not_host_index() {
+        let sh = shared();
+        // Active = {person (STRUCTURAL → locked), top (ABSTRACT → removable)}.
+        // Host order: [person, top]; display order: [top, person] (lock marker
+        // sorts last). Highlighting `top` lands on display index 0 — the same
+        // index that, in host order, is the locked `person`.
+        let mut view = build_view(&sh, &["person", "top"]);
+        let mut out = std::collections::VecDeque::new();
+        let mut timers = tv::timer::TimerQueue::new();
+        let mut deferred: Vec<Deferred> = Vec::new();
+        let mut ctx = headless_ctx(&mut out, &mut timers, &mut deferred);
+        view.reset_current(&mut ctx);
+
+        let p = picker_mut(&mut view);
+        // Sanity: host order really does put the locked class first.
+        assert_eq!(
+            active_index(p, "person"),
+            0,
+            "locked class first in host order"
+        );
+        highlight_active_by_label(p, "top", &mut ctx);
+        let mut ev = Event::KeyDown(KeyEvent::from(Key::Delete));
+        p.handle_event(&mut ev, &mut ctx);
+
+        let v = staged(&sh);
+        assert!(
+            !v.iter().any(|s| s.eq_ignore_ascii_case("top")),
+            "highlighted removable 'top' must be removed, got {v:?}"
+        );
+        assert!(
+            v.iter().any(|s| s.eq_ignore_ascii_case("person")),
+            "locked 'person' must remain, got {v:?}"
+        );
     }
 
     #[test]

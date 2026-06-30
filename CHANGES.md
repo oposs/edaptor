@@ -141,6 +141,19 @@ All notable changes to eDAPtor are documented here. The format follows
   light theme (a slate line on the desktop tone; blue while being dragged). They
   previously rendered with the old dark classic-blue defaults.
 
+- tvision UI: the shared dual-list editors (`objectClass` and group membership)
+  gained **scroll bars** on each column (shown when the column overflows) and
+  visible **[Add]** / **[Remove]** buttons on the dialog button row. The
+  Insert/Delete (and →/←) keys continue to work; the buttons also carry Alt-A /
+  Alt-R shortcuts.
+
+- tvision UI: in the dual-list editors (`objectClass` / membership), **Tab /
+  Shift-Tab now move focus between the screen elements** (search box, the two
+  lists, the Add/Remove/OK/Cancel buttons) the standard way. Previously Tab was
+  consumed to flip which column the arrow keys drove, so it appeared to do
+  nothing and the buttons were unreachable by keyboard. The arrow keys now drive
+  whichever list holds focus.
+
 - tvision UI: the **mouse wheel** in the entry form now moves the focused field
   (scrolling the form to follow it), so wheel scrolling advances the cursor
   instead of sliding the content out from under a stationary cursor.
@@ -163,6 +176,20 @@ All notable changes to eDAPtor are documented here. The format follows
   temporary git-pin for `exec_view_focused` has been removed.
 
 ### Fixed
+
+- tvision UI: in the `objectClass` editor, **a structural class added during the
+  edit could not be removed again** — every STRUCTURAL class was locked, including
+  ones just added. Now only the structural classes that were already on the entry
+  at open are locked (marked `*`); a structural class you add this session stays
+  removable, so an add can be undone.
+
+- tvision UI: in the dual-list editors (`objectClass` / membership), **Remove (and
+  the Delete key / [Remove] button) could silently do nothing**. The list widget
+  re-sorts its rows internally (and the lock marker shifts locked rows to the
+  end), so the highlighted *display* row no longer lined up with the underlying
+  row index — Remove often targeted a locked structural class and was rejected.
+  The highlight is now resolved by matching the displayed row, so Remove always
+  acts on the class you selected.
 
 - tvision UI: **adding or removing an objectClass crashed the application**
   (`index out of bounds` in the form pane). The form only rebuilt its cells when

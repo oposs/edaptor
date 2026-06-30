@@ -11,10 +11,11 @@
 //! - **Members** (right): the staged member DN set, seeded from `field.values`
 //!   (the user's current memberships / baseline) via `DualList::set_selected`.
 //!
-//! `DualList` owns the column geometry and interaction (Insert/→ move into
-//! Members, Delete/← remove, Tab flips the active column, search-box reporting,
-//! and the intentional pass-through of Space/Enter to the search box and the
-//! default OK button). This module keeps the membership-specific plumbing: the
+//! `DualList` owns the column geometry and move actions (Insert/→ move into
+//! Members, Delete/← remove, plus [Add]/[Remove] buttons, and search-box
+//! reporting); Tab/Shift-Tab focus traversal, list navigation and the
+//! pass-through of Space/Enter to the search box and the default OK button are
+//! handled by the dialog. This module keeps the membership-specific plumbing: the
 //! async candidate-search submit, the pump/`REFRESH` seam that refreshes the
 //! Available column, member seeding, and the `staged_commit` write-back.
 //!
