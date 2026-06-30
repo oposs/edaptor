@@ -186,6 +186,12 @@ All notable changes to eDAPtor are documented here. The format follows
 
 ### Fixed
 
+- tvision UI: in the two-column editors (`objectClass` / membership), the **mouse
+  wheel now scrolls the column under the pointer** instead of always scrolling one
+  fixed column. The scroll bar consumed the wheel non-positionally, so whichever
+  column's bar the widget offered first ate every wheel event regardless of where
+  the cursor was; the Shuttle now routes the wheel to the hovered column's list.
+
 - tvision UI: in the `objectClass` editor, **a structural class added during the
   edit could not be removed again** — every STRUCTURAL class was locked, including
   ones just added. Now only the structural classes that were already on the entry

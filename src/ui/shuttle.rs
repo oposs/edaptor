@@ -9,8 +9,8 @@
 //! tvision-free and unit-testable without a `Dialog`.
 
 use tvision_rs::{
-    delegate, Button, ButtonFlags, Command, Context, Event, FieldValue, Group, InputLine, Key,
-    Label, ListBox, Rect, ScrollBar, SortedListBox, View, ViewId,
+    self as tv, delegate, Button, ButtonFlags, Command, Context, Event, FieldValue, Group,
+    InputLine, Key, Label, ListBox, Rect, ScrollBar, SortedListBox, View, ViewId,
 };
 
 /// Broadcast (with the Shuttle's own `ViewId` as `source`) when the Selected set
@@ -254,6 +254,51 @@ impl Shuttle {
         }
     }
 
+    /// The list of the column whose horizontal extent contains the Shuttle-local
+    /// `x`, or `None` when `x` is over neither list. A wheel scroll is routed here
+    /// so the column *under the cursor* scrolls: `ScrollBar` consumes `MouseWheel`
+    /// non-positionally (any visible bar grabs it) and the group offers a fixed bar
+    /// first, so without explicit routing one column would scroll regardless of the
+    /// cursor (the reported "always the left panel" bug).
+    fn wheel_target_list(&mut self, x: i32) -> Option<ViewId> {
+        if self.x_in_child(self.avail_id, x) {
+            Some(self.avail_id)
+        } else if self.x_in_child(self.selected_id, x) {
+            Some(self.selected_id)
+        } else {
+            None
+        }
+    }
+
+    /// Whether `x` (Shuttle-local) falls within child `id`'s horizontal extent.
+    /// `get_bounds` is owner-relative — the same frame a delivered mouse event's
+    /// position carries here — so the comparison holds wherever the host places
+    /// the Shuttle.
+    fn x_in_child(&mut self, id: ViewId, x: i32) -> bool {
+        match self.group.child_mut(id) {
+            Some(c) => {
+                let b = c.state().get_bounds();
+                x >= b.a.x && x < b.b.x
+            }
+            None => false,
+        }
+    }
+
+    /// Scroll list `id` by `delta` rows by nudging its focused item (clamped at the
+    /// top; the list clamps the bottom). This moves the highlight *and* scrolls the
+    /// viewport via the list's own `ensure_visible`, so it works regardless of which
+    /// child holds focus or whether the column's scroll bar is currently visible.
+    fn scroll_list(&mut self, id: ViewId, delta: i32, ctx: &mut Context) {
+        if let Some(c) = self.group.child_mut(id) {
+            let cur = match c.value() {
+                Some(FieldValue::Int(i)) => i,
+                _ => 0,
+            };
+            let next = (cur + delta).max(0);
+            c.set_value_ctx(FieldValue::Int(next), ctx);
+        }
+    }
+
     /// Replace the Available rows and re-render the Available column.
     pub(crate) fn set_available(&mut self, rows: Vec<ShuttleRow>, ctx: &mut Context) {
         self.model.set_available(rows);
@@ -436,6 +481,32 @@ impl View for Shuttle {
     }
 
     fn handle_event(&mut self, ev: &mut Event, ctx: &mut Context) {
+        // Mouse wheel: scroll the column the cursor is OVER. `ScrollBar` consumes
+        // the wheel non-positionally (any visible bar grabs it) and the group offers
+        // a fixed bar first, so without routing here one column would scroll
+        // regardless of the cursor. Scroll the hovered column's list directly (if
+        // any) and always consume, so the group's non-positional default never fires.
+        if matches!(ev, Event::MouseWheel(_)) {
+            let (x, delta) = match &*ev {
+                Event::MouseWheel(me) => (
+                    me.position.x,
+                    match me.wheel {
+                        tv::event::MouseWheel::Down => 3,
+                        tv::event::MouseWheel::Up => -3,
+                        _ => 0,
+                    },
+                ),
+                _ => (0, 0),
+            };
+            if delta != 0 {
+                if let Some(list) = self.wheel_target_list(x) {
+                    self.scroll_list(list, delta, ctx);
+                }
+            }
+            ev.clear();
+            return;
+        }
+
         // Insert moves the highlighted Available row toward Selected. Everything
         // else (Tab/arrows/typing) delegates to the group so focus and list
         // navigation work the standard way.
@@ -898,6 +969,70 @@ mod tests {
         assert!(
             text.iter().any(|s| s.ends_with("beta")),
             "beta must appear, got {text:?}"
+        );
+    }
+
+    #[test]
+    fn mouse_wheel_routes_to_the_column_under_the_cursor() {
+        // `shuttle()` builds with selected_on_left = false → Available is the LEFT
+        // column, Selected the RIGHT. A wheel must scroll the column the cursor is
+        // OVER, not whichever scrollbar the group happens to offer first (the
+        // non-positional `ScrollBar` wheel grab that made one fixed column eat
+        // every wheel event regardless of the cursor).
+        let mut sh = shuttle();
+        assert_eq!(
+            sh.wheel_target_list(10),
+            Some(sh.avail_id),
+            "a wheel over the left column scrolls the left (Available) list"
+        );
+        assert_eq!(
+            sh.wheel_target_list(50),
+            Some(sh.selected_id),
+            "a wheel over the right column scrolls the right (Selected) list"
+        );
+        // Outside both list columns (e.g. the far gutter) → no column to scroll.
+        assert_eq!(
+            sh.wheel_target_list(0),
+            None,
+            "left of both columns: no target"
+        );
+    }
+
+    #[test]
+    fn mouse_wheel_scrolls_the_hovered_column_only() {
+        use tv::event::{MouseEvent, MouseWheel};
+        use tv::Point;
+        // selected_on_left = false → Available LEFT, Selected RIGHT.
+        let mut sh = shuttle();
+        let mut h = Harness::new();
+        let many: Vec<ShuttleRow> = (0..30).map(|i| row(&format!("r{i:02}"))).collect();
+        sh.set_available(many.clone(), &mut h.ctx());
+        sh.set_selected(many, &mut h.ctx());
+
+        // A wheel-down over the LEFT (Available) column advances the Available
+        // list's focused row, and leaves the RIGHT (Selected) list untouched.
+        let mut ev = Event::MouseWheel(MouseEvent {
+            position: Point::new(10, 12),
+            wheel: MouseWheel::Down,
+            ..Default::default()
+        });
+        sh.handle_event(&mut ev, &mut h.ctx());
+
+        let avail_focus = match sh.group.child_mut(sh.avail_id).and_then(|v| v.value()) {
+            Some(FieldValue::Int(i)) => i,
+            _ => -1,
+        };
+        let selected_focus = match sh.group.child_mut(sh.selected_id).and_then(|v| v.value()) {
+            Some(FieldValue::Int(i)) => i,
+            _ => -1,
+        };
+        assert!(
+            avail_focus > 0,
+            "a wheel over the left column scrolls the Available list, got {avail_focus}"
+        );
+        assert_eq!(
+            selected_focus, 0,
+            "the right (Selected) column must NOT scroll, got {selected_focus}"
         );
     }
 }
