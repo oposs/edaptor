@@ -1,14 +1,22 @@
-//! `Shuttle` — a domain-free two-list "transfer" widget (work in progress).
+//! `Shuttle` — a domain-free two-list "transfer" widget.
 //!
-//! This is the clean re-incubation of `dual_list.rs`: instead of a controller
-//! that reaches into the host's `Dialog`, the `Shuttle` will *be* a `View`
-//! embedding a `Group` and owning its children, notifying the owner by
-//! broadcast. The pure column logic — move / de-dup / lock — lives in
-//! [`ShuttleModel`], which is tvision-free and unit-testable without a `Dialog`.
+//! The clean re-incubation of `dual_list.rs`: instead of a controller that
+//! reaches into the host's `Dialog`, the `Shuttle` *is* a `View` embedding a
+//! `Group` and owning its children (two columns, optional search box, Add/Remove
+//! buttons), notifying the owner by broadcast (`CMD_SHUTTLE_CHANGED` /
+//! `CMD_SHUTTLE_SEARCH`) rather than a bespoke return-value channel. The pure
+//! column logic — move / de-dup / lock — lives in [`ShuttleModel`], which is
+//! tvision-free and unit-testable without a `Dialog`.
+
+// The Shuttle is not yet wired into the app: `membership.rs` / `oc_picker.rs`
+// migrate onto it next. Until then its public surface is unreferenced from
+// production code (only the tests exercise it), so the whole module reads as
+// dead. Remove this once a consumer constructs a `Shuttle`.
+#![allow(dead_code)]
 
 use tvision_rs::{
-    delegate, Command, Context, Event, FieldValue, Group, InputLine, Key, ListBox, Rect, ScrollBar,
-    SortedListBox, View, ViewId,
+    delegate, Button, ButtonFlags, Command, Context, Event, FieldValue, Group, InputLine, Key,
+    Label, ListBox, Rect, ScrollBar, SortedListBox, View, ViewId,
 };
 
 /// Broadcast (with the Shuttle's own `ViewId` as `source`) when the Selected set
@@ -16,8 +24,12 @@ use tvision_rs::{
 pub(crate) const CMD_SHUTTLE_CHANGED: Command = Command::custom("shuttle.changed");
 /// Broadcast when the search box text changes. The owner re-reads
 /// [`Shuttle::search_text`] and re-publishes the Available column.
-#[allow(dead_code)] // wired when the search seam lands
 pub(crate) const CMD_SHUTTLE_SEARCH: Command = Command::custom("shuttle.search");
+
+/// Internal: the on-screen [Add] button posts this; handled exactly like Insert.
+const CMD_ADD: Command = Command::custom("shuttle.add");
+/// Internal: the on-screen [Remove] button posts this; handled like Delete.
+const CMD_REMOVE: Command = Command::custom("shuttle.remove");
 
 /// Marker prefix for a Selected row that may **not** be removed (locked).
 const MARK_LOCKED: &str = "* ";
@@ -28,7 +40,6 @@ const MARK_PLAIN: &str = "  ";
 /// (a DN, an object-class name, …) used for de-duplication; `label` is the
 /// display text; `locked` blocks moving the row out of the Selected column.
 #[derive(Clone, Debug, PartialEq, Eq)]
-#[allow(dead_code)] // fields wired in as the model grows
 pub(crate) struct ShuttleRow {
     pub key: String,
     pub label: String,
@@ -39,13 +50,11 @@ pub(crate) struct ShuttleRow {
 /// wrap one of these plus the child views; all move/de-dup/lock logic lives
 /// here so it is exercised without a `Dialog`.
 #[derive(Default)]
-#[allow(dead_code)] // grows under TDD; trimmed before the View is wired up
 pub(crate) struct ShuttleModel {
     available: Vec<ShuttleRow>,
     selected: Vec<ShuttleRow>,
 }
 
-#[allow(dead_code)]
 impl ShuttleModel {
     fn available(&self) -> &[ShuttleRow] {
         &self.available
@@ -100,21 +109,22 @@ impl ShuttleModel {
     }
 }
 
-/// The two-list transfer widget. Embeds a `Group` that owns the column lists
-/// (and, later, the scroll bars, search box and Add/Remove buttons); the move
-/// logic lives in [`ShuttleModel`]. Built to *be* a `View` (the `View` impl is
-/// wired up in a later step) rather than poking a host's `Dialog`.
-#[allow(dead_code)] // View impl + remaining children wired up under TDD
+/// The two-list transfer widget. Embeds a `Group` that owns the column lists,
+/// their scroll bars, the optional search box and the Add/Remove buttons; the
+/// move logic lives in [`ShuttleModel`]. A `View` in its own right (the impl is
+/// delegated to the group, with only `handle_event`, `as_any_mut` and the
+/// gather/scatter methods hand-written) rather than a controller poking a host's
+/// `Dialog`.
 pub(crate) struct Shuttle {
     group: Group,
     model: ShuttleModel,
     avail_id: ViewId,
     selected_id: ViewId,
     search_id: Option<ViewId>,
-    selected_on_left: bool,
+    /// Last-observed search-box text (the value returned by `search_text`).
+    last_search: String,
 }
 
-#[allow(dead_code)]
 impl Shuttle {
     /// Build the two columns (each a list + a right-lane scroll bar) inside an
     /// owned `Group`, plus an optional search box above the Available column.
@@ -123,8 +133,8 @@ impl Shuttle {
     /// rows 4..(height-4), 2-cell margins and a 4-cell gutter.
     pub(crate) fn new(
         area: Rect,
-        _left_title: &str,
-        _right_title: &str,
+        left_title: &str,
+        right_title: &str,
         with_search: bool,
         selected_on_left: bool,
     ) -> Shuttle {
@@ -132,6 +142,7 @@ impl Shuttle {
         let mid = (x0 + x1) / 2;
         let left = (x0 + 2, mid - 2);
         let right = (mid + 2, x1 - 2);
+        let head_y = y0 + 1;
         let search_y = (y0 + 2, y0 + 3);
         let list_y = (y0 + 4, y1 - 4);
         let (avail_col, sel_col) = if selected_on_left {
@@ -141,6 +152,18 @@ impl Shuttle {
         };
 
         let mut group = Group::new(area);
+
+        // Static column headers over the physical left/right columns.
+        group.insert(Box::new(Label::new(
+            Rect::new(left.0, head_y, left.1, head_y + 1),
+            left_title,
+            None,
+        )));
+        group.insert(Box::new(Label::new(
+            Rect::new(right.0, head_y, right.1, head_y + 1),
+            right_title,
+            None,
+        )));
 
         // Search box above the Available column.
         let search_id = if with_search {
@@ -180,13 +203,60 @@ impl Shuttle {
             Some(selected_bar),
         )));
 
+        // On-screen affordances for the move keys (which are not discoverable),
+        // left-aligned on the bottom button row. Alt-A / Alt-R shortcuts work
+        // even while another child holds focus.
+        let btn_top = y1 - 3;
+        group.insert(Box::new(Button::new(
+            Rect::new(x0 + 2, btn_top, x0 + 12, btn_top + 2),
+            "~A~dd",
+            CMD_ADD,
+            ButtonFlags::new(),
+        )));
+        group.insert(Box::new(Button::new(
+            Rect::new(x0 + 14, btn_top, x0 + 26, btn_top + 2),
+            "~R~emove",
+            CMD_REMOVE,
+            ButtonFlags::new(),
+        )));
+
         Shuttle {
             group,
             model: ShuttleModel::default(),
             avail_id,
             selected_id,
             search_id,
-            selected_on_left,
+            last_search: String::new(),
+        }
+    }
+
+    /// The current search-box text (empty when there is no search box). Updated
+    /// as the box is edited; the owner reads it after a `CMD_SHUTTLE_SEARCH`
+    /// broadcast to re-publish the Available column.
+    pub(crate) fn search_text(&self) -> &str {
+        &self.last_search
+    }
+
+    /// The current Selected set — the owner reads this after a
+    /// `CMD_SHUTTLE_CHANGED` broadcast to stage its commit.
+    pub(crate) fn selected(&self) -> &[ShuttleRow] {
+        self.model.selected()
+    }
+
+    /// The `ViewId` of the search box, if any. The owner typically focuses it so
+    /// typing searches immediately.
+    pub(crate) fn search_id(&self) -> Option<ViewId> {
+        self.search_id
+    }
+
+    /// The current search-box text read live from the child `InputLine`.
+    fn current_search(&mut self) -> String {
+        let Some(id) = self.search_id else {
+            return String::new();
+        };
+        match self.group.child_mut(id).and_then(|v| v.value()) {
+            Some(FieldValue::Text(s)) => s,
+            _ => String::new(),
         }
     }
 
@@ -317,18 +387,67 @@ impl Shuttle {
     }
 }
 
-#[delegate(to = group, skip(handle_event, as_any_mut))]
+#[delegate(to = group, skip(handle_event, as_any_mut, value, set_value, set_value_ctx))]
 impl View for Shuttle {
     fn as_any_mut(&mut self) -> Option<&mut dyn core::any::Any> {
         Some(self)
+    }
+
+    /// Gather: the Selected set as a list of keys, so the Shuttle participates
+    /// in a Dialog's data exchange like any other field.
+    fn value(&self) -> Option<FieldValue> {
+        Some(FieldValue::List(
+            self.model
+                .selected()
+                .iter()
+                .map(|r| FieldValue::Text(r.key.clone()))
+                .collect(),
+        ))
+    }
+
+    /// Scatter (no `Context`): seed the Selected set from a list of keys. Rows
+    /// are reconstructed with `label == key` and unlocked — the lossy generic
+    /// path; rich seeding (labels, locks) uses [`Shuttle::set_selected`].
+    fn set_value(&mut self, v: FieldValue) {
+        if let FieldValue::List(items) = v {
+            let rows = items
+                .into_iter()
+                .filter_map(|fv| match fv {
+                    FieldValue::Text(s) => Some(ShuttleRow {
+                        key: s.clone(),
+                        label: s,
+                        locked: false,
+                    }),
+                    _ => None,
+                })
+                .collect();
+            self.model.set_selected(rows);
+        }
+    }
+
+    /// Scatter with rendering: seed the model, then re-render the Selected list.
+    fn set_value_ctx(&mut self, v: FieldValue, ctx: &mut Context) {
+        self.set_value(v);
+        self.rebuild_selected(ctx);
     }
 
     fn handle_event(&mut self, ev: &mut Event, ctx: &mut Context) {
         // Insert moves the highlighted Available row toward Selected. Everything
         // else (Tab/arrows/typing) delegates to the group so focus and list
         // navigation work the standard way.
-        let move_in = matches!(ev, Event::KeyDown(k) if k.key == Key::Insert);
-        let move_out = matches!(ev, Event::KeyDown(k) if k.key == Key::Delete);
+        // Enter is a move only while a list holds focus (Available → move in,
+        // Selected → move out). Enter elsewhere (search box, buttons) passes
+        // through so the dialog's default OK still fires.
+        let enter = matches!(ev, Event::KeyDown(k) if k.key == Key::Enter);
+        let enter_in = enter && self.group.current() == Some(self.avail_id);
+        let enter_out = enter && self.group.current() == Some(self.selected_id);
+
+        let move_in = enter_in
+            || matches!(ev, Event::KeyDown(k) if k.key == Key::Insert)
+            || matches!(ev, Event::Command(c) if *c == CMD_ADD);
+        let move_out = enter_out
+            || matches!(ev, Event::KeyDown(k) if k.key == Key::Delete)
+            || matches!(ev, Event::Command(c) if *c == CMD_REMOVE);
         if move_in {
             if self.move_in_highlighted(ctx) {
                 ctx.broadcast(CMD_SHUTTLE_CHANGED, self.state().id());
@@ -344,6 +463,16 @@ impl View for Shuttle {
             return;
         }
         self.group.handle_event(ev, ctx);
+
+        // Report a search-box edit. The owner re-reads `search_text` and
+        // re-publishes the Available column.
+        if self.search_id.is_some() {
+            let cur = self.current_search();
+            if cur != self.last_search {
+                self.last_search = cur;
+                ctx.broadcast(CMD_SHUTTLE_SEARCH, self.state().id());
+            }
+        }
     }
 }
 
@@ -378,6 +507,15 @@ impl Shuttle {
     fn highlight(&mut self, id: ViewId, idx: i32, ctx: &mut Context) {
         if let Some(c) = self.group.child_mut(id) {
             c.set_value_ctx(FieldValue::Int(idx), ctx);
+        }
+    }
+
+    /// Simulate the user having typed `text` into the search box.
+    fn set_search_text(&mut self, text: &str, ctx: &mut Context) {
+        if let Some(id) = self.search_id {
+            if let Some(c) = self.group.child_mut(id) {
+                c.set_value_ctx(FieldValue::Text(text.into()), ctx);
+            }
         }
     }
 }
@@ -518,6 +656,175 @@ mod tests {
             h.broadcast_seen(CMD_SHUTTLE_CHANGED),
             "a move must broadcast CMD_SHUTTLE_CHANGED"
         );
+    }
+
+    #[test]
+    fn enter_on_available_list_moves_in() {
+        let mut sh = shuttle();
+        let mut h = Harness::new();
+        sh.set_available(vec![row("a")], &mut h.ctx());
+        sh.set_selected(vec![], &mut h.ctx());
+        let aid = sh.avail_id;
+        {
+            let mut ctx = h.ctx();
+            sh.group.focus_child(aid, &mut ctx);
+        }
+        sh.highlight(aid, 0, &mut h.ctx());
+        let mut ev = Event::KeyDown(KeyEvent::from(Key::Enter));
+        sh.handle_event(&mut ev, &mut h.ctx());
+        assert_eq!(
+            keys(sh.model.selected()),
+            ["a"],
+            "Enter on the Available list moves the row in"
+        );
+    }
+
+    #[test]
+    fn enter_on_selected_list_moves_out() {
+        let mut sh = shuttle();
+        let mut h = Harness::new();
+        sh.set_selected(vec![row("x"), row("y")], &mut h.ctx());
+        let sid = sh.selected_id;
+        {
+            let mut ctx = h.ctx();
+            sh.group.focus_child(sid, &mut ctx);
+        }
+        sh.highlight(sid, 0, &mut h.ctx());
+        let mut ev = Event::KeyDown(KeyEvent::from(Key::Enter));
+        sh.handle_event(&mut ev, &mut h.ctx());
+        assert_eq!(
+            keys(sh.model.selected()),
+            ["y"],
+            "Enter on the Selected list moves the highlighted row out"
+        );
+    }
+
+    #[test]
+    fn enter_on_search_box_does_not_move() {
+        let mut sh = shuttle();
+        let mut h = Harness::new();
+        sh.set_available(vec![row("a")], &mut h.ctx());
+        sh.set_selected(vec![row("k")], &mut h.ctx());
+        let search = sh.search_id().unwrap();
+        {
+            let mut ctx = h.ctx();
+            sh.group.focus_child(search, &mut ctx);
+        }
+        let mut ev = Event::KeyDown(KeyEvent::from(Key::Enter));
+        sh.handle_event(&mut ev, &mut h.ctx());
+        assert_eq!(
+            keys(sh.model.selected()),
+            ["k"],
+            "Enter on the search box must NOT move — it passes through to the dialog (OK)"
+        );
+    }
+
+    #[test]
+    fn public_accessors_expose_selection_and_search_id() {
+        let mut sh = shuttle();
+        let mut h = Harness::new();
+        assert!(sh.search_id().is_some(), "built with a search box");
+        sh.set_available(vec![row("a")], &mut h.ctx());
+        sh.set_selected(vec![], &mut h.ctx());
+        let aid = sh.avail_id;
+        sh.highlight(aid, 0, &mut h.ctx());
+        let mut ev = Event::KeyDown(KeyEvent::from(Key::Insert));
+        sh.handle_event(&mut ev, &mut h.ctx());
+        assert_eq!(
+            keys(sh.selected()),
+            ["a"],
+            "selected() reflects the staged set after a move"
+        );
+    }
+
+    #[test]
+    fn value_reports_selected_keys_as_a_list() {
+        let mut sh = shuttle();
+        let mut h = Harness::new();
+        sh.set_selected(vec![row("a"), row("b")], &mut h.ctx());
+        assert_eq!(
+            View::value(&sh),
+            Some(FieldValue::List(vec![
+                FieldValue::Text("a".into()),
+                FieldValue::Text("b".into()),
+            ])),
+            "value() must gather the selected keys for dialog data exchange"
+        );
+    }
+
+    #[test]
+    fn set_value_ctx_seeds_and_renders_selected() {
+        let mut sh = shuttle();
+        let mut h = Harness::new();
+        let v = FieldValue::List(vec![
+            FieldValue::Text("x".into()),
+            FieldValue::Text("y".into()),
+        ]);
+        sh.set_value_ctx(v, &mut h.ctx());
+        assert_eq!(
+            keys(sh.model.selected()),
+            ["x", "y"],
+            "set_value seeds Selected"
+        );
+        assert_eq!(
+            sh.selected_text().len(),
+            2,
+            "set_value_ctx must also render the Selected column"
+        );
+    }
+
+    #[test]
+    fn search_box_edit_broadcasts_search_changed() {
+        let mut sh = shuttle();
+        let mut h = Harness::new();
+        sh.set_search_text("foo", &mut h.ctx());
+        // Any delegating (non-move) event triggers the post-delegation check.
+        let mut ev = Event::KeyDown(KeyEvent::from(Key::End));
+        sh.handle_event(&mut ev, &mut h.ctx());
+        assert_eq!(sh.search_text(), "foo", "search_text must track the box");
+        assert!(
+            h.broadcast_seen(CMD_SHUTTLE_SEARCH),
+            "a search edit must broadcast CMD_SHUTTLE_SEARCH"
+        );
+    }
+
+    #[test]
+    fn add_button_command_moves_highlighted_available_in() {
+        let mut sh = shuttle();
+        let mut h = Harness::new();
+        sh.set_available(vec![row("a")], &mut h.ctx());
+        sh.set_selected(vec![], &mut h.ctx());
+        let aid = sh.avail_id;
+        sh.highlight(aid, 0, &mut h.ctx());
+
+        let mut ev = Event::Command(CMD_ADD);
+        sh.handle_event(&mut ev, &mut h.ctx());
+
+        assert_eq!(
+            keys(sh.model.selected()),
+            ["a"],
+            "[Add] must move the row in"
+        );
+        assert!(h.broadcast_seen(CMD_SHUTTLE_CHANGED));
+    }
+
+    #[test]
+    fn remove_button_command_moves_highlighted_selected_out() {
+        let mut sh = shuttle();
+        let mut h = Harness::new();
+        sh.set_selected(vec![row("x"), row("y")], &mut h.ctx());
+        let sid = sh.selected_id;
+        sh.highlight(sid, 1, &mut h.ctx());
+
+        let mut ev = Event::Command(CMD_REMOVE);
+        sh.handle_event(&mut ev, &mut h.ctx());
+
+        assert_eq!(
+            keys(sh.model.selected()),
+            ["x"],
+            "[Remove] must move 'y' out"
+        );
+        assert!(h.broadcast_seen(CMD_SHUTTLE_CHANGED));
     }
 
     #[test]
