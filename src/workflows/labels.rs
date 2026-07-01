@@ -90,13 +90,19 @@ pub(crate) fn compute_rows(
     rules: &[LabelRule],
 ) -> Vec<(String, String)> {
     let mut rows = Vec::new();
-    if let Some(node) = structure.get(branch) {
-        rows.push((format!("‹self› {}", node.label), branch.to_string()));
-    }
     // Match the incremental search against the RENDERED label (what the operator
     // sees) — which contains every property used in the profile's label template —
-    // not just the structural cn. Get every leaf (empty query) and filter here.
+    // not just the structural cn. The ‹self› row is filtered too, so a query that
+    // matches nothing leaves ZERO rows: the entries list is then genuinely empty
+    // and its find mode renders the "No match: <query>" placeholder. Get every
+    // leaf (empty query) and filter here.
     let q = search.to_lowercase();
+    if let Some(node) = structure.get(branch) {
+        let self_label = format!("‹self› {}", node.label);
+        if q.is_empty() || self_label.to_lowercase().contains(&q) {
+            rows.push((self_label, branch.to_string()));
+        }
+    }
     for leaf in structure.filter_leaves(branch, "") {
         let label = render_node_label(rules, &leaf.object_classes, &leaf.attrs, &leaf.label);
         if q.is_empty() || label.to_lowercase().contains(&q) {
@@ -278,10 +284,16 @@ mod tests {
                 "uid=jane,ou=users,dc=example,dc=org".to_string()
             )
         );
+        // A query that matches neither the ‹self› row nor any leaf leaves ZERO
+        // rows — so the entries list is genuinely empty and shows "No match".
         assert_eq!(
             compute_rows(&s, "ou=users,dc=example,dc=org", "zzz", &[]).len(),
-            1
+            0
         );
+        // A query matching only the ‹self› label keeps just that row.
+        let self_only = compute_rows(&s, "ou=users,dc=example,dc=org", "‹self›", &[]);
+        assert_eq!(self_only.len(), 1);
+        assert_eq!(self_only[0].0, "‹self› ou=users");
     }
 
     #[test]
@@ -306,12 +318,14 @@ mod tests {
             template: crate::config::label::parse_label_template("{cn} ({uid})"),
         }];
         // Searching the uid (only visible inside the rendered "(jane)") matches,
-        // even though the structural label is "Jane".
+        // even though the structural label is "Jane". The ‹self› row
+        // ("‹self› ou=users") does not contain "jane", so it is filtered out too.
         let hit = compute_rows(&s, "ou=users,dc=example,dc=org", "jane", &rules);
-        assert_eq!(hit.len(), 2, "self row + the matched leaf");
-        assert_eq!(hit[1].0, "Jane (jane)");
-        // A term in neither the cn nor the uid still filters the leaf out.
+        assert_eq!(hit.len(), 1, "only the matched leaf");
+        assert_eq!(hit[0].0, "Jane (jane)");
+        // A term in neither the ‹self› label, the cn, nor the uid filters
+        // everything out, leaving zero rows (the "No match" case).
         let miss = compute_rows(&s, "ou=users,dc=example,dc=org", "zzz", &rules);
-        assert_eq!(miss.len(), 1, "only the self row");
+        assert_eq!(miss.len(), 0, "no rows survive");
     }
 }

@@ -1,18 +1,19 @@
-//! Leaf list pane: a search box over a ListBox of the current branch's leaves.
+//! Leaf list pane: a `ListBox` of the current branch's leaves with the list's
+//! own incremental find (`FindMode::Highlight`) — type while it is focused to
+//! filter and highlight, no separate search box.
 
 use tvision_rs::{
-    self as tv, delegate, Context, Event, FieldValue, Group, InputLine, Key, ListBox, Rect,
-    ScrollBar, StaticText, View,
+    self as tv, delegate, Context, Event, FieldValue, FindMode, Group, Key, ListBox, ListViewer,
+    Rect, ScrollBar, View,
 };
 
 use crate::ui::{Shared, REFRESH};
 
-/// A search `InputLine` (row 0) above a `ListBox`. Recomputes rows from the
-/// shared state on REFRESH and whenever the search text changes; submits a base
-/// read via ReadFlow when the selection moves to a new leaf.
+/// A `ListBox` (with incremental find) of the current branch's leaves. Recomputes
+/// rows from the shared state on REFRESH and whenever the find query changes;
+/// submits a base read via ReadFlow when the selection moves to a new leaf.
 pub(crate) struct LeafPane {
     group: Group,
-    search_id: tv::ViewId,
     list_id: tv::ViewId,
     /// Vertical scroll bar in the right column. Wired as the list's `v_bar`, so
     /// the list widget publishes its range/value/page; this pane owns only the
@@ -35,39 +36,28 @@ impl LeafPane {
         // it); a plain Group does not, so set it explicitly.
         group.state_mut().options.first_click = true;
         let w = bounds.b.x - bounds.a.x;
-        // Static "Filter:" label at the left of row 0 — makes the search box's
-        // purpose obvious. px is label width + 1 space so the InputLine sits right
-        // after it without overlap.
-        const PROMPT: &str = "Filter:";
-        let px = PROMPT.chars().count() as i32 + 1; // 7 + 1 = 8
-        group.insert(Box::new(StaticText::new(
-            Rect::new(0, 0, px, 1),
-            PROMPT.to_string(),
-        )));
-        // grow_mode so Group::change_bounds (driven by the Splitter) resizes children:
-        // search bar widens with the pane (stays at row 0, height 1, starts after label).
-        let mut search = InputLine::with_limit(Rect::new(px, 0, w, 1), 256);
-        search.state.grow_mode.hi_x = true;
-        let search_id = group.insert(Box::new(search));
         let h = bounds.b.y - bounds.a.y;
         // Vertical scroll bar in the right column (width 1 ⇒ vertical, which
         // ScrollBar::new detects and gives the right grow_mode). Hidden until the
         // pane is focused AND the list overflows — sync_scrollbar() owns that
         // gate and the matching one-column width reflow.
-        let mut v_bar = ScrollBar::new(Rect::new(w - 1, 1, w, h));
+        let mut v_bar = ScrollBar::new(Rect::new(w - 1, 0, w, h));
         v_bar.state_mut().state.visible = false;
         let v_bar = group.insert(Box::new(v_bar));
-        // List fills the remaining height and — while the bar is hidden — the
-        // full width. It is wired as the list's vertical bar, so the list widget
-        // publishes the bar's range/value/page itself on every (re)population and
-        // a bar drag scrolls the list; this pane only gates visibility + width.
-        let mut list = ListBox::new(Rect::new(0, 1, w, h), 1, None, Some(v_bar));
+        // List fills the pane height and — while the bar is hidden — the full
+        // width. `FindMode::Highlight` enables type-to-find: typing accumulates a
+        // query and highlights matches; the pane supplies the already-filtered
+        // rows (see `handle_event`). It is wired as the list's vertical bar, so
+        // the list widget publishes the bar's range/value/page itself on every
+        // (re)population and a bar drag scrolls the list; this pane only gates
+        // visibility + width.
+        let mut list = ListBox::new(Rect::new(0, 0, w, h), 1, None, Some(v_bar))
+            .with_find(FindMode::Highlight);
         list.state_mut().grow_mode.hi_x = true;
         list.state_mut().grow_mode.hi_y = true;
         let list_id = group.insert(Box::new(list));
         LeafPane {
             group,
-            search_id,
             list_id,
             v_bar,
             state,
@@ -120,8 +110,8 @@ impl LeafPane {
         let active = self.group.state().state.active;
         let extent = self.group.state().get_extent();
         let (w, h) = (extent.b.x, extent.b.y);
-        // The list occupies rows 1..h, so its visible page height is h - 1.
-        let page = (h - 1).max(0);
+        // The list occupies the full pane height, so its visible page height is h.
+        let page = h.max(0);
         let rows = self
             .group
             .child_mut(self.list_id)
@@ -132,25 +122,16 @@ impl LeafPane {
         let (show, list_w) = Self::bar_layout(rows, page, active, w);
         // Reserve / reclaim the bar lane.
         if let Some(list) = self.group.child_mut(self.list_id) {
-            list.change_bounds(Rect::new(0, 1, list_w, h));
+            list.change_bounds(Rect::new(0, 0, list_w, h));
         }
         // Pin the bar to the right column (idempotent with its grow_mode) and
         // toggle its visibility directly for the steady state.
         if let Some(bar) = self.group.child_mut(self.v_bar) {
-            bar.change_bounds(Rect::new(w - 1, 1, w, h));
+            bar.change_bounds(Rect::new(w - 1, 0, w, h));
             bar.state_mut().state.visible = show;
         }
         // Compete with the list's overflow-blind SetVisible in the deferred drain.
         ctx.request_set_visible(self.v_bar, show);
-    }
-
-    #[cfg(test)]
-    pub(crate) fn search_bounds_for_test(&mut self) -> Rect {
-        self.group
-            .child_mut(self.search_id)
-            .unwrap()
-            .state()
-            .get_bounds()
     }
 
     #[cfg(test)]
@@ -160,6 +141,16 @@ impl LeafPane {
             .unwrap()
             .state()
             .get_bounds()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn list_text_for_test(&mut self) -> Vec<String> {
+        self.group
+            .child_mut(self.list_id)
+            .and_then(|v| v.as_any_mut())
+            .and_then(|a| a.downcast_mut::<ListBox>())
+            .map(|lb| lb.list().to_vec())
+            .unwrap_or_default()
     }
 
     /// Pure selector: when the highlight lands on a new row, record the requested
@@ -215,43 +206,52 @@ impl View for LeafPane {
     }
 
     fn handle_event(&mut self, ev: &mut Event, ctx: &mut Context) {
+        // Only scroll on the wheel when the cursor is over this pane — tvision
+        // delivers the wheel non-positionally, so otherwise the inner list would
+        // grab a wheel meant for a sibling pane. Left unconsumed, it propagates.
+        if super::wheel_misses_pane(self.group.state(), ev) {
+            return;
+        }
         let is_refresh = matches!(ev, Event::Broadcast { command, .. } if *command == REFRESH);
-        if !self.seeded || (is_refresh && self.state.borrow().list_dirty) {
+        let first_seed = !self.seeded;
+        if first_seed || (is_refresh && self.state.borrow().list_dirty) {
             self.seeded = true;
             self.repopulate(ctx);
             self.state.borrow_mut().list_dirty = false;
         }
+        if first_seed {
+            // Make the list the group's current child so arrows and type-to-find
+            // reach it once the pane gains focus. The pump's currency settle does
+            // this in the running app; do it deterministically here too (there is
+            // no longer a search box competing for the pane's open-time focus).
+            self.group.focus_child(self.list_id, ctx);
+        }
 
         // Tab is reserved for switching panes. Do not let the inner group consume
-        // it for intra-pane focus cycling (search-box ↔ list) — return without
-        // clearing so the parent Splitter receives it and moves to the next pane.
+        // it for intra-pane focus cycling — return without clearing so the parent
+        // Splitter receives it and moves to the next pane.
         if matches!(ev, Event::KeyDown(k) if k.key == Key::Tab) {
             return;
         }
 
-        // Arrow/page keys navigate the LIST even while the search box holds text
-        // focus (the search-over-list idiom): forward them straight to the list so
-        // the user can move the selection while typing a filter. Tab is reserved for
-        // switching panes (consumed by the Splitter), so intra-pane navigation uses
-        // the arrows — exactly as the tree pane does.
-        let nav_key = matches!(
-            ev,
-            Event::KeyDown(k)
-                if matches!(k.key, Key::Up | Key::Down | Key::PageUp | Key::PageDown)
-        );
-        if nav_key {
-            if let Some(list) = self.group.child_mut(self.list_id) {
-                list.handle_event(ev, ctx);
-            }
-        } else {
-            self.group.handle_event(ev, ctx);
-        }
+        // Delegate: the focused ListBox handles arrow/page navigation and, via its
+        // find mode, accumulates the type-to-find query (Backspace widens, Esc
+        // clears) and broadcasts `Command::LIST_FIND_CHANGED`.
+        self.group.handle_event(ev, ctx);
 
-        // Sync search text from the InputLine into shared state; recompute on change.
-        let cur = match self.group.child_mut(self.search_id).and_then(|v| v.value()) {
-            Some(FieldValue::Text(s)) => s,
-            _ => String::new(),
-        };
+        // A find-query edit (the list broadcasts LIST_FIND_CHANGED on change):
+        // mirror the query into shared state and recompute the rows. `Highlight`
+        // mode does not self-filter — the pane supplies the already-filtered rows
+        // (`leaf_rows()` narrows by `state.search`), keeping the list index aligned
+        // 1:1 with `leaf_rows()` so the selection→DN mapping stays correct, while
+        // the list highlights the matched substring.
+        let cur = self
+            .group
+            .child_mut(self.list_id)
+            .and_then(|v| v.as_any_mut())
+            .and_then(|a| a.downcast_mut::<ListBox>())
+            .and_then(|lb| lb.find_query().map(str::to_string))
+            .unwrap_or_default();
         if cur != self.last_search {
             self.last_search = cur.clone();
             self.state.borrow_mut().search = cur;
@@ -286,9 +286,9 @@ mod tests {
     /// Group::change_bounds — NOT via an on_bounds_changed override (which the
     /// framework never calls for Splitter-nested panes).
     ///
-    /// TDD evidence: before grow_mode flags were set (hi_x on search, hi_x+hi_y
-    /// on list), this test FAILED — children kept their original Rect. After
-    /// setting the flags, Group::change_bounds propagates the delta and this PASSES.
+    /// TDD evidence: before grow_mode flags were set (hi_x+hi_y on the list),
+    /// this test FAILED — the list kept its original Rect. After setting the
+    /// flags, Group::change_bounds propagates the delta and this PASSES.
     #[test]
     fn grow_mode_resize_fills_pane() {
         let inputs = vec![StructureInput {
@@ -305,16 +305,11 @@ mod tests {
         let mut pane = LeafPane::new(Rect::new(0, 0, 30, 10), shared);
         // Simulate Splitter driving a resize: just change_bounds, no on_bounds_changed.
         <LeafPane as View>::change_bounds(&mut pane, Rect::new(0, 0, 50, 20));
-        // The "Filter:" label (7 chars + 1 space = px=8) is pinned at x=0..8; the
-        // InputLine starts at x=8 and its hi_x grow_mode tracks the pane's right edge.
-        assert_eq!(
-            pane.search_bounds_for_test(),
-            Rect::new(8, 0, 50, 1),
-            "search InputLine must start at px=8 (after Filter: label) and widen (hi_x)"
-        );
+        // The list fills the whole pane (no search row above it any more) and its
+        // hi_x+hi_y grow_mode tracks the pane's bottom-right.
         assert_eq!(
             pane.list_bounds_for_test(),
-            Rect::new(0, 1, 50, 20),
+            Rect::new(0, 0, 50, 20),
             "list ListBox must fill width+height (hi_x+hi_y)"
         );
     }
@@ -474,8 +469,8 @@ mod tests {
 
     #[test]
     fn arrow_key_navigates_the_list() {
-        // Arrows are forwarded to the list (the search box keeps text focus), so a
-        // Down advances the list selection and submit_selected loads the new leaf.
+        // The list is the focused child, so a Down advances the list selection and
+        // submit_selected loads the new leaf.
         let inputs = vec![
             StructureInput {
                 dn: "dc=x".into(),
@@ -528,13 +523,101 @@ mod tests {
         pane.handle_event(&mut seed, &mut ctx);
         assert_eq!(pane.last_sel, 0, "seeding selects row 0");
 
-        // A Down key is forwarded to the list (not the search box) and moves the
-        // selection, which submit_selected then picks up.
+        // A Down key reaches the focused list and moves the selection, which
+        // submit_selected then picks up.
         let mut down = Event::KeyDown(tv::KeyEvent::from(tv::Key::Down));
         pane.handle_event(&mut down, &mut ctx);
         assert_eq!(
             pane.last_sel, 1,
             "Down advances the list selection (forwarded to the list)"
+        );
+    }
+
+    #[test]
+    fn typing_a_find_query_filters_the_leaf_rows() {
+        // Branch ou=p has two leaves, cn=a and cn=b. Typing "a" into the focused
+        // list accumulates the find query, which the pane mirrors into
+        // `state.search` and uses to narrow `leaf_rows()` — so the displayed rows
+        // become the ‹self› row plus the matching leaf "a" (label "b" drops out).
+        let inputs = vec![
+            StructureInput {
+                dn: "dc=x".into(),
+                cn: None,
+                description: None,
+                object_classes: vec![],
+                attrs: BTreeMap::new(),
+            },
+            StructureInput {
+                dn: "ou=p,dc=x".into(),
+                cn: None,
+                description: None,
+                object_classes: vec![],
+                attrs: BTreeMap::new(),
+            },
+            StructureInput {
+                dn: "cn=a,ou=p,dc=x".into(),
+                cn: Some("a".into()),
+                description: None,
+                object_classes: vec![],
+                attrs: BTreeMap::new(),
+            },
+            StructureInput {
+                dn: "cn=b,ou=p,dc=x".into(),
+                cn: Some("b".into()),
+                description: None,
+                object_classes: vec![],
+                attrs: BTreeMap::new(),
+            },
+        ];
+        let structure = Structure::build("dc=x", inputs);
+        let schema = SchemaModel::from_raw(&RawSubschema::default());
+        let mut state =
+            UiState::new_for_test(structure, schema, "dc=x".into(), Vec::new(), Vec::new());
+        state.current_branch = Some("ou=p,dc=x".into());
+        let shared: Shared = Rc::new(RefCell::new(state));
+
+        let mut pane = LeafPane::new(Rect::new(0, 0, 30, 10), shared.clone());
+        let mut out: VecDeque<Event> = VecDeque::new();
+        let mut timers = tv::timer::TimerQueue::new();
+        let mut deferred: Vec<tv::Deferred> = Vec::new();
+        let mut ctx = tv::Context::new(&mut out, &mut timers, 0, &mut deferred);
+
+        shared.borrow_mut().list_dirty = true;
+        let mut seed = Event::Broadcast {
+            command: REFRESH,
+            source: None,
+        };
+        pane.handle_event(&mut seed, &mut ctx);
+        assert_eq!(
+            pane.list_text_for_test().len(),
+            3,
+            "unfiltered: ‹self› + two leaves"
+        );
+
+        // Type "a" into the focused list (its find mode captures the key).
+        let mut k = Event::KeyDown(tv::KeyEvent::from(tv::Key::Char('a')));
+        pane.handle_event(&mut k, &mut ctx);
+
+        assert_eq!(shared.borrow().search, "a", "find query mirrors into state");
+        let rows = pane.list_text_for_test();
+        assert_eq!(
+            rows,
+            vec!["a".to_string()],
+            "only the matching leaf remains ('b' and the non-matching ‹self› row \
+             are filtered out), got {rows:?}"
+        );
+
+        // A query that matches nothing leaves the list empty, so the ListBox's
+        // find mode renders the "No match: <query>" placeholder (drawn when the
+        // view is empty and a find query is active).
+        for ch in ['z', 'z', 'z'] {
+            let mut k = Event::KeyDown(tv::KeyEvent::from(tv::Key::Char(ch)));
+            pane.handle_event(&mut k, &mut ctx);
+        }
+        assert_eq!(shared.borrow().search, "azzz", "query accumulates");
+        assert!(
+            pane.list_text_for_test().is_empty(),
+            "a non-matching query leaves zero rows so 'No match' can render"
         );
     }
 }

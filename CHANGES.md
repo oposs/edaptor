@@ -124,6 +124,23 @@ All notable changes to eDAPtor are documented here. The format follows
 
 ### Changed
 
+- tvision UI: incremental search is now the list's **own built-in find** (from
+  tvision-rs 0.4) instead of a separate search box. In the **Entries** pane and
+  the `objectClass` editor, just type while the list is focused to filter it in
+  place and highlight the match (Backspace widens, Esc clears) — the standalone
+  `Filter:` box and the Shuttle's search box are gone. A query that matches
+  nothing shows a **`No match: <query>`** placeholder (in the Entries pane the
+  `‹self›` container row is filtered by the query too, so a non-matching search
+  really does empty the list). The membership editor's candidate search still
+  queries the directory (so it is not limited to an already-loaded page); typing
+  there highlights matches and re-runs the LDAP search. Built on **tvision-rs
+  0.4.0** (upgraded from 0.3).
+
+- tvision UI: the main view was **re-laid out** — the directory tree (top-left)
+  and the selected branch's entries (bottom-left) now share the left column, with
+  the detail/edit form filling the full-height right column. Previously the three
+  panes sat side by side. Tab order is unchanged (tree → entries → form).
+
 - tvision UI: the interface now uses a **light Solarized-Light colour scheme** —
   cream/tan panels, dark slate text, blue accent — replacing the previous
   dark classic-blue palette. The theme is applied uniformly and is not
@@ -185,6 +202,23 @@ All notable changes to eDAPtor are documented here. The format follows
   temporary git-pin for `exec_view_focused` has been removed.
 
 ### Fixed
+
+- tvision UI: the **mouse wheel now scrolls the pane under the pointer** in the
+  three-pane main view. Previously the wheel always scrolled one pane (the form)
+  regardless of where the cursor was, because tvision delivers wheel events
+  non-positionally; each pane now ignores a wheel whose cursor is over a sibling
+  so it reaches the pane actually under the pointer.
+
+- tvision UI: the entry form pane's **scroll bar now tracks the cursor (the
+  focused field) like the list panes**, instead of the raw scroll offset. The
+  thumb follows the highlight as you move through fields, the bar shows a thumb
+  the moment the form opens (previously it had none until the first scroll), and
+  dragging the thumb now moves the focused field.
+
+- tvision UI: in the entry form pane, **arrow-down on the last field (and the
+  mouse wheel at the bottom) no longer wraps focus back to the top** — focus now
+  clamps at the first and last field, matching the list panes. Previously moving
+  past either end jumped to the opposite end.
 
 - tvision UI: in the two-column editors (`objectClass` / membership), the **mouse
   wheel now scrolls the column under the pointer** instead of always scrolling one

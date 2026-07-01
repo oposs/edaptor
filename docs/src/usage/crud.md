@@ -33,13 +33,13 @@ while a list holds focus does the same move (toward the active set from the
 available list, out of it from the active list). The same actions are available
 as on-screen **[Add]** / **[Remove]** buttons (also reachable with **Alt+A** /
 **Alt+R**). Each column shows a scroll bar when its list overflows. **Tab** /
-**Shift-Tab** move focus between the search box, the two lists and the buttons;
-the arrow keys drive whichever list is focused. Typing in the search box (above
-the right column) filters the available list. STRUCTURAL classes that were
-already on the entry are shown locked (marked `*`) and cannot be removed; a
-structural class you add during this edit can still be removed again. Press
-**Enter** while the search box or the **OK** button is focused to confirm, or the
-**Cancel** button to close the editor without committing. The form immediately
+**Shift-Tab** move focus between the two lists and the buttons; the arrow keys
+drive whichever list is focused. Typing while the available list is focused
+filters it in place (incremental find; Backspace widens, Esc clears). STRUCTURAL
+classes that were already on the entry are shown locked (marked `*`) and cannot
+be removed; a structural class you add during this edit can still be removed
+again. Press the **OK** button to confirm, or the **Cancel** button to close the
+editor without committing. The form immediately
 updates: new MUST/MAY fields appear for
 added classes, and any attribute no longer permitted by the remaining classes is
 shown **crossed out** (it will be deleted on save). Press **Alt+C** in the form

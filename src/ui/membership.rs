@@ -3,8 +3,9 @@
 //! holder attribute, e.g. a group's `member`) opens a modal with an embedded
 //! [`Shuttle`] view (`ui::shuttle`):
 //!
-//! - **Available** (left): a search box on top + a list of live LDAP candidates.
-//!   Typing broadcasts `CMD_SHUTTLE_SEARCH`; this dialog submits an async candidate
+//! - **Available** (left): a list of live LDAP candidates with incremental find
+//!   (`FindMode::Highlight`). Typing accumulates a query and highlights matches and
+//!   broadcasts `Command::LIST_FIND_CHANGED`; this dialog submits an async candidate
 //!   search (`SearchFlow`) via the worker exactly like the plain picker; results
 //!   arrive on the next pump tick and are broadcast as `REFRESH`, which the dialog
 //!   maps into `Shuttle::set_available`. Candidates already in Members are filtered
@@ -13,11 +14,12 @@
 //!   (the user's current memberships / baseline) via `Shuttle::set_selected`.
 //!
 //! The `Shuttle` owns the column geometry and move actions (Insert moves into
-//! Members, Delete removes, plus [Add]/[Remove] buttons, Enter-on-a-list moves, and
-//! search-box reporting); Tab/Shift-Tab focus traversal and the pass-through of the
-//! default OK button (Enter from the search box) are handled by the dialog. The
-//! Shuttle notifies via broadcast (`CMD_SHUTTLE_CHANGED` / `CMD_SHUTTLE_SEARCH`);
-//! this module keeps the membership-specific plumbing: the async candidate-search
+//! Members, Delete removes, plus [Add]/[Remove] buttons, Enter-on-a-list moves) and
+//! the Available list's incremental find; Tab/Shift-Tab focus traversal and the
+//! pass-through of the default OK button are handled by the dialog. The Shuttle
+//! notifies via broadcast (`CMD_SHUTTLE_CHANGED`); the Available list broadcasts
+//! `Command::LIST_FIND_CHANGED` for find edits. This module keeps the
+//! membership-specific plumbing: the async candidate-search
 //! submit, the pump/`REFRESH` seam that refreshes the Available column, member
 //! seeding, and the `staged_commit` write-back.
 //!
@@ -31,14 +33,14 @@
 use std::collections::HashSet;
 
 use tvision_rs::{
-    self as tv, delegate, ButtonFlags, ButtonRowAlign, Command, Context, Dialog, Event, Rect, View,
-    ViewId,
+    self as tv, delegate, ButtonFlags, ButtonRowAlign, Command, Context, Dialog, Event, FindMode,
+    Rect, View, ViewId,
 };
 
 use crate::config::relation::{PickerBinding, StoreKey};
 use crate::config::widget::WidgetKind;
 use crate::schema::SchemaModel;
-use crate::ui::shuttle::{Shuttle, ShuttleRow, CMD_SHUTTLE_CHANGED, CMD_SHUTTLE_SEARCH};
+use crate::ui::shuttle::{Shuttle, ShuttleRow, CMD_SHUTTLE_CHANGED};
 use crate::ui::widget::{Activation, Capability, CommitOutcome, FieldEditor, FieldWidget};
 use crate::ui::{Shared, REFRESH};
 use crate::workflows::edit_form::EditField;
@@ -103,7 +105,7 @@ impl FieldEditor for MembershipEditor {
         let dlg = MembershipDialog::new(label, binding, current, shared);
         // Focus the Shuttle itself: it is a direct child of the dialog, so this sets
         // the dialog's current child (events route into it) and cascades focus to the
-        // Shuttle's own open-time target (the search box, for search-as-you-type).
+        // Shuttle's own open-time target (the Available list, for type-to-find).
         let focus = dlg.shuttle_id;
         (Box::new(dlg), focus)
     }
@@ -113,14 +115,14 @@ impl FieldEditor for MembershipEditor {
 // MembershipDialog — the interactive two-column mover with live search
 // ---------------------------------------------------------------------------
 
-/// Available list (search box + candidates) on the left, Members list on the
-/// right — both owned by the embedded [`Shuttle`]. Candidate results arrive via
-/// the pump and the `REFRESH` broadcast.
+/// Available list (live candidates with incremental find) on the left, Members
+/// list on the right — both owned by the embedded [`Shuttle`]. Candidate results
+/// arrive via the pump and the `REFRESH` broadcast.
 pub(crate) struct MembershipDialog {
     dlg: Dialog,
     /// The embedded two-list transfer widget (a child of `dlg`). Owns the column
     /// geometry, the staged Members set (Selected) and the live candidate set
-    /// (Available), plus the moves and the search box; it notifies us by broadcast.
+    /// (Available), plus the moves; it notifies us by broadcast.
     shuttle_id: ViewId,
     shared: Shared,
     /// Resolved candidate-search scope (groups).
@@ -142,16 +144,19 @@ impl MembershipDialog {
         dlg.state_mut().options.center_x = true;
         dlg.state_mut().options.center_y = true;
 
-        // Build the two columns. Available on the left (membership convention), a
-        // search box above it; Members (Selected) on the right. Insert the Shuttle
-        // FIRST so it is the dialog's first selectable child (the modal's open-time
-        // reset_current then makes it current, and focus_descendant reaches the
-        // search box inside it).
+        // Build the two columns. Available on the left (membership convention),
+        // Members (Selected) on the right. The Available list uses
+        // `FindMode::Highlight`: typing accumulates a query and highlights matches
+        // but does NOT self-filter — the candidate set is server-backed, so the
+        // dialog re-runs the LDAP search on `LIST_FIND_CHANGED` instead. Insert the
+        // Shuttle FIRST so it is the dialog's first selectable child (the modal's
+        // open-time reset_current then makes it current, and focus reaches the
+        // Available list inside it).
         let shuttle = Shuttle::new(
             Rect::new(0, 0, 80, 22),
             "Available",
             "Members",
-            /* with_search */ true,
+            /* find */ FindMode::Highlight,
             /* selected_on_left */ false,
         );
         let shuttle_id = dlg.insert_child(Box::new(shuttle));
@@ -227,10 +232,11 @@ impl MembershipDialog {
             .downcast_mut::<Shuttle>()
     }
 
-    /// The Shuttle's current search-box text (owned copy; releases the borrow).
-    fn shuttle_search_text(&mut self) -> String {
+    /// The Available list's current incremental-find query (owned copy; releases
+    /// the borrow). Drives the async candidate search.
+    fn shuttle_find_query(&mut self) -> String {
         self.shuttle_mut()
-            .map(|sh| sh.search_text().to_string())
+            .map(|sh| sh.find_query())
             .unwrap_or_default()
     }
 
@@ -310,8 +316,9 @@ impl View for MembershipDialog {
         if !self.seeded {
             self.seed(ctx);
         }
-        // Establish the Shuttle's internal currency (its search box) before the
-        // dialog focuses the Shuttle, so focus cascades onto the search box.
+        // Establish the Shuttle's internal currency (the Available list) before
+        // the dialog focuses the Shuttle, so focus cascades onto the list and
+        // type-to-find works immediately.
         if let Some(sh) = self.shuttle_mut() {
             sh.reset_current(ctx);
         }
@@ -331,22 +338,27 @@ impl View for MembershipDialog {
         }
 
         // Delegate first: the Shuttle (the dialog's current child) handles the move
-        // keys / search edits and broadcasts the outcome; the dialog's OK/Cancel and
-        // Tab traversal are handled here too. We then react to the Shuttle's own
-        // broadcasts when they are delivered (a later loop iteration).
+        // keys and the Available list's incremental find, broadcasting the outcome;
+        // the dialog's OK/Cancel and Tab traversal are handled here too. We then
+        // react to the broadcasts when they are delivered (a later loop iteration).
         self.dlg.handle_event(ev, ctx);
 
         let notice = match &*ev {
             Event::Broadcast { command, source } if *source == Some(self.shuttle_id) => {
                 Some(*command)
             }
+            // The find query lives on the Available list (nested in the Shuttle),
+            // so its LIST_FIND_CHANGED carries the list's own ViewId as source.
+            Event::Broadcast { command, .. } if *command == Command::LIST_FIND_CHANGED => {
+                Some(Command::LIST_FIND_CHANGED)
+            }
             _ => None,
         };
         match notice {
-            // A search-box edit: submit an async candidate search. Results land on
-            // the next pump's REFRESH broadcast and refill the Available column.
-            Some(cmd) if cmd == CMD_SHUTTLE_SEARCH => {
-                let term = self.shuttle_search_text();
+            // A find edit: submit an async candidate search for the query. Results
+            // land on the next pump's REFRESH broadcast and refill Available.
+            Some(cmd) if cmd == Command::LIST_FIND_CHANGED => {
+                let term = self.shuttle_find_query();
                 self.submit_search(&term);
             }
             // A move: restage the member set and re-filter Available so the moved
@@ -512,8 +524,8 @@ mod tests {
 
     /// Dispatch `key` directly to the embedded Shuttle (the seam the dialog's focus
     /// routing reaches in the running app), then faithfully deliver any broadcasts
-    /// the Shuttle queued (a move → `CMD_SHUTTLE_CHANGED`) back to the dialog. The
-    /// `CMD_SHUTTLE_SEARCH` broadcast is left in `out` — submitting an async search
+    /// the Shuttle queued (a move → `CMD_SHUTTLE_CHANGED`) back to the dialog. A
+    /// `LIST_FIND_CHANGED` broadcast is left in `out` — submitting an async search
     /// is exercised separately; here we only settle moves.
     fn press_and_settle(
         d: &mut MembershipDialog,
@@ -629,11 +641,12 @@ mod tests {
         );
     }
 
-    /// Enter on the search box must NOT move a row — it passes through to the
-    /// dialog's default OK button. (Enter on a *list* moves; that is a Shuttle
-    /// concern covered by the widget's own tests.)
+    /// Typing a find query (letters and Space) into the focused Available list
+    /// must NOT move the highlighted candidate — the list's find mode consumes
+    /// the keys to build the query (guards against the old picker's stolen-Space
+    /// bug). A move is a Shuttle concern covered by the widget's own tests.
     #[test]
-    fn enter_on_search_box_does_not_move() {
+    fn typing_a_find_query_does_not_move_a_candidate() {
         let shared = test_shared();
         shared.borrow_mut().search_results = vec![cand(G1), cand(G2)];
 
@@ -646,13 +659,14 @@ mod tests {
         });
 
         let d = dialog_mut(&mut view);
-        // Focus the search box, then press Enter on the Shuttle.
         with_ctx(&mut out, &mut timers, &mut deferred, |ctx| {
-            let sh = d.shuttle_mut().expect("shuttle");
-            let search = sh.search_id().expect("search box");
-            sh.focus_for_test(search, ctx);
-            let mut ev = Event::KeyDown(KeyEvent::from(Key::Enter));
-            sh.handle_event(&mut ev, ctx);
+            let avail = d.shuttle_mut().expect("shuttle").avail_id_for_test();
+            d.shuttle_mut().expect("shuttle").focus_for_test(avail, ctx);
+            highlight_avail_by_label(d, G2, ctx);
+            for ch in ['x', ' ', 'y'] {
+                let mut ev = Event::KeyDown(KeyEvent::from(Key::Char(ch)));
+                d.shuttle_mut().expect("shuttle").handle_event(&mut ev, ctx);
+            }
         });
 
         let members: Vec<String> = d
@@ -665,14 +679,14 @@ mod tests {
         assert_eq!(
             members,
             vec![G1.to_string()],
-            "Enter on the search box must not move a candidate"
+            "typing a find query must not move a candidate"
         );
     }
 
-    /// Space is never a move key — it reaches the search box so users can type
-    /// multi-word queries (guards against the old picker's stolen-Space bug).
+    /// Typing into the Available list broadcasts `LIST_FIND_CHANGED` (the signal
+    /// the dialog turns into an async candidate search).
     #[test]
-    fn space_does_not_move_a_row() {
+    fn typing_broadcasts_list_find_changed() {
         let shared = test_shared();
         shared.borrow_mut().search_results = vec![cand(G1), cand(G2)];
 
@@ -686,25 +700,18 @@ mod tests {
 
         let d = dialog_mut(&mut view);
         with_ctx(&mut out, &mut timers, &mut deferred, |ctx| {
-            let sh = d.shuttle_mut().expect("shuttle");
-            let search = sh.search_id().expect("search box");
-            sh.focus_for_test(search, ctx);
-            highlight_avail_by_label(d, G2, ctx);
-            let mut ev = Event::KeyDown(KeyEvent::from(Key::Char(' ')));
+            let avail = d.shuttle_mut().expect("shuttle").avail_id_for_test();
+            d.shuttle_mut().expect("shuttle").focus_for_test(avail, ctx);
+            let mut ev = Event::KeyDown(KeyEvent::from(Key::Char('g')));
             d.shuttle_mut().expect("shuttle").handle_event(&mut ev, ctx);
         });
 
-        let members: Vec<String> = d
-            .shuttle_mut()
-            .expect("shuttle")
-            .selected()
-            .iter()
-            .map(|r| r.key.clone())
-            .collect();
-        assert_eq!(
-            members,
-            vec![G1.to_string()],
-            "Space must not move a candidate — it belongs to the search box"
+        assert!(
+            out.iter().any(|e| matches!(
+                e,
+                Event::Broadcast { command, .. } if *command == Command::LIST_FIND_CHANGED
+            )),
+            "typing must broadcast LIST_FIND_CHANGED"
         );
     }
 }

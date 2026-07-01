@@ -10,22 +10,23 @@
 //! Built on the embedded [`Shuttle`] view (`ui::shuttle`), with
 //! `selected_on_left = true` so the active set renders on the left per the user's
 //! request. Unlike membership, the Available column is a *static* set computed
-//! locally (all known classes minus the active ones, filtered by the search box),
-//! so there is no async worker search — `CMD_SHUTTLE_SEARCH` just refilters in
-//! place. The Shuttle notifies via broadcast (`CMD_SHUTTLE_CHANGED` /
-//! `CMD_SHUTTLE_SEARCH`, with the Shuttle's own `ViewId` as `source`); this dialog
-//! reacts in its own `handle_event` after delegating, re-reading `Shuttle::selected`.
+//! locally (all known classes minus the active ones), so there is no async worker
+//! search — incremental filtering is the Available list's own `FindMode::Filter`,
+//! which narrows the column in place as the user types. The Shuttle notifies via
+//! broadcast (`CMD_SHUTTLE_CHANGED`, with the Shuttle's own `ViewId` as `source`);
+//! this dialog reacts in its own `handle_event` after delegating, re-reading
+//! `Shuttle::selected`.
 
 use std::collections::{BTreeSet, HashSet};
 
 use ldap_types::schema::ObjectClassType;
 use tvision_rs::{
-    self as tv, delegate, ButtonFlags, ButtonRowAlign, Command, Context, Dialog, Event, Rect, View,
-    ViewId,
+    self as tv, delegate, ButtonFlags, ButtonRowAlign, Command, Context, Dialog, Event, FindMode,
+    Rect, View, ViewId,
 };
 
 use crate::schema::SchemaModel;
-use crate::ui::shuttle::{Shuttle, ShuttleRow, CMD_SHUTTLE_CHANGED, CMD_SHUTTLE_SEARCH};
+use crate::ui::shuttle::{Shuttle, ShuttleRow, CMD_SHUTTLE_CHANGED};
 use crate::ui::widget::{Activation, Capability, CommitOutcome, FieldEditor, FieldWidget};
 use crate::ui::Shared;
 use crate::workflows::edit_form::EditField;
@@ -86,7 +87,7 @@ impl FieldEditor for ObjectClassEditor {
         let picker = ObjectClassPicker::new(all_rows, ticked, shared);
         // Focus the Shuttle itself: it is a direct child of the dialog, so this sets
         // the dialog's current child (events route into it) and cascades focus to the
-        // Shuttle's own open-time target (the search box, for search-as-you-type).
+        // Shuttle's own open-time target (the Available list, for type-to-find).
         let focus = picker.shuttle_id;
         (Box::new(picker), focus)
     }
@@ -96,19 +97,18 @@ impl FieldEditor for ObjectClassEditor {
 pub(crate) struct ObjectClassPicker {
     dlg: Dialog,
     /// The embedded two-list transfer widget (a child of `dlg`). Owns the column
-    /// geometry, the active set (Selected) and the available set, plus the moves
-    /// and the search box; it notifies us by broadcast.
+    /// geometry, the active set (Selected) and the available set, plus the moves;
+    /// it notifies us by broadcast.
     shuttle_id: ViewId,
     shared: Shared,
     /// Every known class as a `ShuttleRow` (canonical, sorted, `locked` precomputed).
     /// The source of truth for both columns: the Active column is the subset that
-    /// is ticked, the Available column is the rest filtered by the search term.
+    /// is ticked, the Available column is the rest (the list's own find mode
+    /// narrows the displayed Available rows as the user types).
     all_rows: Vec<ShuttleRow>,
     /// The active rows to seed on first open (stashed because `set_selected` needs
     /// a `Context`, only available once the modal is inserted).
     seed_selected: Vec<ShuttleRow>,
-    /// Last-observed search term (drives the Available filter).
-    last_search: String,
     seeded: bool,
 }
 
@@ -118,17 +118,16 @@ impl ObjectClassPicker {
         dlg.state_mut().options.center_x = true;
         dlg.state_mut().options.center_y = true;
 
-        // Active (Selected) on the LEFT, Available on the RIGHT, with a search box
-        // above the Available column. `selected_on_left = true` flips only the
-        // rendered layout — Insert still means "move toward Active". Insert the
-        // Shuttle FIRST so it is the dialog's first selectable child: the modal's
-        // open-time `reset_current` then makes it current, so key events route into
-        // it (and `focus_descendant` can reach the search box inside it).
+        // Active (Selected) on the LEFT, Available on the RIGHT. `selected_on_left
+        // = true` flips only the rendered layout — Insert still means "move toward
+        // Active". Insert the Shuttle FIRST so it is the dialog's first selectable
+        // child: the modal's open-time `reset_current` then makes it current, so
+        // key events route into it (and reach the Available list inside it).
         let shuttle = Shuttle::new(
             Rect::new(0, 0, 72, 22),
             "Active",
             "Available",
-            /* with_search */ true,
+            /* find */ FindMode::Filter,
             /* selected_on_left */ true,
         );
         let shuttle_id = dlg.insert_child(Box::new(shuttle));
@@ -162,7 +161,6 @@ impl ObjectClassPicker {
             shared,
             all_rows,
             seed_selected,
-            last_search: String::new(),
             seeded: false,
         }
     }
@@ -175,27 +173,20 @@ impl ObjectClassPicker {
             .downcast_mut::<Shuttle>()
     }
 
-    /// The Shuttle's current search-box text (owned copy; releases the borrow).
-    fn shuttle_search_text(&mut self) -> String {
-        self.shuttle_mut()
-            .map(|sh| sh.search_text().to_string())
-            .unwrap_or_default()
-    }
-
-    /// Rebuild the Available column = all known classes minus the active set,
-    /// filtered by the current search term. Borrow-safe: reads the active key set
-    /// into a local (releasing the Shuttle borrow) before touching `set_available`.
+    /// Rebuild the Available column = all known classes minus the active set. The
+    /// Available list's `FindMode::Filter` narrows the *displayed* rows by the
+    /// live query on top of this set (re-applied on each `set_available`), so no
+    /// search term is threaded here. Borrow-safe: reads the active key set into a
+    /// local (releasing the Shuttle borrow) before touching `set_available`.
     fn refresh_available(&mut self, ctx: &mut Context) {
         let active: HashSet<String> = match self.shuttle_mut() {
             Some(sh) => sh.selected().iter().map(|r| r.key.to_lowercase()).collect(),
             None => return,
         };
-        let needle = self.last_search.to_lowercase();
         let rows: Vec<ShuttleRow> = self
             .all_rows
             .iter()
             .filter(|r| !active.contains(&r.key.to_lowercase()))
-            .filter(|r| needle.is_empty() || r.label.to_lowercase().contains(&needle))
             .cloned()
             .collect();
         if let Some(sh) = self.shuttle_mut() {
@@ -254,8 +245,9 @@ impl View for ObjectClassPicker {
         if !self.seeded {
             self.seed(ctx);
         }
-        // Establish the Shuttle's internal currency (its search box) before the
-        // dialog focuses the Shuttle, so focus cascades onto the search box.
+        // Establish the Shuttle's internal currency (the Available list) before
+        // the dialog focuses the Shuttle, so focus cascades onto the list and
+        // type-to-find works immediately.
         if let Some(sh) = self.shuttle_mut() {
             sh.reset_current(ctx);
         }
@@ -269,30 +261,24 @@ impl View for ObjectClassPicker {
         }
 
         // Delegate first: the Shuttle (the dialog's current child) handles the
-        // move keys / search edits and broadcasts the outcome; the dialog's OK/Cancel
-        // and Tab traversal are handled here too. We then react to the Shuttle's own
-        // broadcasts when they are delivered (a later loop iteration).
+        // move keys and broadcasts the outcome; the dialog's OK/Cancel and Tab
+        // traversal are handled here too. Incremental filtering of the Available
+        // column is the list's own `FindMode::Filter` — it narrows in place and
+        // needs no reaction here. We react only to a membership change (a later
+        // loop iteration) to rebuild Available and restage.
         self.dlg.handle_event(ev, ctx);
 
-        let notice = match &*ev {
-            Event::Broadcast { command, source } if *source == Some(self.shuttle_id) => {
-                Some(*command)
-            }
-            _ => None,
-        };
-        match notice {
-            Some(cmd) if cmd == CMD_SHUTTLE_CHANGED => {
-                // A class was (un)ticked: rebuild Available = candidates minus the
-                // new active set, and restage. (A locked STRUCTURAL row is rejected
-                // by the Shuttle before it ever broadcasts, so no special-casing.)
-                self.refresh_available(ctx);
-                self.update_staged();
-            }
-            Some(cmd) if cmd == CMD_SHUTTLE_SEARCH => {
-                self.last_search = self.shuttle_search_text();
-                self.refresh_available(ctx);
-            }
-            _ => {}
+        let changed = matches!(
+            &*ev,
+            Event::Broadcast { command, source }
+                if *source == Some(self.shuttle_id) && *command == CMD_SHUTTLE_CHANGED
+        );
+        if changed {
+            // A class was (un)ticked: rebuild Available = candidates minus the new
+            // active set, and restage. (A locked STRUCTURAL row is rejected by the
+            // Shuttle before it ever broadcasts, so no special-casing.)
+            self.refresh_available(ctx);
+            self.update_staged();
         }
     }
 }
@@ -405,10 +391,9 @@ mod tests {
 
     /// Dispatch `key` directly to the embedded Shuttle (the seam the dialog's focus
     /// routing reaches in the running app), then faithfully deliver any broadcasts
-    /// the Shuttle queued (a move → `CMD_SHUTTLE_CHANGED`, a search edit →
-    /// `CMD_SHUTTLE_SEARCH`) back to the picker. In the real loop these broadcasts
-    /// are delivered on later iterations; here we drain them so the picker reacts
-    /// within the test.
+    /// the Shuttle queued (a move → `CMD_SHUTTLE_CHANGED`) back to the picker. In
+    /// the real loop these broadcasts are delivered on later iterations; here we
+    /// drain them so the picker reacts within the test.
     fn press_and_settle(
         p: &mut ObjectClassPicker,
         key: Key,

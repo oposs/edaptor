@@ -1,23 +1,26 @@
 # The Three-Pane TUI
 
-eDAPtor presents the directory as three side-by-side panes — a navigation
-tree, an entry list, and a detail/edit form — over a single bottom status
-line. The layout is persistent: you keep the directory, the current container's
-entries, and the selected entry's form all on screen at once, instead of losing
-context to a modal dialog every time you edit.
+eDAPtor presents the directory as three panes — a navigation tree, an entry
+list, and a detail/edit form — over a single bottom status line. The tree
+(top-left) and the selected branch's entries (bottom-left) share the left
+column; the detail/edit form fills the full-height right column. The layout is
+persistent: you keep the directory, the current container's entries, and the
+selected entry's form all on screen at once, instead of losing context to a
+modal dialog every time you edit.
 
 ## The three panes
 
 ```
-┌─ DIT ───────┐┌─ Entries ────────┐╔═ Entry — uid=bob,ou=people,… ═╗
-│ dc=example  ││ /                │║ uid           bob             ║
-│ ├─ people   ││ ‹self› people    │║ cn            Bob Baker       ║
-│ └─ groups   ││ Bob Baker (bob)  │║ sn            Baker           ║
-│             ││ Babs Carr (babs) │║ givenName     Bob             ║
-│             ││ Carl Diaz (carl) │║ mail          bob@example.org ║
-│             ││ …                │║ uidNumber     10001           ║
-│             ││                  │║ …                             ║
-└─────────────┘└──────────────────┘╚═══════════════════════════════╝
+┌─ DIT ───────────┐╔═ Entry — uid=bob,ou=people,… ═╗
+│ dc=example      │║ uid           bob             ║
+│ ├─ people       │║ cn            Bob Baker       ║
+│ └─ groups       │║ sn            Baker           ║
+├─ Entries ───────┤║ givenName     Bob             ║
+│ ‹self› people   │║ mail          bob@example.org ║
+│ Bob Baker (bob) │║ uidNumber     10001           ║
+│ Babs Carr (babs)│║ …                             ║
+│ Carl Diaz (carl)│║                               ║
+└─────────────────┘╚═══════════════════════════════╝
  ↑↓ Field · ↵ Edit · Alt+S Save · Alt+C Cancel · Alt+X Quit
 ```
 
@@ -32,13 +35,13 @@ accent colour, which ASCII cannot show.)*
   drives the entry list. Move with `↑↓`, fold/unfold a branch with `←→`.
 
 - **Entries (entry list)** — the entries directly under the selected branch. The
-  top row is an incremental-search box with a `Filter:` label; below it is a
-  `‹self›` row representing the branch entry itself (editable like any other
-  entry), followed by the branch's leaf entries. Each entry is shown with its
-  profile **label** — for example `Bob Baker (bob)` from a `label = "{cn} ({uid})"`
-  — rather than a raw DN. Just start typing to filter the list (the search
-  matches against the rendered label). Moving the highlight with `↑↓` selects the
-  current entry and loads it into the form.
+  first row is a `‹self›` row representing the branch entry itself (editable like
+  any other entry), followed by the branch's leaf entries. Each entry is shown
+  with its profile **label** — for example `Bob Baker (bob)` from a
+  `label = "{cn} ({uid})"` — rather than a raw DN. Just start typing to filter the
+  list in place (the incremental find matches against the rendered label and
+  highlights the match; Backspace widens, Esc clears). Moving the highlight with
+  `↑↓` selects the current entry and loads it into the form.
 
 - **Entry (detail/edit form)** — a scrollable form for the selected entry, one
   row per attribute (label on the left, value on the right). The form is
@@ -62,8 +65,9 @@ overflows the visible height.
   only and does **not** descend into a pane's internal fields.
 - **`Shift-Tab`** moves focus backward.
 - Use the **arrow keys** to move within the focused pane.
-- The **mouse wheel** in the entry form moves between fields, scrolling the form
-  so the focused field stays on screen.
+- The **mouse wheel** scrolls the pane under the pointer: it moves the highlight
+  in the tree or entry list, and in the entry form it moves between fields,
+  scrolling the form so the focused field stays on screen.
 - **Clicking a form label** moves focus to that field's input directly.
 
 Moving focus off the form pane while it has unsaved edits opens the dirty-guard

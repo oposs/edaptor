@@ -35,12 +35,14 @@ the `memberOf` view write the link onto the chosen groups.
 2. Open the membership field (`member` on a group, `memberOf` on a user) with
    `↵`. A picker overlay opens, listing the candidate entries from the linked
    profile.
-3. **Incremental search on both panes:** type to filter the candidate list. The
-   search matches against each candidate's rendered profile **label** (e.g.
-   `Bob Baker (bob)` from `label = "{cn} ({uid})"`), not just its raw `cn`, so
-   you can find people by any attribute the label includes — `uid`, `mail`, and
-   so on. The same incremental search applies when browsing entries in the main
-   **Entries** pane.
+3. **Incremental search:** type while the candidate (Available) list is focused
+   to search. The query matches against each candidate's rendered profile
+   **label** (e.g. `Bob Baker (bob)` from `label = "{cn} ({uid})"`), not just its
+   raw `cn`, so you can find people by any attribute the label includes — `uid`,
+   `mail`, and so on. Because the candidate set comes from the directory, the
+   query re-runs the LDAP search (it is not limited to an already-loaded page).
+   The same type-to-find applies when browsing entries in the main **Entries**
+   pane (there it filters the already-loaded list in place).
 4. Toggle candidates in or out of the membership set, then accept the picker.
 5. Save the form (`Alt+S`). The change goes through the usual LDIF
    preview → apply flow.

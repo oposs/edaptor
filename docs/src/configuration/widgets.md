@@ -361,15 +361,16 @@ two-column picker:
 
 - **Left column** — the entry's *active* objectClasses (currently applied).
 - **Right column** — the *available* objectClasses known from the server's
-  subschema, filtered by the search box at the top of the right column.
+  subschema. Type while the available list is focused to filter it in place
+  (incremental find).
 
 | Action | Keys |
 |--------|------|
-| Move focus between search box, lists and buttons | Tab / Shift-Tab |
+| Move focus between the lists and buttons | Tab / Shift-Tab |
 | Add (highlighted available → active) | Insert, the **[Add]** button (Alt+A), or Enter on the available list |
 | Remove (highlighted active → available) | Delete, the **[Remove]** button (Alt+R), or Enter on the active list |
-| Filter the available column | type in the search box |
-| Commit | Enter (while the search box or OK button is focused), or the OK button |
+| Filter the available column | type while the available list is focused (Backspace widens, Esc clears) |
+| Commit | the **OK** button |
 
 **STRUCTURAL** classes that were already on the entry are shown in the active
 column but are **locked** (marked `*`) and cannot be removed; a structural class

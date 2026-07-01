@@ -2,23 +2,23 @@
 //!
 //! The clean re-incubation of `dual_list.rs`: instead of a controller that
 //! reaches into the host's `Dialog`, the `Shuttle` *is* a `View` embedding a
-//! `Group` and owning its children (two columns, optional search box, Add/Remove
-//! buttons), notifying the owner by broadcast (`CMD_SHUTTLE_CHANGED` /
-//! `CMD_SHUTTLE_SEARCH`) rather than a bespoke return-value channel. The pure
-//! column logic — move / de-dup / lock — lives in [`ShuttleModel`], which is
-//! tvision-free and unit-testable without a `Dialog`.
+//! `Group` and owning its children (two columns + Add/Remove buttons),
+//! notifying the owner by broadcast (`CMD_SHUTTLE_CHANGED`) rather than a
+//! bespoke return-value channel. Incremental search is the Available list's own
+//! built-in find mode (`FindMode`): typing while it is focused filters or
+//! highlights in place and the list broadcasts `Command::LIST_FIND_CHANGED`; a
+//! server-backed host reads [`Shuttle::find_query`] to re-run its query. The
+//! pure column logic — move / de-dup / lock — lives in [`ShuttleModel`], which
+//! is tvision-free and unit-testable without a `Dialog`.
 
 use tvision_rs::{
-    self as tv, delegate, Button, ButtonFlags, Command, Context, Event, FieldValue, Group,
-    InputLine, Key, Label, ListBox, Rect, ScrollBar, SortedListBox, View, ViewId,
+    self as tv, delegate, Button, ButtonFlags, Command, Context, Event, FieldValue, FindMode,
+    Group, Key, Label, ListBox, ListViewer, Rect, ScrollBar, SortedListBox, View, ViewId,
 };
 
 /// Broadcast (with the Shuttle's own `ViewId` as `source`) when the Selected set
 /// changes via a move. The owner re-reads [`Shuttle::selected`] and reacts.
 pub(crate) const CMD_SHUTTLE_CHANGED: Command = Command::custom("shuttle.changed");
-/// Broadcast when the search box text changes. The owner re-reads
-/// [`Shuttle::search_text`] and re-publishes the Available column.
-pub(crate) const CMD_SHUTTLE_SEARCH: Command = Command::custom("shuttle.search");
 
 /// Internal: the on-screen [Add] button posts this; handled exactly like Insert.
 const CMD_ADD: Command = Command::custom("shuttle.add");
@@ -104,7 +104,7 @@ impl ShuttleModel {
 }
 
 /// The two-list transfer widget. Embeds a `Group` that owns the column lists,
-/// their scroll bars, the optional search box and the Add/Remove buttons; the
+/// their scroll bars and the Add/Remove buttons; the
 /// move logic lives in [`ShuttleModel`]. A `View` in its own right (the impl is
 /// delegated to the group, with only `handle_event`, `as_any_mut` and the
 /// gather/scatter methods hand-written) rather than a controller poking a host's
@@ -114,22 +114,20 @@ pub(crate) struct Shuttle {
     model: ShuttleModel,
     avail_id: ViewId,
     selected_id: ViewId,
-    search_id: Option<ViewId>,
-    /// Last-observed search-box text (the value returned by `search_text`).
-    last_search: String,
 }
 
 impl Shuttle {
     /// Build the two columns (each a list + a right-lane scroll bar) inside an
-    /// owned `Group`, plus an optional search box above the Available column.
-    /// `selected_on_left` only flips the rendered layout — move semantics are
-    /// unchanged. Geometry: headers at row 1, search at rows 2..3, lists at
-    /// rows 4..(height-4), 2-cell margins and a 4-cell gutter.
+    /// owned `Group`. `find_mode` enables the Available list's built-in
+    /// incremental search ([`FindMode::Off`] for none); `selected_on_left` only
+    /// flips the rendered layout — move semantics are unchanged. Geometry:
+    /// headers at row 1, lists at rows 2..(height-4), 2-cell margins and a
+    /// 4-cell gutter.
     pub(crate) fn new(
         area: Rect,
         left_title: &str,
         right_title: &str,
-        with_search: bool,
+        find_mode: FindMode,
         selected_on_left: bool,
     ) -> Shuttle {
         let (x0, y0, x1, y1) = (area.a.x, area.a.y, area.b.x, area.b.y);
@@ -137,8 +135,7 @@ impl Shuttle {
         let left = (x0 + 2, mid - 2);
         let right = (mid + 2, x1 - 2);
         let head_y = y0 + 1;
-        let search_y = (y0 + 2, y0 + 3);
-        let list_y = (y0 + 4, y1 - 4);
+        let list_y = (y0 + 2, y1 - 4);
         let (avail_col, sel_col) = if selected_on_left {
             (right, left)
         } else {
@@ -159,29 +156,23 @@ impl Shuttle {
             None,
         )));
 
-        // Search box above the Available column.
-        let search_id = if with_search {
-            Some(group.insert(Box::new(InputLine::with_limit(
-                Rect::new(avail_col.0, search_y.0, avail_col.1, search_y.1),
-                128,
-            ))))
-        } else {
-            None
-        };
-
-        // Available column: a SortedListBox (type-to-search) wired to a bar.
+        // Available column: a SortedListBox (type-to-search + incremental find)
+        // wired to a bar.
         let avail_bar = group.insert(Box::new(ScrollBar::new(Rect::new(
             avail_col.1 - 1,
             list_y.0,
             avail_col.1,
             list_y.1,
         ))));
-        let avail_id = group.insert(Box::new(SortedListBox::new(
-            Rect::new(avail_col.0, list_y.0, avail_col.1 - 1, list_y.1),
-            1,
-            None,
-            Some(avail_bar),
-        )));
+        let avail_id = group.insert(Box::new(
+            SortedListBox::new(
+                Rect::new(avail_col.0, list_y.0, avail_col.1 - 1, list_y.1),
+                1,
+                None,
+                Some(avail_bar),
+            )
+            .with_find(find_mode),
+        ));
 
         // Selected column: a plain ListBox (insertion order) wired to a bar.
         let selected_bar = group.insert(Box::new(ScrollBar::new(Rect::new(
@@ -219,39 +210,25 @@ impl Shuttle {
             model: ShuttleModel::default(),
             avail_id,
             selected_id,
-            search_id,
-            last_search: String::new(),
         }
     }
 
-    /// The current search-box text (empty when there is no search box). Updated
-    /// as the box is edited; the owner reads it after a `CMD_SHUTTLE_SEARCH`
-    /// broadcast to re-publish the Available column.
-    pub(crate) fn search_text(&self) -> &str {
-        &self.last_search
+    /// The Available list's current incremental-find query (empty when find mode
+    /// is off or nothing has been typed). A server-backed host reads this after a
+    /// `Command::LIST_FIND_CHANGED` broadcast to re-run its candidate query.
+    pub(crate) fn find_query(&mut self) -> String {
+        self.group
+            .child_mut(self.avail_id)
+            .and_then(|v| v.as_any_mut())
+            .and_then(|a| a.downcast_mut::<SortedListBox>())
+            .and_then(|lb| lb.find_query().map(str::to_string))
+            .unwrap_or_default()
     }
 
     /// The current Selected set — the owner reads this after a
     /// `CMD_SHUTTLE_CHANGED` broadcast to stage its commit.
     pub(crate) fn selected(&self) -> &[ShuttleRow] {
         self.model.selected()
-    }
-
-    /// The `ViewId` of the search box, if any. The owner typically focuses it so
-    /// typing searches immediately.
-    pub(crate) fn search_id(&self) -> Option<ViewId> {
-        self.search_id
-    }
-
-    /// The current search-box text read live from the child `InputLine`.
-    fn current_search(&mut self) -> String {
-        let Some(id) = self.search_id else {
-            return String::new();
-        };
-        match self.group.child_mut(id).and_then(|v| v.value()) {
-            Some(FieldValue::Text(s)) => s,
-            _ => String::new(),
-        }
     }
 
     /// The list of the column whose horizontal extent contains the Shuttle-local
@@ -432,14 +409,13 @@ impl View for Shuttle {
         Some(self)
     }
 
-    /// Open-time focus inside the Shuttle: the search box (search-as-you-type)
-    /// when present, otherwise the Available list. The host embeds the Shuttle and
+    /// Open-time focus inside the Shuttle: the Available list, so type-to-search
+    /// / incremental find works immediately. The host embeds the Shuttle and
     /// focuses the Shuttle itself (so the dialog routes events here); this decides
     /// which child lands focus when that happens. Runs before the first draw.
     fn reset_current(&mut self, ctx: &mut Context) {
         self.group.reset_current(ctx);
-        let target = self.search_id().unwrap_or(self.avail_id);
-        self.group.focus_child(target, ctx);
+        self.group.focus_child(self.avail_id, ctx);
     }
 
     /// Gather: the Selected set as a list of keys, so the Shuttle participates
@@ -511,8 +487,8 @@ impl View for Shuttle {
         // else (Tab/arrows/typing) delegates to the group so focus and list
         // navigation work the standard way.
         // Enter is a move only while a list holds focus (Available → move in,
-        // Selected → move out). Enter elsewhere (search box, buttons) passes
-        // through so the dialog's default OK still fires.
+        // Selected → move out). Enter elsewhere (the buttons) passes through so
+        // the dialog's default OK still fires.
         let enter = matches!(ev, Event::KeyDown(k) if k.key == Key::Enter);
         let enter_in = enter && self.group.current() == Some(self.avail_id);
         let enter_out = enter && self.group.current() == Some(self.selected_id);
@@ -538,16 +514,9 @@ impl View for Shuttle {
             return;
         }
         self.group.handle_event(ev, ctx);
-
-        // Report a search-box edit. The owner re-reads `search_text` and
-        // re-publishes the Available column.
-        if self.search_id.is_some() {
-            let cur = self.current_search();
-            if cur != self.last_search {
-                self.last_search = cur;
-                ctx.broadcast(CMD_SHUTTLE_SEARCH, self.state().id());
-            }
-        }
+        // Incremental search is the Available list's own find mode: when focused
+        // it consumes query keys and broadcasts `Command::LIST_FIND_CHANGED`
+        // itself, so the Shuttle has nothing to report here.
     }
 }
 
@@ -602,12 +571,14 @@ impl Shuttle {
         }
     }
 
-    /// Simulate the user having typed `text` into the search box.
-    pub(crate) fn set_search_text(&mut self, text: &str, ctx: &mut Context) {
-        if let Some(id) = self.search_id {
-            if let Some(c) = self.group.child_mut(id) {
-                c.set_value_ctx(FieldValue::Text(text.into()), ctx);
-            }
+    /// Simulate the user typing `text` into the Available list's find box: focus
+    /// the list, then dispatch one `KeyDown(Char)` per character so the list's
+    /// own find state machine accumulates the query.
+    pub(crate) fn type_find(&mut self, text: &str, ctx: &mut Context) {
+        self.group.focus_child(self.avail_id, ctx);
+        for ch in text.chars() {
+            let mut ev = Event::KeyDown(tv::KeyEvent::from(Key::Char(ch)));
+            self.handle_event(&mut ev, ctx);
         }
     }
 }
@@ -721,7 +692,13 @@ mod tests {
     // -- View seams --------------------------------------------------------
 
     fn shuttle() -> Shuttle {
-        Shuttle::new(Rect::new(0, 0, 72, 22), "Active", "Available", true, false)
+        Shuttle::new(
+            Rect::new(0, 0, 72, 22),
+            "Active",
+            "Available",
+            FindMode::Filter,
+            false,
+        )
     }
 
     #[test]
@@ -792,30 +769,25 @@ mod tests {
     }
 
     #[test]
-    fn enter_on_search_box_does_not_move() {
+    fn typing_filters_the_available_list_in_filter_mode() {
+        // `shuttle()` builds the Available list with FindMode::Filter. Typing
+        // narrows it to rows containing the query; clearing restores the set.
         let mut sh = shuttle();
         let mut h = Harness::new();
-        sh.set_available(vec![row("a")], &mut h.ctx());
-        sh.set_selected(vec![row("k")], &mut h.ctx());
-        let search = sh.search_id().unwrap();
-        {
-            let mut ctx = h.ctx();
-            sh.group.focus_child(search, &mut ctx);
-        }
-        let mut ev = Event::KeyDown(KeyEvent::from(Key::Enter));
-        sh.handle_event(&mut ev, &mut h.ctx());
+        sh.set_available(vec![row("alpha"), row("beta"), row("gamma")], &mut h.ctx());
+        sh.type_find("gam", &mut h.ctx());
+        assert_eq!(sh.find_query(), "gam", "find_query tracks the typed query");
         assert_eq!(
-            keys(sh.model.selected()),
-            ["k"],
-            "Enter on the search box must NOT move — it passes through to the dialog (OK)"
+            sh.avail_text(),
+            vec!["gamma".to_string()],
+            "Filter mode narrows the Available list to the substring match"
         );
     }
 
     #[test]
-    fn public_accessors_expose_selection_and_search_id() {
+    fn public_accessors_expose_selection() {
         let mut sh = shuttle();
         let mut h = Harness::new();
-        assert!(sh.search_id().is_some(), "built with a search box");
         sh.set_available(vec![row("a")], &mut h.ctx());
         sh.set_selected(vec![], &mut h.ctx());
         let aid = sh.avail_id;
@@ -866,17 +838,18 @@ mod tests {
     }
 
     #[test]
-    fn search_box_edit_broadcasts_search_changed() {
+    fn typing_a_query_broadcasts_list_find_changed() {
+        // The Available list owns the find: typing must broadcast the upstream
+        // `Command::LIST_FIND_CHANGED` (so a server-backed host re-runs its
+        // query) and `find_query` must report the accumulated text.
         let mut sh = shuttle();
         let mut h = Harness::new();
-        sh.set_search_text("foo", &mut h.ctx());
-        // Any delegating (non-move) event triggers the post-delegation check.
-        let mut ev = Event::KeyDown(KeyEvent::from(Key::End));
-        sh.handle_event(&mut ev, &mut h.ctx());
-        assert_eq!(sh.search_text(), "foo", "search_text must track the box");
+        sh.set_available(vec![row("foobar"), row("baz")], &mut h.ctx());
+        sh.type_find("foo", &mut h.ctx());
+        assert_eq!(sh.find_query(), "foo", "find_query must track the query");
         assert!(
-            h.broadcast_seen(CMD_SHUTTLE_SEARCH),
-            "a search edit must broadcast CMD_SHUTTLE_SEARCH"
+            h.broadcast_seen(Command::LIST_FIND_CHANGED),
+            "a find edit must broadcast Command::LIST_FIND_CHANGED"
         );
     }
 
