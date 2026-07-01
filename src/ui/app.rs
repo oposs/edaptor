@@ -705,9 +705,17 @@ fn init_desktop(r: Rect, state: Shared) -> Option<Box<dyn View>> {
     let leaf: Box<dyn View> = Box::new(LeafPane::new(interior, state.clone()));
     let form: Box<dyn View> = Box::new(FormPane::new(interior, state.clone()));
 
+    // Left column: the branch tree (top) stacked over the selected branch's
+    // members (bottom); the form fills the right column. A nested rows-splitter
+    // inside the outer cols-splitter — `.joined()` on the outer cascades to it.
+    let left: Box<dyn View> = Box::new(
+        Splitter::rows()
+            .pane(tree, Constraints::flex().min(3))
+            .pane(leaf, Constraints::flex().min(3)),
+    );
+
     let split = Splitter::cols()
-        .pane(tree, Constraints::flex().min(16))
-        .pane(leaf, Constraints::flex().min(16))
+        .pane(left, Constraints::flex().min(16))
         .pane(form, Constraints::flex().min(20))
         .joined();
 
