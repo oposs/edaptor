@@ -232,6 +232,12 @@ impl View for TreePane {
     }
 
     fn handle_event(&mut self, ev: &mut Event, ctx: &mut Context) {
+        // Only scroll on the wheel when the cursor is over this pane — tvision
+        // delivers the wheel non-positionally, so otherwise the outline would grab
+        // a wheel meant for a sibling pane. Left unconsumed, it propagates.
+        if super::wheel_misses_pane(self.group.state(), ev) {
+            return;
+        }
         // Controller → pane: snap the selection back (guard "Stay") before reporting.
         let snap = self.state.borrow_mut().set_tree_row.take();
         if let Some(row) = snap {

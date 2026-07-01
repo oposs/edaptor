@@ -321,8 +321,10 @@ impl FormPane {
         }
     }
 
-    /// Move focus to the prev/next focusable field, wrapping. Focuses the first
-    /// focusable when none is currently focused.
+    /// Move focus to the prev/next focusable field, clamping at the ends (so
+    /// Down on the last field and Up on the first stay put — no wrap-around,
+    /// matching the list panes). Focuses the first focusable when none is
+    /// currently focused.
     fn focus_field(&mut self, delta: i32, ctx: &mut Context) {
         let ids = self.focusable_value_ids();
         if ids.is_empty() {
@@ -331,8 +333,9 @@ impl FormPane {
         // Current focused field lives inside the ScrollGroup.
         let cur = self.scroll_mut().and_then(|sg| sg.current());
         let pos = cur.and_then(|c| ids.iter().position(|id| *id == c));
+        let last = ids.len() as i32 - 1;
         let next = match pos {
-            Some(p) => (p as i32 + delta).rem_euclid(ids.len() as i32) as usize,
+            Some(p) => (p as i32 + delta).clamp(0, last) as usize,
             None if delta >= 0 => 0,
             None => ids.len() - 1,
         };
@@ -548,15 +551,15 @@ impl View for FormPane {
         // sliding content under a stationary cursor. Moving focus lets
         // `ensure_visible` scroll the form so the focused field — and the hardware
         // cursor — stays on screen, so the wheel "advances the cursor" and can
-        // never strand it off-screen (which previously wedged the display). Only
-        // the active pane consumes the wheel; otherwise it propagates so the
-        // tree/leaf panes wheel-scroll when they are the active pane. (The form is
-        // the splitter's last child, so reverse-order delivery offers it the wheel
-        // first — the active-gate is what keeps it from hijacking the others.)
+        // never strand it off-screen (which previously wedged the display). The
+        // form consumes the wheel only when the cursor is over IT — tvision
+        // delivers the wheel non-positionally (the splitter offers it to each pane
+        // in turn), so without this gate the form, as the splitter's last child,
+        // would grab every wheel regardless of the pointer.
+        if super::wheel_misses_pane(self.group.state(), ev) {
+            return; // cursor is over a sibling pane: let the wheel propagate
+        }
         if let Event::MouseWheel(me) = ev {
-            if !self.group.state().state.active {
-                return; // not the active pane: let the splitter try the next one
-            }
             let delta = match me.wheel {
                 tv::event::MouseWheel::Down => 1,
                 tv::event::MouseWheel::Up => -1,
@@ -720,7 +723,7 @@ mod tests {
     }
 
     #[test]
-    fn updown_cycles_focus_among_editable_fields() {
+    fn updown_moves_focus_and_clamps_at_ends() {
         // Tab switches panes (consumed by the Splitter), so intra-pane field
         // navigation uses Up/Down. Render focuses the first editable field; Up/Down
         // cycle among editable rows, skipping read-only ones.
@@ -772,26 +775,40 @@ mod tests {
         let cur = pane.scroll_mut().and_then(|sg| sg.current());
         assert_eq!(cur, Some(focusable[1]), "Down → next focusable field");
 
+        // Down on the LAST focusable field clamps — it must NOT wrap back to the
+        // top (the reported "focus jumps back to the top from the bottom" bug).
         let mut d = Event::KeyDown(tv::KeyEvent::from(tv::Key::Down));
         pane.handle_event(&mut d, &mut ctx);
         let cur = pane.scroll_mut().and_then(|sg| sg.current());
         assert_eq!(
             cur,
-            Some(focusable[0]),
-            "Down wraps to the first focusable field"
+            Some(focusable[1]),
+            "Down on the last field stays put (clamp, no wrap)"
         );
 
         let mut u = Event::KeyDown(tv::KeyEvent::from(tv::Key::Up));
         pane.handle_event(&mut u, &mut ctx);
         let cur = pane.scroll_mut().and_then(|sg| sg.current());
-        assert_eq!(cur, Some(focusable[1]), "Up → previous focusable field");
+        assert_eq!(cur, Some(focusable[0]), "Up → previous focusable field");
+
+        // Up on the FIRST focusable field clamps at the top too (no wrap to bottom).
+        let mut u = Event::KeyDown(tv::KeyEvent::from(tv::Key::Up));
+        pane.handle_event(&mut u, &mut ctx);
+        let cur = pane.scroll_mut().and_then(|sg| sg.current());
+        assert_eq!(
+            cur,
+            Some(focusable[0]),
+            "Up on the first field stays put (clamp, no wrap)"
+        );
     }
 
     #[test]
-    fn mouse_wheel_moves_focus_only_when_pane_active() {
-        // The wheel advances the focused field (so ensure_visible keeps the cursor
-        // on screen) — but only when the form is the active pane; otherwise it
-        // propagates so the tree/leaf panes can wheel-scroll.
+    fn mouse_wheel_scrolls_only_when_cursor_is_over_the_pane() {
+        // tvision delivers the wheel non-positionally (the splitter offers it to
+        // each pane until one consumes it), with the position translated into the
+        // pane's local frame. The form must scroll only when the cursor is over
+        // IT — a wheel whose local position lies outside the pane's extent (the
+        // cursor is over a sibling pane) must be left unconsumed so it propagates.
         use crate::ldap::worker::RawSubschema;
         let schema = SchemaModel::from_raw(&RawSubschema::default());
         let structure = Structure::build("dc=x", vec![]);
@@ -819,24 +836,39 @@ mod tests {
         let cur = pane.scroll_mut().and_then(|sg| sg.current());
         assert_eq!(cur, Some(focusable[0]));
 
-        // Inactive pane: the wheel is ignored here (left to propagate elsewhere).
+        // Cursor NOT over this pane (local x is left of the pane): the wheel must
+        // be left unconsumed (still live) and must not move focus.
         let mut w = Event::MouseWheel(tv::event::MouseEvent {
+            position: tv::Point::new(-5, 5),
             wheel: tv::event::MouseWheel::Down,
             ..Default::default()
         });
         pane.handle_event(&mut w, &mut ctx);
+        assert!(
+            !w.is_nothing(),
+            "a wheel over a sibling pane must stay unconsumed so it propagates"
+        );
         let cur = pane.scroll_mut().and_then(|sg| sg.current());
-        assert_eq!(cur, Some(focusable[0]), "inactive pane ignores the wheel");
+        assert_eq!(
+            cur,
+            Some(focusable[0]),
+            "a wheel that misses the pane must not move focus"
+        );
 
-        // Active pane: wheel down advances focus to the next field.
-        pane.group.state_mut().state.active = true;
+        // Cursor OVER this pane: wheel down advances focus and consumes the event.
         let mut w = Event::MouseWheel(tv::event::MouseEvent {
+            position: tv::Point::new(10, 5),
             wheel: tv::event::MouseWheel::Down,
             ..Default::default()
         });
         pane.handle_event(&mut w, &mut ctx);
+        assert!(w.is_nothing(), "a wheel over the pane is consumed");
         let cur = pane.scroll_mut().and_then(|sg| sg.current());
-        assert_eq!(cur, Some(focusable[1]), "active pane wheel advances focus");
+        assert_eq!(
+            cur,
+            Some(focusable[1]),
+            "a wheel over the pane advances focus"
+        );
     }
 
     #[test]
