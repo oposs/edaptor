@@ -1,10 +1,12 @@
-//! Picker field widget (single / multi select over live LDAP results). A
-//! `WidgetKind::Picker` binding with `fanout_attr == None` opens a modal with a
-//! search `InputLine` on top and a `ListBox` below: typing in the search box
-//! submits an async candidate search (`SearchFlow`) via the worker; results
-//! arrive on the next pump tick and are broadcast as `REFRESH`, which the dialog
-//! copies into its neutral `PickState` and re-renders. Insert ticks the
-//! highlighted row (radio for single, checkbox for multi); OK commits
+//! Picker field widget (single-select over live LDAP results). A
+//! `WidgetKind::Picker` binding that resolves to single cardinality and is not a
+//! fan-out opens a modal with a search `InputLine` over a radio `ListBox`.
+//! Multi-select pickers are served by `ui::multi_picker` (the Shuttle dialog).
+//!
+//! Typing in the search box submits an async candidate search (`SearchFlow`)
+//! via the worker; results arrive on the next pump tick and are broadcast as
+//! `REFRESH`, which the dialog copies into its neutral `PickState` and
+//! re-renders. Insert selects the highlighted row (radio); OK commits
 //! `SetValues(pick_state.selected_values())`. Space is intentionally NOT
 //! intercepted so it can be typed into the search box for multi-word queries.
 //!
@@ -48,7 +50,6 @@ impl FieldWidget for PickerWidget {
     }
 
     fn activate(&self, field: &EditField) -> Activation {
-        use crate::config::relation::Cardinality;
         match &field.widget_binding {
             Some(WidgetKind::Picker(b))
                 if b.fanout_attr.is_none()
@@ -91,8 +92,10 @@ impl FieldEditor for PickerEditor {
             current,
             multi,
         } = *self;
-        let cardinality = binding.cardinality(multi);
-        let dlg = PickerDialog::new(label, binding, current, cardinality, shared);
+        // Multi-select pickers are routed to MultiPickerDialog; this dialog is
+        // single-select only.
+        debug_assert_eq!(binding.cardinality(multi), Cardinality::Single);
+        let dlg = PickerDialog::new(label, binding, current, shared);
         // Focus the search box so typing searches immediately (search-as-you-type);
         // arrow keys are forwarded to the list by `handle_event` (the search-over-
         // list idiom, mirroring `LeafPane`).
@@ -113,7 +116,6 @@ pub(crate) struct PickerDialog {
     list_id: tv::ViewId,
     shared: Shared,
     pick: PickState,
-    cardinality: Cardinality,
     /// Resolved candidate-search scope.
     base: String,
     oc: String,
@@ -129,7 +131,6 @@ impl PickerDialog {
         label: String,
         binding: PickerBinding,
         current: Vec<String>,
-        cardinality: Cardinality,
         shared: Shared,
     ) -> Self {
         let title = format!("Select {label}");
@@ -203,7 +204,6 @@ impl PickerDialog {
             list_id,
             shared,
             pick,
-            cardinality,
             base: binding.scope.base.clone(),
             oc,
             attrs,
@@ -213,15 +213,12 @@ impl PickerDialog {
         }
     }
 
-    /// Marker prefix for a row: radio for single, checkbox for multi.
-    fn marker(&self, selected: bool, saved: bool) -> &'static str {
-        match (self.cardinality, selected, saved) {
-            (Cardinality::Single, true, _) => "(\u{2022}) ",
-            (Cardinality::Single, false, _) => "( ) ",
-            (Cardinality::Multi, true, _) => "[x] ",
-            // saved-but-removed (will be deleted on save): mark distinctly.
-            (Cardinality::Multi, false, true) => "[-] ",
-            (Cardinality::Multi, false, false) => "[ ] ",
+    /// Radio marker for the highlighted single-select candidate.
+    fn marker(&self, selected: bool, _saved: bool) -> &'static str {
+        if selected {
+            "(\u{2022}) "
+        } else {
+            "( ) "
         }
     }
 
@@ -300,24 +297,15 @@ impl PickerDialog {
         }
     }
 
-    /// Pick the candidate at visible-row `idx`: replace (single) or toggle (multi).
+    /// Pick the candidate at visible-row `idx`: replaces the current selection.
     fn pick_at(&mut self, idx: usize, ctx: &mut Context) {
         let rows = self.pick.visible();
         let Some(row) = rows.get(idx) else {
             return;
         };
         let cand = row.candidate.clone();
-        match self.cardinality {
-            Cardinality::Single => {
-                // Radio: the pick replaces the whole selection.
-                self.pick.selected = vec![cand];
-            }
-            Cardinality::Multi => {
-                // Checkbox: drive PickState's keyed toggle at this row.
-                self.pick.cursor = idx;
-                self.pick.toggle_cursor();
-            }
-        }
+        // Single-select radio: the pick replaces the whole selection.
+        self.pick.selected = vec![cand];
         self.rebuild_list(ctx, true);
         self.update_staged();
     }
@@ -460,12 +448,12 @@ mod tests {
         }
     }
 
-    fn multi_dn_binding() -> PickerBinding {
+    fn single_dn_binding() -> PickerBinding {
         PickerBinding {
-            attr: "member".into(),
+            attr: "secretary".into(),
             scope: dn_scope(),
             store: StoreKey::Dn,
-            select: Some(Cardinality::Multi),
+            select: Some(Cardinality::Single),
             fanout_attr: None,
         }
     }
@@ -483,7 +471,7 @@ mod tests {
     #[test]
     fn present_joins_values_or_none() {
         let w = PickerWidget;
-        let mut f = picker_field("member", &[], multi_dn_binding(), true);
+        let mut f = picker_field("secretary", &[], single_dn_binding(), false);
         assert_eq!(w.present(&f), "\u{2039}none\u{203a}");
         f.values = vec!["uid=a,ou=people,dc=example,dc=org".into()];
         assert_eq!(w.present(&f), "uid=a,ou=people,dc=example,dc=org");
@@ -508,124 +496,27 @@ mod tests {
     #[test]
     fn multi_nonfanout_picker_does_not_activate_here() {
         // A multi non-fanout binding is routed to MultiPickerWidget, not PickerWidget.
-        let f = picker_field("member", &[], multi_dn_binding(), true);
+        let binding = PickerBinding {
+            attr: "member".into(),
+            scope: dn_scope(),
+            store: StoreKey::Dn,
+            select: Some(Cardinality::Multi),
+            fanout_attr: None,
+        };
+        let f = picker_field("member", &[], binding, true);
         assert!(matches!(PickerWidget.activate(&f), Activation::Inline));
     }
 
     #[test]
     fn fanout_picker_does_not_activate_here() {
         // A fan-out (membership) binding is a later task — this widget yields Inline.
-        let mut b = multi_dn_binding();
+        let mut b = single_dn_binding();
         b.fanout_attr = Some("member".into());
-        let f = picker_field("memberOf", &[], b, true);
+        let f = picker_field("memberOf", &[], b, false);
         assert!(matches!(PickerWidget.activate(&f), Activation::Inline));
     }
 
-    // -- Task 14: headless dialog — seed results, toggle, assert staged ----
-
-    /// RED→GREEN: seed `search_results` with two candidates, `reset_current`
-    /// builds the list, toggling one (multi) with Insert stages
-    /// `SetValues([store_value])`.
-    #[test]
-    fn multi_toggle_stages_selected_store_value() {
-        let shared = test_shared();
-        // Two delivered candidates (DN store: store_value == dn).
-        shared.borrow_mut().search_results = vec![
-            cand(
-                "uid=alice,ou=people,dc=example,dc=org",
-                "uid=alice,ou=people,dc=example,dc=org",
-                "Alice",
-            ),
-            cand(
-                "uid=bob,ou=people,dc=example,dc=org",
-                "uid=bob,ou=people,dc=example,dc=org",
-                "Bob",
-            ),
-        ];
-
-        let ed: Box<dyn FieldEditor> = Box::new(PickerEditor {
-            label: "member".into(),
-            binding: multi_dn_binding(),
-            current: vec![],
-            multi: true,
-        });
-        let (mut view, _focus) = ed.into_view(&schema(), shared.clone());
-
-        let mut out = std::collections::VecDeque::new();
-        let mut timers = TimerQueue::new();
-        let mut deferred = Vec::new();
-        let mut ctx = headless_ctx(&mut out, &mut timers, &mut deferred);
-        view.reset_current(&mut ctx);
-
-        // Initially nothing selected.
-        assert_eq!(
-            shared.borrow().staged_commit,
-            Some(CommitOutcome::SetValues(vec![]))
-        );
-
-        // Highlight row 0 (Alice) and press Insert to tick it.
-        let dlg = view
-            .as_any_mut()
-            .and_then(|a| a.downcast_mut::<PickerDialog>())
-            .expect("downcast PickerDialog");
-        if let Some(list) = dlg.dlg.child_mut(dlg.list_id) {
-            list.set_value_ctx(FieldValue::Int(0), &mut ctx);
-        }
-        let mut ev = Event::KeyDown(KeyEvent::from(Key::Insert));
-        dlg.handle_event(&mut ev, &mut ctx);
-
-        assert_eq!(
-            shared.borrow().staged_commit,
-            Some(CommitOutcome::SetValues(vec![
-                "uid=alice,ou=people,dc=example,dc=org".to_string()
-            ])),
-            "Insert on Alice must stage her DN as the only selected value"
-        );
-    }
-
-    /// Space must NOT toggle any candidate — it must pass through to the search
-    /// box so users can type multi-word queries like "Ann Smith" or "van der".
-    #[test]
-    fn space_does_not_toggle_candidate() {
-        let shared = test_shared();
-        shared.borrow_mut().search_results = vec![cand(
-            "uid=alice,ou=people,dc=example,dc=org",
-            "uid=alice,ou=people,dc=example,dc=org",
-            "Alice",
-        )];
-
-        let ed: Box<dyn FieldEditor> = Box::new(PickerEditor {
-            label: "member".into(),
-            binding: multi_dn_binding(),
-            current: vec![],
-            multi: true,
-        });
-        let (mut view, _focus) = ed.into_view(&schema(), shared.clone());
-
-        let mut out = std::collections::VecDeque::new();
-        let mut timers = TimerQueue::new();
-        let mut deferred = Vec::new();
-        let mut ctx = headless_ctx(&mut out, &mut timers, &mut deferred);
-        view.reset_current(&mut ctx);
-
-        let dlg = view
-            .as_any_mut()
-            .and_then(|a| a.downcast_mut::<PickerDialog>())
-            .expect("downcast PickerDialog");
-        // Highlight row 0.
-        if let Some(list) = dlg.dlg.child_mut(dlg.list_id) {
-            list.set_value_ctx(FieldValue::Int(0), &mut ctx);
-        }
-        // Press Space — must NOT toggle Alice.
-        let mut ev = Event::KeyDown(KeyEvent::from(Key::Char(' ')));
-        dlg.handle_event(&mut ev, &mut ctx);
-
-        assert_eq!(
-            shared.borrow().staged_commit,
-            Some(CommitOutcome::SetValues(vec![])),
-            "Space must not toggle any candidate — it should reach the search box"
-        );
-    }
+    // -- Task 14: headless dialog — seed results, pick, assert staged --------
 
     /// Single-select radio: a pick replaces the selection (does not accumulate).
     #[test]
@@ -695,10 +586,10 @@ mod tests {
     fn reset_seeds_current_selection() {
         let shared = test_shared();
         let ed: Box<dyn FieldEditor> = Box::new(PickerEditor {
-            label: "member".into(),
-            binding: multi_dn_binding(),
+            label: "secretary".into(),
+            binding: single_dn_binding(),
             current: vec!["uid=carol,ou=people,dc=example,dc=org".into()],
-            multi: true,
+            multi: false,
         });
         let (mut view, _focus) = ed.into_view(&schema(), shared.clone());
         let mut out = std::collections::VecDeque::new();
