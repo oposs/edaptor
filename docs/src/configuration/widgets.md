@@ -168,6 +168,12 @@ field**. Pressing Enter opens an overlay that searches entries from a linked
 profile; the operator selects one or more candidates and eDAPtor writes the
 right value(s) into this entry's attribute.
 
+A **single-select** picker (`select = "single"`) presents a search box over a
+radio list. A **multi-select** picker (`select = "multi"`, the default for
+multi-valued attributes such as `member` and `memberUid`) presents the
+two-column **Available | Selected** shuttle: type to search, then
+Insert/Enter/[Add] to move a candidate in and Delete/[Remove] to move it out.
+
 ```toml
 [profile.widget.gidNumber]
 kind      = "picker"

@@ -124,6 +124,11 @@ All notable changes to eDAPtor are documented here. The format follows
 
 ### Changed
 
+- Multi-select `picker` fields (`memberUid`, `member`) now use the two-column
+  Shuttle editor (Available | Members) with type-to-find, matching the
+  objectClass and membership editors. The single-list checkbox picker is now
+  single-select only. Fixed-vocabulary `choice` fields are unchanged.
+
 - Upgraded **tvision-rs 0.4 → 0.5**, which adds focus-aware surfaces for the
   outline and input-line widgets (`OutlineNormalInactive`, `InputPassive`).
 
