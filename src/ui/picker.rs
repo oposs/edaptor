@@ -87,11 +87,7 @@ impl FieldEditor for PickerEditor {
             current,
             multi,
         } = *self;
-        let cardinality = binding.select.unwrap_or(if multi {
-            Cardinality::Multi
-        } else {
-            Cardinality::Single
-        });
+        let cardinality = binding.cardinality(multi);
         let dlg = PickerDialog::new(label, binding, current, cardinality, shared);
         // Focus the search box so typing searches immediately (search-as-you-type);
         // arrow keys are forwarded to the list by `handle_event` (the search-over-
