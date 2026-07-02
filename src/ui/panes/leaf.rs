@@ -3,8 +3,8 @@
 //! filter and highlight, no separate search box.
 
 use tvision_rs::{
-    self as tv, delegate, Context, Event, FieldValue, FindMode, Group, Key, ListBox, ListViewer,
-    Rect, ScrollBar, View,
+    self as tv, delegate, Context, DrawCtx, Event, FieldValue, FindMode, Group, Key, ListBox,
+    ListViewer, Rect, ScrollBar, View,
 };
 
 use crate::ui::{Shared, REFRESH};
@@ -205,6 +205,23 @@ impl View for LeafPane {
         Some(self)
     }
 
+    fn draw(&mut self, ctx: &mut DrawCtx) {
+        // Focus indication: the `ListViewer` picks its bright "active" palette
+        // (base3 surface + blue cursor) when `selected && active`, and its dim
+        // "inactive" palette (recessed surface + faded-blue current row) otherwise.
+        // But a list that is the sole current child of this pane group keeps
+        // `selected` set even after the pane loses focus — `Selected` does not fan
+        // out of the owning group, so `selected && active` would stay true and the
+        // leaf would never dim. Mirror the pane's real `focused` onto the list's
+        // `active` flag so an unfocused leaf recedes and its current row fades,
+        // matching the tree pane (whose Outline already keys on `focused`).
+        let focused = self.group.state().state.focused;
+        if let Some(list) = self.group.child_mut(self.list_id) {
+            list.state_mut().state.active = focused;
+        }
+        self.group.draw(ctx);
+    }
+
     fn handle_event(&mut self, ev: &mut Event, ctx: &mut Context) {
         // Only scroll on the wheel when the cursor is over this pane — tvision
         // delivers the wheel non-positionally, so otherwise the inner list would
@@ -329,6 +346,115 @@ mod tests {
         assert_eq!(LeafPane::bar_layout(0, 9, true, 30), (false, 30));
         // Degenerate width clamps to 0 rather than going negative.
         assert_eq!(LeafPane::bar_layout(20, 9, true, 0), (true, 0));
+    }
+
+    /// Focus visualization: the leaf `ListViewer` keys its bright/dim palette on
+    /// `selected && active`, but a list that is the sole current child of its pane
+    /// group keeps `selected` set even after the pane loses focus (Selected does
+    /// not fan out of the owner). So without a focus-sync the leaf would stay
+    /// bright (active surface + blue cursor) regardless of focus. The pane's
+    /// `draw()` fixes this by mirroring the pane's real `focused` onto the list's
+    /// `active` flag: a focused leaf renders the active surface with the blue
+    /// cursor; an unfocused leaf recedes to the inactive surface and its current
+    /// row shows the faded-blue selected colour.
+    #[test]
+    fn unfocused_leaf_recedes_and_current_row_fades() {
+        use tvision_rs::{Buffer, DrawCtx, Point, Role};
+
+        let inputs = vec![
+            StructureInput {
+                dn: "dc=x".into(),
+                cn: None,
+                description: None,
+                object_classes: vec![],
+                attrs: BTreeMap::new(),
+            },
+            StructureInput {
+                dn: "ou=p,dc=x".into(),
+                cn: None,
+                description: None,
+                object_classes: vec![],
+                attrs: BTreeMap::new(),
+            },
+            StructureInput {
+                dn: "cn=a,ou=p,dc=x".into(),
+                cn: Some("a".into()),
+                description: None,
+                object_classes: vec![],
+                attrs: BTreeMap::new(),
+            },
+            StructureInput {
+                dn: "cn=b,ou=p,dc=x".into(),
+                cn: Some("b".into()),
+                description: None,
+                object_classes: vec![],
+                attrs: BTreeMap::new(),
+            },
+        ];
+        let structure = Structure::build("dc=x", inputs);
+        let schema = SchemaModel::from_raw(&RawSubschema::default());
+        let mut state =
+            UiState::new_for_test(structure, schema, "dc=x".into(), Vec::new(), Vec::new());
+        state.current_branch = Some("ou=p,dc=x".into());
+        let shared: Shared = Rc::new(RefCell::new(state));
+
+        let mut pane = LeafPane::new(Rect::new(0, 0, 30, 10), shared.clone());
+        let mut out: VecDeque<Event> = VecDeque::new();
+        let mut timers = tv::timer::TimerQueue::new();
+        let mut deferred: Vec<tv::Deferred> = Vec::new();
+        let mut ctx = tv::Context::new(&mut out, &mut timers, 0, &mut deferred);
+
+        // Seed the list (‹self› + two leaves) and settle currency on row 0.
+        shared.borrow_mut().list_dirty = true;
+        let mut seed = Event::Broadcast {
+            command: REFRESH,
+            source: None,
+        };
+        pane.handle_event(&mut seed, &mut ctx);
+        assert_eq!(pane.last_sel, 0, "seeding selects row 0");
+
+        let theme = crate::ui::theme::edaptor_theme();
+        let active_bg = theme.style(Role::ListNormalActive).bg;
+        let inactive_bg = theme.style(Role::ListNormalInactive).bg;
+        let cursor_bg = theme.style(Role::ListFocused).bg;
+        let faded_bg = theme.style(Role::ListSelected).bg;
+        assert_ne!(
+            active_bg, inactive_bg,
+            "test premise: active vs inactive surfaces must differ"
+        );
+
+        // Helper: draw the pane with the given focus and read back cell backgrounds.
+        let draw_bgs = |pane: &mut LeafPane, focused: bool| -> (tv::Color, tv::Color) {
+            pane.group.state_mut().state.focused = focused;
+            let mut buf = Buffer::new(30, 10);
+            {
+                let mut dctx =
+                    DrawCtx::new(&mut buf, &theme, Rect::new(0, 0, 30, 10), Point::new(0, 0));
+                <LeafPane as View>::draw(pane, &mut dctx);
+            }
+            // Row 0 is the current row; row 1 is a normal content row.
+            (buf.get(0, 0).style().bg, buf.get(0, 1).style().bg)
+        };
+
+        let (cur_focused, row_focused) = draw_bgs(&mut pane, true);
+        assert_eq!(
+            row_focused, active_bg,
+            "focused leaf: normal rows use the active (bright) surface"
+        );
+        assert_eq!(
+            cur_focused, cursor_bg,
+            "focused leaf: the current row uses the blue cursor colour"
+        );
+
+        let (cur_unfocused, row_unfocused) = draw_bgs(&mut pane, false);
+        assert_eq!(
+            row_unfocused, inactive_bg,
+            "unfocused leaf: normal rows recede to the inactive (darker) surface"
+        );
+        assert_eq!(
+            cur_unfocused, faded_bg,
+            "unfocused leaf: the current row shows the faded-blue selected colour"
+        );
     }
 
     #[test]

@@ -12,22 +12,29 @@ use tvision_rs::{
     self as tv, delegate, Context, DrawCtx, Event, FieldValue, Group, InputLine, Key, Point, Rect,
     Role, View,
 };
+use unicode_width::UnicodeWidthStr;
 
+use crate::ui::panes::field_label::FieldLabel;
 use crate::ui::scroll_group::ScrollGroup;
 use crate::ui::widget::{inline_editable, is_modal_field, widget_for};
 use crate::ui::{Shared, ACTIVATE, REFRESH};
 use crate::workflows::edit_form::{composed_create_dn, FormMode};
 
-/// Columns reserved for the label before the value `InputLine`.
-const LABEL_W: i32 = 22;
+/// Smallest / largest width the label column is allowed to take. It is sized to
+/// fit the longest label (so every field name shows in full) but never eats more
+/// than half the pane (see `label_col_width`).
+const LABEL_MIN: i32 = 6;
+const LABEL_MAX: i32 = 30;
+/// One column of breathing room kept after the right-aligned label text.
+const LABEL_GAP: i32 = 1;
 
-/// A disabled (read-only, skip-focus) `InputLine` used for header/label cells.
-/// `StaticText` has no `set_value`, so we reuse the M1 disabled-InputLine idiom
-/// for any cell whose text we update at render time.
-fn ro_cell(bounds: Rect) -> InputLine {
-    let mut il = InputLine::with_limit(bounds, 1024);
-    il.state.state.disabled = true;
-    il
+/// Width for the label column given the longest label (display columns) and the
+/// available inner width: fit the longest label plus a gap, but clamp so it stays
+/// within `[LABEL_MIN, min(LABEL_MAX, w/2)]` — the value editor always keeps at
+/// least half the pane.
+fn label_col_width(longest: i32, w: i32) -> i32 {
+    let cap = (w / 2).clamp(LABEL_MIN, LABEL_MAX);
+    (longest + LABEL_GAP).clamp(LABEL_MIN, cap)
 }
 
 /// A field's value cell is focusable if it is inline-editable OR a modal-activated
@@ -37,16 +44,28 @@ fn cell_focusable(f: &crate::workflows::edit_form::EditField) -> bool {
 }
 
 pub(crate) struct FormPane {
-    /// Outer container: header (row 0) + ScrollGroup (rows 1..h).
+    /// Outer container: header row 0 (`dn` label + DN value) + ScrollGroup (1..h).
     group: Group,
-    header_id: tv::ViewId,
+    /// The `dn` caption in the label column of the header row.
+    header_label_id: tv::ViewId,
+    /// The DN value (styled as a title) in the value column of the header row.
+    header_value_id: tv::ViewId,
     scroll_id: tv::ViewId,
     /// One value `InputLine` id per field, in field order (full-length; no cap).
     value_ids: Vec<tv::ViewId>,
-    /// One label `InputLine` (ro) id per field, parallel to `value_ids`.
+    /// One label `FieldLabel` id per field, parallel to `value_ids`.
     label_ids: Vec<tv::ViewId>,
     /// DN of the entry whose cells are currently built; `None` before first render.
     built_dn: Option<String>,
+    /// Width of the label column at the last rebuild (fit to the longest label).
+    label_w: i32,
+    /// Inner content width at the last rebuild; a change (splitter drag) triggers
+    /// a rebuild so the value editors reflow to fill the new width.
+    built_w: i32,
+    /// Whether the pane held focus at the previous event, so we can detect the
+    /// moment focus enters the pane (Tab from another pane) and home the caret —
+    /// the framework select-alls the field on focus entry, which we undo.
+    was_focused: bool,
     state: Shared,
 }
 
@@ -60,10 +79,14 @@ impl FormPane {
         let w = bounds.b.x - bounds.a.x;
         let h = bounds.b.y - bounds.a.y;
 
-        // Row 0: header (read-only cell). grow_mode hi_x so it widens with the pane.
-        let mut header = ro_cell(Rect::new(0, 0, w, 1));
-        header.state.grow_mode.hi_x = true;
-        let header_id = group.insert(Box::new(header));
+        // Row 0: the header, laid out like a field row — a `dn` label in the
+        // label column and the DN value (styled as a title) in the value column.
+        // Both are repositioned to the real label width on the first rebuild.
+        let header_label = FieldLabel::label(Rect::new(0, 0, LABEL_MIN, 1));
+        let header_label_id = group.insert(Box::new(header_label));
+        let mut header_value = FieldLabel::title(Rect::new(LABEL_MIN, 0, w, 1));
+        header_value.state.grow_mode.hi_x = true;
+        let header_value_id = group.insert(Box::new(header_value));
         // Rows 1..h: scrollable content pane. grow_mode hi_x+hi_y so it fills the pane.
         let mut sg = ScrollGroup::new(Rect::new(0, 1, w, h));
         sg.state_mut().grow_mode.hi_x = true;
@@ -72,11 +95,15 @@ impl FormPane {
 
         FormPane {
             group,
-            header_id,
+            header_label_id,
+            header_value_id,
             scroll_id,
             value_ids: Vec::new(),
             label_ids: Vec::new(),
             built_dn: None,
+            label_w: LABEL_MIN,
+            built_w: 0,
+            was_focused: false,
             state,
         }
     }
@@ -117,11 +144,11 @@ impl FormPane {
         }
     }
 
-    /// Test seam: current bounds of the header cell.
+    /// Test seam: current bounds of the header value (title) cell.
     #[cfg(test)]
     pub(crate) fn header_bounds_for_test(&mut self) -> Rect {
         self.group
-            .child_mut(self.header_id)
+            .child_mut(self.header_value_id)
             .unwrap()
             .state()
             .get_bounds()
@@ -204,25 +231,48 @@ impl FormPane {
         // `self.group`) does not overlap with writing `self.label_ids`/`self.value_ids`.
         let mut new_lids: Vec<tv::ViewId> = Vec::with_capacity(fields.len());
         let mut new_vids: Vec<tv::ViewId> = Vec::with_capacity(fields.len());
+        let label_w;
+        let inner_w;
         {
             let Some(sg) = self.scroll_mut() else { return };
             sg.clear_content(ctx);
             let w = sg.inner_width();
+            inner_w = w;
+            // Size the label column to the longest label so every field name shows
+            // in full, right-aligned; the value editor fills the rest of the width.
+            let longest = fields
+                .iter()
+                .map(|(label, _)| UnicodeWidthStr::width(label.as_str()) as i32)
+                .max()
+                .unwrap_or(0);
+            label_w = label_col_width(longest, w);
             for (row, (_label, editable)) in fields.iter().enumerate() {
                 let y = row as i32;
                 let lid = sg.add_content(
-                    Box::new(ro_cell(Rect::new(0, y, LABEL_W, y + 1))),
-                    Rect::new(0, y, LABEL_W, y + 1),
+                    Box::new(FieldLabel::label(Rect::new(0, y, label_w, y + 1))),
+                    Rect::new(0, y, label_w, y + 1),
                 );
-                let mut il = InputLine::with_limit(Rect::new(LABEL_W, y, w, y + 1), 1024);
+                let mut il = InputLine::with_limit(Rect::new(label_w, y, w, y + 1), 1024);
                 il.state.state.disabled = !editable;
-                let vid = sg.add_content(Box::new(il), Rect::new(LABEL_W, y, w, y + 1));
+                let vid = sg.add_content(Box::new(il), Rect::new(label_w, y, w, y + 1));
                 new_lids.push(lid);
                 new_vids.push(vid);
             }
         } // sg borrow released; self is free again
         self.label_ids = new_lids;
         self.value_ids = new_vids;
+        self.label_w = label_w;
+        self.built_w = inner_w;
+
+        // Reposition the header row's two cells to the same columns as the fields:
+        // the `dn` caption fills the label column, the DN value fills the rest.
+        let full_w = self.group.state().get_extent().b.x;
+        if let Some(v) = self.group.child_mut(self.header_label_id) {
+            v.change_bounds(Rect::new(0, 0, label_w, 1));
+        }
+        if let Some(v) = self.group.child_mut(self.header_value_id) {
+            v.change_bounds(Rect::new(label_w, 0, full_w, 1));
+        }
     }
 
     /// Repaint header + all cell texts from `edit_form`; rebuild cells first if
@@ -236,11 +286,24 @@ impl FormPane {
             }
         };
         // Rebuild cells when the entry changes (different dn) OR the field set
-        // changes size. Adding/removing an objectClass regenerates the MUST/MAY
-        // fields on the SAME entry, growing or shrinking the field list while the
-        // dn is unchanged; without the count check the cell vectors go stale and
-        // `focusable_value_ids` would index past `value_ids`.
-        if cur_dn != self.built_dn || field_count != self.value_ids.len() {
+        // changes size OR the pane was resized. Adding/removing an objectClass
+        // regenerates the MUST/MAY fields on the SAME entry, growing or shrinking
+        // the field list while the dn is unchanged; without the count check the
+        // cell vectors go stale and `focusable_value_ids` would index past
+        // `value_ids`. A width change (splitter drag) reflows the value editors to
+        // fill the new width.
+        let inner_w = self.scroll_mut().map(|sg| sg.inner_width()).unwrap_or(0);
+        let dn_or_count_changed = cur_dn != self.built_dn || field_count != self.value_ids.len();
+        // A width-only reflow keeps the same field focused; an entry/field-set
+        // change lands focus on the first field (a fresh form). Capture the
+        // focused field index up front so a width reflow can restore it after the
+        // cell vectors are rebuilt under new ids.
+        let keep_focus_idx = if dn_or_count_changed {
+            None
+        } else {
+            self.focused_field_idx()
+        };
+        if dn_or_count_changed || inner_w != self.built_w {
             self.rebuild_cells(ctx);
             self.built_dn = cur_dn;
         }
@@ -266,8 +329,12 @@ impl FormPane {
         }; // state borrow dropped
 
         // Compute header with a fresh short borrow (Create mode needs profiles too).
+        // The `dn` caption is constant; the DN value goes into the title cell.
         let header = self.header_text();
-        if let Some(h) = self.group.child_mut(self.header_id) {
+        if let Some(h) = self.group.child_mut(self.header_label_id) {
+            h.set_value(FieldValue::Text("dn".to_string()));
+        }
+        if let Some(h) = self.group.child_mut(self.header_value_id) {
             h.set_value(FieldValue::Text(header));
         }
 
@@ -290,15 +357,47 @@ impl FormPane {
             }
         } // sg borrow dropped
 
-        // Land focus on the first editable field. Tab switches panes; Up/Down
-        // move between fields. Also ensures the outer Group routes events to the
-        // ScrollGroup.
-        if let Some(first) = self.focusable_value_ids().first().copied() {
+        // Land focus. On a width-only reflow, restore the previously focused field
+        // (its new id at the same index) so a splitter drag never yanks focus back
+        // to the top. Otherwise (fresh entry / changed field set) land on the first
+        // editable field. Tab switches panes; Up/Down move between fields. Either
+        // way, ensure the outer Group routes events to the ScrollGroup.
+        let preserved = keep_focus_idx
+            .and_then(|i| self.value_ids.get(i).copied())
+            .filter(|id| self.focusable_value_ids().contains(id));
+        let fresh = preserved.is_none();
+        let target = preserved.or_else(|| self.focusable_value_ids().first().copied());
+        if let Some(id) = target {
             let scroll_id = self.scroll_id;
             self.group.focus_child(scroll_id, ctx);
             if let Some(sg) = self.scroll_mut() {
-                sg.focus_child(first, ctx);
+                sg.focus_child(id, ctx);
             }
+            // On a fresh entry, start with the caret at the beginning of the field
+            // (no select-all block); a width-only reflow keeps the caret where it
+            // was so a splitter drag doesn't disturb an in-progress edit.
+            if fresh {
+                self.place_cursor_home(id);
+            }
+        }
+    }
+
+    /// Collapse the given value cell's selection and place the caret at the very
+    /// start. A field select-alls its value the moment it becomes focused (Turbo
+    /// Vision behaviour); that whole-value selection would be wiped by the first
+    /// keystroke, so we clear it and home the caret whenever focus lands on a field.
+    fn place_cursor_home(&mut self, id: tv::ViewId) {
+        if let Some(il) = self
+            .scroll_mut()
+            .and_then(|sg| sg.child_mut(id))
+            .and_then(|v| v.as_any_mut())
+            .and_then(|a| a.downcast_mut::<InputLine>())
+        {
+            il.cur_pos = 0;
+            il.first_pos = 0;
+            il.sel_start = 0;
+            il.sel_end = 0;
+            il.anchor = 0;
         }
     }
 
@@ -348,6 +447,8 @@ impl FormPane {
                 sg.ensure_visible(logical, ctx);
             }
         }
+        // Enter the field with the caret at the start, not a select-all block.
+        self.place_cursor_home(next_id);
     }
 
     /// If pane-local point `pt` falls inside a field's read-only label cell,
@@ -459,8 +560,51 @@ impl FormPane {
 
         // Compute header after writes are committed; Create mode needs profiles.
         let text = self.header_text();
-        if let Some(h) = self.group.child_mut(self.header_id) {
+        if let Some(h) = self.group.child_mut(self.header_value_id) {
             h.set_value(FieldValue::Text(text));
+        }
+    }
+
+    /// Repaint every on-screen value cell in the deselected (desktop-tone) surface,
+    /// used when the pane is unfocused so the value editors recede with the rest of
+    /// the pane. Compensates for `InputLine` having no pane-active surface role
+    /// (see the call site in `draw`).
+    fn dim_value_cells(&mut self, ctx: &mut DrawCtx) {
+        let surface = ctx.style(Role::ListNormalInactive);
+        // Origin + viewport of the ScrollGroup within this pane.
+        let Some(sgb) = self
+            .group
+            .child_mut(self.scroll_id)
+            .map(|v| v.state().get_bounds())
+        else {
+            return;
+        };
+        let value_ids = self.value_ids.clone();
+        // Collect (pane-local rect, text) for each value cell inside the viewport.
+        let mut cells: Vec<(Rect, String)> = Vec::with_capacity(value_ids.len());
+        if let Some(sg) = self.scroll_mut() {
+            for vid in value_ids {
+                let Some(local) = sg.local_bounds_of(vid) else {
+                    continue;
+                };
+                let y = sgb.a.y + local.a.y;
+                if y < sgb.a.y || y >= sgb.b.y {
+                    continue; // scrolled out of the viewport
+                }
+                let text = match sg.child_mut(vid).and_then(|v| v.value()) {
+                    Some(FieldValue::Text(s)) => s,
+                    _ => String::new(),
+                };
+                cells.push((
+                    Rect::new(sgb.a.x + local.a.x, y, sgb.a.x + local.b.x, y + 1),
+                    text,
+                ));
+            }
+        }
+        for (rect, text) in cells {
+            ctx.fill(rect, ' ', surface);
+            let mut sub = ctx.sub(rect);
+            sub.put_str(0, 0, &text, surface);
         }
     }
 }
@@ -472,9 +616,49 @@ impl View for FormPane {
     }
 
     fn draw(&mut self, ctx: &mut DrawCtx) {
-        // Active pane = brightest (base3); inactive = base2. Mirrors the list panes
-        // which get this from ListNormalActive/Inactive automatically.
-        let role = if self.group.state().state.active {
+        // Focused pane = brightest (base3); the others recede (inactive surface).
+        // Key off `focused`, not `active`: `active` fans out to every pane in the
+        // window (so it is uniformly true and never distinguishes focus), whereas
+        // `focused` follows only the current-child chain. Mirrors the tree and leaf
+        // panes; the focused field's own blue highlight already tracks focus.
+        let focused = self.group.state().state.focused;
+
+        // The ScrollGroup fills its own region keyed on `active`; mirror the pane's
+        // real focus onto it (like the leaf pane does for its list) so the form's
+        // content area dims in lock-step with the rest of the pane instead of
+        // staying bright (`active` is uniformly true across panes).
+        if let Some(sg) = self.scroll_mut() {
+            sg.state_mut().state.active = focused;
+        }
+
+        // Drive the header/label styling: every cell mirrors the pane focus, and
+        // the label of the field that holds focus gets the blue current-row chip.
+        let active_idx = self.focused_field_idx();
+        for id in [self.header_label_id, self.header_value_id] {
+            if let Some(h) = self
+                .group
+                .child_mut(id)
+                .and_then(|v| v.as_any_mut())
+                .and_then(|a| a.downcast_mut::<FieldLabel>())
+            {
+                h.set_focused(focused);
+            }
+        }
+        let label_ids = self.label_ids.clone();
+        if let Some(sg) = self.scroll_mut() {
+            for (i, &lid) in label_ids.iter().enumerate() {
+                if let Some(fl) = sg
+                    .child_mut(lid)
+                    .and_then(|v| v.as_any_mut())
+                    .and_then(|a| a.downcast_mut::<FieldLabel>())
+                {
+                    fl.set_focused(focused);
+                    fl.set_active(Some(i) == active_idx);
+                }
+            }
+        }
+
+        let role = if focused {
             Role::ListNormalActive
         } else {
             Role::ListNormalInactive
@@ -483,6 +667,17 @@ impl View for FormPane {
         let extent = self.group.state().get_extent();
         ctx.fill(extent, ' ', style);
         self.group.draw(ctx);
+
+        // Dim the value editors when the pane is not focused. A stock `InputLine`
+        // only distinguishes its OWN focus (`InputNormal`/`InputPassive`), not
+        // whether its owning pane is active — so it can't recede with the pane the
+        // way the outline/list widgets do (those gained an `*Inactive` surface
+        // role). Until `InputLine` grows the same pane-active surface upstream, we
+        // repaint each value cell in the deselected (desktop-tone) colour here, so
+        // an unfocused form recedes uniformly like the tree and leaf panes.
+        if !focused {
+            self.dim_value_cells(ctx);
+        }
     }
 
     fn handle_event(&mut self, ev: &mut Event, ctx: &mut Context) {
@@ -490,11 +685,30 @@ impl View for FormPane {
         // (Discard, re-read) only sets `form_needs_render` — it cannot broadcast
         // REFRESH (Program has no broadcast) — and the 50ms pump timer reaches
         // this view, so a flagged re-render repaints within one tick.
-        if self.state.borrow().form_needs_render {
+        // Also re-render on a width change (splitter drag): render() reflows the
+        // value editors to fill the new width. `form_needs_render` covers content
+        // changes; the width check covers geometry changes that carry no flag.
+        let width_changed =
+            self.scroll_mut().map(|sg| sg.inner_width()).unwrap_or(0) != self.built_w;
+        if width_changed || self.state.borrow().form_needs_render {
             self.state.borrow_mut().form_needs_render = false;
             self.render(ctx);
         }
         let _ = REFRESH; // REFRESH still drives other panes; retained import
+
+        // When focus enters the pane (Tab from another pane), the framework
+        // select-alls the current field (Turbo Vision focus behaviour), leaving the
+        // caret at the end over a highlighted block that the first keystroke would
+        // wipe. Detect the unfocused→focused transition and home the caret — unless
+        // the focus came from a mouse click, where the click position should win.
+        let entered_by_click = matches!(ev, Event::MouseDown(_));
+        let focused_now = self.group.state().state.focused;
+        if focused_now && !self.was_focused && !entered_by_click {
+            if let Some(cur) = self.scroll_mut().and_then(|sg| sg.current()) {
+                self.place_cursor_home(cur);
+            }
+        }
+        self.was_focused = focused_now;
 
         // A click on a field's read-only label cell focuses that field's value
         // editor. Label cells are disabled InputLines, so the inner group never
@@ -511,6 +725,7 @@ impl View for FormPane {
                 if let Some(sg) = self.scroll_mut() {
                     sg.focus_child(vid, ctx);
                 }
+                self.place_cursor_home(vid);
                 ev.clear();
                 self.sync_into_form();
                 return;
@@ -1125,9 +1340,9 @@ mod tests {
     fn click_on_label_maps_to_paired_value_field() {
         // A pane-local point inside a field's label cell must resolve to that
         // field's value-editor id (so a label click can focus the value editor).
-        // Geometry: LABEL_W-wide label column at x 0..LABEL_W; the ScrollGroup
-        // starts at pane row 1 (header is row 0) with scroll top=0, so field row
-        // i's label occupies pane-local y = i + 1.
+        // Geometry: the label column spans x 0..label_w (sized to the longest
+        // label); the ScrollGroup starts at pane row 1 (header is row 0) with
+        // scroll top=0, so field row i's label occupies pane-local y = i + 1.
         let shared = state_with_form();
         let mut pane = FormPane::new(Rect::new(0, 0, 80, 20), shared);
         let mut out = VecDeque::new();
@@ -1155,9 +1370,9 @@ mod tests {
         );
         // The header row (y=0) is not a label cell.
         assert_eq!(pane.value_id_for_label_hit(Point::new(5, 0)), None);
-        // A point in the value column (x >= LABEL_W) is not a label hit.
+        // A point in the value column (x >= label_w) is not a label hit.
         assert_eq!(
-            pane.value_id_for_label_hit(Point::new(LABEL_W + 2, 1)),
+            pane.value_id_for_label_hit(Point::new(pane.label_w + 2, 1)),
             None
         );
         // A point below the last field is not a label hit.
@@ -1192,6 +1407,248 @@ mod tests {
         assert_eq!(
             st.edit_form.as_ref().unwrap().fields[0].values,
             vec!["Müller-Lüdenscheidt".to_string()]
+        );
+    }
+
+    /// Focus visualization matching the tree / leaf panes:
+    /// * the selected field's LABEL carries the blue current-row chip (faded when
+    ///   the pane is unfocused);
+    /// * non-selected value fields carry NO special background (they sit on the
+    ///   pane surface), while the one focused field is the bright input well;
+    /// * the focused field is NOT select-all'd (no blue bar over its value);
+    /// * the empty area below the fields dims with the pane.
+    #[test]
+    fn form_focus_visualization_matches_the_list_panes() {
+        use tvision_rs::{Buffer, Color, Point};
+        let mut pane = FormPane::new(Rect::new(0, 0, 60, 10), state_with_form());
+        let mut out = VecDeque::new();
+        let mut timers = tv::timer::TimerQueue::new();
+        let mut deferred = Vec::new();
+        let mut ctx = headless_ctx(&mut out, &mut timers, &mut deferred);
+        let mut ev = Event::Broadcast {
+            command: REFRESH,
+            source: None,
+        };
+        pane.handle_event(&mut ev, &mut ctx);
+
+        let theme = crate::ui::theme::edaptor_theme();
+        let base3 = theme.style(Role::ListNormalActive).bg;
+        let desktop = theme.style(Role::ListNormalInactive).bg;
+        let chip = theme.style(Role::ListFocused).bg; // blue current-row chip
+        let faded = theme.style(Role::ListSelected).bg; // faded (unfocused) chip
+        let input_bg = theme.style(Role::InputNormal).bg; // focused input well
+        let accent = theme.style(Role::InputSelected).bg; // select-all highlight
+        let label_w = pane.label_w as u16;
+
+        // Draw with the given focus, propagating focus into the current value cell
+        // as the framework would, and return a sampler over the resulting buffer.
+        let draw = |pane: &mut FormPane, focused: bool| -> Buffer {
+            pane.group.state_mut().state.focused = focused;
+            if let Some(cur) = pane.scroll_mut().and_then(|sg| sg.current()) {
+                if let Some(sg) = pane.scroll_mut() {
+                    if let Some(c) = sg.child_mut(cur) {
+                        c.state_mut().state.focused = focused;
+                    }
+                }
+            }
+            let mut buf = Buffer::new(60, 10);
+            {
+                let mut dctx =
+                    DrawCtx::new(&mut buf, &theme, Rect::new(0, 0, 60, 10), Point::new(0, 0));
+                <FormPane as View>::draw(pane, &mut dctx);
+            }
+            buf
+        };
+        let bg = |buf: &Buffer, x: u16, y: u16| -> Color { buf.get(x, y).style().bg };
+
+        // Row layout: header at pane y 0; field 0 ("cn", the active field) at y 1;
+        // field 1 ("creatorsName", read-only, non-selected) at y 2.
+        let focused = draw(&mut pane, true);
+        // Selected field's label → blue chip.
+        assert_eq!(bg(&focused, 0, 1), chip, "active label gets the blue chip");
+        // Focused field's value → bright input well, and NOT a select-all bar.
+        assert_eq!(
+            bg(&focused, label_w, 1),
+            input_bg,
+            "active field is the input well"
+        );
+        assert_ne!(
+            bg(&focused, label_w + 1, 1),
+            accent,
+            "the focused field must not be select-all'd (no blue value bar)"
+        );
+        // Non-selected value field → pane surface, no special background.
+        assert_eq!(
+            bg(&focused, 40, 2),
+            base3,
+            "non-selected field carries no special background (blends into base3)"
+        );
+        // Empty area below the fields is the bright fill.
+        assert_eq!(bg(&focused, 40, 8), base3, "focused fill is bright");
+
+        let unfocused = draw(&mut pane, false);
+        // Selected label fades (like the list panes' unfocused current row).
+        assert_eq!(bg(&unfocused, 0, 1), faded, "unfocused active label fades");
+        // Value cells recede to the deselected surface too — the whole form dims.
+        assert_eq!(
+            bg(&unfocused, label_w, 1),
+            desktop,
+            "unfocused value cell recedes to the deselected surface"
+        );
+        assert_eq!(
+            bg(&unfocused, 40, 2),
+            desktop,
+            "unfocused non-selected value cell recedes too"
+        );
+        // Empty area recedes to the desktop tone.
+        assert_eq!(bg(&unfocused, 40, 8), desktop, "unfocused fill recedes");
+    }
+
+    #[test]
+    fn entering_a_field_places_the_caret_at_the_start_without_select_all() {
+        // Feedback: entering a field must NOT select all its content (which the
+        // first keypress would wipe); the caret starts at position 0 instead.
+        let mut pane = FormPane::new(Rect::new(0, 0, 60, 10), state_with_form());
+        let mut out = VecDeque::new();
+        let mut timers = tv::timer::TimerQueue::new();
+        let mut deferred = Vec::new();
+        let mut ctx = headless_ctx(&mut out, &mut timers, &mut deferred);
+        let mut ev = Event::Broadcast {
+            command: REFRESH,
+            source: None,
+        };
+        pane.handle_event(&mut ev, &mut ctx); // lands focus on the first field
+
+        let cur = pane.scroll_mut().and_then(|sg| sg.current()).unwrap();
+        let (cur_pos, sel_len) = pane
+            .scroll_mut()
+            .and_then(|sg| sg.child_mut(cur))
+            .and_then(|v| v.as_any_mut())
+            .and_then(|a| a.downcast_mut::<InputLine>())
+            .map(|il| (il.cur_pos, il.sel_end - il.sel_start))
+            .unwrap();
+        assert_eq!(cur_pos, 0, "caret starts at the beginning of the field");
+        assert_eq!(sel_len, 0, "no select-all block on entering the field");
+    }
+
+    #[test]
+    fn tab_into_pane_homes_the_caret() {
+        // When focus enters the pane from another pane, the framework select-alls
+        // the current field (caret at the end). The pane must detect the focus
+        // transition and home the caret so the first keypress does not wipe it.
+        let mut pane = FormPane::new(Rect::new(0, 0, 60, 10), state_with_form());
+        let mut out = VecDeque::new();
+        let mut timers = tv::timer::TimerQueue::new();
+        let mut deferred = Vec::new();
+        let mut ctx = headless_ctx(&mut out, &mut timers, &mut deferred);
+        let mut ev = Event::Broadcast {
+            command: REFRESH,
+            source: None,
+        };
+        pane.handle_event(&mut ev, &mut ctx); // pane unfocused in this headless setup
+
+        // Simulate the framework's focus-entry select-all: caret at the end over a
+        // full-value selection.
+        let cur = pane.scroll_mut().and_then(|sg| sg.current()).unwrap();
+        if let Some(il) = pane
+            .scroll_mut()
+            .and_then(|sg| sg.child_mut(cur))
+            .and_then(|v| v.as_any_mut())
+            .and_then(|a| a.downcast_mut::<InputLine>())
+        {
+            il.cur_pos = 1;
+            il.sel_start = 0;
+            il.sel_end = 1;
+        }
+
+        // Focus now enters the pane; the next event must home the caret.
+        pane.group.state_mut().state.focused = true;
+        let mut tick = Event::Broadcast {
+            command: tv::Command::custom("test.noop"),
+            source: None,
+        };
+        pane.handle_event(&mut tick, &mut ctx);
+
+        let (cur_pos, sel_len) = pane
+            .scroll_mut()
+            .and_then(|sg| sg.child_mut(cur))
+            .and_then(|v| v.as_any_mut())
+            .and_then(|a| a.downcast_mut::<InputLine>())
+            .map(|il| (il.cur_pos, il.sel_end - il.sel_start))
+            .unwrap();
+        assert_eq!(cur_pos, 0, "focus entry homes the caret");
+        assert_eq!(sel_len, 0, "focus entry clears the select-all block");
+    }
+
+    #[test]
+    fn resize_reflows_value_width_and_keeps_focus() {
+        // A wider pane (splitter drag) must reflow the value editors to fill the
+        // new width, and must NOT yank focus back to the first field.
+        use crate::ldap::worker::RawSubschema;
+        let schema = SchemaModel::from_raw(&RawSubschema::default());
+        let structure = Structure::build("dc=x", vec![]);
+        let mut st =
+            UiState::new_for_test(structure, schema, "dc=x".into(), Vec::new(), Vec::new());
+        st.edit_form = Some(EditForm {
+            dn: "cn=a,dc=x".into(),
+            mode: FormMode::Edit,
+            object_classes: vec![],
+            fields: vec![
+                ef("cn", "a", true),
+                ef("sn", "b", true),
+                ef("mail", "c", true),
+            ],
+        });
+        st.form_needs_render = true;
+        let shared: Shared = Rc::new(RefCell::new(st));
+        let mut pane = FormPane::new(Rect::new(0, 0, 40, 10), shared);
+        let mut out = VecDeque::new();
+        let mut timers = tv::timer::TimerQueue::new();
+        let mut deferred = Vec::new();
+        let mut ctx = headless_ctx(&mut out, &mut timers, &mut deferred);
+        let mut ev = Event::Broadcast {
+            command: REFRESH,
+            source: None,
+        };
+        pane.handle_event(&mut ev, &mut ctx);
+
+        // Move focus to the last field (sn/mail); it must survive the resize.
+        pane.focus_field(2, &mut ctx);
+        let focused_before = pane.scroll_mut().and_then(|sg| sg.current());
+        assert_eq!(focused_before, Some(pane.value_ids[2]));
+
+        // The value cell fills to the (inner) width before the resize.
+        let vid = pane.value_ids[2];
+        let w_before = pane
+            .scroll_mut()
+            .and_then(|sg| sg.logical_of(vid))
+            .map(|r| r.b.x)
+            .unwrap();
+
+        // Splitter drives a wider bound; a following event reflows the cells.
+        <FormPane as View>::change_bounds(&mut pane, Rect::new(0, 0, 70, 10));
+        let mut tick = Event::Broadcast {
+            command: tv::Command::custom("test.noop"),
+            source: None,
+        };
+        pane.handle_event(&mut tick, &mut ctx);
+
+        let vid = pane.value_ids[2];
+        let w_after = pane
+            .scroll_mut()
+            .and_then(|sg| sg.logical_of(vid))
+            .map(|r| r.b.x)
+            .unwrap();
+        assert!(
+            w_after > w_before,
+            "value editor must widen with the pane (was {w_before}, now {w_after})"
+        );
+        // Focus stayed on the same field (index 2), not snapped back to the top.
+        let focused_after = pane.scroll_mut().and_then(|sg| sg.current());
+        assert_eq!(
+            focused_after,
+            Some(pane.value_ids[2]),
+            "a resize must preserve the focused field, not reset to the first"
         );
     }
 }

@@ -1894,9 +1894,9 @@ dependencies = [
 
 [[package]]
 name = "tvision-rs"
-version = "0.4.0"
+version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5fd556086efebd2076e5c021008e9a296f21ccca292a8d9e2cd1d1027e06ed1e"
+checksum = "be57708dd451f61617ac3a51cc015b9e5617fc73961a33166bd1e4e18b2344f8"
 dependencies = [
  "arboard",
  "crossterm",
@@ -1910,9 +1910,9 @@ dependencies = [
 
 [[package]]
 name = "tvision-rs-macros"
-version = "0.4.0"
+version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2f7f315184e789be4853a67f3e370957f8e866e609df38703431bce441c9f777"
+checksum = "318e972e6ad092dbc7fc8465db7bbb974d8815422af0fbcf269e9ea20772b5d1"
 dependencies = [
  "proc-macro-crate",
  "proc-macro2",

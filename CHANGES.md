@@ -124,6 +124,22 @@ All notable changes to eDAPtor are documented here. The format follows
 
 ### Changed
 
+- Upgraded **tvision-rs 0.4 → 0.5**, which adds focus-aware surfaces for the
+  outline and input-line widgets (`OutlineNormalInactive`, `InputPassive`).
+
+- tvision UI: the **entry form pane** now matches the tree and entry panes
+  visually. The header reads as a **title** (`dn` label + the DN value in bold);
+  field **labels are right-aligned** — a shade lighter than the values — in a
+  column sized to the longest label, so short and long names line up against their
+  values; the **selected field's label gets the blue current-row highlight** (like
+  the tree/leaf panes) while its value is the one bright "type here" well;
+  non-selected fields carry **no special background** (plain text on the pane), and
+  the whole pane **recedes to the deselected tone when it loses focus** (like the
+  tree/leaf panes); the value editors **stretch to fill** the remaining width
+  (reflowing when the splitter is dragged); and **`objectClass` is pinned to the
+  top** of the form. Entering a field now places the caret at the **start** instead
+  of selecting the whole value (which the first keystroke would have wiped).
+
 - tvision UI: incremental search is now the list's **own built-in find** (from
   tvision-rs 0.4) instead of a separate search box. In the **Entries** pane and
   the `objectClass` editor, just type while the list is focused to filter it in
@@ -202,6 +218,18 @@ All notable changes to eDAPtor are documented here. The format follows
   temporary git-pin for `exec_view_focused` has been removed.
 
 ### Fixed
+
+- tvision UI: the **focused pane is now clearly indicated** in the three-pane
+  browser. The pane with keyboard focus shows the bright (base3) surface with a
+  blue current-row highlight, while the two unfocused panes recede to the darker
+  desktop tone and show their current row in a faded blue. Previously the
+  entry-list pane never dimmed and always drew the bright blue cursor (its list
+  stayed "active" because the `selected` state does not fan out of the owning
+  group), and the tree/form pane backgrounds keyed off `active` — true for every
+  pane in the window — so neither dimmed. The list pane now syncs its `active`
+  flag to the pane's real focus, and the **tree pane brightens/dims with focus**
+  via tvision-rs 0.5's new focus-aware outline surface
+  (`OutlineNormal`/`OutlineNormalInactive`).
 
 - tvision UI: the **mouse wheel now scrolls the pane under the pointer** in the
   three-pane main view. Previously the wheel always scrolled one pane (the form)

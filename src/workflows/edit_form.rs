@@ -216,12 +216,16 @@ pub fn value_set_eq(a: &[String], b: &[String]) -> bool {
         && b.iter().all(|v| a.iter().any(|w| w == v))
 }
 
-/// Reorder a built form's fields into: mandatory, then populated-or-special
+/// Reorder a built form's fields into: `objectClass` first (pinned to the very
+/// top, right under the DN header), then mandatory, then populated-or-special
 /// (non-empty current value, secret, or widget-bound), then the rest — each
 /// bucket case-insensitive by label. Orphaned fields have empty `current_values`,
 /// so they fall into the last bucket. Neutral port of `ui::edit_form::order_fields`
 /// (the ratatui picker probe becomes `widget_binding.is_some()`).
 pub fn order_fields(form: &mut EditForm) {
+    fn is_object_class(f: &EditField) -> bool {
+        f.label.eq_ignore_ascii_case("objectClass")
+    }
     fn bucket(f: &EditField) -> u8 {
         if f.orphaned {
             2
@@ -234,8 +238,10 @@ pub fn order_fields(form: &mut EditForm) {
         }
     }
     form.fields.sort_by(|a, b| {
-        bucket(a)
-            .cmp(&bucket(b))
+        // objectClass always sorts before every other field.
+        (!is_object_class(a))
+            .cmp(&!is_object_class(b))
+            .then_with(|| bucket(a).cmp(&bucket(b)))
             .then_with(|| a.label.to_lowercase().cmp(&b.label.to_lowercase()))
     });
 }
@@ -264,7 +270,7 @@ pub fn composed_create_dn(rdn_attr: &str, rdn_value: &str, container: &str) -> S
 /// they are not on `FormModel`, so the caller passes them via the read path; here
 /// we leave them empty and the caller fills `object_classes` (see Task 4 wiring).
 pub fn build_edit_form(model: &FormModel, schema: &SchemaModel, read_only: bool) -> EditForm {
-    let fields: Vec<EditField> = model
+    let mut fields: Vec<EditField> = model
         .fields
         .iter()
         .map(|f| {
@@ -285,6 +291,17 @@ pub fn build_edit_form(model: &FormModel, schema: &SchemaModel, read_only: bool)
             }
         })
         .collect();
+
+    // objectClass always leads the form (right under the DN title), keeping the
+    // rest of the profile-driven order intact. `sync_schema_fields`/`order_fields`
+    // pin it the same way after an objectClass change.
+    if let Some(pos) = fields
+        .iter()
+        .position(|f| f.label.eq_ignore_ascii_case("objectClass"))
+    {
+        let oc = fields.remove(pos);
+        fields.insert(0, oc);
+    }
 
     EditForm {
         dn: model.title.clone(),
@@ -354,6 +371,29 @@ mod tests {
     fn read_only_forces_non_editable() {
         let f = build_edit_form(&model(), &schema(), true);
         assert!(f.fields.iter().all(|x| !x.editable));
+    }
+
+    #[test]
+    fn build_pins_object_class_to_the_top() {
+        // A model whose objectClass field is NOT first must still yield a form with
+        // objectClass leading, right under the DN title.
+        let mut m = model();
+        m.fields.push(FormField {
+            label: "objectClass".into(),
+            kind: FieldKind::Text,
+            is_must: true,
+            values: vec!["top".into(), "person".into()],
+            widget: WidgetSpec::ReadOnlyText,
+        });
+        let f = build_edit_form(&m, &schema(), false);
+        assert_eq!(
+            f.fields.first().unwrap().label,
+            "objectClass",
+            "objectClass must lead the built form"
+        );
+        // The remaining fields keep their original relative order.
+        let rest: Vec<&str> = f.fields[1..].iter().map(|x| x.label.as_str()).collect();
+        assert_eq!(rest, vec!["cn", "sn"]);
     }
 
     #[test]
@@ -427,6 +467,21 @@ mod tests {
         f.fields[0].orphaned = true; // cn orphaned → current_values() == [] → bucket 2
         order_fields(&mut f);
         assert_eq!(f.fields.last().unwrap().label, "cn");
+    }
+
+    #[test]
+    fn order_fields_pins_object_class_to_the_top() {
+        let mut f = build_edit_form(&model(), &schema(), false);
+        // objectClass is a MUST field; without the pin it would sort alphabetically
+        // among the other MUSTs (after cn). It must instead lead the whole form.
+        f.fields
+            .push(EditField::injected("objectClass".into(), true, &schema()));
+        order_fields(&mut f);
+        assert_eq!(
+            f.fields.first().unwrap().label,
+            "objectClass",
+            "objectClass must lead the form, ahead of the other mandatory fields"
+        );
     }
 
     fn schema_oc() -> SchemaModel {

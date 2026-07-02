@@ -218,9 +218,13 @@ impl View for TreePane {
     }
 
     fn draw(&mut self, ctx: &mut DrawCtx) {
-        // Active pane = brightest (base3); inactive = base2. Mirrors the form pane
-        // and the list panes which get this from ListNormalActive/Inactive automatically.
-        let role = if self.group.state().state.active {
+        // Focused pane = brightest (base3); the others recede (inactive surface).
+        // Key off `focused`, not `active`: `active` fans out to every pane in the
+        // window (so it is uniformly true and never distinguishes focus), whereas
+        // `focused` follows only the current-child chain. Mirrors the form and leaf
+        // panes. The Outline itself already keys its current-node colour on
+        // `focused`, so this only governs the area not covered by outline rows.
+        let role = if self.group.state().state.focused {
             Role::ListNormalActive
         } else {
             Role::ListNormalInactive
@@ -304,6 +308,73 @@ mod tests {
         assert_eq!(TreePane::bar_layout(0, 10, true, 30), (false, 30));
         // Degenerate width clamps to 0 rather than going negative.
         assert_eq!(TreePane::bar_layout(20, 10, true, 0), (true, 0));
+    }
+
+    /// Focus visualization (tvision-rs 0.5): the Outline now paints normal rows
+    /// with `OutlineNormal` when it holds focus and `OutlineNormalInactive` when
+    /// it does not. edaptor themes those to base3 (bright) vs the desktop tone
+    /// (dim), so the tree pane brightens on focus and recedes when a sibling pane
+    /// takes over — mirroring the leaf list. Row 0 is the current node (blue /
+    /// faded); row 1 is a normal row, which is what we assert here.
+    #[test]
+    fn focused_tree_brightens_normal_rows_and_dims_when_unfocused() {
+        use tvision_rs::{Buffer, DrawCtx, Point};
+
+        let inputs = vec![
+            si("dc=x"),
+            si("ou=a,dc=x"),
+            si("ou=b,dc=x"),
+            si("cn=1,ou=a,dc=x"),
+            si("cn=1,ou=b,dc=x"),
+        ];
+        let structure = Structure::build("dc=x", inputs);
+        let schema = SchemaModel::from_raw(&RawSubschema::default());
+        let mut st = UiState::new_for_test(
+            structure,
+            schema,
+            "dc=x".into(),
+            Vec::new(),
+            compile_tree_rules(&TreeConfig::default()),
+        );
+        let (root, dns) = build_branch_nodes(&st, 40);
+        st.branch_dns = dns;
+        let shared: std::rc::Rc<std::cell::RefCell<UiState>> =
+            std::rc::Rc::new(std::cell::RefCell::new(st));
+        let mut pane = TreePane::new(Rect::new(0, 0, 30, 10), root, shared);
+
+        let theme = crate::ui::theme::edaptor_theme();
+        let active_bg = theme.style(Role::OutlineNormal).bg;
+        let inactive_bg = theme.style(Role::OutlineNormalInactive).bg;
+        assert_ne!(
+            active_bg, inactive_bg,
+            "test premise: focused vs unfocused outline surfaces must differ"
+        );
+
+        // Draw with the outline focused / unfocused and read row 1's background.
+        let row1_bg = |pane: &mut TreePane, focused: bool| -> tv::Color {
+            pane.group.state_mut().state.focused = focused;
+            if let Some(outline) = pane.outline_mut() {
+                outline.state_mut().state.focused = focused;
+            }
+            let mut buf = Buffer::new(30, 10);
+            {
+                let mut dctx =
+                    DrawCtx::new(&mut buf, &theme, Rect::new(0, 0, 30, 10), Point::new(0, 0));
+                <TreePane as View>::draw(pane, &mut dctx);
+            }
+            buf.get(0, 1).style().bg
+        };
+
+        assert_eq!(
+            row1_bg(&mut pane, true),
+            active_bg,
+            "focused tree: normal rows use the bright OutlineNormal surface"
+        );
+        assert_eq!(
+            row1_bg(&mut pane, false),
+            inactive_bg,
+            "unfocused tree: normal rows recede to OutlineNormalInactive"
+        );
     }
 
     #[test]
