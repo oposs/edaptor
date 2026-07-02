@@ -3,10 +3,9 @@
 //! (e.g. `memberUid`, `member`) writes the picked store values onto this entry;
 //! a fan-out binding (`fanout_attr.is_some()`, e.g. `memberOf`) instead writes
 //! this entry's DN onto each picked candidate at save time (the combined-save
-//! path handles that expansion — the dialog itself is identical either way). A
-//! `WidgetKind::Picker` binding with `fanout_attr.is_some()` (the back-reference
-//! holder attribute, e.g. a group's `member`) opens a modal with an embedded
-//! [`Shuttle`] view (`ui::shuttle`):
+//! path handles that expansion). Any multi-select picker opens a modal with an
+//! embedded [`Shuttle`] view (`ui::shuttle`) presenting **Available** and
+//! **Members** columns:
 //!
 //! - **Available** (left): a list of live LDAP candidates with incremental find
 //!   (`FindMode::Highlight`). Typing accumulates a query and highlights matches and
@@ -24,7 +23,7 @@
 //! pass-through of the default OK button are handled by the dialog. The Shuttle
 //! notifies via broadcast (`CMD_SHUTTLE_CHANGED`); the Available list broadcasts
 //! `Command::LIST_FIND_CHANGED` for find edits. This module keeps the
-//! membership-specific plumbing: the async candidate-search
+//! multi-picker-specific plumbing: the async candidate-search
 //! submit, the pump/`REFRESH` seam that refreshes the Available column, member
 //! seeding, and the `staged_commit` write-back.
 //!
@@ -54,7 +53,7 @@ use crate::workflows::edit_form::EditField;
 // MultiPickerWidget — FieldWidget plugin
 // ---------------------------------------------------------------------------
 
-/// The plugin for fan-out `WidgetKind::Picker`-bound fields (membership).
+/// The plugin for every multi-select `WidgetKind::Picker`-bound field (fan-out or not).
 /// `present` summarises the member count; `activate` opens a `MultiPickerDialog`.
 pub(crate) struct MultiPickerWidget;
 
@@ -75,8 +74,7 @@ impl FieldWidget for MultiPickerWidget {
         use crate::config::relation::Cardinality;
         match &field.widget_binding {
             Some(WidgetKind::Picker(b))
-                if b.fanout_attr.is_some()
-                    || b.cardinality(field.multi) == Cardinality::Multi =>
+                if b.fanout_attr.is_some() || b.cardinality(field.multi) == Cardinality::Multi =>
             {
                 Activation::Modal(Box::new(MultiPickerEditor {
                     label: field.label.clone(),

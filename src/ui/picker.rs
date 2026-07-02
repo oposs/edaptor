@@ -12,8 +12,7 @@
 //!
 //! Mirrors the `oc_picker` / `choice` modal structure: one file holds
 //! `PickerWidget` (FieldWidget), `PickerEditor` (FieldEditor) and `PickerDialog`
-//! (the interactive `Dialog` view). Membership (fan-out) pickers are a later
-//! task and are NOT handled here.
+//! (the interactive `Dialog` view). Multi-select and fan-out pickers are served by `ui::multi_picker`.
 
 use tvision_rs::{
     self as tv, delegate, ButtonFlags, ButtonRowAlign, Command, Context, Dialog, Event, FieldValue,
@@ -52,8 +51,7 @@ impl FieldWidget for PickerWidget {
     fn activate(&self, field: &EditField) -> Activation {
         match &field.widget_binding {
             Some(WidgetKind::Picker(b))
-                if b.fanout_attr.is_none()
-                    && b.cardinality(field.multi) == Cardinality::Single =>
+                if b.fanout_attr.is_none() && b.cardinality(field.multi) == Cardinality::Single =>
             {
                 Activation::Modal(Box::new(PickerEditor {
                     label: field.label.clone(),
@@ -127,12 +125,7 @@ pub(crate) struct PickerDialog {
 }
 
 impl PickerDialog {
-    fn new(
-        label: String,
-        binding: PickerBinding,
-        current: Vec<String>,
-        shared: Shared,
-    ) -> Self {
+    fn new(label: String, binding: PickerBinding, current: Vec<String>, shared: Shared) -> Self {
         let title = format!("Select {label}");
         let mut dlg = Dialog::new(Rect::new(0, 0, 60, 22), Some(title));
         dlg.state_mut().options.center_x = true;
@@ -509,7 +502,7 @@ mod tests {
 
     #[test]
     fn fanout_picker_does_not_activate_here() {
-        // A fan-out (membership) binding is a later task — this widget yields Inline.
+        // A fan-out binding is routed to MultiPickerWidget; this widget yields Inline.
         let mut b = single_dn_binding();
         b.fanout_attr = Some("member".into());
         let f = picker_field("memberOf", &[], b, false);

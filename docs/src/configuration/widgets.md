@@ -171,7 +171,7 @@ right value(s) into this entry's attribute.
 A **single-select** picker (`select = "single"`) presents a search box over a
 radio list. A **multi-select** picker (`select = "multi"`, the default for
 multi-valued attributes such as `member` and `memberUid`) presents the
-two-column **Available | Selected** shuttle: type to search, then
+two-column **Available | Members** shuttle: type to search, then
 Insert/Enter/[Add] to move a candidate in and Delete/[Remove] to move it out.
 
 ```toml
