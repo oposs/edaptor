@@ -165,8 +165,14 @@ mod cardinality_tests {
 
     #[test]
     fn cardinality_prefers_explicit_select() {
-        assert_eq!(binding(Some(Cardinality::Single)).cardinality(true), Cardinality::Single);
-        assert_eq!(binding(Some(Cardinality::Multi)).cardinality(false), Cardinality::Multi);
+        assert_eq!(
+            binding(Some(Cardinality::Single)).cardinality(true),
+            Cardinality::Single
+        );
+        assert_eq!(
+            binding(Some(Cardinality::Multi)).cardinality(false),
+            Cardinality::Multi
+        );
     }
 
     #[test]

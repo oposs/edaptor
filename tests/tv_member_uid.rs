@@ -100,7 +100,10 @@ fn member_uid_picker_stores_uid_scalar() {
         SearchOutcome::Results { rows, .. } => rows,
         other => panic!("expected uid-store Results, got {other:?}"),
     };
-    assert!(!rows.is_empty(), "the demo server must return user candidates");
+    assert!(
+        !rows.is_empty(),
+        "the demo server must return user candidates"
+    );
 
     let first = &rows[0];
     // store_value must be the uid scalar, NOT the DN.
