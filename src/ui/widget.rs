@@ -144,7 +144,7 @@ pub fn widget_for(field: &EditField) -> Box<dyn FieldWidget> {
         &field.widget_binding,
         Some(WidgetKind::Picker(b)) if b.fanout_attr.is_some()
     ) {
-        Box::new(crate::ui::membership::MembershipWidget)
+        Box::new(crate::ui::multi_picker::MultiPickerWidget)
     } else if matches!(field.widget_binding, Some(WidgetKind::SambaSid)) {
         Box::new(SambaSidWidget)
     } else if matches!(field.widget_binding, Some(WidgetKind::XOrdered)) {

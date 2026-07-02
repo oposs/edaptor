@@ -1,4 +1,9 @@
-//! Membership (fan-out) picker — a two-column "mover" dialog. A
+//! Multi-select picker — a two-column "mover" dialog backed by [`Shuttle`].
+//! Serves every multi-select `WidgetKind::Picker` binding: a plain multi picker
+//! (e.g. `memberUid`, `member`) writes the picked store values onto this entry;
+//! a fan-out binding (`fanout_attr.is_some()`, e.g. `memberOf`) instead writes
+//! this entry's DN onto each picked candidate at save time (the combined-save
+//! path handles that expansion — the dialog itself is identical either way). A
 //! `WidgetKind::Picker` binding with `fanout_attr.is_some()` (the back-reference
 //! holder attribute, e.g. a group's `member`) opens a modal with an embedded
 //! [`Shuttle`] view (`ui::shuttle`):
@@ -27,8 +32,8 @@
 //! after every move; OK applies it, Cancel discards it. The fan-out write (one
 //! MODIFY per group) is produced from the diff against baseline by the
 //! combined-save path. Mirrors the `picker` / `oc_picker` module shape: one file
-//! holds `MembershipWidget` (FieldWidget), `MembershipEditor` (FieldEditor) and
-//! `MembershipDialog` (the interactive `Dialog` view).
+//! holds `MultiPickerWidget` (FieldWidget), `MultiPickerEditor` (FieldEditor) and
+//! `MultiPickerDialog` (the interactive `Dialog` view).
 
 use std::collections::HashSet;
 
@@ -46,14 +51,14 @@ use crate::ui::{Shared, REFRESH};
 use crate::workflows::edit_form::EditField;
 
 // ---------------------------------------------------------------------------
-// MembershipWidget — FieldWidget plugin
+// MultiPickerWidget — FieldWidget plugin
 // ---------------------------------------------------------------------------
 
 /// The plugin for fan-out `WidgetKind::Picker`-bound fields (membership).
-/// `present` summarises the member count; `activate` opens a `MembershipDialog`.
-pub(crate) struct MembershipWidget;
+/// `present` summarises the member count; `activate` opens a `MultiPickerDialog`.
+pub(crate) struct MultiPickerWidget;
 
-impl FieldWidget for MembershipWidget {
+impl FieldWidget for MultiPickerWidget {
     fn capability(&self) -> Capability {
         Capability::NeedsWorkerSearch
     }
@@ -69,7 +74,7 @@ impl FieldWidget for MembershipWidget {
     fn activate(&self, field: &EditField) -> Activation {
         match &field.widget_binding {
             Some(WidgetKind::Picker(b)) if b.fanout_attr.is_some() => {
-                Activation::Modal(Box::new(MembershipEditor {
+                Activation::Modal(Box::new(MultiPickerEditor {
                     label: field.label.clone(),
                     binding: b.clone(),
                     current: field.values.clone(),
@@ -81,28 +86,28 @@ impl FieldWidget for MembershipWidget {
 }
 
 // ---------------------------------------------------------------------------
-// MembershipEditor — FieldEditor (carries state into the dialog builder)
+// MultiPickerEditor — FieldEditor (carries state into the dialog builder)
 // ---------------------------------------------------------------------------
 
 /// Carries the field's binding + current member set into the dialog builder.
-pub(crate) struct MembershipEditor {
+pub(crate) struct MultiPickerEditor {
     label: String,
     binding: PickerBinding,
     current: Vec<String>,
 }
 
-impl FieldEditor for MembershipEditor {
+impl FieldEditor for MultiPickerEditor {
     fn into_view(
         self: Box<Self>,
         _schema: &SchemaModel,
         shared: Shared,
     ) -> (Box<dyn View>, tv::ViewId) {
-        let MembershipEditor {
+        let MultiPickerEditor {
             label,
             binding,
             current,
         } = *self;
-        let dlg = MembershipDialog::new(label, binding, current, shared);
+        let dlg = MultiPickerDialog::new(label, binding, current, shared);
         // Focus the Shuttle itself: it is a direct child of the dialog, so this sets
         // the dialog's current child (events route into it) and cascades focus to the
         // Shuttle's own open-time target (the Available list, for type-to-find).
@@ -112,13 +117,13 @@ impl FieldEditor for MembershipEditor {
 }
 
 // ---------------------------------------------------------------------------
-// MembershipDialog — the interactive two-column mover with live search
+// MultiPickerDialog — the interactive two-column mover with live search
 // ---------------------------------------------------------------------------
 
 /// Available list (live candidates with incremental find) on the left, Members
 /// list on the right — both owned by the embedded [`Shuttle`]. Candidate results
 /// arrive via the pump and the `REFRESH` broadcast.
-pub(crate) struct MembershipDialog {
+pub(crate) struct MultiPickerDialog {
     dlg: Dialog,
     /// The embedded two-list transfer widget (a child of `dlg`). Owns the column
     /// geometry, the staged Members set (Selected) and the live candidate set
@@ -137,7 +142,7 @@ pub(crate) struct MembershipDialog {
     seeded: bool,
 }
 
-impl MembershipDialog {
+impl MultiPickerDialog {
     fn new(label: String, binding: PickerBinding, current: Vec<String>, shared: Shared) -> Self {
         let title = format!("Edit {label}");
         let mut dlg = Dialog::new(Rect::new(0, 0, 80, 22), Some(title));
@@ -211,7 +216,7 @@ impl MembershipDialog {
             })
             .collect();
 
-        MembershipDialog {
+        MultiPickerDialog {
             dlg,
             shuttle_id,
             shared,
@@ -305,12 +310,12 @@ impl MembershipDialog {
 }
 
 #[delegate(to = dlg)]
-impl View for MembershipDialog {
+impl View for MultiPickerDialog {
     fn as_any_mut(&mut self) -> Option<&mut dyn core::any::Any> {
         Some(self)
     }
 
-    /// Seed on first open (see [`MembershipDialog::seed`]).
+    /// Seed on first open (see [`MultiPickerDialog::seed`]).
     fn reset_current(&mut self, ctx: &mut Context) {
         self.dlg.reset_current(ctx);
         if !self.seeded {
@@ -452,7 +457,7 @@ mod tests {
     }
 
     fn build_dialog(shared: &Shared, current: &[&str]) -> Box<dyn View> {
-        let ed: Box<dyn FieldEditor> = Box::new(MembershipEditor {
+        let ed: Box<dyn FieldEditor> = Box::new(MultiPickerEditor {
             label: "memberOf".into(),
             binding: fanout_binding(),
             current: current.iter().map(|s| s.to_string()).collect(),
@@ -468,10 +473,10 @@ mod tests {
         }
     }
 
-    fn dialog_mut(view: &mut Box<dyn View>) -> &mut MembershipDialog {
+    fn dialog_mut(view: &mut Box<dyn View>) -> &mut MultiPickerDialog {
         view.as_any_mut()
-            .and_then(|a| a.downcast_mut::<MembershipDialog>())
-            .expect("downcast MembershipDialog")
+            .and_then(|a| a.downcast_mut::<MultiPickerDialog>())
+            .expect("downcast MultiPickerDialog")
     }
 
     /// Run `f` with a fresh headless `Context` over the given backing stores.
@@ -486,7 +491,7 @@ mod tests {
     }
 
     /// Highlight `label` in the Available column (plain rows — matched directly).
-    fn highlight_avail_by_label(d: &mut MembershipDialog, label: &str, ctx: &mut Context) {
+    fn highlight_avail_by_label(d: &mut MultiPickerDialog, label: &str, ctx: &mut Context) {
         let sh = d.shuttle_mut().expect("shuttle present");
         let id = sh.avail_id_for_test();
         let idx = sh
@@ -498,7 +503,7 @@ mod tests {
     }
 
     /// Highlight `label` in the Members column (Selected rows carry a 2-char marker).
-    fn highlight_member_by_label(d: &mut MembershipDialog, label: &str, ctx: &mut Context) {
+    fn highlight_member_by_label(d: &mut MultiPickerDialog, label: &str, ctx: &mut Context) {
         let sh = d.shuttle_mut().expect("shuttle present");
         let id = sh.selected_id_for_test();
         let idx = sh
@@ -528,7 +533,7 @@ mod tests {
     /// `LIST_FIND_CHANGED` broadcast is left in `out` — submitting an async search
     /// is exercised separately; here we only settle moves.
     fn press_and_settle(
-        d: &mut MembershipDialog,
+        d: &mut MultiPickerDialog,
         key: Key,
         out: &mut std::collections::VecDeque<tv::Event>,
         timers: &mut TimerQueue,
@@ -551,7 +556,7 @@ mod tests {
 
     #[test]
     fn present_summarises_member_count() {
-        let w = MembershipWidget;
+        let w = MultiPickerWidget;
         assert_eq!(
             w.present(&membership_field("memberOf", &[])),
             "\u{2039}none\u{203a}"
@@ -567,7 +572,7 @@ mod tests {
     fn fanout_picker_activates_modal() {
         let f = membership_field("memberOf", &[]);
         assert!(matches!(
-            MembershipWidget.activate(&f),
+            MultiPickerWidget.activate(&f),
             Activation::Modal(_)
         ));
     }
