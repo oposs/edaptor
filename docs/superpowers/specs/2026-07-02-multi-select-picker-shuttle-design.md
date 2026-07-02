@@ -131,6 +131,11 @@ save and fan-out expansion are unaffected.
 
 ## Out of scope / non-goals
 
+- **The `choice` kind is untouched.** Fixed short vocabularies (e.g.
+  `sambaAcctFlags`, a `kind = "choice"` field in `choice.rs`) keep their simple
+  checklist / radio UI — a checkbox picker is the appropriate control for a
+  small fixed set. Only `WidgetKind::Picker` (live server-backed candidate
+  search over potentially large sets like users/groups) migrates to the Shuttle.
 - Single-select pickers keep the radio list — no Shuttle single-select
   affordance.
 - No change to fan-out save semantics or the combined-save path.
