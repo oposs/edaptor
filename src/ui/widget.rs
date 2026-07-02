@@ -337,6 +337,7 @@ mod tests {
             crate::ui::picker::PickerWidget.activate(&f),
             Activation::Inline
         ));
+        assert!(matches!(widget_for(&f).activate(&f), Activation::Modal(_)), "widget_for must route a multi non-fanout picker to a modal widget");
     }
 
     #[test]
@@ -367,5 +368,6 @@ mod tests {
             crate::ui::multi_picker::MultiPickerWidget.activate(&f),
             Activation::Inline
         ));
+        assert!(matches!(widget_for(&f).activate(&f), Activation::Modal(_)), "widget_for must route a single non-fanout picker to a modal widget");
     }
 }
