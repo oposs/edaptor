@@ -111,11 +111,14 @@ save and fan-out expansion are unaffected.
 - **`widget.rs`**: extend the routing test — a multi non-fanout Picker field
   routes to `MultiPickerWidget`; a single non-fanout Picker field routes to
   `PickerWidget`.
-- **Integration:** unlike `memberOf` (operational, overlay-maintained, not a
-  reachable demo form field), `memberUid` **is** a reachable field on
-  `posixGroup` in the demo config. Add a `tv_member_uid` integration test that
-  drives the real Shuttle live end-to-end (seed, search, move, save), mirroring
-  `tv_membership`.
+- **Integration:** the dialog Views (`MultiPickerDialog`, `Shuttle`) are
+  `pub(crate)` and therefore not reachable from `tests/` (a separate crate) —
+  which is why `tv_membership`/`tv_picker` test at the public workflow /
+  `SearchFlow` API, not the dialog. Live dialog behaviour is covered by the
+  in-crate unit tests above. Add a gated `tv_member_uid` **`SearchFlow`-level**
+  test (public API, mirroring `tv_picker`) proving the `memberUid` picker shape
+  (candidate = user, `store = uid`) yields candidates whose `store_value` is the
+  bare `uid` scalar (not a DN) — the exact keys the Shuttle stages.
 - `make check` (fmt + clippy -D warnings + tests) green before done.
 
 ## Docs / changelog
