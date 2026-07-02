@@ -72,8 +72,12 @@ impl FieldWidget for MultiPickerWidget {
     }
 
     fn activate(&self, field: &EditField) -> Activation {
+        use crate::config::relation::Cardinality;
         match &field.widget_binding {
-            Some(WidgetKind::Picker(b)) if b.fanout_attr.is_some() => {
+            Some(WidgetKind::Picker(b))
+                if b.fanout_attr.is_some()
+                    || b.cardinality(field.multi) == Cardinality::Multi =>
+            {
                 Activation::Modal(Box::new(MultiPickerEditor {
                     label: field.label.clone(),
                     binding: b.clone(),
@@ -685,6 +689,61 @@ mod tests {
             members,
             vec![G1.to_string()],
             "typing a find query must not move a candidate"
+        );
+    }
+
+    /// A non-fanout memberUid binding (scalar `uid` store) seeds Available from the
+    /// delivered candidates and stages `SetValues([uid])` when a candidate is moved in.
+    /// Proves the routing change: MultiPickerDialog handles multi non-fanout pickers.
+    #[test]
+    fn nonfanout_scalar_picker_seeds_moves_and_stages_uid() {
+        use crate::config::relation::{CandidateScope, Cardinality, PickerBinding, StoreKey};
+
+        let shared = test_shared();
+        // A delivered candidate whose scalar store_value is a uid (not a DN).
+        shared.borrow_mut().search_results = vec![Candidate {
+            dn: "uid=ann,ou=people,dc=example,dc=org".into(),
+            label: "Ann Smith".into(),
+            store_value: "ann".into(),
+        }];
+
+        let binding = PickerBinding {
+            attr: "memberUid".into(),
+            scope: CandidateScope {
+                base: "ou=people,dc=example,dc=org".into(),
+                object_classes: vec!["inetOrgPerson".into()],
+                search_attrs: vec!["uid".into()],
+                label_template: None,
+            },
+            store: StoreKey::Attr("uid".into()),
+            select: Some(Cardinality::Multi),
+            fanout_attr: None,
+        };
+        let ed: Box<dyn FieldEditor> = Box::new(MultiPickerEditor {
+            label: "memberUid".into(),
+            binding,
+            current: vec![],
+        });
+        let (mut view, _focus) = ed.into_view(&schema(), shared.clone());
+
+        let mut out = std::collections::VecDeque::new();
+        let mut timers = TimerQueue::new();
+        let mut deferred = Vec::new();
+        with_ctx(&mut out, &mut timers, &mut deferred, |ctx| {
+            view.reset_current(ctx)
+        });
+
+        // The scalar candidate is offered in Available (keyed by its uid).
+        let d = dialog_mut(&mut view);
+        with_ctx(&mut out, &mut timers, &mut deferred, |ctx| {
+            highlight_avail_by_label(d, "Ann Smith", ctx);
+        });
+        press_and_settle(d, Key::Insert, &mut out, &mut timers, &mut deferred);
+
+        assert_eq!(
+            shared.borrow().staged_commit,
+            Some(CommitOutcome::SetValues(vec!["ann".to_string()])),
+            "moving the scalar candidate in must stage its uid, not its DN"
         );
     }
 

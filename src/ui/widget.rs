@@ -135,16 +135,13 @@ pub fn widget_for(field: &EditField) -> Box<dyn FieldWidget> {
         Box::new(crate::ui::pw_editor::PasswordWidget)
     } else if matches!(field.widget_binding, Some(WidgetKind::Choice(_))) {
         Box::new(crate::ui::choice::ChoiceWidget)
-    } else if matches!(
-        &field.widget_binding,
-        Some(WidgetKind::Picker(b)) if b.fanout_attr.is_none()
-    ) {
-        Box::new(crate::ui::picker::PickerWidget)
-    } else if matches!(
-        &field.widget_binding,
-        Some(WidgetKind::Picker(b)) if b.fanout_attr.is_some()
-    ) {
-        Box::new(crate::ui::multi_picker::MultiPickerWidget)
+    } else if let Some(WidgetKind::Picker(b)) = &field.widget_binding {
+        use crate::config::relation::Cardinality;
+        if b.fanout_attr.is_some() || b.cardinality(field.multi) == Cardinality::Multi {
+            Box::new(crate::ui::multi_picker::MultiPickerWidget)
+        } else {
+            Box::new(crate::ui::picker::PickerWidget)
+        }
     } else if matches!(field.widget_binding, Some(WidgetKind::SambaSid)) {
         Box::new(SambaSidWidget)
     } else if matches!(field.widget_binding, Some(WidgetKind::XOrdered)) {
@@ -164,14 +161,7 @@ pub fn is_modal_field(field: &EditField) -> bool {
     field.label.eq_ignore_ascii_case("objectClass")
         || matches!(field.widget_binding, Some(WidgetKind::Password(_)))
         || matches!(field.widget_binding, Some(WidgetKind::Choice(_)))
-        || matches!(
-            &field.widget_binding,
-            Some(WidgetKind::Picker(b)) if b.fanout_attr.is_none()
-        )
-        || matches!(
-            &field.widget_binding,
-            Some(WidgetKind::Picker(b)) if b.fanout_attr.is_some()
-        )
+        || matches!(field.widget_binding, Some(WidgetKind::Picker(_)))
         || matches!(field.widget_binding, Some(WidgetKind::SambaSid))
         || matches!(field.widget_binding, Some(WidgetKind::XOrdered))
         || (field.editable && field.multi && !field.orphaned && field.widget_binding.is_none())
@@ -314,5 +304,68 @@ mod tests {
         }));
         assert!(is_modal_field(&f));
         assert!(matches!(widget_for(&f).activate(&f), Activation::Modal(_)));
+    }
+
+    #[test]
+    fn multi_nonfanout_picker_routes_to_multi_picker() {
+        use crate::config::relation::{CandidateScope, Cardinality, PickerBinding, StoreKey};
+        use crate::config::widget::WidgetKind;
+        let binding = PickerBinding {
+            attr: "memberUid".into(),
+            scope: CandidateScope {
+                base: "ou=people,dc=example,dc=org".into(),
+                object_classes: vec!["inetOrgPerson".into()],
+                search_attrs: vec!["uid".into()],
+                label_template: None,
+            },
+            store: StoreKey::Attr("uid".into()),
+            select: Some(Cardinality::Multi),
+            fanout_attr: None,
+        };
+        let mut f = field(&[], WidgetSpec::ReadOnlyText);
+        f.label = "memberUid".into();
+        f.multi = true;
+        f.widget_binding = Some(WidgetKind::Picker(binding));
+        // A multi, non-fanout picker must be modal AND must activate a Modal editor
+        // on the multi-picker widget (not Inline).
+        assert!(is_modal_field(&f));
+        assert!(matches!(
+            crate::ui::multi_picker::MultiPickerWidget.activate(&f),
+            Activation::Modal(_)
+        ));
+        assert!(matches!(
+            crate::ui::picker::PickerWidget.activate(&f),
+            Activation::Inline
+        ));
+    }
+
+    #[test]
+    fn single_nonfanout_picker_routes_to_picker() {
+        use crate::config::relation::{CandidateScope, Cardinality, PickerBinding, StoreKey};
+        use crate::config::widget::WidgetKind;
+        let binding = PickerBinding {
+            attr: "gidNumber".into(),
+            scope: CandidateScope {
+                base: "ou=groups,dc=example,dc=org".into(),
+                object_classes: vec!["posixGroup".into()],
+                search_attrs: vec!["cn".into()],
+                label_template: None,
+            },
+            store: StoreKey::Attr("gidNumber".into()),
+            select: Some(Cardinality::Single),
+            fanout_attr: None,
+        };
+        let mut f = field(&[], WidgetSpec::ReadOnlyText);
+        f.label = "gidNumber".into();
+        f.multi = false;
+        f.widget_binding = Some(WidgetKind::Picker(binding));
+        assert!(matches!(
+            crate::ui::picker::PickerWidget.activate(&f),
+            Activation::Modal(_)
+        ));
+        assert!(matches!(
+            crate::ui::multi_picker::MultiPickerWidget.activate(&f),
+            Activation::Inline
+        ));
     }
 }

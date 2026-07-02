@@ -48,8 +48,12 @@ impl FieldWidget for PickerWidget {
     }
 
     fn activate(&self, field: &EditField) -> Activation {
+        use crate::config::relation::Cardinality;
         match &field.widget_binding {
-            Some(WidgetKind::Picker(b)) if b.fanout_attr.is_none() => {
+            Some(WidgetKind::Picker(b))
+                if b.fanout_attr.is_none()
+                    && b.cardinality(field.multi) == Cardinality::Single =>
+            {
                 Activation::Modal(Box::new(PickerEditor {
                     label: field.label.clone(),
                     binding: b.clone(),
@@ -488,9 +492,24 @@ mod tests {
     }
 
     #[test]
-    fn non_fanout_picker_activates_modal() {
-        let f = picker_field("member", &[], multi_dn_binding(), true);
+    fn single_nonfanout_picker_activates_modal() {
+        // PickerWidget handles single-select non-fanout only.
+        let binding = PickerBinding {
+            attr: "gidNumber".into(),
+            scope: dn_scope(),
+            store: StoreKey::Attr("gidNumber".into()),
+            select: Some(Cardinality::Single),
+            fanout_attr: None,
+        };
+        let f = picker_field("gidNumber", &[], binding, false);
         assert!(matches!(PickerWidget.activate(&f), Activation::Modal(_)));
+    }
+
+    #[test]
+    fn multi_nonfanout_picker_does_not_activate_here() {
+        // A multi non-fanout binding is routed to MultiPickerWidget, not PickerWidget.
+        let f = picker_field("member", &[], multi_dn_binding(), true);
+        assert!(matches!(PickerWidget.activate(&f), Activation::Inline));
     }
 
     #[test]
