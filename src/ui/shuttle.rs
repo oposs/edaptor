@@ -462,6 +462,26 @@ impl Shuttle {
         let mark = if r.locked { MARK_LOCKED } else { MARK_PLAIN };
         format!("{mark}{}", r.label)
     }
+
+    /// Enable exactly the move command whose source list is focused: Add when the
+    /// Available list is current, Remove when the Selected list is current,
+    /// disabling the other (both disabled when neither list is current, e.g. focus
+    /// on OK/Cancel). tvision's deferred command set flips COMMAND_SET_CHANGED on
+    /// the next idle pump, and each Button re-grays itself from
+    /// `ctx.command_enabled`.
+    fn sync_move_commands(&mut self, ctx: &mut Context) {
+        let cur = self.group.current();
+        if cur == Some(self.avail_id) {
+            ctx.enable_command(CMD_ADD);
+            ctx.disable_command(CMD_REMOVE);
+        } else if cur == Some(self.selected_id) {
+            ctx.disable_command(CMD_ADD);
+            ctx.enable_command(CMD_REMOVE);
+        } else {
+            ctx.disable_command(CMD_ADD);
+            ctx.disable_command(CMD_REMOVE);
+        }
+    }
 }
 
 #[delegate(to = group, skip(handle_event, as_any_mut, reset_current, value, set_value, set_value_ctx))]
@@ -477,6 +497,7 @@ impl View for Shuttle {
     fn reset_current(&mut self, ctx: &mut Context) {
         self.group.reset_current(ctx);
         self.group.focus_child(self.avail_id, ctx);
+        self.sync_move_commands(ctx);
     }
 
     /// Gather: the Selected set as a list of keys, so the Shuttle participates
@@ -575,6 +596,10 @@ impl View for Shuttle {
             return;
         }
         self.group.handle_event(ev, ctx);
+        // A Tab/focus change may have moved currency between the two lists (or to
+        // a button/OK/Cancel): re-derive which move command is live so the buttons
+        // gray correctly.
+        self.sync_move_commands(ctx);
         // Incremental search is the Available list's own find mode: when focused
         // it consumes query keys and broadcasts `Command::LIST_FIND_CHANGED`
         // itself, so the Shuttle has nothing to report here.
@@ -694,6 +719,64 @@ mod tests {
                 .iter()
                 .any(|e| matches!(e, Event::Broadcast { command, .. } if *command == cmd))
         }
+
+        /// Whether the harness saw a deferred enable/disable for `cmd`.
+        /// Last enable/disable wins.
+        fn command_disabled(&self, cmd: Command) -> bool {
+            self.deferred
+                .iter()
+                .rev()
+                .find_map(|d| match d {
+                    Deferred::DisableCommand(c) if *c == cmd => Some(true),
+                    Deferred::EnableCommand(c) if *c == cmd => Some(false),
+                    _ => None,
+                })
+                .unwrap_or(false)
+        }
+    }
+
+    #[test]
+    fn focus_on_available_enables_add_disables_remove() {
+        let mut sh = shuttle();
+        let mut h = Harness::new();
+        sh.set_available(vec![row("a")], &mut h.ctx());
+        sh.set_selected(vec![row("x")], &mut h.ctx());
+        let aid = sh.avail_id;
+        {
+            let mut ctx = h.ctx();
+            sh.group.focus_child(aid, &mut ctx);
+            sh.sync_move_commands(&mut ctx);
+        }
+        assert!(
+            !h.command_disabled(CMD_ADD),
+            "Add enabled while Available focused"
+        );
+        assert!(
+            h.command_disabled(CMD_REMOVE),
+            "Remove disabled while Available focused"
+        );
+    }
+
+    #[test]
+    fn focus_on_selected_enables_remove_disables_add() {
+        let mut sh = shuttle();
+        let mut h = Harness::new();
+        sh.set_available(vec![row("a")], &mut h.ctx());
+        sh.set_selected(vec![row("x")], &mut h.ctx());
+        let sid = sh.selected_id;
+        {
+            let mut ctx = h.ctx();
+            sh.group.focus_child(sid, &mut ctx);
+            sh.sync_move_commands(&mut ctx);
+        }
+        assert!(
+            h.command_disabled(CMD_ADD),
+            "Add disabled while Selected focused"
+        );
+        assert!(
+            !h.command_disabled(CMD_REMOVE),
+            "Remove enabled while Selected focused"
+        );
     }
 
     fn row(key: &str) -> ShuttleRow {
@@ -931,7 +1014,7 @@ mod tests {
             sh.draw(&mut dc);
         }
         // Read a non-current content row (row 1) in each column's list area. Lists
-        // span y 2..18; Available x ~2..33, Selected x ~38..67 (see Shuttle::new).
+        // span y 2..18; Available x ~2..33, Selected x ~38..67 (see Shuttle::layout).
         let avail_bg = buf.get(4, 3).style().bg;
         let selected_bg = buf.get(50, 3).style().bg;
         assert_eq!(avail_bg, normal, "the focused Available list is bright");
