@@ -22,7 +22,7 @@ chumsky = "0.12"
 oid = "0.3"
 unicode-width = "0.2"
 # tvision-rs is the TUI framework driving the edaptor browser (tree / leaf list / entry form).
-tvision-rs = "0.9"
+tvision-rs = "0.10"
 
 [dev-dependencies]
 tempfile = "3"

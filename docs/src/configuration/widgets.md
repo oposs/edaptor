@@ -174,9 +174,10 @@ multi-valued attributes such as `member` and `memberUid`) presents a two-column
 **Available (left) | Selected (right)** shuttle: type to search, then
 Insert/Enter/[Add] to move a candidate in and Delete/[Remove] to move it out.
 A wide **Add** button sits under the Available column and a wide **Remove** button
-under the Selected column; each is active only while its list is focused (the one
-under the focused list is highlighted), and Tab skips them. The dialog is
-resizable — drag its lower-right corner and the columns reflow.
+under the Selected column; the one under the focused list is **highlighted**, both
+stay usable at all times, and Tab skips them. The dialog is resizable — drag its
+lower-right corner and the columns reflow, down to a minimum that keeps both
+columns usable.
 
 ```toml
 [profile.widget.gidNumber]
@@ -376,10 +377,10 @@ two-column picker:
   applied).
 
 A wide **Add** button sits under the Available (left) column and a wide **Remove**
-button under the Active (right) column. Each is active only while its list is
-focused — the button under the focused list is highlighted — and Tab skips both.
-The dialog is resizable: drag its lower-right corner and the columns, buttons, and
-OK/Cancel reflow.
+button under the Active (right) column. The button under the focused list is
+**highlighted**; both stay usable at all times, and Tab skips both. The dialog is
+resizable: drag its lower-right corner and the columns, buttons, and OK/Cancel
+reflow, down to a minimum that keeps both columns usable.
 
 | Action | Keys |
 |--------|------|

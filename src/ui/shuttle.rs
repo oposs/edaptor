@@ -151,8 +151,11 @@ pub(crate) struct Shuttle {
 
 impl Shuttle {
     /// Minimum interior the two columns + button rows need before they overlap.
-    const MIN_W: i32 = 60;
-    const MIN_H: i32 = 20;
+    /// `pub(crate)` so a host dialog can pin its resize floor to the same values
+    /// via `Dialog::set_min_size` (the Shuttle fills the dialog, so the window must
+    /// not shrink below this or the columns hit the layout clamp and overflow).
+    pub(crate) const MIN_W: i32 = 60;
+    pub(crate) const MIN_H: i32 = 20;
 
     /// Every child rect derived purely from the widget's `area`. Extracted from
     /// `new` so a resize (`change_bounds`) can recompute the same geometry.

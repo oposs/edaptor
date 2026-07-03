@@ -157,6 +157,11 @@ impl MultiPickerDialog {
             grow: true,
             ..tv::WindowFlags::default()
         });
+        // Floor the resize at the embedded Shuttle's minimum: the Shuttle fills the
+        // dialog, so below this the columns hit their layout clamp and overflow the
+        // frame. tvision 0.10's settable window minimum governs the interactive
+        // corner-drag too (the bare Window floor is only 16×6).
+        dlg.set_min_size(tv::Point::new(Shuttle::MIN_W, Shuttle::MIN_H));
 
         // Build the two columns. Available on the left (membership convention),
         // Available on the left, Members (the Selected set) on the right — the
@@ -630,6 +635,17 @@ mod tests {
     }
 
     // -- two-column move logic --------------------------------------------
+
+    #[test]
+    fn dialog_resize_floor_matches_the_shuttle_minimum() {
+        // set_min_size must reach the window: the dialog reports the Shuttle floor
+        // (60×20), not tvision's bare 16×6 Window default, so an interactive drag
+        // cannot shrink below the usable content size.
+        let shared = test_shared();
+        let view = build_dialog(&shared, &[]);
+        let (min, _max) = view.size_limits(tv::Point::new(300, 100));
+        assert_eq!(min, tv::Point::new(Shuttle::MIN_W, Shuttle::MIN_H));
+    }
 
     /// Seed two group candidates, baseline Members = [g1]; moving g2 from
     /// Available into Members stages [g1, g2]; removing g1 stages [g2].

@@ -11,11 +11,11 @@ All notable changes to eDAPtor are documented here. The format follows
 - Picker dialogs (object classes, membership, multi-select pickers) now use the
   conventional transfer layout — **Available on the left, the selected set on the
   right** — with wide **Add** and **Remove** buttons under their respective
-  columns. Each button is active only while its list is focused, and the button
-  under the focused list is **highlighted** as the dialog's default action. The
-  move buttons are skipped by Tab (still usable via click, Alt-A/Alt-R, or
-  Insert/Delete/Enter). The dialogs are **resizable** — drag the lower-right
-  corner and the columns, buttons, and OK/Cancel reflow.
+  columns. The button under the currently-focused list is **highlighted** as the
+  dialog's default action; both stay usable at all times (click, Alt-A/Alt-R, or
+  Insert/Delete/Enter) and Tab skips them. The dialogs are **resizable** — drag
+  the lower-right corner and the columns, buttons, and OK/Cancel reflow — down to
+  a minimum size that keeps the two columns usable.
 
 - tvision UI: clicking a form **label** now focuses the corresponding input field
   directly, without needing to navigate to it with the arrow keys.

@@ -123,6 +123,11 @@ impl ObjectClassPicker {
             grow: true,
             ..tv::WindowFlags::default()
         });
+        // Floor the resize at the embedded Shuttle's minimum: the Shuttle fills the
+        // dialog, so below this the columns hit their layout clamp and overflow the
+        // frame. tvision 0.10's settable window minimum governs the interactive
+        // corner-drag too (the bare Window floor is only 16×6).
+        dlg.set_min_size(tv::Point::new(Shuttle::MIN_W, Shuttle::MIN_H));
 
         // Conventional transfer layout: Available on the LEFT, Active (the
         // Selected set) on the RIGHT. Insert the Shuttle FIRST so it is the
@@ -445,6 +450,18 @@ mod tests {
     /// A STRUCTURAL class ADDED in this session must stay unlocked — only the
     /// classes already on the entry at open are locked. (Reported bug: you could
     /// add a `*` class but then never drop it again.)
+    #[test]
+    fn dialog_resize_floor_matches_the_shuttle_minimum() {
+        // set_min_size must reach the window: the picker delegates size_limits to
+        // the dialog, so a large-owner query reports the Shuttle floor (60×20),
+        // not tvision's bare 16×6 Window default. This is what stops an interactive
+        // drag from shrinking the dialog below its usable content size.
+        let sh = shared();
+        let view = build_view(&sh, &["person"]);
+        let (min, _max) = view.size_limits(tv::Point::new(300, 100));
+        assert_eq!(min, tv::Point::new(Shuttle::MIN_W, Shuttle::MIN_H));
+    }
+
     #[test]
     fn session_added_structural_class_can_be_removed() {
         let sh = shared();
