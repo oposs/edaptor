@@ -4,12 +4,15 @@
 //! reaches into the host's `Dialog`, the `Shuttle` *is* a `View` embedding a
 //! `Group` and owning its children (two columns + Add/Remove buttons),
 //! notifying the owner by broadcast (`CMD_SHUTTLE_CHANGED`) rather than a
-//! bespoke return-value channel. Incremental search is the Available list's own
-//! built-in find mode (`FindMode`): typing while it is focused filters or
-//! highlights in place and the list broadcasts `Command::LIST_FIND_CHANGED`; a
-//! server-backed host reads [`Shuttle::find_query`] to re-run its query. The
-//! pure column logic — move / de-dup / lock — lives in [`ShuttleModel`], which
-//! is tvision-free and unit-testable without a `Dialog`.
+//! bespoke return-value channel. Incremental search is each list's own built-in
+//! find mode (`FindMode`): typing while a list is focused narrows/highlights it
+//! and it broadcasts `Command::LIST_FIND_CHANGED`. The Available list's mode is
+//! the consumer's choice (`Highlight` for a server-backed host, which reads
+//! [`Shuttle::find_query`] to re-run its query, or `Filter` for a local set); the
+//! Selected list always uses `Filter` (a local narrow) so both columns search the
+//! same way and letters never leak to the Add/Remove buttons. The pure column
+//! logic — move / de-dup / lock — lives in [`ShuttleModel`], which is
+//! tvision-free and unit-testable without a `Dialog`.
 
 use tvision_rs::{
     self as tv, delegate, Button, ButtonFlags, Command, Context, Event, FieldValue, FindMode,
@@ -181,12 +184,13 @@ impl Shuttle {
             sel_col.1,
             list_y.1,
         ))));
-        // The Selected list gets `FindMode::Highlight` too: typing while it holds
-        // focus does a local find-as-you-type over the staged set (so letters are
-        // consumed by the list instead of leaking to the Add/Remove button
-        // hotkeys), and Highlight — unlike Filter — does not narrow the list, so
-        // the unsorted "display index == model index" invariant that `move_out`
-        // relies on still holds. It never re-queries a server (a local set).
+        // The Selected list gets `FindMode::Filter` — the same incremental search
+        // the Available list does (narrow-as-you-type), over the local staged set:
+        // typing while it holds focus narrows it to matching rows (and consumes the
+        // letters, so they no longer leak to the Add/Remove button hotkeys). It
+        // never re-queries a server (a local set). Because Filter narrows the
+        // display, the focused row is mapped back to the model by label in
+        // [`selected_highlight`] (as the Available list already does).
         let selected_id = group.insert(Box::new(
             ListBox::new(
                 Rect::new(sel_col.0, list_y.0, sel_col.1 - 1, list_y.1),
@@ -194,7 +198,7 @@ impl Shuttle {
                 None,
                 Some(selected_bar),
             )
-            .with_find(FindMode::Highlight),
+            .with_find(FindMode::Filter),
         ));
 
         // On-screen affordances for the move keys (which are not discoverable),
@@ -373,19 +377,33 @@ impl Shuttle {
         }
     }
 
-    /// Index into the model's Selected rows of the highlighted row. The Selected
-    /// `ListBox` is unsorted, so its focused index *is* the model index — no
-    /// display-string round-trip needed.
+    /// Index into the model's Selected rows of the highlighted row, resolved by
+    /// matching the focused display row's label back to the model. The Selected
+    /// list is unsorted but its `FindMode::Filter` can narrow the display, so the
+    /// focused index is a *display* index, not the model index — map it by label
+    /// (mirroring [`avail_highlight`]).
     fn selected_highlight(&mut self) -> Option<usize> {
+        let label = self.selected_focused_label()?;
+        self.model
+            .selected()
+            .iter()
+            .position(|r| r.label.eq_ignore_ascii_case(&label))
+    }
+
+    /// The display label currently focused in the Selected `ListBox`, with the
+    /// 2-char lock/plain marker that [`selected_display`] prepends stripped off.
+    fn selected_focused_label(&mut self) -> Option<String> {
         let lb = self
             .group
             .child_mut(self.selected_id)?
             .as_any_mut()?
             .downcast_mut::<ListBox>()?;
-        match lb.value() {
-            Some(FieldValue::Int(i)) if i >= 0 => Some(i as usize),
-            _ => None,
-        }
+        let idx = match lb.value() {
+            Some(FieldValue::Int(i)) if i >= 0 => i as usize,
+            _ => return None,
+        };
+        let disp = lb.list().get(idx).cloned()?;
+        Some(disp.chars().skip(2).collect())
     }
 
     /// Index into the model's Available rows of the highlighted row, resolved by
@@ -805,22 +823,47 @@ mod tests {
     }
 
     #[test]
-    fn typing_on_the_selected_list_drives_its_own_find_not_the_buttons() {
+    fn typing_on_the_selected_list_narrows_it_like_the_available_list() {
         // Regression: with no find mode on the Selected list, letters bubbled to
-        // the dialog and fired the ~A~dd / ~R~emove button hotkeys. The Selected
-        // list now has `FindMode::Highlight`, so typing while it holds focus is
-        // consumed by its own incremental find.
+        // the dialog and fired the ~A~dd / ~R~emove button hotkeys; a later fix
+        // used Highlight, which only highlights (a different feature). The Selected
+        // list now uses `FindMode::Filter` — the same narrow-as-you-type
+        // incremental search the Available list does.
         let mut sh = shuttle();
         let mut h = Harness::new();
         sh.set_selected(vec![row("alpha"), row("beta"), row("gamma")], &mut h.ctx());
         sh.type_find_selected("bet", &mut h.ctx());
+        assert_eq!(sh.selected_find_query(), "bet", "the query accumulates");
+        // Filter narrows the display to the matching row (marker + label).
+        let shown = sh.selected_text();
         assert_eq!(
-            sh.selected_find_query(),
-            "bet",
-            "typing while the Selected list is focused must accumulate its own find query"
+            shown.len(),
+            1,
+            "Filter narrows to the one match, got {shown:?}"
         );
-        // The find must NOT have moved anything (it is a search, not a move).
+        assert!(shown[0].ends_with("beta"), "got {shown:?}");
+        // The find is a search, not a move — the model is unchanged.
         assert_eq!(keys(sh.model.selected()), ["alpha", "beta", "gamma"]);
+    }
+
+    #[test]
+    fn deleting_while_the_selected_list_is_filtered_removes_the_right_model_row() {
+        // With the display narrowed, the focused row is a *display* index; the
+        // model row to remove is resolved by label, so Delete removes the searched
+        // row (not whatever model index the display position happens to be).
+        let mut sh = shuttle();
+        let mut h = Harness::new();
+        sh.set_selected(vec![row("alpha"), row("beta"), row("gamma")], &mut h.ctx());
+        sh.type_find_selected("beta", &mut h.ctx()); // narrows to ["beta"], focuses the list
+        let sid = sh.selected_id;
+        sh.highlight(sid, 0, &mut h.ctx()); // display row 0 == beta
+        let mut ev = Event::KeyDown(KeyEvent::from(Key::Delete));
+        sh.handle_event(&mut ev, &mut h.ctx());
+        assert_eq!(
+            keys(sh.model.selected()),
+            ["alpha", "gamma"],
+            "Delete while filtered must remove the model row matching the focused display row"
+        );
     }
 
     #[test]
