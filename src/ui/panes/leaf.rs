@@ -3,7 +3,7 @@
 //! filter and highlight, no separate search box.
 
 use tvision_rs::{
-    self as tv, delegate, Context, DrawCtx, Event, FieldValue, FindMode, Group, Key, ListBox,
+    self as tv, delegate, Context, Event, FieldValue, FindMode, Group, Key, ListBox,
     ListViewer, Rect, ScrollBar, View,
 };
 
@@ -205,23 +205,6 @@ impl View for LeafPane {
         Some(self)
     }
 
-    fn draw(&mut self, ctx: &mut DrawCtx) {
-        // Focus indication: the `ListViewer` picks its bright "active" palette
-        // (base3 surface + blue cursor) when `selected && active`, and its dim
-        // "inactive" palette (recessed surface + faded-blue current row) otherwise.
-        // But a list that is the sole current child of this pane group keeps
-        // `selected` set even after the pane loses focus — `Selected` does not fan
-        // out of the owning group, so `selected && active` would stay true and the
-        // leaf would never dim. Mirror the pane's real `focused` onto the list's
-        // `active` flag so an unfocused leaf recedes and its current row fades,
-        // matching the tree pane (whose Outline already keys on `focused`).
-        let focused = self.group.state().state.focused;
-        if let Some(list) = self.group.child_mut(self.list_id) {
-            list.state_mut().state.active = focused;
-        }
-        self.group.draw(ctx);
-    }
-
     fn handle_event(&mut self, ev: &mut Event, ctx: &mut Context) {
         // Only scroll on the wheel when the cursor is over this pane — tvision
         // delivers the wheel non-positionally, so otherwise the inner list would
@@ -348,15 +331,14 @@ mod tests {
         assert_eq!(LeafPane::bar_layout(20, 9, true, 0), (true, 0));
     }
 
-    /// Focus visualization: the leaf `ListViewer` keys its bright/dim palette on
-    /// `selected && active`, but a list that is the sole current child of its pane
-    /// group keeps `selected` set even after the pane loses focus (Selected does
-    /// not fan out of the owner). So without a focus-sync the leaf would stay
-    /// bright (active surface + blue cursor) regardless of focus. The pane's
-    /// `draw()` fixes this by mirroring the pane's real `focused` onto the list's
-    /// `active` flag: a focused leaf renders the active surface with the blue
-    /// cursor; an unfocused leaf recedes to the inactive surface and its current
-    /// row shows the faded-blue selected colour.
+    /// Focus visualization: the leaf `ListViewer` keys its row *surface* on
+    /// `ctx.owner_active()` (the pane group's focus, fanned by `Group::draw`) and
+    /// its current-row *highlight* on the list's own `state.focused`. So a focused
+    /// leaf renders the active surface with the blue cursor; an unfocused leaf
+    /// recedes to the inactive surface and its current row shows the faded-blue
+    /// selected colour — no pane-side focus mirroring needed (the framework drives
+    /// both axes). The helper sets the pane group's *and* the current list's
+    /// `focused` together, mirroring the real focus chain.
     #[test]
     fn unfocused_leaf_recedes_and_current_row_fades() {
         use tvision_rs::{Buffer, DrawCtx, Point, Role};
@@ -414,8 +396,8 @@ mod tests {
         assert_eq!(pane.last_sel, 0, "seeding selects row 0");
 
         let theme = crate::ui::theme::edaptor_theme();
-        let active_bg = theme.style(Role::ListNormalActive).bg;
-        let inactive_bg = theme.style(Role::ListNormalInactive).bg;
+        let active_bg = theme.style(Role::ListNormal).bg;
+        let inactive_bg = theme.style(Role::ListInactive).bg;
         let cursor_bg = theme.style(Role::ListFocused).bg;
         let faded_bg = theme.style(Role::ListSelected).bg;
         assert_ne!(
@@ -426,6 +408,13 @@ mod tests {
         // Helper: draw the pane with the given focus and read back cell backgrounds.
         let draw_bgs = |pane: &mut LeafPane, focused: bool| -> (tv::Color, tv::Color) {
             pane.group.state_mut().state.focused = focused;
+            // The current list is the pane group's focused child on the real focus
+            // chain; mirror that so its own `state.focused` (the highlight axis)
+            // tracks the pane, as the running app's focus propagation would.
+            let list_id = pane.list_id;
+            if let Some(list) = pane.group.child_mut(list_id) {
+                list.state_mut().state.focused = focused;
+            }
             let mut buf = Buffer::new(30, 10);
             {
                 let mut dctx =

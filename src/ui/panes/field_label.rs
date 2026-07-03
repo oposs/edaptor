@@ -12,7 +12,7 @@
 //! Colours come from theme roles (never hard-coded) so the widget tracks the
 //! palette: the surface is `ListNormal{Active,Inactive}`, the selected-row chip is
 //! `ListFocused` / `ListSelected`, the lighter label text is `Disabled`'s
-//! foreground, and the value/title text is body text (`ListNormalActive` fg).
+//! foreground, and the value/title text is body text (`ListNormal` fg).
 
 use tvision_rs::{DrawCtx, FieldValue, Rect, Role, View, ViewState};
 use unicode_width::UnicodeWidthStr;
@@ -33,13 +33,13 @@ pub(crate) enum LabelKind {
 
 /// A read-only, single-row label cell. Not selectable, so it never takes focus
 /// or a Tab stop; the owning [`FormPane`](super::form::FormPane) drives its text
-/// via [`View::set_value`] and its `focused`/`active` flags each draw.
+/// via [`View::set_value`] and its `active` flag. Focus (bright vs. dim) comes
+/// from the framework at draw time via [`DrawCtx::owner_active`] — the owning
+/// pane group's focus, fanned by `Group::draw` — so the pane need not push it.
 pub(crate) struct FieldLabel {
     pub state: ViewState,
     text: String,
     kind: LabelKind,
-    /// Whether the owning pane currently holds focus (bright vs. dim).
-    focused: bool,
     /// Whether this label's field is the current/selected one (highlight chip).
     active: bool,
 }
@@ -50,7 +50,6 @@ impl FieldLabel {
             state: ViewState::new(bounds),
             text: String::new(),
             kind,
-            focused: false,
             active: false,
         }
     }
@@ -63,11 +62,6 @@ impl FieldLabel {
     /// A right-aligned label cell.
     pub(crate) fn label(bounds: Rect) -> Self {
         Self::new(bounds, LabelKind::Label)
-    }
-
-    /// Mirror the pane's focus so the cell brightens/dims with it.
-    pub(crate) fn set_focused(&mut self, focused: bool) {
-        self.focused = focused;
     }
 
     /// Mark this label's field as the active (selected) one, so it is highlighted.
@@ -108,18 +102,19 @@ impl View for FieldLabel {
         // the pane is focused, faded blue when it is not — exactly like the tree
         // and leaf panes highlight their current row. Everything else sits on the
         // pane surface (which itself dims when the pane loses focus).
+        let focused = ctx.owner_active();
         let chip = self.active && self.kind == LabelKind::Label;
         let fill = if chip {
-            ctx.style(if self.focused {
+            ctx.style(if focused {
                 Role::ListFocused
             } else {
                 Role::ListSelected
             })
         } else {
-            ctx.style(if self.focused {
-                Role::ListNormalActive
+            ctx.style(if focused {
+                Role::ListNormal
             } else {
-                Role::ListNormalInactive
+                Role::ListInactive
             })
         };
         ctx.fill(Rect::new(0, 0, size.x, size.y), ' ', fill);
@@ -135,7 +130,7 @@ impl View for FieldLabel {
         let mut style = fill;
         if chip {
             // fg already carries the chip's on-blue foreground.
-        } else if !self.focused {
+        } else if !focused {
             style.fg = ctx.style(Role::Disabled).fg;
         } else if self.kind == LabelKind::Title {
             style.modifiers.bold = true;
@@ -161,7 +156,10 @@ mod tests {
     use tvision_rs::{Buffer, Color, Point};
 
     /// Render a single label and return (symbol, fg, bg) of each cell in row 0.
-    fn render_row(fl: &mut FieldLabel, w: u16) -> Vec<(String, Color, Color)> {
+    /// `owner_active` is the owning pane's focus, which `FieldLabel::draw` reads
+    /// via `ctx.owner_active()` for its bright/dim surface — the real signal the
+    /// framework fans from the form pane's `Group::draw`.
+    fn render_row(fl: &mut FieldLabel, w: u16, owner_active: bool) -> Vec<(String, Color, Color)> {
         let theme = edaptor_theme();
         let mut buf = Buffer::new(w, 1);
         {
@@ -171,6 +169,7 @@ mod tests {
                 Rect::new(0, 0, w as i32, 1),
                 Point::new(0, 0),
             );
+            ctx.set_owner_active(owner_active);
             fl.draw(&mut ctx);
         }
         (0..w)
@@ -184,9 +183,8 @@ mod tests {
     #[test]
     fn label_is_right_aligned() {
         let mut fl = FieldLabel::label(Rect::new(0, 0, 10, 1));
-        fl.set_focused(true);
         fl.set_value(FieldValue::Text("cn".into()));
-        let row = render_row(&mut fl, 10);
+        let row = render_row(&mut fl, 10, true);
         // Width 10, label "cn" (2 cols) with a 1-col right gap → text at cols 7,8.
         assert_eq!(row[7].0, "c");
         assert_eq!(row[8].0, "n");
@@ -198,33 +196,31 @@ mod tests {
         let theme = edaptor_theme();
         let chip_bg = theme.style(Role::ListFocused).bg; // BLUE
         let faded_bg = theme.style(Role::ListSelected).bg; // faded selection
-        let surface = theme.style(Role::ListNormalActive).bg;
+        let surface = theme.style(Role::ListNormal).bg;
 
         let mut fl = FieldLabel::label(Rect::new(0, 0, 6, 1));
         fl.set_value(FieldValue::Text("cn".into()));
 
-        // Focused + active → full blue chip fills the label cell.
-        fl.set_focused(true);
+        // Focused pane + active → full blue chip fills the label cell.
         fl.set_active(true);
         assert_eq!(
-            render_row(&mut fl, 6)[0].2,
+            render_row(&mut fl, 6, true)[0].2,
             chip_bg,
             "active label → blue chip"
         );
 
-        // Focused + inactive → plain pane surface, no chip.
+        // Focused pane + inactive → plain pane surface, no chip.
         fl.set_active(false);
         assert_eq!(
-            render_row(&mut fl, 6)[0].2,
+            render_row(&mut fl, 6, true)[0].2,
             surface,
             "inactive label → surface"
         );
 
-        // Unfocused + active → faded selection chip (matches the other panes).
-        fl.set_focused(false);
+        // Unfocused pane + active → faded selection chip (matches the other panes).
         fl.set_active(true);
         assert_eq!(
-            render_row(&mut fl, 6)[0].2,
+            render_row(&mut fl, 6, false)[0].2,
             faded_bg,
             "unfocused active → faded chip"
         );
@@ -233,16 +229,15 @@ mod tests {
     #[test]
     fn label_text_is_lighter_than_value_text() {
         let theme = edaptor_theme();
-        let value_fg = theme.style(Role::ListNormalActive).fg; // body text (values)
+        let value_fg = theme.style(Role::ListNormal).fg; // body text (values)
         let light_fg = theme.style(Role::Disabled).fg; // lighter label text
         assert_ne!(value_fg, light_fg, "test premise: the two tones differ");
 
         let mut fl = FieldLabel::label(Rect::new(0, 0, 6, 1));
-        fl.set_focused(true);
         fl.set_value(FieldValue::Text("cn".into()));
         // "cn" is right-aligned to cols 3,4 in a width-6 cell (1-col gap).
         assert_eq!(
-            render_row(&mut fl, 6)[3].1,
+            render_row(&mut fl, 6, true)[3].1,
             light_fg,
             "label text uses the lighter tone"
         );
@@ -251,11 +246,10 @@ mod tests {
     #[test]
     fn title_is_bold_body_text_and_left_aligned() {
         let theme = edaptor_theme();
-        let body = theme.style(Role::ListNormalActive).fg;
+        let body = theme.style(Role::ListNormal).fg;
         let mut fl = FieldLabel::title(Rect::new(0, 0, 20, 1));
-        fl.set_focused(true);
         fl.set_value(FieldValue::Text("cn=a,dc=x".into()));
-        let row = render_row(&mut fl, 20);
+        let row = render_row(&mut fl, 20, true);
         assert_eq!(row[0].0, "c", "title is left-aligned in the value column");
         assert_eq!(row[0].1, body, "title uses body text colour");
     }

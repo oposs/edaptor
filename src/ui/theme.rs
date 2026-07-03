@@ -24,14 +24,14 @@ pub(crate) fn edaptor_theme() -> Theme {
     // Active pane = brightest parchment (base3); inactive panes recede to the
     // desktop tone so the focused pane is unmistakable (base2 vs base3 was one
     // Solarized step apart — invisible on most terminals).
-    t.set_style(Role::ListNormalInactive, Style::new(BASE01, DESKTOP));
-    t.set_style(Role::ListNormalActive, Style::new(BASE01, BASE3));
+    t.set_style(Role::ListInactive, Style::new(BASE01, DESKTOP));
+    t.set_style(Role::ListNormal, Style::new(BASE01, BASE3));
     // Outline (tree) surface is now focus-aware (tvision-rs 0.5): a focused tree
     // brightens to base3 like the active list, an unfocused one recedes to the
     // desktop tone. Keep OutlineNotExpanded's background on base3 so a collapsed
     // branch's dim label matches the focused row fill.
     t.set_style(Role::OutlineNormal, Style::new(BASE01, BASE3));
-    t.set_style(Role::OutlineNormalInactive, Style::new(BASE01, DESKTOP));
+    t.set_style(Role::OutlineInactive, Style::new(BASE01, DESKTOP));
     t.set_style(Role::OutlineNotExpanded, Style::new(BASE1, BASE3));
     t.set_style(Role::ListDivider, Style::new(BASE01, BASE2));
     // Current item: same accent everywhere (list, outline, form).
@@ -43,12 +43,12 @@ pub(crate) fn edaptor_theme() -> Theme {
     t.set_style(Role::ListSelected, Style::new(BASE01, SEL_BG));
     t.set_style(Role::OutlineSelected, Style::new(BASE01, SEL_BG));
     // Editable fields. `InputNormal` (the FOCUSED field) is the near-white "type
-    // here" well that marks where input goes. `InputPassive` (every UNFOCUSED
+    // here" well that marks where input goes. `InputInactive` (every UNFOCUSED
     // field) sits on the bright pane surface (base3) so non-selected fields carry
     // no special background — they read as plain text against the pane, not as
     // recessed wells — while the one focused field stands out as the input well.
     t.set_style(Role::InputNormal, Style::new(BASE01, INPUT_BG));
-    t.set_style(Role::InputPassive, Style::new(BASE01, BASE3));
+    t.set_style(Role::InputInactive, Style::new(BASE01, BASE3));
     t.set_style(Role::InputSelected, Style::new(BASE3, BLUE));
     t.set_style(Role::InputArrow, Style::new(BASE01, INPUT_BG));
     // Secondary chrome.
@@ -139,21 +139,21 @@ mod tests {
         let t = edaptor_theme();
         // The leaf ListBox no longer paints cyan; inactive panes recede to the
         // desktop tone so the active pane (base3) is clearly distinguishable.
-        assert_eq!(bg(&t, Role::ListNormalInactive), DESKTOP);
+        assert_eq!(bg(&t, Role::ListInactive), DESKTOP);
         // Active pane list is the brightest surface.
-        assert_eq!(bg(&t, Role::ListNormalActive), BASE3);
+        assert_eq!(bg(&t, Role::ListNormal), BASE3);
         // The outline (tree) surface is focus-aware and mirrors the list: a
         // focused tree brightens to base3, an unfocused one recedes to the
-        // desktop tone. InputPassive is pinned to the input surface (never the
+        // desktop tone. InputInactive is pinned to the input surface (never the
         // classic_blue blue default) so unfocused form fields stay on parchment.
         assert_eq!(bg(&t, Role::OutlineNormal), BASE3);
-        assert_eq!(bg(&t, Role::OutlineNormalInactive), DESKTOP);
+        assert_eq!(bg(&t, Role::OutlineInactive), DESKTOP);
         // The focused field (InputNormal) is the bright "type here" well; every
-        // unfocused field (InputPassive) sits on the pane surface (base3) so
+        // unfocused field (InputInactive) sits on the pane surface (base3) so
         // non-selected fields carry no special background — plain text on the pane,
         // not recessed wells — while only the focused field reads as an input well.
         assert_eq!(bg(&t, Role::InputNormal), INPUT_BG);
-        assert_eq!(bg(&t, Role::InputPassive), BASE3);
+        assert_eq!(bg(&t, Role::InputInactive), BASE3);
     }
 
     #[test]

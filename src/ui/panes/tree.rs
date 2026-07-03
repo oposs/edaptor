@@ -225,9 +225,9 @@ impl View for TreePane {
         // panes. The Outline itself already keys its current-node colour on
         // `focused`, so this only governs the area not covered by outline rows.
         let role = if self.group.state().state.focused {
-            Role::ListNormalActive
+            Role::ListNormal
         } else {
-            Role::ListNormalInactive
+            Role::ListInactive
         };
         let style = ctx.style(role);
         let extent = self.group.state().get_extent();
@@ -311,7 +311,7 @@ mod tests {
     }
 
     /// Focus visualization (tvision-rs 0.5): the Outline now paints normal rows
-    /// with `OutlineNormal` when it holds focus and `OutlineNormalInactive` when
+    /// with `OutlineNormal` when it holds focus and `OutlineInactive` when
     /// it does not. edaptor themes those to base3 (bright) vs the desktop tone
     /// (dim), so the tree pane brightens on focus and recedes when a sibling pane
     /// takes over — mirroring the leaf list. Row 0 is the current node (blue /
@@ -344,7 +344,7 @@ mod tests {
 
         let theme = crate::ui::theme::edaptor_theme();
         let active_bg = theme.style(Role::OutlineNormal).bg;
-        let inactive_bg = theme.style(Role::OutlineNormalInactive).bg;
+        let inactive_bg = theme.style(Role::OutlineInactive).bg;
         assert_ne!(
             active_bg, inactive_bg,
             "test premise: focused vs unfocused outline surfaces must differ"
@@ -373,7 +373,7 @@ mod tests {
         assert_eq!(
             row1_bg(&mut pane, false),
             inactive_bg,
-            "unfocused tree: normal rows recede to OutlineNormalInactive"
+            "unfocused tree: normal rows recede to OutlineInactive"
         );
     }
 
