@@ -131,19 +131,12 @@ pub(crate) struct Shuttle {
     model: ShuttleModel,
     avail_id: ViewId,
     selected_id: ViewId,
-    // Stored for change_bounds geometry reflow (Task 4); not yet read.
-    #[allow(dead_code)]
+    // Read in change_bounds to reposition every child via layout().
     left_header_id: ViewId,
-    #[allow(dead_code)]
     right_header_id: ViewId,
-    #[allow(dead_code)]
     avail_bar_id: ViewId,
-    #[allow(dead_code)]
     sel_bar_id: ViewId,
-    // Used in tests and will be used in change_bounds (Task 4).
-    #[allow(dead_code)]
     add_id: ViewId,
-    #[allow(dead_code)]
     remove_id: ViewId,
 }
 
@@ -484,10 +477,36 @@ impl Shuttle {
     }
 }
 
-#[delegate(to = group, skip(handle_event, as_any_mut, reset_current, value, set_value, set_value_ctx))]
+#[delegate(to = group, skip(handle_event, as_any_mut, reset_current, value, set_value, set_value_ctx, change_bounds))]
 impl View for Shuttle {
     fn as_any_mut(&mut self) -> Option<&mut dyn core::any::Any> {
         Some(self)
+    }
+
+    /// Reflow on resize. The dialog's change_bounds cascade calls this with the
+    /// widget's new bounds; recompute every child rect from `layout` and apply it.
+    /// (The two-column split moves the midpoint by delta/2, which per-child
+    /// grow_mode cannot express, so we reposition explicitly rather than delegate
+    /// to the group's grow-mode reflow.) Scrollbar page-step refresh is a cosmetic
+    /// follow-up handled lazily by the lists on their next draw.
+    fn change_bounds(&mut self, bounds: Rect) {
+        self.group.state_mut().set_bounds(bounds);
+        let l = Self::layout(bounds);
+        let places = [
+            (self.left_header_id, l.left_header),
+            (self.right_header_id, l.right_header),
+            (self.avail_bar_id, l.avail_bar),
+            (self.avail_id, l.avail_list),
+            (self.sel_bar_id, l.sel_bar),
+            (self.selected_id, l.sel_list),
+            (self.add_id, l.add_btn),
+            (self.remove_id, l.remove_btn),
+        ];
+        for (id, rect) in places {
+            if let Some(c) = self.group.child_mut(id) {
+                c.change_bounds(rect);
+            }
+        }
     }
 
     /// Open-time focus inside the Shuttle: the Available list, so type-to-search
@@ -1281,6 +1300,35 @@ mod tests {
             sh.wheel_target_list(0),
             None,
             "left of both columns: no target"
+        );
+    }
+
+    #[test]
+    fn change_bounds_reflows_children_wider() {
+        let mut sh = shuttle(); // 72 x 25
+        let before = Shuttle::layout(Rect::new(0, 0, 72, 25));
+        // Grow to 100 x 30.
+        View::change_bounds(&mut sh, Rect::new(0, 0, 100, 30));
+        let want = Shuttle::layout(Rect::new(0, 0, 100, 30));
+        assert_ne!(
+            want.sel_list.b.x, before.sel_list.b.x,
+            "test premise: geometry changes"
+        );
+        // Each child now sits at the recomputed rect.
+        let sel_bounds = sh
+            .group
+            .child_mut(sh.selected_id)
+            .unwrap()
+            .state()
+            .get_bounds();
+        assert_eq!(
+            sel_bounds, want.sel_list,
+            "Selected list follows the new width"
+        );
+        let add_bounds = sh.group.child_mut(sh.add_id).unwrap().state().get_bounds();
+        assert_eq!(
+            add_bounds, want.add_btn,
+            "Add button widens with its column"
         );
     }
 

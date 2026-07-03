@@ -116,6 +116,13 @@ impl ObjectClassPicker {
         let mut dlg = Dialog::new(Rect::new(0, 0, 72, 25), Some("Object classes".to_string()));
         dlg.state_mut().options.center_x = true;
         dlg.state_mut().options.center_y = true;
+        // Allow the user to resize the dialog (grow flag also enables drag_grow).
+        dlg.set_flags(tv::WindowFlags {
+            r#move: true,
+            close: true,
+            grow: true,
+            ..tv::WindowFlags::default()
+        });
 
         // Conventional transfer layout: Available on the LEFT, Active (the
         // Selected set) on the RIGHT. Insert the Shuttle FIRST so it is the
@@ -130,7 +137,7 @@ impl ObjectClassPicker {
         );
         let shuttle_id = dlg.insert_child(Box::new(shuttle));
 
-        dlg.button_row(
+        let button_ids = dlg.button_row(
             &[
                 (
                     "~O~K",
@@ -144,6 +151,18 @@ impl ObjectClassPicker {
             ],
             ButtonRowAlign::Right,
         );
+        // Keep OK/Cancel pinned to the bottom-right as the dialog grows: both the
+        // top and bottom edges track the owner (lo_y + hi_y translate the fixed-
+        // height button down), likewise lo_x + hi_x to the right.
+        for id in button_ids {
+            if let Some(b) = dlg.child_mut(id) {
+                let gm = &mut b.state_mut().grow_mode;
+                gm.lo_x = true;
+                gm.hi_x = true;
+                gm.lo_y = true;
+                gm.hi_y = true;
+            }
+        }
 
         // The active rows to seed: every candidate whose (lowercased) name is in the
         // ticked set, in canonical sorted order.

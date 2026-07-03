@@ -150,6 +150,13 @@ impl MultiPickerDialog {
         let mut dlg = Dialog::new(Rect::new(0, 0, 80, 25), Some(title));
         dlg.state_mut().options.center_x = true;
         dlg.state_mut().options.center_y = true;
+        // Allow the user to resize the dialog (grow flag also enables drag_grow).
+        dlg.set_flags(tv::WindowFlags {
+            r#move: true,
+            close: true,
+            grow: true,
+            ..tv::WindowFlags::default()
+        });
 
         // Build the two columns. Available on the left (membership convention),
         // Available on the left, Members (the Selected set) on the right — the
@@ -164,7 +171,7 @@ impl MultiPickerDialog {
         );
         let shuttle_id = dlg.insert_child(Box::new(shuttle));
 
-        dlg.button_row(
+        let button_ids = dlg.button_row(
             &[
                 (
                     "~O~K",
@@ -178,6 +185,18 @@ impl MultiPickerDialog {
             ],
             ButtonRowAlign::Right,
         );
+        // Keep OK/Cancel pinned to the bottom-right as the dialog grows: both the
+        // top and bottom edges track the owner (lo_y + hi_y translate the fixed-
+        // height button down), likewise lo_x + hi_x to the right.
+        for id in button_ids {
+            if let Some(b) = dlg.child_mut(id) {
+                let gm = &mut b.state_mut().grow_mode;
+                gm.lo_x = true;
+                gm.hi_x = true;
+                gm.lo_y = true;
+                gm.hi_y = true;
+            }
+        }
 
         // Resolve the candidate-search scope from the binding (mirrors picker).
         let store_attr = match &binding.store {
