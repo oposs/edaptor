@@ -23,15 +23,25 @@ pub(crate) fn edaptor_theme() -> Theme {
     t.set_style(Role::Normal, Style::new(BASE01, BASE2));
     // Active pane = brightest parchment (base3); inactive panes recede to the
     // desktop tone so the focused pane is unmistakable (base2 vs base3 was one
-    // Solarized step apart — invisible on most terminals).
+    // Solarized step apart — invisible on most terminals). `ListSurface` (tvision
+    // 0.9's three-surface default) is a list that is a NON-focused sibling in an
+    // active group — the passive column of the two-list shuttle. Pin it to the
+    // desktop tone so the non-focused shuttle list recedes exactly like an
+    // unfocused pane, restoring the shuttle's active/passive columns. (Single-list
+    // panes — tree, leaf — never hit Surface: their sole list is focused iff its
+    // pane is.)
     t.set_style(Role::ListInactive, Style::new(BASE01, DESKTOP));
     t.set_style(Role::ListNormal, Style::new(BASE01, BASE3));
-    // Outline (tree) surface is now focus-aware (tvision-rs 0.5): a focused tree
-    // brightens to base3 like the active list, an unfocused one recedes to the
-    // desktop tone. Keep OutlineNotExpanded's background on base3 so a collapsed
-    // branch's dim label matches the focused row fill.
+    t.set_style(Role::ListSurface, Style::new(BASE01, DESKTOP));
+    // Outline (tree) surface is focus-aware: a focused tree brightens to base3
+    // like the active list, an unfocused one recedes to the desktop tone. Keep
+    // OutlineNotExpanded's background on base3 so a collapsed branch's dim label
+    // matches the focused row fill. `OutlineSurface` (the non-focused-sibling
+    // case) is unreachable for edaptor's single tree pane, but wire it to the
+    // passive tone for palette completeness.
     t.set_style(Role::OutlineNormal, Style::new(BASE01, BASE3));
     t.set_style(Role::OutlineInactive, Style::new(BASE01, DESKTOP));
+    t.set_style(Role::OutlineSurface, Style::new(BASE01, DESKTOP));
     t.set_style(Role::OutlineNotExpanded, Style::new(BASE1, BASE3));
     t.set_style(Role::ListDivider, Style::new(BASE01, BASE2));
     // Current item: same accent everywhere (list, outline, form).
@@ -143,6 +153,10 @@ mod tests {
         // The leaf ListBox no longer paints cyan; inactive panes recede to the
         // desktop tone so the active pane (base3) is clearly distinguishable.
         assert_eq!(bg(&t, Role::ListInactive), DESKTOP);
+        // ListSurface = the non-focused sibling list (passive shuttle column):
+        // receded to the desktop tone, distinct from the bright focused list.
+        assert_eq!(bg(&t, Role::ListSurface), DESKTOP);
+        assert_ne!(bg(&t, Role::ListSurface), bg(&t, Role::ListNormal));
         // Active pane list is the brightest surface.
         assert_eq!(bg(&t, Role::ListNormal), BASE3);
         // The outline (tree) surface is focus-aware and mirrors the list: a

@@ -823,6 +823,54 @@ mod tests {
     }
 
     #[test]
+    fn the_focused_list_is_bright_and_its_sibling_recedes() {
+        // #1: the two lists no longer share one surface. tvision 0.9's default
+        // three-surface rule keys each list's surface on its own `state.focused`
+        // (owner-active × self-focus), so the focused list paints ListNormal
+        // (bright) and the non-focused sibling paints ListSurface (receded) — the
+        // shuttle's active/passive columns, driven by the framework, not by hand.
+        use crate::ui::theme::edaptor_theme;
+        use tvision_rs::{Buffer, DrawCtx, Point, Role};
+
+        let mut sh = shuttle(); // selected_on_left = false → Available LEFT, Selected RIGHT
+        let mut h = Harness::new();
+        sh.set_available(vec![row("a"), row("b"), row("c")], &mut h.ctx());
+        sh.set_selected(vec![row("x"), row("y"), row("z")], &mut h.ctx());
+        // The dialog has focused the shuttle, with the Available list current.
+        sh.group.state_mut().state.focused = true;
+        if let Some(a) = sh.group.child_mut(sh.avail_id) {
+            a.state_mut().state.focused = true;
+        }
+        if let Some(s) = sh.group.child_mut(sh.selected_id) {
+            s.state_mut().state.focused = false;
+        }
+
+        let theme = edaptor_theme();
+        let normal = theme.style(Role::ListNormal).bg; // bright (base3)
+        let passive = theme.style(Role::ListSurface).bg; // receded (desktop)
+        assert_ne!(
+            normal, passive,
+            "test premise: the two surfaces must differ"
+        );
+
+        let mut buf = Buffer::new(72, 22);
+        {
+            let mut dc = DrawCtx::new(&mut buf, &theme, Rect::new(0, 0, 72, 22), Point::new(0, 0));
+            dc.set_owner_active(true); // the dialog/pane is active
+            sh.draw(&mut dc);
+        }
+        // Read a non-current content row (row 1) in each column's list area. Lists
+        // span y 2..18; Available x ~2..33, Selected x ~38..67 (see Shuttle::new).
+        let avail_bg = buf.get(4, 3).style().bg;
+        let selected_bg = buf.get(50, 3).style().bg;
+        assert_eq!(avail_bg, normal, "the focused Available list is bright");
+        assert_eq!(
+            selected_bg, passive,
+            "the non-focused Selected list recedes to the passive surface"
+        );
+    }
+
+    #[test]
     fn typing_on_the_selected_list_narrows_it_like_the_available_list() {
         // Regression: with no find mode on the Selected list, letters bubbled to
         // the dialog and fired the ~A~dd / ~R~emove button hotkeys; a later fix

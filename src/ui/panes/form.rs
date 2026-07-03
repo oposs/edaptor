@@ -256,12 +256,12 @@ impl FormPane {
                     Box::new(FieldLabel::label(Rect::new(0, y, label_w, y + 1))),
                     Rect::new(0, y, label_w, y + 1),
                 );
-                // Self-focus surface (tvision 0.8): only the focused field paints
-                // the bright well; non-focused fields use InputSurface (base3) and
-                // an inactive pane recedes to InputInactive (desktop). This is what
-                // gives the form its single-well look without any manual repaint.
-                let mut il = InputLine::with_limit(Rect::new(label_w, y, w, y + 1), 1024)
-                    .with_self_focus_surface(true);
+                // The three-surface model is the framework default (tvision 0.9):
+                // only the focused field paints the bright well (InputNormal),
+                // non-focused fields use InputSurface (base3), and an inactive pane
+                // recedes to InputInactive (desktop) — the form's single-well look
+                // with no opt-in and no manual repaint.
+                let mut il = InputLine::with_limit(Rect::new(label_w, y, w, y + 1), 1024);
                 il.state.state.disabled = !editable;
                 let vid = sg.add_content(Box::new(il), Rect::new(label_w, y, w, y + 1));
                 new_lids.push(lid);
