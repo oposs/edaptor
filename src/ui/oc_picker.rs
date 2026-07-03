@@ -1,20 +1,19 @@
-//! The objectClass field editor: a schema-seeded two-column mover. The currently
-//! active object classes sit in the **Active** column (left), the remaining known
-//! classes in the **Available** column (right). Moving a class toward Active ticks
-//! it; moving it away unticks it. STRUCTURAL classes that were already on the
-//! entry are shown locked (non-removable); a structural class added this session
-//! stays removable so an add can be undone.
+//! The objectClass field editor: a schema-seeded two-column mover. The
+//! **Available** column (left) shows the remaining known classes; the **Active**
+//! column (right) holds the currently active set. Moving a class toward Active
+//! ticks it; moving it away unticks it. STRUCTURAL classes that were already on
+//! the entry are shown locked (non-removable); a structural class added this
+//! session stays removable so an add can be undone.
 //! The prospective `SetValuesThenResyncSchema` outcome is kept in
 //! `UiState::staged_commit`. Capability: `NeedsSchema` (no worker).
 //!
-//! Built on the embedded [`Shuttle`] view (`ui::shuttle`), with
-//! `selected_on_left = true` so the active set renders on the left per the user's
-//! request. Unlike membership, the Available column is a *static* set computed
-//! locally (all known classes minus the active ones), so there is no async worker
-//! search — incremental filtering is the Available list's own `FindMode::Filter`,
-//! which narrows the column in place as the user types. The Shuttle notifies via
-//! broadcast (`CMD_SHUTTLE_CHANGED`, with the Shuttle's own `ViewId` as `source`);
-//! this dialog reacts in its own `handle_event` after delegating, re-reading
+//! Built on the embedded [`Shuttle`] view (`ui::shuttle`). Unlike membership,
+//! the Available column is a *static* set computed locally (all known classes
+//! minus the active ones), so there is no async worker search — incremental
+//! filtering is the Available list's own `FindMode::Filter`, which narrows the
+//! column in place as the user types. The Shuttle notifies via broadcast
+//! (`CMD_SHUTTLE_CHANGED`, with the Shuttle's own `ViewId` as `source`); this
+//! dialog reacts in its own `handle_event` after delegating, re-reading
 //! `Shuttle::selected`.
 
 use std::collections::{BTreeSet, HashSet};
@@ -118,17 +117,16 @@ impl ObjectClassPicker {
         dlg.state_mut().options.center_x = true;
         dlg.state_mut().options.center_y = true;
 
-        // Active (Selected) on the LEFT, Available on the RIGHT. `selected_on_left
-        // = true` flips only the rendered layout — Insert still means "move toward
-        // Active". Insert the Shuttle FIRST so it is the dialog's first selectable
-        // child: the modal's open-time `reset_current` then makes it current, so
-        // key events route into it (and reach the Available list inside it).
+        // Conventional transfer layout: Available on the LEFT, Active (the
+        // Selected set) on the RIGHT. Insert the Shuttle FIRST so it is the
+        // dialog's first selectable child: the modal's open-time `reset_current`
+        // then makes it current, so key events route into it (and reach the
+        // Available list inside it).
         let shuttle = Shuttle::new(
             Rect::new(0, 0, 72, 22),
-            "Active",
             "Available",
+            "Active",
             /* find */ FindMode::Filter,
-            /* selected_on_left */ true,
         );
         let shuttle_id = dlg.insert_child(Box::new(shuttle));
 

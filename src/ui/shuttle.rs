@@ -122,16 +122,15 @@ pub(crate) struct Shuttle {
 impl Shuttle {
     /// Build the two columns (each a list + a right-lane scroll bar) inside an
     /// owned `Group`. `find_mode` enables the Available list's built-in
-    /// incremental search ([`FindMode::Off`] for none); `selected_on_left` only
-    /// flips the rendered layout — move semantics are unchanged. Geometry:
-    /// headers at row 1, lists at rows 2..(height-4), 2-cell margins and a
-    /// 4-cell gutter.
+    /// incremental search ([`FindMode::Off`] for none). The Available column is
+    /// always rendered on the LEFT, the Selected column on the RIGHT (the
+    /// conventional transfer-widget layout). Geometry: headers at row 1, lists at
+    /// rows 2..(height-4), 2-cell margins and a 4-cell gutter.
     pub(crate) fn new(
         area: Rect,
         left_title: &str,
         right_title: &str,
         find_mode: FindMode,
-        selected_on_left: bool,
     ) -> Shuttle {
         let (x0, y0, x1, y1) = (area.a.x, area.a.y, area.b.x, area.b.y);
         let mid = (x0 + x1) / 2;
@@ -139,11 +138,8 @@ impl Shuttle {
         let right = (mid + 2, x1 - 2);
         let head_y = y0 + 1;
         let list_y = (y0 + 2, y1 - 4);
-        let (avail_col, sel_col) = if selected_on_left {
-            (right, left)
-        } else {
-            (left, right)
-        };
+        let avail_col = left;
+        let sel_col = right;
 
         let mut group = Group::new(area);
 
@@ -751,7 +747,6 @@ mod tests {
             "Active",
             "Available",
             FindMode::Filter,
-            false,
         )
     }
 

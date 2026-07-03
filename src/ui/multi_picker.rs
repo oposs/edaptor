@@ -152,19 +152,15 @@ impl MultiPickerDialog {
         dlg.state_mut().options.center_y = true;
 
         // Build the two columns. Available on the left (membership convention),
-        // Members (Selected) on the right. The Available list uses
-        // `FindMode::Highlight`: typing accumulates a query and highlights matches
-        // but does NOT self-filter — the candidate set is server-backed, so the
-        // dialog re-runs the LDAP search on `LIST_FIND_CHANGED` instead. Insert the
-        // Shuttle FIRST so it is the dialog's first selectable child (the modal's
-        // open-time reset_current then makes it current, and focus reaches the
-        // Available list inside it).
+        // Available on the left, Members (the Selected set) on the right — the
+        // conventional transfer layout. Insert the Shuttle FIRST so it is the
+        // dialog's first selectable child (the modal's open-time reset_current
+        // then makes it current, and focus reaches the Available list inside it).
         let shuttle = Shuttle::new(
             Rect::new(0, 0, 80, 22),
             "Available",
             "Members",
             /* find */ FindMode::Highlight,
-            /* selected_on_left */ false,
         );
         let shuttle_id = dlg.insert_child(Box::new(shuttle));
 
