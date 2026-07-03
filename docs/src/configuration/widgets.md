@@ -170,9 +170,13 @@ right value(s) into this entry's attribute.
 
 A **single-select** picker (`select = "single"`) presents a search box over a
 radio list. A **multi-select** picker (`select = "multi"`, the default for
-multi-valued attributes such as `member` and `memberUid`) presents the
-two-column **Available | Members** shuttle: type to search, then
+multi-valued attributes such as `member` and `memberUid`) presents a two-column
+**Available (left) | Selected (right)** shuttle: type to search, then
 Insert/Enter/[Add] to move a candidate in and Delete/[Remove] to move it out.
+A wide **Add** button sits under the Available column and a wide **Remove** button
+under the Selected column; each is active only while its list is focused (the one
+under the focused list is highlighted), and Tab skips them. The dialog is
+resizable — drag its lower-right corner and the columns reflow.
 
 ```toml
 [profile.widget.gidNumber]
@@ -365,14 +369,21 @@ editor** (the shared *Shuttle* view). No configuration is needed — it is alway
 present when editing any entry. Pressing Enter on the `objectClass` field opens a
 two-column picker:
 
-- **Left column** — the entry's *active* objectClasses (currently applied).
-- **Right column** — the *available* objectClasses known from the server's
-  subschema. Type while the available list is focused to filter it in place
-  (incremental find).
+- **Left column (Available)** — the objectClasses known from the server's
+  subschema. Type while this list is focused to filter it in place (incremental
+  find).
+- **Right column (Active)** — the entry's *active* objectClasses (currently
+  applied).
+
+A wide **Add** button sits under the Available (left) column and a wide **Remove**
+button under the Active (right) column. Each is active only while its list is
+focused — the button under the focused list is highlighted — and Tab skips both.
+The dialog is resizable: drag its lower-right corner and the columns, buttons, and
+OK/Cancel reflow.
 
 | Action | Keys |
 |--------|------|
-| Move focus between the lists and buttons | Tab / Shift-Tab |
+| Move focus between the two lists and OK/Cancel | Tab / Shift-Tab |
 | Add (highlighted available → active) | Insert, the **[Add]** button (Alt+A), or Enter on the available list |
 | Remove (highlighted active → available) | Delete, the **[Remove]** button (Alt+R), or Enter on the active list |
 | Filter the available column | type while the available list is focused (Backspace widens, Esc clears) |
