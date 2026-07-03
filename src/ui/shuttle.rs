@@ -138,6 +138,14 @@ pub(crate) struct Shuttle {
     sel_bar_id: ViewId,
     add_id: ViewId,
     remove_id: ViewId,
+    // Which move button currently holds the dialog's default-button look, so the
+    // grab/release broadcast is edge-triggered. sync_move_commands runs at the end
+    // of EVERY handle_event, and make_button_default broadcasts unconditionally;
+    // re-emitting on every call would loop (the broadcast re-enters handle_event →
+    // sync → broadcast …) and flip the default button forever. Only toggle on a
+    // real change of the focused list.
+    add_is_default: bool,
+    remove_is_default: bool,
 }
 
 impl Shuttle {
@@ -242,6 +250,9 @@ impl Shuttle {
             sel_bar_id,
             add_id,
             remove_id,
+            // Both buttons start plain (ButtonFlags default:false ⇒ am_default:false).
+            add_is_default: false,
+            remove_is_default: false,
         }
     }
 
@@ -478,12 +489,23 @@ impl Shuttle {
         }
         // Give the button under the focused list the dialog's default-button look
         // (the file-dialog idiom: a list grabs the default for its sibling button).
-        // The other button releases it, and with focus off both lists both release
-        // so the dialog's own OK button retakes the default. Enter never
-        // double-fires: `handle_event` intercepts and clears Enter while a list is
-        // current, so it never reaches the default-command broadcast.
-        ctx.make_button_default(self.add_id, add_live);
-        ctx.make_button_default(self.remove_id, remove_live);
+        // With focus off both lists both release so the dialog's own OK button
+        // retakes the default. Enter never double-fires: `handle_event` intercepts
+        // and clears Enter while a list is current, so it never reaches the
+        // default-command broadcast.
+        //
+        // EDGE-TRIGGERED: only toggle on a real change. `make_button_default`
+        // broadcasts GRAB/RELEASE_DEFAULT unconditionally, and those broadcasts
+        // re-enter `handle_event` → `sync_move_commands`; re-emitting every call
+        // would loop and flip the default button forever (rapid blink / lockup).
+        if add_live != self.add_is_default {
+            ctx.make_button_default(self.add_id, add_live);
+            self.add_is_default = add_live;
+        }
+        if remove_live != self.remove_is_default {
+            ctx.make_button_default(self.remove_id, remove_live);
+            self.remove_is_default = remove_live;
+        }
     }
 }
 
@@ -771,6 +793,16 @@ mod tests {
                 _ => None,
             })
         }
+
+        /// How many `MakeButtonDefault` toggles were queued for button `id`.
+        fn button_default_count(&self, id: ViewId) -> usize {
+            self.deferred
+                .iter()
+                .filter(
+                    |d| matches!(d, Deferred::MakeButtonDefault { button, .. } if *button == id),
+                )
+                .count()
+        }
     }
 
     #[test]
@@ -834,22 +866,27 @@ mod tests {
             Some(true),
             "Add takes the default look while Available focused"
         );
+        // Remove was never the default, so it is not toggled (edge-triggered).
         assert_eq!(
             h.button_default(remove),
-            Some(false),
-            "Remove drops the default look while Available focused"
+            None,
+            "Remove is not touched — it never held the default"
         );
     }
 
     #[test]
-    fn focus_on_selected_makes_remove_the_default_button() {
+    fn focus_switch_moves_the_default_from_add_to_remove() {
+        // Available focused → Add grabs the default. Then focus the Selected list:
+        // Add must RELEASE and Remove must GRAB — the one edge that flips both.
         let mut sh = shuttle();
         let mut h = Harness::new();
         sh.set_available(vec![row("a")], &mut h.ctx());
         sh.set_selected(vec![row("x")], &mut h.ctx());
-        let (sid, add, remove) = (sh.selected_id, sh.add_id, sh.remove_id);
+        let (aid, sid, add, remove) = (sh.avail_id, sh.selected_id, sh.add_id, sh.remove_id);
         {
             let mut ctx = h.ctx();
+            sh.group.focus_child(aid, &mut ctx);
+            sh.sync_move_commands(&mut ctx);
             sh.group.focus_child(sid, &mut ctx);
             sh.sync_move_commands(&mut ctx);
         }
@@ -861,33 +898,65 @@ mod tests {
         assert_eq!(
             h.button_default(add),
             Some(false),
-            "Add drops the default look while Selected focused"
+            "Add releases the default look when focus leaves the Available list"
         );
     }
 
     #[test]
-    fn focus_on_neither_list_releases_both_default_looks() {
-        // With focus off both lists (e.g. on OK/Cancel) the move buttons must
-        // release the default look so the dialog's own OK button retakes it.
+    fn repeated_sync_without_focus_change_does_not_re_toggle_default() {
+        // Regression: sync_move_commands runs at the end of EVERY handle_event.
+        // make_button_default broadcasts GRAB/RELEASE_DEFAULT unconditionally, and
+        // those broadcasts are themselves events that re-enter handle_event → sync.
+        // If sync re-emits on every call the dialog's default button flips forever
+        // (rapid blink / lockup). The default toggle must be edge-triggered: only
+        // emitted when the focused list actually changes.
         let mut sh = shuttle();
         let mut h = Harness::new();
         sh.set_available(vec![row("a")], &mut h.ctx());
         sh.set_selected(vec![row("x")], &mut h.ctx());
-        let (add, remove) = (sh.add_id, sh.remove_id);
+        let (aid, add, remove) = (sh.avail_id, sh.add_id, sh.remove_id);
         {
-            // No list is current: sync while currency sits nowhere relevant.
             let mut ctx = h.ctx();
+            sh.group.focus_child(aid, &mut ctx);
+            sh.sync_move_commands(&mut ctx);
+            // Second and third sync with focus unchanged: must be no-ops.
+            sh.sync_move_commands(&mut ctx);
+            sh.sync_move_commands(&mut ctx);
+        }
+        assert_eq!(
+            h.button_default_count(add),
+            1,
+            "Add default is toggled once, not re-emitted on every sync"
+        );
+        assert_eq!(
+            h.button_default_count(remove),
+            0,
+            "Remove (already non-default) is never re-toggled while focus is unchanged"
+        );
+    }
+
+    #[test]
+    fn focus_leaving_both_lists_releases_the_active_default() {
+        // Available focused → Add is the default. When focus then leaves both lists
+        // (e.g. onto OK/Cancel), Add must release so the dialog's own OK button
+        // retakes the default look.
+        let mut sh = shuttle();
+        let mut h = Harness::new();
+        sh.set_available(vec![row("a")], &mut h.ctx());
+        sh.set_selected(vec![row("x")], &mut h.ctx());
+        let (aid, add) = (sh.avail_id, sh.add_id);
+        {
+            let mut ctx = h.ctx();
+            sh.group.focus_child(aid, &mut ctx);
+            sh.sync_move_commands(&mut ctx);
+            // Focus moves off both lists (as when Tab lands on OK/Cancel).
+            sh.group.set_current(None, tv::SelectMode::Normal, &mut ctx);
             sh.sync_move_commands(&mut ctx);
         }
         assert_eq!(
             h.button_default(add),
             Some(false),
-            "Add releases the default look when no list is focused"
-        );
-        assert_eq!(
-            h.button_default(remove),
-            Some(false),
-            "Remove releases the default look when no list is focused"
+            "Add releases the default look when focus leaves both lists"
         );
     }
 
