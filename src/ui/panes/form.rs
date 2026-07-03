@@ -76,6 +76,10 @@ impl FormPane {
         // focuses the pane and lands on the clicked field, rather than needing a
         // second click.
         group.state_mut().options.first_click = true;
+        // The pane paints its own background (tvision 0.8 `Group::set_surface`):
+        // bright when the pane is focused, receded to the desktop tone when not —
+        // in lock-step with the list/tree panes. Replaces the hand-rolled fill.
+        group.set_surface(Role::ListNormal, Role::ListInactive);
         let w = bounds.b.x - bounds.a.x;
         let h = bounds.b.y - bounds.a.y;
 
@@ -252,7 +256,12 @@ impl FormPane {
                     Box::new(FieldLabel::label(Rect::new(0, y, label_w, y + 1))),
                     Rect::new(0, y, label_w, y + 1),
                 );
-                let mut il = InputLine::with_limit(Rect::new(label_w, y, w, y + 1), 1024);
+                // Self-focus surface (tvision 0.8): only the focused field paints
+                // the bright well; non-focused fields use InputSurface (base3) and
+                // an inactive pane recedes to InputInactive (desktop). This is what
+                // gives the form its single-well look without any manual repaint.
+                let mut il = InputLine::with_limit(Rect::new(label_w, y, w, y + 1), 1024)
+                    .with_self_focus_surface(true);
                 il.state.state.disabled = !editable;
                 let vid = sg.add_content(Box::new(il), Rect::new(label_w, y, w, y + 1));
                 new_lids.push(lid);
@@ -564,49 +573,6 @@ impl FormPane {
             h.set_value(FieldValue::Text(text));
         }
     }
-
-    /// Repaint every on-screen value cell in the deselected (desktop-tone) surface,
-    /// used when the pane is unfocused so the value editors recede with the rest of
-    /// the pane. Compensates for `InputLine` having no pane-active surface role
-    /// (see the call site in `draw`).
-    fn dim_value_cells(&mut self, ctx: &mut DrawCtx) {
-        let surface = ctx.style(Role::ListInactive);
-        // Origin + viewport of the ScrollGroup within this pane.
-        let Some(sgb) = self
-            .group
-            .child_mut(self.scroll_id)
-            .map(|v| v.state().get_bounds())
-        else {
-            return;
-        };
-        let value_ids = self.value_ids.clone();
-        // Collect (pane-local rect, text) for each value cell inside the viewport.
-        let mut cells: Vec<(Rect, String)> = Vec::with_capacity(value_ids.len());
-        if let Some(sg) = self.scroll_mut() {
-            for vid in value_ids {
-                let Some(local) = sg.local_bounds_of(vid) else {
-                    continue;
-                };
-                let y = sgb.a.y + local.a.y;
-                if y < sgb.a.y || y >= sgb.b.y {
-                    continue; // scrolled out of the viewport
-                }
-                let text = match sg.child_mut(vid).and_then(|v| v.value()) {
-                    Some(FieldValue::Text(s)) => s,
-                    _ => String::new(),
-                };
-                cells.push((
-                    Rect::new(sgb.a.x + local.a.x, y, sgb.a.x + local.b.x, y + 1),
-                    text,
-                ));
-            }
-        }
-        for (rect, text) in cells {
-            ctx.fill(rect, ' ', surface);
-            let mut sub = ctx.sub(rect);
-            sub.put_str(0, 0, &text, surface);
-        }
-    }
 }
 
 #[delegate(to = group)]
@@ -616,25 +582,11 @@ impl View for FormPane {
     }
 
     fn draw(&mut self, ctx: &mut DrawCtx) {
-        // Focused pane = brightest (base3); the others recede (inactive surface).
-        // Key off `focused`, not `active`: `active` fans out to every pane in the
-        // window (so it is uniformly true and never distinguishes focus), whereas
-        // `focused` follows only the current-child chain. Mirrors the tree and leaf
-        // panes; the focused field's own blue highlight already tracks focus.
-        let focused = self.group.state().state.focused;
-
-        // The ScrollGroup fills its own region keyed on `active`; mirror the pane's
-        // real focus onto it (like the leaf pane does for its list) so the form's
-        // content area dims in lock-step with the rest of the pane instead of
-        // staying bright (`active` is uniformly true across panes).
-        if let Some(sg) = self.scroll_mut() {
-            sg.state_mut().state.active = focused;
-        }
-
         // Mark the label of the field that holds focus so it gets the blue
-        // current-row chip. Focus brightness now comes from the framework
-        // (`ctx.owner_active()` in `FieldLabel::draw`), so the pane no longer
-        // pushes `focused` onto each cell — only the selected-field `active` flag.
+        // current-row chip. Everything focus-driven is now the framework's job:
+        // the pane background recedes via `Group::set_surface`, the labels/values
+        // via `ctx.owner_active()` (and the value wells via the InputLine
+        // self-focus surface). The pane no longer mirrors focus or repaints cells.
         let active_idx = self.focused_field_idx();
         let label_ids = self.label_ids.clone();
         if let Some(sg) = self.scroll_mut() {
@@ -648,27 +600,7 @@ impl View for FormPane {
                 }
             }
         }
-
-        let role = if focused {
-            Role::ListNormal
-        } else {
-            Role::ListInactive
-        };
-        let style = ctx.style(role);
-        let extent = self.group.state().get_extent();
-        ctx.fill(extent, ' ', style);
         self.group.draw(ctx);
-
-        // Dim the value editors when the pane is not focused. A stock `InputLine`
-        // only distinguishes its OWN focus (`InputNormal`/`InputInactive`), not
-        // whether its owning pane is active — so it can't recede with the pane the
-        // way the outline/list widgets do (those gained an `*Inactive` surface
-        // role). Until `InputLine` grows the same pane-active surface upstream, we
-        // repaint each value cell in the deselected (desktop-tone) colour here, so
-        // an unfocused form recedes uniformly like the tree and leaf panes.
-        if !focused {
-            self.dim_value_cells(ctx);
-        }
     }
 
     fn handle_event(&mut self, ev: &mut Event, ctx: &mut Context) {
@@ -1409,9 +1341,6 @@ mod tests {
     /// * the focused field is NOT select-all'd (no blue bar over its value);
     /// * the empty area below the fields dims with the pane.
     #[test]
-    #[ignore = "single-well value cells need the tvision-rs InputLine self-focus \
-                surface opt-in (owner_active-only keying makes every field a well); \
-                re-enable once the upstream opt-in ships and is wired in"]
     fn form_focus_visualization_matches_the_list_panes() {
         use tvision_rs::{Buffer, Color, Point};
         let mut pane = FormPane::new(Rect::new(0, 0, 60, 10), state_with_form());
@@ -1438,6 +1367,13 @@ mod tests {
         // as the framework would, and return a sampler over the resulting buffer.
         let draw = |pane: &mut FormPane, focused: bool| -> Buffer {
             pane.group.state_mut().state.focused = focused;
+            // Propagate focus down the chain as the running app would: the
+            // ScrollGroup (so its own `set_surface` backdrop and the `owner_active`
+            // it fans to the labels/value cells track the pane) and the current
+            // value cell (whose own `state.focused` drives its self-focus well).
+            if let Some(sg) = pane.scroll_mut() {
+                sg.state_mut().state.focused = focused;
+            }
             if let Some(cur) = pane.scroll_mut().and_then(|sg| sg.current()) {
                 if let Some(sg) = pane.scroll_mut() {
                     if let Some(c) = sg.child_mut(cur) {

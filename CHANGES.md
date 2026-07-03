@@ -129,8 +129,16 @@ All notable changes to eDAPtor are documented here. The format follows
   objectClass and membership editors. The single-list checkbox picker is now
   single-select only. Fixed-vocabulary `choice` fields are unchanged. The form-pane summary for these fields now shows a member count (e.g. "‹3 members›") instead of the comma-joined values.
 
-- Upgraded **tvision-rs 0.4 → 0.5**, which adds focus-aware surfaces for the
-  outline and input-line widgets (`OutlineNormalInactive`, `InputPassive`).
+- Upgraded **tvision-rs 0.4 → 0.8** and moved all focus-driven highlighting onto
+  the framework. The three browser panes now recede as a unit when unfocused via
+  `Group::set_surface` (the pane background) and `ctx.owner_active()` (the list,
+  outline, input and label content), and the entry form keeps its single-well
+  look via `InputLine`'s new self-focus surface opt-in. This deletes edaptor's
+  manual focus code: the leaf pane's list-`active` mirror, the form's per-draw
+  label focus push, its `ScrollGroup` focus mirror, and its hand-rolled value-cell
+  dimming and pane-background fills. No visual change; the internal focus-aware
+  theme roles were renamed to the 0.8 names (`ListNormal`/`ListInactive`,
+  `OutlineInactive`, `InputInactive`, plus the new `InputSurface`).
 
 - tvision UI: the **entry form pane** now matches the tree and entry panes
   visually. The header reads as a **title** (`dn` label + the DN value in bold);

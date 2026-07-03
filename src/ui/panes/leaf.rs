@@ -3,8 +3,8 @@
 //! filter and highlight, no separate search box.
 
 use tvision_rs::{
-    self as tv, delegate, Context, Event, FieldValue, FindMode, Group, Key, ListBox,
-    ListViewer, Rect, ScrollBar, View,
+    self as tv, delegate, Context, Event, FieldValue, FindMode, Group, Key, ListBox, ListViewer,
+    Rect, ScrollBar, View,
 };
 
 use crate::ui::{Shared, REFRESH};

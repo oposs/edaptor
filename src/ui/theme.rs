@@ -42,13 +42,16 @@ pub(crate) fn edaptor_theme() -> Theme {
     // Multi-selected / staged rows.
     t.set_style(Role::ListSelected, Style::new(BASE01, SEL_BG));
     t.set_style(Role::OutlineSelected, Style::new(BASE01, SEL_BG));
-    // Editable fields. `InputNormal` (the FOCUSED field) is the near-white "type
-    // here" well that marks where input goes. `InputInactive` (every UNFOCUSED
-    // field) sits on the bright pane surface (base3) so non-selected fields carry
-    // no special background — they read as plain text against the pane, not as
-    // recessed wells — while the one focused field stands out as the input well.
+    // Editable fields, three surfaces (InputLine self-focus opt-in, tvision 0.8):
+    // `InputNormal` (the FOCUSED field, active pane) is the near-white "type here"
+    // well. `InputSurface` (a NON-focused field in the active pane) sits on the
+    // bright pane surface (base3) so non-selected fields carry no special
+    // background. `InputInactive` (any field in an INACTIVE pane) recedes to the
+    // desktop tone so an unfocused form dims as a whole — the framework paints this
+    // via `owner_active`, so edaptor no longer repaints value cells by hand.
     t.set_style(Role::InputNormal, Style::new(BASE01, INPUT_BG));
-    t.set_style(Role::InputInactive, Style::new(BASE01, BASE3));
+    t.set_style(Role::InputSurface, Style::new(BASE01, BASE3));
+    t.set_style(Role::InputInactive, Style::new(BASE01, DESKTOP));
     t.set_style(Role::InputSelected, Style::new(BASE3, BLUE));
     t.set_style(Role::InputArrow, Style::new(BASE01, INPUT_BG));
     // Secondary chrome.
@@ -148,12 +151,14 @@ mod tests {
         // classic_blue blue default) so unfocused form fields stay on parchment.
         assert_eq!(bg(&t, Role::OutlineNormal), BASE3);
         assert_eq!(bg(&t, Role::OutlineInactive), DESKTOP);
-        // The focused field (InputNormal) is the bright "type here" well; every
-        // unfocused field (InputInactive) sits on the pane surface (base3) so
-        // non-selected fields carry no special background — plain text on the pane,
-        // not recessed wells — while only the focused field reads as an input well.
+        // Three input surfaces: the focused field (InputNormal) is the bright
+        // "type here" well; a non-focused field in the active pane (InputSurface)
+        // sits on the pane surface (base3) so non-selected fields carry no special
+        // background; a field in an inactive pane (InputInactive) recedes to the
+        // desktop tone so an unfocused form dims as a whole.
         assert_eq!(bg(&t, Role::InputNormal), INPUT_BG);
-        assert_eq!(bg(&t, Role::InputInactive), BASE3);
+        assert_eq!(bg(&t, Role::InputSurface), BASE3);
+        assert_eq!(bg(&t, Role::InputInactive), DESKTOP);
     }
 
     #[test]

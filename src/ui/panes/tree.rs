@@ -1,7 +1,7 @@
 //! DIT tree pane: an `Outline` over the structure's branch hierarchy.
 
 use tvision_rs::{
-    self as tv, delegate, Context, DrawCtx, Event, FieldValue, OutlineViewer, Rect, Role, View,
+    self as tv, delegate, Context, Event, FieldValue, OutlineViewer, Rect, Role, View,
 };
 
 use crate::config::tree_label::{eval_tree_label, fit_label};
@@ -122,6 +122,10 @@ impl TreePane {
         // delegation; a plain `Group` does not, so set it explicitly (matches the
         // leaf/form panes).
         group.state_mut().options.first_click = true;
+        // The pane paints its own background (tvision 0.8 `Group::set_surface`):
+        // bright when focused, receded to the desktop tone when not — the cells
+        // the outline rows do not cover. Replaces the hand-rolled fill in `draw`.
+        group.set_surface(Role::ListNormal, Role::ListInactive);
         // Vertical scroll bar in the right column (width 1 ⇒ vertical, which
         // ScrollBar::new detects and gives the right grow_mode). Hidden until the
         // pane is focused AND the tree overflows — sync_scrollbar() owns that gate
@@ -215,24 +219,6 @@ impl TreePane {
 impl View for TreePane {
     fn as_any_mut(&mut self) -> Option<&mut dyn core::any::Any> {
         Some(self)
-    }
-
-    fn draw(&mut self, ctx: &mut DrawCtx) {
-        // Focused pane = brightest (base3); the others recede (inactive surface).
-        // Key off `focused`, not `active`: `active` fans out to every pane in the
-        // window (so it is uniformly true and never distinguishes focus), whereas
-        // `focused` follows only the current-child chain. Mirrors the form and leaf
-        // panes. The Outline itself already keys its current-node colour on
-        // `focused`, so this only governs the area not covered by outline rows.
-        let role = if self.group.state().state.focused {
-            Role::ListNormal
-        } else {
-            Role::ListInactive
-        };
-        let style = ctx.style(role);
-        let extent = self.group.state().get_extent();
-        ctx.fill(extent, ' ', style);
-        self.group.draw(ctx);
     }
 
     fn handle_event(&mut self, ev: &mut Event, ctx: &mut Context) {

@@ -10,7 +10,7 @@
 //! to tvision-rs.
 
 use tvision_rs::{
-    self as tv, delegate, Context, DrawCtx, Event, Point, Rect, Role, ScrollBar, View, ViewId,
+    self as tv, delegate, Context, Event, Point, Rect, Role, ScrollBar, View, ViewId,
 };
 
 pub(crate) struct ScrollGroup {
@@ -33,6 +33,11 @@ impl ScrollGroup {
         let w = bounds.b.x - bounds.a.x;
         let h = bounds.b.y - bounds.a.y;
         let mut group = tv::Group::new(bounds);
+        // Paint the group's own backdrop (tvision 0.8 `Group::set_surface`):
+        // bright when the pane is focused, receded when not. Replaces the
+        // hand-rolled fill in the old `draw` override; the uncovered rows below
+        // the content now come from the framework, keyed on the group's own focus.
+        group.set_surface(Role::ListNormal, Role::ListInactive);
         // Vertical bar in the right column (width 1 ⇒ vertical). Local coords.
         let v_bar = group.insert(Box::new(ScrollBar::new(Rect::new(w - 1, 0, w, h))));
         ScrollGroup {
@@ -188,11 +193,13 @@ impl ScrollGroup {
         self.publish_bar(ctx);
     }
 
-    /// The bar shows only when this pane is the active one AND the content
-    /// overflows the viewport — mirroring the leaf/tree panes, so scroll bars
-    /// appear on the focused pane alone rather than on every pane at once.
+    /// The bar shows only when this pane is the focused one AND the content
+    /// overflows the viewport — so scroll bars appear on the focused pane alone
+    /// rather than on every pane at once. Keys on the group's own `focused` (true
+    /// only down the current-child chain), so the owning pane no longer needs to
+    /// mirror its focus onto this group's `active` flag.
     fn bar_should_show(&self) -> bool {
-        self.max_top() > 0 && self.group.state().state.active
+        self.max_top() > 0 && self.group.state().state.focused
     }
 
     /// Re-assert the bar's focus+overflow visibility. Called every event so a
@@ -252,19 +259,6 @@ impl View for ScrollGroup {
         } else {
             Some(p)
         }
-    }
-
-    fn draw(&mut self, ctx: &mut DrawCtx) {
-        // Match the owning pane: brightest when the pane is the active one.
-        let role = if self.group.state().state.active {
-            Role::ListNormal
-        } else {
-            Role::ListInactive
-        };
-        let style = ctx.style(role);
-        let extent = self.group.state().get_extent();
-        ctx.fill(extent, ' ', style);
-        self.group.draw(ctx);
     }
 
     /// Override `change_bounds` so that a grow-mode resize (driven by
@@ -471,7 +465,7 @@ mod tests {
         for y in 0..8 {
             ids.push(sg.add_content(cell(y, w), Rect::new(0, y, w, y + 1)));
         }
-        sg.group.state_mut().state.active = true; // the bar only shows when active
+        sg.group.state_mut().state.focused = true; // the bar only shows on the focused pane
         let mut out = std::collections::VecDeque::new();
         let mut timers = tv::timer::TimerQueue::new();
         let mut deferred: Vec<Deferred> = Vec::new();
@@ -505,7 +499,7 @@ mod tests {
         for y in 0..8 {
             ids.push(sg.add_content(cell(y, w), Rect::new(0, y, w, y + 1)));
         }
-        sg.group.state_mut().state.active = true;
+        sg.group.state_mut().state.focused = true;
         let mut out = std::collections::VecDeque::new();
         let mut timers = tv::timer::TimerQueue::new();
         let mut deferred: Vec<Deferred> = Vec::new();
@@ -650,10 +644,10 @@ mod tests {
         assert!(sg.max_top() > 0, "content must overflow the viewport");
         // Inactive pane → bar hidden despite overflow (scroll bars live on the
         // active pane only).
-        sg.group.state_mut().state.active = false;
+        sg.group.state_mut().state.focused = false;
         assert!(!sg.bar_should_show(), "inactive pane must hide its bar");
         // Active pane → bar shown.
-        sg.group.state_mut().state.active = true;
+        sg.group.state_mut().state.focused = true;
         assert!(
             sg.bar_should_show(),
             "active overflowing pane shows its bar"
@@ -675,7 +669,7 @@ mod tests {
         let mut timers = tv::timer::TimerQueue::new();
         let mut deferred = Vec::new();
         let mut ctx = Context::new(&mut out, &mut timers, 0, &mut deferred);
-        sg.group.state_mut().state.active = true;
+        sg.group.state_mut().state.focused = true;
         sg.focus_child(ids[7], &mut ctx); // focus the last (row 7) field
                                           // Make the focused field's cursor visible so group.cursor_request()
                                           // surfaces a point — otherwise the viewport gate is never exercised.
