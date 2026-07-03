@@ -1013,10 +1013,12 @@ mod tests {
     // -- View seams --------------------------------------------------------
 
     fn shuttle() -> Shuttle {
+        // left_title / right_title: Available (left) / Active (right), matching the
+        // conventional orientation the Shuttle always renders.
         Shuttle::new(
             Rect::new(0, 0, 72, 25),
-            "Active",
             "Available",
+            "Active",
             FindMode::Filter,
         )
     }
@@ -1098,7 +1100,7 @@ mod tests {
         use crate::ui::theme::edaptor_theme;
         use tvision_rs::{Buffer, DrawCtx, Point, Role};
 
-        let mut sh = shuttle(); // selected_on_left = false → Available LEFT, Selected RIGHT
+        let mut sh = shuttle(); // the Shuttle always renders Available LEFT, Selected RIGHT
         let mut h = Harness::new();
         sh.set_available(vec![row("a"), row("b"), row("c")], &mut h.ctx());
         sh.set_selected(vec![row("x"), row("y"), row("z")], &mut h.ctx());
@@ -1372,8 +1374,8 @@ mod tests {
 
     #[test]
     fn mouse_wheel_routes_to_the_column_under_the_cursor() {
-        // `shuttle()` builds with selected_on_left = false → Available is the LEFT
-        // column, Selected the RIGHT. A wheel must scroll the column the cursor is
+        // The Shuttle always renders Available as the LEFT column, Selected the
+        // RIGHT. A wheel must scroll the column the cursor is
         // OVER, not whichever scrollbar the group happens to offer first (the
         // non-positional `ScrollBar` wheel grab that made one fixed column eat
         // every wheel event regardless of the cursor).
@@ -1423,13 +1425,35 @@ mod tests {
             add_bounds, want.add_btn,
             "Add button widens with its column"
         );
+        // Also cover the left-column children so the assertion set proves the
+        // reflow loop touched every id, not just the right/selected side.
+        let avail_bounds = sh
+            .group
+            .child_mut(sh.avail_id)
+            .unwrap()
+            .state()
+            .get_bounds();
+        assert_eq!(
+            avail_bounds, want.avail_list,
+            "Available list follows the new width"
+        );
+        let header_bounds = sh
+            .group
+            .child_mut(sh.left_header_id)
+            .unwrap()
+            .state()
+            .get_bounds();
+        assert_eq!(
+            header_bounds, want.left_header,
+            "Available header repositions with its column"
+        );
     }
 
     #[test]
     fn mouse_wheel_scrolls_the_hovered_column_only() {
         use tv::event::{MouseEvent, MouseWheel};
         use tv::Point;
-        // selected_on_left = false → Available LEFT, Selected RIGHT.
+        // The Shuttle always renders Available LEFT, Selected RIGHT.
         let mut sh = shuttle();
         let mut h = Harness::new();
         let many: Vec<ShuttleRow> = (0..30).map(|i| row(&format!("r{i:02}"))).collect();
