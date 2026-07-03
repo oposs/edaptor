@@ -464,16 +464,26 @@ impl Shuttle {
     /// `ctx.command_enabled`.
     fn sync_move_commands(&mut self, ctx: &mut Context) {
         let cur = self.group.current();
-        if cur == Some(self.avail_id) {
+        let add_live = cur == Some(self.avail_id);
+        let remove_live = cur == Some(self.selected_id);
+        if add_live {
             ctx.enable_command(CMD_ADD);
             ctx.disable_command(CMD_REMOVE);
-        } else if cur == Some(self.selected_id) {
+        } else if remove_live {
             ctx.disable_command(CMD_ADD);
             ctx.enable_command(CMD_REMOVE);
         } else {
             ctx.disable_command(CMD_ADD);
             ctx.disable_command(CMD_REMOVE);
         }
+        // Give the button under the focused list the dialog's default-button look
+        // (the file-dialog idiom: a list grabs the default for its sibling button).
+        // The other button releases it, and with focus off both lists both release
+        // so the dialog's own OK button retakes the default. Enter never
+        // double-fires: `handle_event` intercepts and clears Enter while a list is
+        // current, so it never reaches the default-command broadcast.
+        ctx.make_button_default(self.add_id, add_live);
+        ctx.make_button_default(self.remove_id, remove_live);
     }
 }
 
@@ -752,6 +762,15 @@ mod tests {
                 })
                 .unwrap_or(false)
         }
+
+        /// The last `MakeButtonDefault` enable/disable queued for button `id`,
+        /// or `None` if the harness saw no default toggle for it. Last write wins.
+        fn button_default(&self, id: ViewId) -> Option<bool> {
+            self.deferred.iter().rev().find_map(|d| match d {
+                Deferred::MakeButtonDefault { button, enable } if *button == id => Some(*enable),
+                _ => None,
+            })
+        }
     }
 
     #[test]
@@ -795,6 +814,80 @@ mod tests {
         assert!(
             !h.command_disabled(CMD_REMOVE),
             "Remove enabled while Selected focused"
+        );
+    }
+
+    #[test]
+    fn focus_on_available_makes_add_the_default_button() {
+        let mut sh = shuttle();
+        let mut h = Harness::new();
+        sh.set_available(vec![row("a")], &mut h.ctx());
+        sh.set_selected(vec![row("x")], &mut h.ctx());
+        let (aid, add, remove) = (sh.avail_id, sh.add_id, sh.remove_id);
+        {
+            let mut ctx = h.ctx();
+            sh.group.focus_child(aid, &mut ctx);
+            sh.sync_move_commands(&mut ctx);
+        }
+        assert_eq!(
+            h.button_default(add),
+            Some(true),
+            "Add takes the default look while Available focused"
+        );
+        assert_eq!(
+            h.button_default(remove),
+            Some(false),
+            "Remove drops the default look while Available focused"
+        );
+    }
+
+    #[test]
+    fn focus_on_selected_makes_remove_the_default_button() {
+        let mut sh = shuttle();
+        let mut h = Harness::new();
+        sh.set_available(vec![row("a")], &mut h.ctx());
+        sh.set_selected(vec![row("x")], &mut h.ctx());
+        let (sid, add, remove) = (sh.selected_id, sh.add_id, sh.remove_id);
+        {
+            let mut ctx = h.ctx();
+            sh.group.focus_child(sid, &mut ctx);
+            sh.sync_move_commands(&mut ctx);
+        }
+        assert_eq!(
+            h.button_default(remove),
+            Some(true),
+            "Remove takes the default look while Selected focused"
+        );
+        assert_eq!(
+            h.button_default(add),
+            Some(false),
+            "Add drops the default look while Selected focused"
+        );
+    }
+
+    #[test]
+    fn focus_on_neither_list_releases_both_default_looks() {
+        // With focus off both lists (e.g. on OK/Cancel) the move buttons must
+        // release the default look so the dialog's own OK button retakes it.
+        let mut sh = shuttle();
+        let mut h = Harness::new();
+        sh.set_available(vec![row("a")], &mut h.ctx());
+        sh.set_selected(vec![row("x")], &mut h.ctx());
+        let (add, remove) = (sh.add_id, sh.remove_id);
+        {
+            // No list is current: sync while currency sits nowhere relevant.
+            let mut ctx = h.ctx();
+            sh.sync_move_commands(&mut ctx);
+        }
+        assert_eq!(
+            h.button_default(add),
+            Some(false),
+            "Add releases the default look when no list is focused"
+        );
+        assert_eq!(
+            h.button_default(remove),
+            Some(false),
+            "Remove releases the default look when no list is focused"
         );
     }
 
