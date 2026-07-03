@@ -181,12 +181,21 @@ impl Shuttle {
             sel_col.1,
             list_y.1,
         ))));
-        let selected_id = group.insert(Box::new(ListBox::new(
-            Rect::new(sel_col.0, list_y.0, sel_col.1 - 1, list_y.1),
-            1,
-            None,
-            Some(selected_bar),
-        )));
+        // The Selected list gets `FindMode::Highlight` too: typing while it holds
+        // focus does a local find-as-you-type over the staged set (so letters are
+        // consumed by the list instead of leaking to the Add/Remove button
+        // hotkeys), and Highlight — unlike Filter — does not narrow the list, so
+        // the unsorted "display index == model index" invariant that `move_out`
+        // relies on still holds. It never re-queries a server (a local set).
+        let selected_id = group.insert(Box::new(
+            ListBox::new(
+                Rect::new(sel_col.0, list_y.0, sel_col.1 - 1, list_y.1),
+                1,
+                None,
+                Some(selected_bar),
+            )
+            .with_find(FindMode::Highlight),
+        ));
 
         // On-screen affordances for the move keys (which are not discoverable),
         // left-aligned on the bottom button row. Alt-A / Alt-R shortcuts work
@@ -229,6 +238,14 @@ impl Shuttle {
     /// `CMD_SHUTTLE_CHANGED` broadcast to stage its commit.
     pub(crate) fn selected(&self) -> &[ShuttleRow] {
         self.model.selected()
+    }
+
+    /// The `ViewId` of the Available list. Both lists have their own find mode and
+    /// each broadcasts `Command::LIST_FIND_CHANGED` with its own id as `source`; a
+    /// server-backed owner filters on this so only the Available list's find drives
+    /// a re-query (the Selected list's find is a purely local highlight).
+    pub(crate) fn available_id(&self) -> ViewId {
+        self.avail_id
     }
 
     /// The list of the column whose horizontal extent contains the Shuttle-local
@@ -581,6 +598,25 @@ impl Shuttle {
             self.handle_event(&mut ev, ctx);
         }
     }
+
+    /// Like [`type_find`], but focuses and types into the *Selected* list.
+    pub(crate) fn type_find_selected(&mut self, text: &str, ctx: &mut Context) {
+        self.group.focus_child(self.selected_id, ctx);
+        for ch in text.chars() {
+            let mut ev = Event::KeyDown(tv::KeyEvent::from(Key::Char(ch)));
+            self.handle_event(&mut ev, ctx);
+        }
+    }
+
+    /// The Selected list's own incremental-find query.
+    pub(crate) fn selected_find_query(&mut self) -> String {
+        self.group
+            .child_mut(self.selected_id)
+            .and_then(|v| v.as_any_mut())
+            .and_then(|a| a.downcast_mut::<ListBox>())
+            .and_then(|lb| lb.find_query().map(str::to_string))
+            .unwrap_or_default()
+    }
 }
 
 #[cfg(test)]
@@ -766,6 +802,25 @@ mod tests {
             ["y"],
             "Enter on the Selected list moves the highlighted row out"
         );
+    }
+
+    #[test]
+    fn typing_on_the_selected_list_drives_its_own_find_not_the_buttons() {
+        // Regression: with no find mode on the Selected list, letters bubbled to
+        // the dialog and fired the ~A~dd / ~R~emove button hotkeys. The Selected
+        // list now has `FindMode::Highlight`, so typing while it holds focus is
+        // consumed by its own incremental find.
+        let mut sh = shuttle();
+        let mut h = Harness::new();
+        sh.set_selected(vec![row("alpha"), row("beta"), row("gamma")], &mut h.ctx());
+        sh.type_find_selected("bet", &mut h.ctx());
+        assert_eq!(
+            sh.selected_find_query(),
+            "bet",
+            "typing while the Selected list is focused must accumulate its own find query"
+        );
+        // The find must NOT have moved anything (it is a search, not a move).
+        assert_eq!(keys(sh.model.selected()), ["alpha", "beta", "gamma"]);
     }
 
     #[test]

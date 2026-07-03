@@ -257,6 +257,35 @@ impl MultiPickerDialog {
             let st = self.shared.borrow();
             st.search_results.clone()
         };
+
+        // Upgrade the staged Members' labels from any matching candidate. A member
+        // is seeded only from its raw store value (a DN for `member`), so it first
+        // renders as that DN; once a candidate search reveals the same store value
+        // with a friendly label, adopt it so both columns show the same nice view.
+        // (Members not yet returned by a search keep their store value until then.)
+        let label_of: std::collections::HashMap<String, String> = results
+            .iter()
+            .map(|c| (c.store_value.to_lowercase(), c.label.clone()))
+            .collect();
+        let relabeled: Option<Vec<ShuttleRow>> = self.shuttle_mut().map(|sh| {
+            sh.selected()
+                .iter()
+                .map(|r| ShuttleRow {
+                    key: r.key.clone(),
+                    label: label_of
+                        .get(&r.key.to_lowercase())
+                        .cloned()
+                        .unwrap_or_else(|| r.label.clone()),
+                    locked: r.locked,
+                })
+                .collect()
+        });
+        if let Some(rows) = relabeled {
+            if let Some(sh) = self.shuttle_mut() {
+                sh.set_selected(rows, ctx);
+            }
+        }
+
         let already: HashSet<String> = match self.shuttle_mut() {
             Some(sh) => sh.selected().iter().map(|r| r.key.to_lowercase()).collect(),
             None => return,
@@ -350,13 +379,19 @@ impl View for MultiPickerDialog {
         // react to the broadcasts when they are delivered (a later loop iteration).
         self.dlg.handle_event(ev, ctx);
 
+        // Both shuttle lists have a find mode and each broadcasts
+        // LIST_FIND_CHANGED with its own id. Only the AVAILABLE list's find drives
+        // an async candidate re-query; the Members list's find is a local
+        // highlight, so ignore its broadcast (else typing in Members would reload
+        // the Available column with the unchanged query).
+        let avail_src = self.shuttle_mut().map(|sh| sh.available_id());
         let notice = match &*ev {
             Event::Broadcast { command, source } if *source == Some(self.shuttle_id) => {
                 Some(*command)
             }
-            // The find query lives on the Available list (nested in the Shuttle),
-            // so its LIST_FIND_CHANGED carries the list's own ViewId as source.
-            Event::Broadcast { command, .. } if *command == Command::LIST_FIND_CHANGED => {
+            Event::Broadcast { command, source }
+                if *command == Command::LIST_FIND_CHANGED && *source == avail_src =>
+            {
                 Some(Command::LIST_FIND_CHANGED)
             }
             _ => None,
@@ -618,6 +653,39 @@ mod tests {
         press_and_settle(d, Key::Delete, &mut out, &mut timers, &mut deferred);
 
         assert_eq!(staged_set(&shared), vec![G2.to_string()]);
+    }
+
+    /// A seeded member starts life as its raw store value (a DN), but once a
+    /// candidate search reveals the same store value with a friendly label, the
+    /// Members column adopts it — so both columns show the same nice view rather
+    /// than names on one side and DNs on the other.
+    #[test]
+    fn seeded_member_adopts_friendly_label_from_matching_candidate() {
+        let shared = test_shared();
+        // The search returns g1 with a friendly label (not just its DN).
+        shared.borrow_mut().search_results = vec![Candidate {
+            dn: G1.into(),
+            label: "devs (developers)".into(),
+            store_value: G1.into(),
+        }];
+        let mut view = build_dialog(&shared, &[G1]);
+        let mut out = std::collections::VecDeque::new();
+        let mut timers = TimerQueue::new();
+        let mut deferred = Vec::new();
+        with_ctx(&mut out, &mut timers, &mut deferred, |ctx| {
+            view.reset_current(ctx)
+        });
+
+        let d = dialog_mut(&mut view);
+        let members = d.shuttle_mut().expect("shuttle present").selected_text();
+        assert!(
+            members.iter().any(|s| s.contains("devs (developers)")),
+            "the seeded member must adopt the candidate's friendly label, got {members:?}"
+        );
+        assert!(
+            !members.iter().any(|s| s.contains(G1)),
+            "the raw DN must no longer be shown once a label is known, got {members:?}"
+        );
     }
 
     /// A candidate already in Members is filtered out of the Available column —
