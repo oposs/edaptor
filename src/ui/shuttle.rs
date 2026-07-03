@@ -16,7 +16,8 @@
 
 use tvision_rs::{
     self as tv, delegate, Button, ButtonFlags, Command, Context, Event, FieldValue, FindMode,
-    Group, Key, Label, ListBox, ListViewer, Rect, ScrollBar, SortedListBox, View, ViewId,
+    Group, Key, Label, ListBox, ListViewer, Rect, ScrollBar, SortedListBox, StateFlag, View,
+    ViewId,
 };
 
 /// Broadcast (with the Shuttle's own `ViewId` as `source`) when the Selected set
@@ -467,37 +468,38 @@ impl Shuttle {
         format!("{mark}{}", r.label)
     }
 
-    /// Enable exactly the move command whose source list is focused: Add when the
-    /// Available list is current, Remove when the Selected list is current,
-    /// disabling the other (both disabled when neither list is current, e.g. focus
-    /// on OK/Cancel). tvision's deferred command set flips COMMAND_SET_CHANGED on
-    /// the next idle pump, and each Button re-grays itself from
-    /// `ctx.command_enabled`.
+    /// Keep both move buttons operable and highlight the one under the focused
+    /// list. Both `CMD_ADD`/`CMD_REMOVE` stay **enabled** — a button acts on its
+    /// own list's highlighted row regardless of which list is focused, so graying
+    /// the inactive-side button was needless; a plain (non-highlighted) button
+    /// reads clearly enough. The button under the currently-focused list takes the
+    /// dialog's **default-button look**; when focus is off both lists (on OK/Cancel,
+    /// so the whole Shuttle group is unfocused) neither is highlighted and the
+    /// dialog's own OK button retakes the default.
     fn sync_move_commands(&mut self, ctx: &mut Context) {
+        // Both buttons always fire; enable is idempotent (no COMMAND_SET_CHANGED
+        // when already enabled), so this cannot loop.
+        ctx.enable_command(CMD_ADD);
+        ctx.enable_command(CMD_REMOVE);
+
+        // The highlight follows the focused list, but ONLY while the Shuttle group
+        // itself holds focus. `group.current()` is sticky — it still points at the
+        // last-focused list after focus leaves the group for OK/Cancel — so gating
+        // on `state.focused` is what releases the look when the dialog moves focus
+        // to a sibling button. `set_state(Focused, …)` re-runs this so the release
+        // happens even when the Shuttle never processes the focus-moving Tab.
+        let focused = self.group.state().state.focused;
         let cur = self.group.current();
-        let add_live = cur == Some(self.avail_id);
-        let remove_live = cur == Some(self.selected_id);
-        if add_live {
-            ctx.enable_command(CMD_ADD);
-            ctx.disable_command(CMD_REMOVE);
-        } else if remove_live {
-            ctx.disable_command(CMD_ADD);
-            ctx.enable_command(CMD_REMOVE);
-        } else {
-            ctx.disable_command(CMD_ADD);
-            ctx.disable_command(CMD_REMOVE);
-        }
-        // Give the button under the focused list the dialog's default-button look
-        // (the file-dialog idiom: a list grabs the default for its sibling button).
-        // With focus off both lists both release so the dialog's own OK button
-        // retakes the default. Enter never double-fires: `handle_event` intercepts
-        // and clears Enter while a list is current, so it never reaches the
-        // default-command broadcast.
-        //
+        let add_live = focused && cur == Some(self.avail_id);
+        let remove_live = focused && cur == Some(self.selected_id);
+
         // EDGE-TRIGGERED: only toggle on a real change. `make_button_default`
         // broadcasts GRAB/RELEASE_DEFAULT unconditionally, and those broadcasts
         // re-enter `handle_event` → `sync_move_commands`; re-emitting every call
         // would loop and flip the default button forever (rapid blink / lockup).
+        // Enter never double-fires: `handle_event` intercepts and clears Enter
+        // while a list is current, so it never reaches the default-command
+        // broadcast.
         if add_live != self.add_is_default {
             ctx.make_button_default(self.add_id, add_live);
             self.add_is_default = add_live;
@@ -509,8 +511,21 @@ impl Shuttle {
     }
 }
 
-#[delegate(to = group, skip(handle_event, as_any_mut, reset_current, value, set_value, set_value_ctx, change_bounds))]
+#[delegate(to = group, skip(handle_event, as_any_mut, reset_current, value, set_value, set_value_ctx, change_bounds, set_state))]
 impl View for Shuttle {
+    /// Re-sync the move-button highlight whenever the Shuttle gains or loses
+    /// focus. The dialog moves focus to a sibling (OK/Cancel) without the Shuttle
+    /// ever seeing the Tab, so `handle_event`'s sync alone cannot release the
+    /// highlight — this focus-out hook does. Delegates the actual state change to
+    /// the group first (which fans `Focused` to the current child), then syncs
+    /// against the now-updated `state.focused`.
+    fn set_state(&mut self, flag: StateFlag, enable: bool, ctx: &mut Context) {
+        self.group.set_state(flag, enable, ctx);
+        if flag == StateFlag::Focused {
+            self.sync_move_commands(ctx);
+        }
+    }
+
     fn as_any_mut(&mut self) -> Option<&mut dyn core::any::Any> {
         Some(self)
     }
@@ -806,12 +821,16 @@ mod tests {
     }
 
     #[test]
-    fn focus_on_available_enables_add_disables_remove() {
+    fn both_move_commands_stay_enabled_regardless_of_focus() {
+        // The inactive-side button is not disabled — it just isn't highlighted.
+        // Both commands stay enabled whichever list (or neither) is focused, so a
+        // click / Alt-hotkey always acts on that button's own list.
         let mut sh = shuttle();
         let mut h = Harness::new();
         sh.set_available(vec![row("a")], &mut h.ctx());
         sh.set_selected(vec![row("x")], &mut h.ctx());
-        let aid = sh.avail_id;
+        let (aid, sid) = (sh.avail_id, sh.selected_id);
+        sh.group.state_mut().state.focused = true;
         {
             let mut ctx = h.ctx();
             sh.group.focus_child(aid, &mut ctx);
@@ -819,33 +838,24 @@ mod tests {
         }
         assert!(
             !h.command_disabled(CMD_ADD),
-            "Add enabled while Available focused"
+            "Add enabled (Available focus)"
         );
         assert!(
-            h.command_disabled(CMD_REMOVE),
-            "Remove disabled while Available focused"
+            !h.command_disabled(CMD_REMOVE),
+            "Remove stays enabled (Available focus)"
         );
-    }
-
-    #[test]
-    fn focus_on_selected_enables_remove_disables_add() {
-        let mut sh = shuttle();
-        let mut h = Harness::new();
-        sh.set_available(vec![row("a")], &mut h.ctx());
-        sh.set_selected(vec![row("x")], &mut h.ctx());
-        let sid = sh.selected_id;
         {
             let mut ctx = h.ctx();
             sh.group.focus_child(sid, &mut ctx);
             sh.sync_move_commands(&mut ctx);
         }
         assert!(
-            h.command_disabled(CMD_ADD),
-            "Add disabled while Selected focused"
+            !h.command_disabled(CMD_ADD),
+            "Add stays enabled (Selected focus)"
         );
         assert!(
             !h.command_disabled(CMD_REMOVE),
-            "Remove enabled while Selected focused"
+            "Remove enabled (Selected focus)"
         );
     }
 
@@ -856,6 +866,7 @@ mod tests {
         sh.set_available(vec![row("a")], &mut h.ctx());
         sh.set_selected(vec![row("x")], &mut h.ctx());
         let (aid, add, remove) = (sh.avail_id, sh.add_id, sh.remove_id);
+        sh.group.state_mut().state.focused = true;
         {
             let mut ctx = h.ctx();
             sh.group.focus_child(aid, &mut ctx);
@@ -883,6 +894,7 @@ mod tests {
         sh.set_available(vec![row("a")], &mut h.ctx());
         sh.set_selected(vec![row("x")], &mut h.ctx());
         let (aid, sid, add, remove) = (sh.avail_id, sh.selected_id, sh.add_id, sh.remove_id);
+        sh.group.state_mut().state.focused = true;
         {
             let mut ctx = h.ctx();
             sh.group.focus_child(aid, &mut ctx);
@@ -915,6 +927,7 @@ mod tests {
         sh.set_available(vec![row("a")], &mut h.ctx());
         sh.set_selected(vec![row("x")], &mut h.ctx());
         let (aid, add, remove) = (sh.avail_id, sh.add_id, sh.remove_id);
+        sh.group.state_mut().state.focused = true;
         {
             let mut ctx = h.ctx();
             sh.group.focus_child(aid, &mut ctx);
@@ -936,28 +949,35 @@ mod tests {
     }
 
     #[test]
-    fn focus_leaving_both_lists_releases_the_active_default() {
-        // Available focused → Add is the default. When focus then leaves both lists
-        // (e.g. onto OK/Cancel), Add must release so the dialog's own OK button
-        // retakes the default look.
+    fn focus_leaving_the_shuttle_releases_the_active_default() {
+        // Available focused → Add is the default. When focus then leaves the whole
+        // Shuttle group (Tab lands on the dialog's OK/Cancel), `set_state(Focused,
+        // false)` fires and Add must release so OK retakes the default look — even
+        // though `group.current()` still points (stickily) at the Available list.
         let mut sh = shuttle();
         let mut h = Harness::new();
         sh.set_available(vec![row("a")], &mut h.ctx());
         sh.set_selected(vec![row("x")], &mut h.ctx());
         let (aid, add) = (sh.avail_id, sh.add_id);
+        sh.group.state_mut().state.focused = true;
         {
             let mut ctx = h.ctx();
             sh.group.focus_child(aid, &mut ctx);
             sh.sync_move_commands(&mut ctx);
-            // Focus moves off both lists (as when Tab lands on OK/Cancel).
-            sh.group.set_current(None, tv::SelectMode::Normal, &mut ctx);
-            sh.sync_move_commands(&mut ctx);
+        }
+        // The dialog moves focus to a sibling (OK): the Shuttle loses sfFocused.
+        {
+            let mut ctx = h.ctx();
+            View::set_state(&mut sh, StateFlag::Focused, false, &mut ctx);
         }
         assert_eq!(
             h.button_default(add),
             Some(false),
-            "Add releases the default look when focus leaves both lists"
+            "Add releases the default look when the Shuttle loses focus"
         );
+        // current() is still sticky at the Available list — proving the release is
+        // driven by the focus flag, not by currency.
+        assert_eq!(sh.group.current(), Some(aid), "current stays sticky");
     }
 
     fn row(key: &str) -> ShuttleRow {
