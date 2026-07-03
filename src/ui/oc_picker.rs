@@ -113,7 +113,7 @@ pub(crate) struct ObjectClassPicker {
 
 impl ObjectClassPicker {
     fn new(all_rows: Vec<ShuttleRow>, ticked: BTreeSet<String>, shared: Shared) -> Self {
-        let mut dlg = Dialog::new(Rect::new(0, 0, 72, 22), Some("Object classes".to_string()));
+        let mut dlg = Dialog::new(Rect::new(0, 0, 72, 25), Some("Object classes".to_string()));
         dlg.state_mut().options.center_x = true;
         dlg.state_mut().options.center_y = true;
 
@@ -123,7 +123,7 @@ impl ObjectClassPicker {
         // then makes it current, so key events route into it (and reach the
         // Available list inside it).
         let shuttle = Shuttle::new(
-            Rect::new(0, 0, 72, 22),
+            Rect::new(0, 0, 72, 25),
             "Available",
             "Active",
             /* find */ FindMode::Filter,

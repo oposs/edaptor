@@ -106,6 +106,20 @@ impl ShuttleModel {
     }
 }
 
+/// The rect of every `Shuttle` child, computed from the widget area by
+/// [`Shuttle::layout`]. Kept as a plain record so `new` and `change_bounds`
+/// derive identical geometry.
+struct ShuttleLayout {
+    left_header: Rect,
+    right_header: Rect,
+    avail_list: Rect,
+    avail_bar: Rect,
+    sel_list: Rect,
+    sel_bar: Rect,
+    add_btn: Rect,
+    remove_btn: Rect,
+}
+
 /// The two-list transfer widget. Embeds a `Group` that owns the column lists,
 /// their scroll bars and the Add/Remove buttons; the
 /// move logic lives in [`ShuttleModel`]. A `View` in its own right (the impl is
@@ -117,108 +131,124 @@ pub(crate) struct Shuttle {
     model: ShuttleModel,
     avail_id: ViewId,
     selected_id: ViewId,
+    // Stored for change_bounds geometry reflow (Task 4); not yet read.
+    #[allow(dead_code)]
+    left_header_id: ViewId,
+    #[allow(dead_code)]
+    right_header_id: ViewId,
+    #[allow(dead_code)]
+    avail_bar_id: ViewId,
+    #[allow(dead_code)]
+    sel_bar_id: ViewId,
+    // Used in tests and will be used in change_bounds (Task 4).
+    #[allow(dead_code)]
+    add_id: ViewId,
+    #[allow(dead_code)]
+    remove_id: ViewId,
 }
 
 impl Shuttle {
+    /// Minimum interior the two columns + button rows need before they overlap.
+    const MIN_W: i32 = 60;
+    const MIN_H: i32 = 20;
+
+    /// Every child rect derived purely from the widget's `area`. Extracted from
+    /// `new` so a resize (`change_bounds`) can recompute the same geometry.
+    fn layout(area: Rect) -> ShuttleLayout {
+        // Clamp the working extent so a too-small area never yields overlapping
+        // or inverted rects (the window's drag limit is the first defence; this
+        // is the backstop).
+        let x0 = area.a.x;
+        let y0 = area.a.y;
+        let x1 = x0 + (area.b.x - x0).max(Self::MIN_W);
+        let y1 = y0 + (area.b.y - y0).max(Self::MIN_H);
+
+        let mid = (x0 + x1) / 2;
+        let left = (x0 + 2, mid - 2);
+        let right = (mid + 2, x1 - 2);
+        let head_y = y0 + 1;
+        // Reserve the bottom: OK/Cancel land at y1-3 (dialog button_row); the
+        // wide Add/Remove row sits two rows above at y1-6..y1-4, so the lists end
+        // at y1-7.
+        let list_top = y0 + 2;
+        let list_bot = y1 - 7;
+        let btn_top = y1 - 6;
+        let btn_bot = y1 - 4;
+
+        ShuttleLayout {
+            left_header: Rect::new(left.0, head_y, left.1, head_y + 1),
+            right_header: Rect::new(right.0, head_y, right.1, head_y + 1),
+            avail_list: Rect::new(left.0, list_top, left.1 - 1, list_bot),
+            avail_bar: Rect::new(left.1 - 1, list_top, left.1, list_bot),
+            sel_list: Rect::new(right.0, list_top, right.1 - 1, list_bot),
+            sel_bar: Rect::new(right.1 - 1, list_top, right.1, list_bot),
+            add_btn: Rect::new(left.0, btn_top, left.1, btn_bot),
+            remove_btn: Rect::new(right.0, btn_top, right.1, btn_bot),
+        }
+    }
+
     /// Build the two columns (each a list + a right-lane scroll bar) inside an
     /// owned `Group`. `find_mode` enables the Available list's built-in
     /// incremental search ([`FindMode::Off`] for none). The Available column is
     /// always rendered on the LEFT, the Selected column on the RIGHT (the
     /// conventional transfer-widget layout). Geometry: headers at row 1, lists at
-    /// rows 2..(height-4), 2-cell margins and a 4-cell gutter.
+    /// rows 2..(height-7), 2-cell margins and a 4-cell gutter; a wide Add/Remove
+    /// button row sits at height-6..height-4.
     pub(crate) fn new(
         area: Rect,
         left_title: &str,
         right_title: &str,
         find_mode: FindMode,
     ) -> Shuttle {
-        let (x0, y0, x1, y1) = (area.a.x, area.a.y, area.b.x, area.b.y);
-        let mid = (x0 + x1) / 2;
-        let left = (x0 + 2, mid - 2);
-        let right = (mid + 2, x1 - 2);
-        let head_y = y0 + 1;
-        let list_y = (y0 + 2, y1 - 4);
-        let avail_col = left;
-        let sel_col = right;
-
+        let l = Self::layout(area);
         let mut group = Group::new(area);
+        // Fill the owner on resize: the dialog's change_bounds cascade resizes
+        // this widget, and our own change_bounds reflows the children.
+        group.state_mut().grow_mode.hi_x = true;
+        group.state_mut().grow_mode.hi_y = true;
 
-        // Static column headers over the physical left/right columns.
-        group.insert(Box::new(Label::new(
-            Rect::new(left.0, head_y, left.1, head_y + 1),
-            left_title,
-            None,
-        )));
-        group.insert(Box::new(Label::new(
-            Rect::new(right.0, head_y, right.1, head_y + 1),
-            right_title,
-            None,
-        )));
+        let left_header_id = group.insert(Box::new(Label::new(l.left_header, left_title, None)));
+        let right_header_id = group.insert(Box::new(Label::new(l.right_header, right_title, None)));
 
-        // Available column: a SortedListBox (type-to-search + incremental find)
-        // wired to a bar.
-        let avail_bar = group.insert(Box::new(ScrollBar::new(Rect::new(
-            avail_col.1 - 1,
-            list_y.0,
-            avail_col.1,
-            list_y.1,
-        ))));
+        // Available column (left): SortedListBox + scroll bar.
+        let avail_bar_id = group.insert(Box::new(ScrollBar::new(l.avail_bar)));
         let avail_id = group.insert(Box::new(
-            SortedListBox::new(
-                Rect::new(avail_col.0, list_y.0, avail_col.1 - 1, list_y.1),
-                1,
-                None,
-                Some(avail_bar),
-            )
-            .with_find(find_mode),
+            SortedListBox::new(l.avail_list, 1, None, Some(avail_bar_id)).with_find(find_mode),
         ));
 
-        // Selected column: a plain ListBox (insertion order) wired to a bar.
-        let selected_bar = group.insert(Box::new(ScrollBar::new(Rect::new(
-            sel_col.1 - 1,
-            list_y.0,
-            sel_col.1,
-            list_y.1,
-        ))));
-        // The Selected list gets `FindMode::Filter` — the same incremental search
-        // the Available list does (narrow-as-you-type), over the local staged set:
-        // typing while it holds focus narrows it to matching rows (and consumes the
-        // letters, so they no longer leak to the Add/Remove button hotkeys). It
-        // never re-queries a server (a local set). Because Filter narrows the
-        // display, the focused row is mapped back to the model by label in
-        // [`selected_highlight`] (as the Available list already does).
+        // Selected column (right): plain ListBox (insertion order) + scroll bar.
+        // FindMode::Filter narrows the local staged set as the user types (so
+        // letters never leak to the Add/Remove hotkeys).
+        let sel_bar_id = group.insert(Box::new(ScrollBar::new(l.sel_bar)));
         let selected_id = group.insert(Box::new(
-            ListBox::new(
-                Rect::new(sel_col.0, list_y.0, sel_col.1 - 1, list_y.1),
-                1,
-                None,
-                Some(selected_bar),
-            )
-            .with_find(FindMode::Filter),
+            ListBox::new(l.sel_list, 1, None, Some(sel_bar_id)).with_find(FindMode::Filter),
         ));
 
-        // On-screen affordances for the move keys (which are not discoverable),
-        // left-aligned on the bottom button row. Alt-A / Alt-R shortcuts work
-        // even while another child holds focus.
-        let btn_top = y1 - 3;
-        group.insert(Box::new(Button::new(
-            Rect::new(x0 + 2, btn_top, x0 + 12, btn_top + 2),
-            "~A~dd",
-            CMD_ADD,
-            ButtonFlags::new(),
-        )));
-        group.insert(Box::new(Button::new(
-            Rect::new(x0 + 14, btn_top, x0 + 26, btn_top + 2),
-            "~R~emove",
-            CMD_REMOVE,
-            ButtonFlags::new(),
-        )));
+        // Wide move buttons, each spanning the column it acts on: Add under the
+        // Available (left) column, Remove under the Selected (right). Both are
+        // marked non-selectable so Tab skips them (they stay operable by click,
+        // Alt-A / Alt-R, and Insert/Delete/Enter on the focused list). Non-
+        // selectable does not disable pre/post-process, so the Alt hotkey still
+        // fires.
+        let mut add = Button::new(l.add_btn, "~A~dd", CMD_ADD, ButtonFlags::new());
+        add.state_mut().options.selectable = false;
+        let add_id = group.insert(Box::new(add));
+
+        let mut remove = Button::new(l.remove_btn, "~R~emove", CMD_REMOVE, ButtonFlags::new());
+        remove.state_mut().options.selectable = false;
+        let remove_id = group.insert(Box::new(remove));
 
         Shuttle {
             group,
             model: ShuttleModel::default(),
             avail_id,
             selected_id,
+            left_header_id,
+            right_header_id,
+            avail_bar_id,
+            sel_bar_id,
+            add_id,
+            remove_id,
         }
     }
 
@@ -687,6 +717,52 @@ mod tests {
     }
 
     #[test]
+    fn layout_splits_columns_and_places_wide_buttons() {
+        let l = Shuttle::layout(Rect::new(0, 0, 72, 25));
+        // Two columns split at the midpoint (36), 2-cell margins, 4-cell gutter.
+        assert_eq!(l.avail_list.a.x, 2, "Available list starts at left margin");
+        assert!(
+            l.avail_list.b.x <= 34,
+            "Available list ends before the gutter"
+        );
+        assert!(
+            l.sel_list.a.x >= 38,
+            "Selected list starts after the gutter"
+        );
+        assert_eq!(
+            l.sel_list.b.x, 69,
+            "Selected list ends before its scrollbar"
+        );
+        // Add spans the Available (left) column; Remove spans the Selected (right).
+        assert_eq!(
+            l.add_btn.a.x, l.avail_list.a.x,
+            "Add left edge aligns Available column"
+        );
+        assert_eq!(
+            l.remove_btn.a.x, l.sel_list.a.x,
+            "Remove left edge aligns Selected column"
+        );
+        assert!(
+            l.add_btn.b.x - l.add_btn.a.x >= 20,
+            "Add is a wide button, got {}",
+            l.add_btn.b.x - l.add_btn.a.x
+        );
+        assert!(
+            l.remove_btn.b.x - l.remove_btn.a.x >= 20,
+            "Remove is a wide button"
+        );
+        // The button row sits above where the dialog's OK/Cancel row lands (y-3),
+        // with a spacer: buttons top at height-6.
+        assert_eq!(l.add_btn.a.y, 25 - 6, "button row two rows above OK/Cancel");
+        assert_eq!(l.remove_btn.a.y, 25 - 6);
+        // Lists end above the button row.
+        assert!(
+            l.avail_list.b.y <= l.add_btn.a.y,
+            "lists clear the button row"
+        );
+    }
+
+    #[test]
     fn move_in_appends_available_row_to_selected() {
         let mut m = ShuttleModel::default();
         m.set_available(vec![row("a"), row("b")]);
@@ -743,7 +819,7 @@ mod tests {
 
     fn shuttle() -> Shuttle {
         Shuttle::new(
-            Rect::new(0, 0, 72, 22),
+            Rect::new(0, 0, 72, 25),
             "Active",
             "Available",
             FindMode::Filter,
@@ -848,9 +924,9 @@ mod tests {
             "test premise: the two surfaces must differ"
         );
 
-        let mut buf = Buffer::new(72, 22);
+        let mut buf = Buffer::new(72, 25);
         {
-            let mut dc = DrawCtx::new(&mut buf, &theme, Rect::new(0, 0, 72, 22), Point::new(0, 0));
+            let mut dc = DrawCtx::new(&mut buf, &theme, Rect::new(0, 0, 72, 25), Point::new(0, 0));
             dc.set_owner_active(true); // the dialog/pane is active
             sh.draw(&mut dc);
         }
@@ -1084,6 +1160,19 @@ mod tests {
             text.iter().any(|s| s.ends_with("beta")),
             "beta must appear, got {text:?}"
         );
+    }
+
+    #[test]
+    fn move_buttons_are_not_tab_stops() {
+        let mut sh = shuttle();
+        for id in [sh.add_id, sh.remove_id] {
+            let selectable = sh
+                .group
+                .child_mut(id)
+                .map(|c| c.state().options.selectable)
+                .expect("button present");
+            assert!(!selectable, "move buttons must be skipped by Tab traversal");
+        }
     }
 
     #[test]

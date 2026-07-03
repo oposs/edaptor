@@ -147,7 +147,7 @@ pub(crate) struct MultiPickerDialog {
 impl MultiPickerDialog {
     fn new(label: String, binding: PickerBinding, current: Vec<String>, shared: Shared) -> Self {
         let title = format!("Edit {label}");
-        let mut dlg = Dialog::new(Rect::new(0, 0, 80, 22), Some(title));
+        let mut dlg = Dialog::new(Rect::new(0, 0, 80, 25), Some(title));
         dlg.state_mut().options.center_x = true;
         dlg.state_mut().options.center_y = true;
 
@@ -157,7 +157,7 @@ impl MultiPickerDialog {
         // dialog's first selectable child (the modal's open-time reset_current
         // then makes it current, and focus reaches the Available list inside it).
         let shuttle = Shuttle::new(
-            Rect::new(0, 0, 80, 22),
+            Rect::new(0, 0, 80, 25),
             "Available",
             "Members",
             /* find */ FindMode::Highlight,
