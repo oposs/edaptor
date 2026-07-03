@@ -2,6 +2,16 @@
 
 A schema-driven TUI LDAP editor (Rust + tvision-rs). Read this before touching the repo.
 
+## Start here: read the handover
+
+`docs/HANDOVER.md` carries the **current concern** into each session — what is
+in-flight, what to do next, and the load-bearing facts for it. Read it right after
+pulling. Right now it covers the `feat/shuttle-widget` buttons + resizable-dialog
+work (Tasks 1–4 committed; Task 4 review + manual resize check + Task 5 docs
+remain), driven with the `superpowers:subagent-driven-development` skill against the
+plan in `docs/superpowers/plans/2026-07-03-shuttle-buttons-resize.md` and the SDD
+ledger `.superpowers/sdd/progress.md`.
+
 ## At the start of every session: pull first
 
 This repo is developed across machines and commits often land directly on `main`.
