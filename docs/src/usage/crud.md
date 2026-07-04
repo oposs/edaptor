@@ -14,14 +14,25 @@ so every editable attribute appears with the right cardinality and the
 read-only / system attributes are shown but not editable.
 
 1. Focus the form pane (`Tab` until the **Entry** pane has the double border).
-2. Move between fields with `↑↓`, open the highlighted field with `↵`, and type
-   the new value.
-3. As soon as a value differs from what was read, the form is **dirty**: a `*`
+2. Move between fields with `↑↓`. The **bottom status line** shows
+   context-sensitive editing hints for the focused field.
+3. **Single-value text fields** — type directly into the field.
+4. **Multi-value free-text and ordered fields** — the field renders as an inline
+   bulleted list; type, use **Enter** to add an item, **Backspace** to remove
+   characters (and empty items), **↑/↓** to move between items, and
+   **Ctrl+↑/↓** (or the `≡` handle via **←** at offset 0) to reorder ordered
+   fields. See [Inline multi-value editing](../configuration/widgets.md#inline-multi-value-editing)
+   for the full key reference.
+5. **Object-class, membership, picker, choice, and password fields** — the
+   field shows a read-only block (`<not set>` if empty, `*****` for passwords)
+   that highlights as a whole when focused. Press any action key (or **Enter**)
+   to open the field's editor modal.
+6. As soon as a value differs from what was read, the form is **dirty**: a `*`
    appears next to the DN in the status line.
-4. Press **`Alt+S`** to save. eDAPtor diffs your edits against the original
+7. Press **`Alt+S`** to save. eDAPtor diffs your edits against the original
    entry, builds the change, shows the LDIF preview, and applies it on
    confirmation. If nothing actually changed, it reports that instead of writing.
-5. Press **`Alt+C`** to cancel, reverting the form to the last-read values.
+8. Press **`Alt+C`** to cancel, reverting the form to the last-read values.
 
 ### Changing objectClasses
 

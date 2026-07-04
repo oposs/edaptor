@@ -3,9 +3,7 @@
 A `[profile.widget.<attr>]` binding gives the field for attribute `<attr>` a
 **richer editor than a plain text box**. It is eDAPtor's extensible *widget
 palette*: the required `kind` key selects the behaviour, and each kind brings its
-own editor and storage rules. Pressing **Enter** on a widget-bound field opens
-that kind's editor; the field is read-only to inline typing and shows a
-human-readable summary (or masked bullets) the rest of the time.
+own display and editing rules.
 
 Four kinds are available today, and more can be added without changing existing
 configuration:
@@ -326,10 +324,10 @@ Built-in assignments: `memberOf` (all standard object classes), `sambaNTPassword
 ### `x_ordered`
 
 For OpenLDAP **X-ORDERED** multi-value attributes (e.g. `olcAccess`,
-`olcDbIndex`). Pressing Enter opens an ordered list editor where you can add
-new values, delete existing ones, and reorder them with **Alt+↑** / **Alt+↓**.
-The `{n}` ordering prefix is hidden in the editor and regenerated from row
-order when the entry is saved. Changing the set of values or their order
+`olcDbIndex`). These are edited **in place** in the entry form as a bulleted
+list, with full reorder support (see [Inline multi-value editing](#inline-multi-value-editing)
+below). The `{n}` ordering prefix is hidden during editing and regenerated from
+row order when the entry is saved. Changing the set of values or their order
 produces a single `REPLACE` operation.
 
 ```toml
@@ -341,27 +339,57 @@ Built-in assignments: `olcAccess`, `olcDbIndex`, `olcSuffix`, `olcRootDN`,
 `olcLimits`, `olcSyncrepl` (all under the `olcGlobal` / `olcDatabaseConfig`
 object classes).
 
-## Multi-value Editor (auto-injected)
+## Inline multi-value editing
 
-Any attribute that holds more than one value receives an **auto-injected
-multi-value editor** when you press Enter on the field. No configuration is
-needed. The editor presents a row list of current values above an edit line:
+Any multi-value attribute that accepts free-text or ordered values is edited
+**in place** in the entry form — no modal dialog. The field renders as a
+bulleted list (`- value`) that grows and shrinks live as you add or remove
+items. An empty field shows `<not set>`. No configuration is needed for this
+behaviour.
 
-| Action | Keyboard | Button |
-|--------|----------|--------|
-| Add a new value | Insert | **[+ Add]** |
-| Delete the selected row | Delete | **[- Del]** |
-| Reorder rows | Alt+↑ / Alt+↓ | — |
-| Edit the selected row | ↵ | — |
+### Key bindings
 
-Empty rows are dropped automatically when the editor is committed. Row order is
-preserved in the stored values; it is only semantically meaningful for
-`x_ordered` attributes (e.g. `olcAccess`), but reordering is available for all
-multi-value fields. The committed
-result is staged in the form and written as part of the normal Save flow.
+| Key | Action |
+|-----|--------|
+| **Printable char** | Insert character at cursor. On an empty field the first keystroke creates the first item. |
+| **Enter** | Split the current item at the cursor — text after the cursor becomes a new item below; at end of item adds a new empty item. |
+| **Ctrl+Enter** | Insert a continuation line (`\n`) within the current item. |
+| **Backspace** | Delete the character before the cursor. At offset 0 of an item, merge this item into the previous one; backspace once more on an empty item to remove its `- ` marker entirely. At the start of the first item, does nothing. |
+| **Delete** | Delete the character after the cursor. At the end of an item, pull the next item up (merge). |
+| **←** / **→** | Move cursor left / right within the item. |
+| **Home** / **End** | Move cursor to the start / end of the item. |
+| **↑** / **↓** | Move cursor to the item above / below. Crossing the top or bottom edge of the field moves focus to the neighbouring field. |
 
-X-ORDERED attributes (e.g. `olcAccess`) use the [`x_ordered`](#x_ordered)
-widget instead, which manages the `{n}` ordering prefix automatically.
+### Reordering (ordered / X-ORDERED fields)
+
+`x_ordered` attributes (e.g. `olcAccess`) additionally support two reorder
+mechanics that plain multi-value fields do not:
+
+| Key | Action |
+|-----|--------|
+| **Ctrl+↑** / **Ctrl+↓** | Move the current item up / down regardless of cursor position. |
+| **←** at offset 0 | Move the cursor onto the `≡` handle. While on the handle, plain **↑** / **↓** move the item up / down; **→** (or any printable key) returns the cursor to the text. |
+
+The `{n}` ordering prefix is hidden during editing and regenerated from row
+order on save.
+
+### Commit and empty state
+
+Empty rows are dropped automatically when focus leaves the field or the entry
+is saved. Removing the last item reverts the field to `<not set>`. The result
+feeds directly into `EditField.values` — the same changeset/diff path as
+single-value fields; no new write path is introduced.
+
+### Footer hints
+
+The bottom status line shows context-sensitive hints for the focused field:
+
+| Focused field state | Hint |
+|---------------------|------|
+| `ListValueView`, has items | `Enter add · Ctrl-Enter newline · Backspace empties→removes · ↑↓ move` |
+| `ListValueView`, ordered (has items) | appends `· Ctrl-↑↓ or ← handle to reorder` |
+| `ListValueView`, empty | `Type to add first value` |
+| `ListValueView`, on `≡` handle | `↑↓ reorder · → back to text` |
 
 ## `objectClass` Editor (auto-injected)
 

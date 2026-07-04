@@ -43,13 +43,14 @@ accent colour, which ASCII cannot show.)*
   highlights the match; Backspace widens, Esc clears). Moving the highlight with
   `↑↓` selects the current entry and loads it into the form.
 
-- **Entry (detail/edit form)** — a scrollable form for the selected entry, one
-  row per attribute (label on the left, value on the right). The form is
-  generated from the entry's `objectClass` definitions in the live schema, so it
-  always matches what the directory actually allows. It re-loads as you move the
-  highlight in the entry list. The pane title shows the current DN (or
-  `New entry` while creating). Move between fields with `↑↓`, open a field for
-  editing with `↵`.
+- **Entry (detail/edit form)** — a scrollable form for the selected entry. Each
+  attribute is a variable-height block: single-value text fields show one line;
+  multi-value fields expand to fit their values as an inline bulleted list. The
+  form is generated from the entry's `objectClass` definitions in the live schema,
+  so it always matches what the directory actually allows. It re-loads as you move
+  the highlight in the entry list. The pane title shows the current DN (or
+  `New entry` while creating). Move between fields with `↑↓`; the status line
+  shows context-sensitive editing hints for the focused field.
 
 ## Focus and the status line
 
@@ -82,7 +83,12 @@ follows focus and shows, in order:
 - the **focused pane's hotkeys**:
   - DIT — `↑↓ Move · ←→ Fold · Alt+R Refresh`
   - Entries — `↑↓ Select · Type to search · Alt+N New · Alt+D Del`
-  - Entry — `↑↓ Field · ↵ Edit · Alt+S Save · Alt+C Cancel`
+  - Entry — **dynamic hints** that update with the focused field's type and
+    state (e.g. `↑↓ move · Enter next field` for a plain text field,
+    `Enter add · Ctrl-Enter newline · Backspace empties→removes · ↑↓ move`
+    for an inline multi-value list, `any key: open picker · ↑↓ move` for a
+    launch field such as `objectClass` or `memberOf`). `Alt+S Save · Alt+C Cancel`
+    are always available.
 - `Alt+X Quit`, so the global quit is discoverable from anywhere;
 - last, the current DN with a trailing `*` when the form has unsaved edits.
 

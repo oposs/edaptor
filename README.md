@@ -25,9 +25,11 @@ overlays, and the Samba schema).
 
 **Working.** The core milestones are implemented on a three-pane tvision-rs
 interface: schema-driven create/edit/rename/delete, defaults and auto-numbering,
-inline passwords with the Samba lifecycle, unified candidate pickers, and
-symmetric membership editing. See the [documentation](https://oposs.github.io/edaptor)
-for usage, and `docs/superpowers/specs/` for the design specifications.
+inline passwords with the Samba lifecycle, unified candidate pickers, symmetric
+membership editing, and **inline multi-value editing** (free-text and ordered
+multi-value attributes are edited in place as a bulleted list — no modal). See
+the [documentation](https://oposs.github.io/edaptor) for usage, and
+`docs/superpowers/specs/` for the design specifications.
 
 ## Highlights of the design
 

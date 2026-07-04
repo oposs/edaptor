@@ -114,13 +114,6 @@ All notable changes to eDAPtor are documented here. The format follows
   chooser (or single-profile fast path), a create-mode form with
   auto-injected/editable objectClass and live DN, validated and submitted as an
   LDAP ADD.
-- **tvision UI:** multi-valued attributes are now editable via a modal editor
-  (a row list plus an edit line): add (Alt+a / Insert), delete (Alt+d /
-  Delete), reorder (Alt+Up / Alt+Down), and edit the selected row. Empty rows
-  are dropped on commit. This unblocks editing plain multi-valued attributes
-  (the form previously only allowed single-valued ones). X-ORDERED attributes
-  remain read-only in the tvision UI for now — editing them needs the `{n}`
-  ordering-prefix strip/reconstruct, which is deferred.
 - **tvision UI:** the `objectClass` field is now editable via a schema-seeded
   multi-select picker (search + tick). Changing the set regenerates the form's
   fields live — newly-allowed attributes appear, now-disallowed ones are marked
@@ -143,10 +136,11 @@ All notable changes to eDAPtor are documented here. The format follows
 
 - The entry form now lays out each attribute as **one variable-height block**
   instead of a single fixed row. Single-value text fields keep their inline
-  editor; multi-value, object-class, membership, picker, ordered and password
-  fields render as a **read-only block** — a bulleted list (`- value`), `<not set>`
-  when empty, or `*****` for secrets — that grows to fit its values. Pressing any
-  key (or Enter) on such a block opens its editor modal, exactly as before.
+  editor. Free-text and ordered multi-value fields are edited **in place** as a
+  bulleted list (no modal). Object-class, membership, picker, choice, and
+  password fields render as a **read-only block** — a bulleted list, `<not set>`
+  when empty, or `*****` for secrets — that highlights as a whole when focused;
+  pressing any action key on such a block opens its existing modal editor.
 
 - The main browser now splits its width **one-third / two-thirds**: the left
   column (branch tree + members list) takes a third and the entry form fills the
