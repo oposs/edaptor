@@ -4,6 +4,11 @@
 
 pub(crate) const NOT_SET: &str = "<not set>";
 
+/// The bullet marker rendered for the item currently in reorder-handle mode
+/// (see `ListModel`). A single-column glyph so the `"- "`/`"≡ "` prefixes stay
+/// the same display width.
+pub(crate) const HANDLE_MARKER: char = '≡';
+
 pub(crate) fn bullet_lines(values: &[String], strip_ordering: bool) -> Vec<String> {
     let cleaned: Vec<String> = values
         .iter()
@@ -19,11 +24,26 @@ pub(crate) fn bullet_lines(values: &[String], strip_ordering: bool) -> Vec<Strin
     if cleaned.is_empty() {
         return vec![NOT_SET.to_string()];
     }
+    format_items(&cleaned, None)
+}
+
+/// Format `items` (already stripped/cleaned by the caller) into display rows:
+/// each item's first line is `"- "` + text, continuation lines (after an
+/// embedded `\n`) are indented two spaces. `handle_item` renders that one item's
+/// first-line marker as [`HANDLE_MARKER`] instead of `-` (the live reorder
+/// handle). Unlike [`bullet_lines`], this does NOT filter blank items — the
+/// inline editor needs a row for the (possibly empty) line under the cursor.
+pub(crate) fn format_items(items: &[String], handle_item: Option<usize>) -> Vec<String> {
     let mut out = Vec::new();
-    for v in &cleaned {
+    for (idx, v) in items.iter().enumerate() {
+        let marker = if handle_item == Some(idx) {
+            HANDLE_MARKER
+        } else {
+            '-'
+        };
         for (i, line) in v.split('\n').enumerate() {
             out.push(if i == 0 {
-                format!("- {line}")
+                format!("{marker} {line}")
             } else {
                 format!("  {line}")
             });
