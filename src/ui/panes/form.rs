@@ -19,7 +19,7 @@ use crate::ui::panes::launch_view::LaunchValueView;
 use crate::ui::panes::list_view::ListValueView;
 use crate::ui::panes::value_lines::{bullet_lines, masked_line, NOT_SET};
 use crate::ui::scroll_group::ScrollGroup;
-use crate::ui::widget::{inline_editable, is_modal_field, present_field};
+use crate::ui::widget::{inline_editable, present_field};
 use crate::ui::{Shared, ACTIVATE, REFRESH};
 use crate::workflows::edit_form::{composed_create_dn, EditField, FormMode};
 
@@ -40,10 +40,12 @@ fn label_col_width(longest: i32, w: i32) -> i32 {
     (longest + LABEL_GAP).clamp(LABEL_MIN, cap)
 }
 
-/// A field's value cell is focusable if it is inline-editable OR a modal-activated
-/// field (objectClass): the latter is read-only text but must accept focus + Enter.
+/// A field's value cell is focusable when the user can interact with it:
+/// - `Text` inline-editable fields (single-value free text);
+/// - `List` inline-editor fields (multi-value, plain or XOrdered);
+/// - `Launch` modal-activated fields (objectClass, password, picker, …).
 fn cell_focusable(f: &EditField) -> bool {
-    inline_editable(f) || is_modal_field(f)
+    matches!(value_kind(f), ValueKind::List { .. } | ValueKind::Launch) || inline_editable(f)
 }
 
 /// Which value-view a field renders as in the form.
@@ -1196,9 +1198,8 @@ mod tests {
         let structure = Structure::build("dc=x", vec![]);
         let mut st =
             UiState::new_for_test(structure, schema, "dc=x".into(), Vec::new(), Vec::new());
-        // A read-only field is neither inline-editable nor modal, so it is
-        // skipped by focus cycling. (Multi-value editable fields ARE now modal —
-        // see `multivalue` — so they are focusable and can't serve as the skip.)
+        // A read-only field is neither inline-editable nor a List/Launch field,
+        // so it is skipped by focus cycling.
         let cn = ef("cn", "a", false);
         st.edit_form = Some(EditForm {
             dn: "cn=a,dc=x".into(),

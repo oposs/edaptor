@@ -9,7 +9,6 @@ pub(crate) mod theme;
 pub(crate) mod choice;
 pub mod dialog;
 pub(crate) mod multi_picker;
-pub(crate) mod multivalue;
 pub(crate) mod oc_picker;
 pub(crate) mod ordered;
 pub(crate) mod panes;

@@ -31,14 +31,6 @@ All notable changes to eDAPtor are documented here. The format follows
 - tvision UI: clicking a form **label** now focuses the corresponding input field
   directly, without needing to navigate to it with the arrow keys.
 
-- tvision UI: the multi-value attribute editor now shows visible **[+ Add]** /
-  **[- Del]** buttons; the keyboard shortcuts Insert / Delete continue to work as
-  before.
-
-- tvision UI: an **empty multi-value field** now shows the prompt
-  `<press ENTER to add Value(s)>` in its value cell instead of a bare em dash,
-  making the ENTER affordance discoverable.
-
 - tvision UI: the entry list now shows a **`Filter:`** label to the left of the
   incremental-search box, making the filter prompt immediately recognisable.
 
@@ -47,10 +39,6 @@ All notable changes to eDAPtor are documented here. The format follows
   configured `[samba] domain_sid`. When discovery succeeds, the algorithmic RID
   base is also taken from the directory (`sambaAlgorithmicRidBase`, default 1000),
   overriding any `[samba] algorithmic_rid_base` in config.
-
-- X-ORDERED attributes (`kind = "x_ordered"`) are now editable in the UI: an
-  ordered list editor (add / delete / Alt+↑/↓ reorder) that hides the `{n}`
-  ordering prefix and regenerates it from row order on save.
 
 - **The TUI is now Turbo-Vision–based.** The user interface was migrated from
   ratatui to [tvision-rs](https://github.com/oetiker/tvision-rs): a frameless
