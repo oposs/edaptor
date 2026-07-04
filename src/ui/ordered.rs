@@ -101,7 +101,9 @@ impl FieldWidget for OrderedWidget {
             .iter()
             .all(|v| strip_ordering(v).trim().is_empty())
         {
-            "\u{2014}".to_string() // em dash
+            // Empty multi-value field: prompt the user to open the editor rather
+            // than showing a bare em dash, so the ENTER affordance is discoverable.
+            "<press ENTER to add Value(s)>".to_string()
         } else {
             field
                 .values

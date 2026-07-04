@@ -30,7 +30,9 @@ impl FieldWidget for MultiValueWidget {
 
     fn present(&self, field: &EditField) -> String {
         if field.values.iter().all(|v| v.trim().is_empty()) {
-            "\u{2014}".to_string() // em dash
+            // Empty multi-value field: prompt the user to open the editor rather
+            // than showing a bare em dash, so the ENTER affordance is discoverable.
+            "<press ENTER to add Value(s)>".to_string()
         } else {
             field
                 .values
@@ -378,10 +380,10 @@ mod tests {
     }
 
     #[test]
-    fn present_empty_is_dash() {
+    fn present_empty_prompts_to_add() {
         let w = MultiValueWidget;
         let f = multi_field("mail", &[]);
-        assert_eq!(w.present(&f), "\u{2014}");
+        assert_eq!(w.present(&f), "<press ENTER to add Value(s)>");
     }
 
     // ----- Task 3: dialog --------------------------------------------------

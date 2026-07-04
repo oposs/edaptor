@@ -714,9 +714,12 @@ fn init_desktop(r: Rect, state: Shared) -> Option<Box<dyn View>> {
             .pane(leaf, Constraints::flex().min(3)),
     );
 
+    // Split the width one-third / two-thirds: the left column (tree + members)
+    // takes a single share, the form takes two — so the entry editor gets the
+    // larger 2/3 of the horizontal axis.
     let split = Splitter::cols()
-        .pane(left, Constraints::flex().min(16))
-        .pane(form, Constraints::flex().min(20))
+        .pane(left, Constraints::weight(1).min(16))
+        .pane(form, Constraints::weight(2).min(20))
         .joined();
 
     let split_id = win.insert_child(Box::new(split));

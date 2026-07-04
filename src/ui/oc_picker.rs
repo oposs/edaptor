@@ -123,19 +123,27 @@ impl ObjectClassPicker {
             grow: true,
             ..tv::WindowFlags::default()
         });
-        // Floor the resize at the embedded Shuttle's minimum: the Shuttle fills the
-        // dialog, so below this the columns hit their layout clamp and overflow the
-        // frame. tvision 0.10's settable window minimum governs the interactive
-        // corner-drag too (the bare Window floor is only 16×6).
-        dlg.set_min_size(tv::Point::new(Shuttle::MIN_W, Shuttle::MIN_H));
+        // Floor the resize at the Shuttle's content minimum PLUS this dialog's own
+        // chrome: 2 cols each side (frame + 1-cell breathing gap) and 6 rows
+        // vertically (top inset 2, spacer 1, OK/Cancel 2, bottom frame 1). tvision
+        // 0.10's settable window minimum governs the interactive corner-drag too
+        // (the bare Window floor is only 16×6).
+        dlg.set_min_size(tv::Point::new(Shuttle::MIN_W + 4, Shuttle::MIN_H + 6));
 
         // Conventional transfer layout: Available on the LEFT, Active (the
         // Selected set) on the RIGHT. Insert the Shuttle FIRST so it is the
         // dialog's first selectable child: the modal's open-time `reset_current`
         // then makes it current, so key events route into it (and reach the
         // Available list inside it).
+        //
+        // Position it in the interior with a 1-cell breathing gap inside the frame
+        // (top-left 2,2) and stop above the host's OK/Cancel row (bottom at H-4). A
+        // child spanning the frame border would sit on top of the frame's
+        // close/move/resize hot-zones and kill the close icon; keeping it off the
+        // border avoids that. grow_mode hi_x/hi_y shifts the far edges by the owner
+        // delta, so both the right gap and the OK/Cancel row survive a resize.
         let shuttle = Shuttle::new(
-            Rect::new(0, 0, 72, 25),
+            Rect::new(2, 2, 70, 21),
             "Available",
             "Active",
             /* find */ FindMode::Filter,
@@ -453,13 +461,38 @@ mod tests {
     #[test]
     fn dialog_resize_floor_matches_the_shuttle_minimum() {
         // set_min_size must reach the window: the picker delegates size_limits to
-        // the dialog, so a large-owner query reports the Shuttle floor (60×20),
-        // not tvision's bare 16×6 Window default. This is what stops an interactive
-        // drag from shrinking the dialog below its usable content size.
+        // the dialog, so a large-owner query reports the Shuttle floor, not
+        // tvision's bare 16×6 Window default. This is what stops an interactive
+        // drag from shrinking the dialog below its usable content size. The dialog
+        // floor is the Shuttle content minimum PLUS this dialog's chrome (2 cols each
+        // side, 6 rows for the top inset + spacer + OK/Cancel + bottom frame).
         let sh = shared();
         let view = build_view(&sh, &["person"]);
         let (min, _max) = view.size_limits(tv::Point::new(300, 100));
-        assert_eq!(min, tv::Point::new(Shuttle::MIN_W, Shuttle::MIN_H));
+        assert_eq!(min, tv::Point::new(Shuttle::MIN_W + 4, Shuttle::MIN_H + 6));
+    }
+
+    #[test]
+    fn shuttle_is_inset_off_the_frame_border() {
+        // Regression: the embedded Shuttle must NOT span the full dialog rect. A
+        // child covering the frame border sits on top of the frame's close / move /
+        // resize hot-zones in mouse routing (it is inserted after the frame, so it
+        // is in front), and the close icon silently does nothing. The Shuttle is
+        // inset into the interior (a 1-cell breathing gap inside the frame) so those
+        // hot-zones stay hittable.
+        let sh = shared();
+        let mut view = build_view(&sh, &["person"]);
+        let p = picker_mut(&mut view);
+        let b = p
+            .shuttle_mut()
+            .expect("shuttle present")
+            .state()
+            .get_bounds();
+        assert!(
+            b.a.x >= 2 && b.a.y >= 2,
+            "shuttle top-left must clear the frame border + breathing gap (was {:?})",
+            b.a
+        );
     }
 
     #[test]

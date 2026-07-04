@@ -150,35 +150,43 @@ pub(crate) struct Shuttle {
 }
 
 impl Shuttle {
-    /// Minimum interior the two columns + button rows need before they overlap.
-    /// `pub(crate)` so a host dialog can pin its resize floor to the same values
-    /// via `Dialog::set_min_size` (the Shuttle fills the dialog, so the window must
-    /// not shrink below this or the columns hit the layout clamp and overflow).
-    pub(crate) const MIN_W: i32 = 60;
-    pub(crate) const MIN_H: i32 = 20;
+    /// Minimum widget size the two columns + header/button rows need before they
+    /// overlap. This is the Shuttle's OWN content floor (edge-to-edge, no outer
+    /// padding); a host that frames the widget and adds an OK/Cancel row pins its
+    /// window resize floor to these plus its own margins (see the pickers).
+    pub(crate) const MIN_W: i32 = 56;
+    pub(crate) const MIN_H: i32 = 16;
 
     /// Every child rect derived purely from the widget's `area`. Extracted from
     /// `new` so a resize (`change_bounds`) can recompute the same geometry.
     fn layout(area: Rect) -> ShuttleLayout {
-        // Clamp the working extent so a too-small area never yields overlapping
-        // or inverted rects (the window's drag limit is the first defence; this
-        // is the backstop).
-        let x0 = area.a.x;
-        let y0 = area.a.y;
-        let x1 = x0 + (area.b.x - x0).max(Self::MIN_W);
-        let y1 = y0 + (area.b.y - y0).max(Self::MIN_H);
+        // Child rects are GROUP-relative (0-based): a tvision `Group` positions each
+        // child from its own top-left, so the widget's placement (`area.a`) does not
+        // enter here — only its size does. (Basing the rects on `area.a` would
+        // double-offset every child once the host inserts the Shuttle away from the
+        // origin.) Clamp the working extent so a too-small area never yields
+        // overlapping or inverted rects (the window's drag limit is the first
+        // defence; this is the backstop).
+        let x0 = 0;
+        let y0 = 0;
+        let x1 = (area.b.x - area.a.x).max(Self::MIN_W);
+        let y1 = (area.b.y - area.a.y).max(Self::MIN_H);
 
+        // Two columns fill the width edge-to-edge, split by a 2-cell gutter at the
+        // midpoint. The widget carries NO outer padding: it owns exactly its bounds
+        // and nothing else. The host places it (the frame inset, breathing room, and
+        // the OK/Cancel row all live in the host, not here).
         let mid = (x0 + x1) / 2;
-        let left = (x0 + 2, mid - 2);
-        let right = (mid + 2, x1 - 2);
-        let head_y = y0 + 1;
-        // Reserve the bottom: OK/Cancel land at y1-3 (dialog button_row); the
-        // wide Add/Remove row sits two rows above at y1-6..y1-4, so the lists end
-        // at y1-7.
-        let list_top = y0 + 2;
-        let list_bot = y1 - 7;
-        let btn_top = y1 - 6;
-        let btn_bot = y1 - 4;
+        let left = (x0, mid - 1);
+        let right = (mid + 1, x1);
+        // Headers on the top row; the wide Add/Remove buttons on the bottom two
+        // rows; the lists fill the space between, with one spacer row above the
+        // button row.
+        let head_y = y0;
+        let list_top = y0 + 1;
+        let btn_bot = y1;
+        let btn_top = y1 - 2;
+        let list_bot = btn_top - 1;
 
         ShuttleLayout {
             left_header: Rect::new(left.0, head_y, left.1, head_y + 1),
@@ -196,9 +204,11 @@ impl Shuttle {
     /// owned `Group`. `find_mode` enables the Available list's built-in
     /// incremental search ([`FindMode::Off`] for none). The Available column is
     /// always rendered on the LEFT, the Selected column on the RIGHT (the
-    /// conventional transfer-widget layout). Geometry: headers at row 1, lists at
-    /// rows 2..(height-7), 2-cell margins and a 4-cell gutter; a wide Add/Remove
-    /// button row sits at height-6..height-4.
+    /// conventional transfer-widget layout). Geometry is **edge-to-edge**: headers
+    /// on the top row, the wide Add/Remove buttons on the bottom two rows, the two
+    /// lists (split by a 2-cell gutter) filling the space between. The widget has no
+    /// outer padding — position it via its `area`, so the host owns any frame inset,
+    /// breathing room, and its own OK/Cancel row.
     pub(crate) fn new(
         area: Rect,
         left_title: &str,
@@ -1006,19 +1016,24 @@ mod tests {
     #[test]
     fn layout_splits_columns_and_places_wide_buttons() {
         let l = Shuttle::layout(Rect::new(0, 0, 72, 25));
-        // Two columns split at the midpoint (36), 2-cell margins, 4-cell gutter.
-        assert_eq!(l.avail_list.a.x, 2, "Available list starts at left margin");
+        // Edge-to-edge: the columns start at the widget's own left edge (x0 = 0),
+        // split at the midpoint (36) with a 2-cell gutter, and the Selected column
+        // runs to the right edge.
+        assert_eq!(
+            l.avail_list.a.x, 0,
+            "Available list starts at the left edge"
+        );
         assert!(
-            l.avail_list.b.x <= 34,
+            l.avail_list.b.x <= 35,
             "Available list ends before the gutter"
         );
         assert!(
-            l.sel_list.a.x >= 38,
+            l.sel_list.a.x >= 37,
             "Selected list starts after the gutter"
         );
         assert_eq!(
-            l.sel_list.b.x, 69,
-            "Selected list ends before its scrollbar"
+            l.sel_list.b.x, 71,
+            "Selected list ends before its scrollbar (widget right edge)"
         );
         // Add spans the Available (left) column; Remove spans the Selected (right).
         assert_eq!(
@@ -1038,13 +1053,14 @@ mod tests {
             l.remove_btn.b.x - l.remove_btn.a.x >= 20,
             "Remove is a wide button"
         );
-        // The button row sits above where the dialog's OK/Cancel row lands (y-3),
-        // with a spacer: buttons top at height-6.
-        assert_eq!(l.add_btn.a.y, 25 - 6, "button row two rows above OK/Cancel");
-        assert_eq!(l.remove_btn.a.y, 25 - 6);
-        // Lists end above the button row.
+        // Headers on the top row; Add/Remove on the bottom two rows (edge-to-edge).
+        assert_eq!(l.left_header.a.y, 0, "headers on the widget's top row");
+        assert_eq!(l.add_btn.b.y, 25, "button row flush with the bottom edge");
+        assert_eq!(l.add_btn.a.y, 25 - 2, "button row is two rows tall");
+        assert_eq!(l.remove_btn.a.y, 25 - 2);
+        // Lists end above the button row (with a spacer).
         assert!(
-            l.avail_list.b.y <= l.add_btn.a.y,
+            l.avail_list.b.y < l.add_btn.a.y,
             "lists clear the button row"
         );
     }
@@ -1482,11 +1498,14 @@ mod tests {
             Some(sh.selected_id),
             "a wheel over the right column scrolls the right (Selected) list"
         );
-        // Outside both list columns (e.g. the far gutter) → no column to scroll.
+        // Over neither list (the gutter between the columns, past the left list's
+        // scrollbar and before the right list) → no column to scroll. With the
+        // edge-to-edge layout the left column now starts at x0, so the "outside"
+        // case is the central gutter, not a left margin.
         assert_eq!(
-            sh.wheel_target_list(0),
+            sh.wheel_target_list(35),
             None,
-            "left of both columns: no target"
+            "the gutter between columns: no target"
         );
     }
 

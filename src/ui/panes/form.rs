@@ -374,7 +374,6 @@ impl FormPane {
         let preserved = keep_focus_idx
             .and_then(|i| self.value_ids.get(i).copied())
             .filter(|id| self.focusable_value_ids().contains(id));
-        let fresh = preserved.is_none();
         let target = preserved.or_else(|| self.focusable_value_ids().first().copied());
         if let Some(id) = target {
             let scroll_id = self.scroll_id;
@@ -382,12 +381,14 @@ impl FormPane {
             if let Some(sg) = self.scroll_mut() {
                 sg.focus_child(id, ctx);
             }
-            // On a fresh entry, start with the caret at the beginning of the field
-            // (no select-all block); a width-only reflow keeps the caret where it
-            // was so a splitter drag doesn't disturb an in-progress edit.
-            if fresh {
-                self.place_cursor_home(id);
-            }
+            // Always land with the caret homed to the start of the value (not the
+            // select-all-to-end block Turbo Vision leaves on focus). This covers a
+            // fresh entry, a re-render of the same form (background refresh: an
+            // async autonumber result, a discard), and a width reflow. Plain
+            // keystroke editing never re-renders (it does not flag
+            // form_needs_render), so this can only home a field the user is not
+            // actively typing into.
+            self.place_cursor_home(id);
         }
     }
 
@@ -402,11 +403,13 @@ impl FormPane {
             .and_then(|v| v.as_any_mut())
             .and_then(|a| a.downcast_mut::<InputLine>())
         {
-            il.cur_pos = 0;
-            il.first_pos = 0;
-            il.sel_start = 0;
-            il.sel_end = 0;
-            il.anchor = 0;
+            // `home()` moves the caret to offset 0, collapses the selection, and
+            // scrolls the field fully left. tvision-rs 0.11+ derives the screen
+            // cursor from `cur_pos`/`first_pos` in `cursor_request`, so homing is
+            // reflected on the next pump with no manual cursor resync. (The Turbo
+            // Vision default select-alls a field to the end on focus; this is what
+            // undoes that so the first keystroke does not wipe the value.)
+            il.home();
         }
     }
 
@@ -1300,6 +1303,80 @@ mod tests {
         );
         // A point below the last field is not a label hit.
         assert_eq!(pane.value_id_for_label_hit(Point::new(5, 8)), None);
+    }
+
+    /// Read `(cur_pos, first_pos)` of the currently focused value InputLine, if
+    /// any. In tvision-rs 0.11+ the screen cursor is derived from these two in
+    /// `cursor_request` (`x = displayed_pos(cur_pos) - first_pos + 1`), so a homed
+    /// field is exactly `(0, 0)` — asserting on them fully pins the rendered
+    /// cursor without depending on the focus/visibility gate of `cursor_request`.
+    fn focused_caret(pane: &mut FormPane) -> Option<(i32, i32)> {
+        let cur = pane.scroll_mut().and_then(|sg| sg.current())?;
+        pane.scroll_mut()
+            .and_then(|sg| sg.child_mut(cur))
+            .and_then(|v| v.as_any_mut())
+            .and_then(|a| a.downcast_mut::<InputLine>())
+            .map(|il| (il.cur_pos, il.first_pos))
+    }
+
+    #[test]
+    fn navigating_fields_homes_the_caret() {
+        // Moving Down/Up onto a field must land the caret at the START of the
+        // value, not the end (Turbo Vision select-alls on focus, cursor at end).
+        use crate::ldap::worker::RawSubschema;
+        let schema = SchemaModel::from_raw(&RawSubschema::default());
+        let structure = Structure::build("dc=x", vec![]);
+        let mut st =
+            UiState::new_for_test(structure, schema, "dc=x".into(), Vec::new(), Vec::new());
+        st.edit_form = Some(EditForm {
+            dn: "cn=a,dc=x".into(),
+            mode: FormMode::Edit,
+            object_classes: vec![],
+            fields: vec![ef("cn", "hello", true), ef("sn", "world", true)],
+        });
+        st.form_needs_render = true;
+        let shared: Shared = Rc::new(RefCell::new(st));
+        let mut pane = FormPane::new(Rect::new(0, 0, 80, 20), shared.clone());
+        let mut out = VecDeque::new();
+        let mut timers = tv::timer::TimerQueue::new();
+        let mut deferred = Vec::new();
+        let mut ctx = headless_ctx(&mut out, &mut timers, &mut deferred);
+        let mut ev = Event::Broadcast {
+            command: REFRESH,
+            source: None,
+        };
+        // The caret must land at the field start — both the logical offset
+        // (cur_pos) and the scroll (first_pos), which together determine the
+        // rendered cursor. The old bug set cur_pos but left the screen cursor
+        // stale at the end; `home()` now moves both and 0.11 derives the cursor.
+        pane.handle_event(&mut ev, &mut ctx); // render focuses first field ("hello")
+        assert_eq!(
+            focused_caret(&mut pane),
+            Some((0, 0)),
+            "first field's caret must be homed after the initial render"
+        );
+
+        let mut d = Event::KeyDown(tv::KeyEvent::from(tv::Key::Down));
+        pane.handle_event(&mut d, &mut ctx);
+        assert_eq!(
+            focused_caret(&mut pane),
+            Some((0, 0)),
+            "caret must be homed after moving Down onto the next field"
+        );
+
+        // A background-driven re-render (form_needs_render flagged again by a
+        // worker / pump, as happens live) must not pop the caret back to the end.
+        shared.borrow_mut().form_needs_render = true;
+        let mut tick = Event::Broadcast {
+            command: REFRESH,
+            source: None,
+        };
+        pane.handle_event(&mut tick, &mut ctx);
+        assert_eq!(
+            focused_caret(&mut pane),
+            Some((0, 0)),
+            "caret must stay homed across a background-driven re-render"
+        );
     }
 
     #[test]

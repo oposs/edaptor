@@ -24,6 +24,10 @@ All notable changes to eDAPtor are documented here. The format follows
   **[- Del]** buttons; the keyboard shortcuts Insert / Delete continue to work as
   before.
 
+- tvision UI: an **empty multi-value field** now shows the prompt
+  `<press ENTER to add Value(s)>` in its value cell instead of a bare em dash,
+  making the ENTER affordance discoverable.
+
 - tvision UI: the entry list now shows a **`Filter:`** label to the left of the
   incremental-search box, making the filter prompt immediately recognisable.
 
@@ -132,6 +136,15 @@ All notable changes to eDAPtor are documented here. The format follows
   fit, and every attribute is reachable (the former 32-row display cap is gone).
 
 ### Changed
+
+- The main browser now splits its width **one-third / two-thirds**: the left
+  column (branch tree + members list) takes a third and the entry form fills the
+  remaining two-thirds, giving the editor more room.
+
+- Upgraded **tvision-rs 0.10 → 0.11**, which adds a public `InputLine` caret API
+  (`home`/`end`/`set_cursor_pos`) and derives the screen cursor from the caret
+  offset on every frame. The form's caret-homing (see below) now calls `home()`
+  instead of reaching into the field's internals.
 
 - Multi-select `picker` fields (`memberUid`, `member`) now use the two-column
   Shuttle editor (Available | Members) with type-to-find, matching the
@@ -244,6 +257,21 @@ All notable changes to eDAPtor are documented here. The format follows
   temporary git-pin for `exec_view_focused` has been removed.
 
 ### Fixed
+
+- tvision UI: the object-class and membership picker dialogs can now be closed
+  with the frame's **close icon** (top-left `[■]`) again. The embedded transfer
+  widget was sized to the full dialog rect, so it sat on top of the frame border
+  and swallowed the close/move/resize hot-zones (Esc and the Cancel button were
+  unaffected). The widget is now a tight, self-contained control — no built-in
+  outer padding, laid out edge-to-edge — that the dialog places in its interior
+  (a 1-cell breathing gap inside the frame, above the OK/Cancel row), so the frame
+  controls stay hittable.
+
+- tvision UI: moving through the entry form now places the text caret at the
+  **beginning** of each field instead of the end. Turbo Vision select-alls a field
+  on focus (caret at the end); the form clears that selection and homes the caret,
+  and a background repaint (e.g. an autonumber result arriving) no longer bumps the
+  focused field's caret to the end.
 
 - tvision UI: the **focused pane is now clearly indicated** in the three-pane
   browser. The pane with keyboard focus shows the bright (base3) surface with a

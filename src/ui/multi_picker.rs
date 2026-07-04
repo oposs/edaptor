@@ -157,19 +157,27 @@ impl MultiPickerDialog {
             grow: true,
             ..tv::WindowFlags::default()
         });
-        // Floor the resize at the embedded Shuttle's minimum: the Shuttle fills the
-        // dialog, so below this the columns hit their layout clamp and overflow the
-        // frame. tvision 0.10's settable window minimum governs the interactive
-        // corner-drag too (the bare Window floor is only 16×6).
-        dlg.set_min_size(tv::Point::new(Shuttle::MIN_W, Shuttle::MIN_H));
+        // Floor the resize at the Shuttle's content minimum PLUS this dialog's own
+        // chrome: 2 cols each side (frame + 1-cell breathing gap) and 6 rows
+        // vertically (top inset 2, spacer 1, OK/Cancel 2, bottom frame 1). tvision
+        // 0.10's settable window minimum governs the interactive corner-drag too
+        // (the bare Window floor is only 16×6).
+        dlg.set_min_size(tv::Point::new(Shuttle::MIN_W + 4, Shuttle::MIN_H + 6));
 
-        // Build the two columns. Available on the left (membership convention),
-        // Available on the left, Members (the Selected set) on the right — the
-        // conventional transfer layout. Insert the Shuttle FIRST so it is the
-        // dialog's first selectable child (the modal's open-time reset_current
-        // then makes it current, and focus reaches the Available list inside it).
+        // Build the two columns: Available on the left, Members (the Selected set)
+        // on the right — the conventional transfer layout. Insert the Shuttle FIRST
+        // so it is the dialog's first selectable child (the modal's open-time
+        // reset_current then makes it current, and focus reaches the Available list
+        // inside it).
+        //
+        // Position it in the interior with a 1-cell breathing gap inside the frame
+        // (top-left 2,2) and stop above the host's OK/Cancel row (bottom at H-4). A
+        // child spanning the frame border would sit on top of the frame's
+        // close/move/resize hot-zones and kill the close icon; keeping it off the
+        // border avoids that. grow_mode hi_x/hi_y shifts the far edges by the owner
+        // delta, so both the right gap and the OK/Cancel row survive a resize.
         let shuttle = Shuttle::new(
-            Rect::new(0, 0, 80, 25),
+            Rect::new(2, 2, 78, 21),
             "Available",
             "Members",
             /* find */ FindMode::Highlight,
@@ -638,13 +646,39 @@ mod tests {
 
     #[test]
     fn dialog_resize_floor_matches_the_shuttle_minimum() {
-        // set_min_size must reach the window: the dialog reports the Shuttle floor
-        // (60×20), not tvision's bare 16×6 Window default, so an interactive drag
-        // cannot shrink below the usable content size.
+        // set_min_size must reach the window: the dialog reports the Shuttle floor,
+        // not tvision's bare 16×6 Window default, so an interactive drag cannot
+        // shrink below the usable content size. The floor is the Shuttle content
+        // minimum PLUS this dialog's chrome (2 cols each side, 6 rows for the top
+        // inset + spacer + OK/Cancel + bottom frame).
         let shared = test_shared();
         let view = build_dialog(&shared, &[]);
         let (min, _max) = view.size_limits(tv::Point::new(300, 100));
-        assert_eq!(min, tv::Point::new(Shuttle::MIN_W, Shuttle::MIN_H));
+        assert_eq!(min, tv::Point::new(Shuttle::MIN_W + 4, Shuttle::MIN_H + 6));
+    }
+
+    #[test]
+    fn shuttle_is_inset_off_the_frame_border() {
+        // Regression (see oc_picker's twin test): the Shuttle must be inset off the
+        // frame border so the close / move / resize hot-zones stay hittable — a
+        // full-rect child sits on top of them in mouse routing and the close icon
+        // does nothing.
+        let shared = test_shared();
+        let mut view = build_dialog(&shared, &[]);
+        let p = view
+            .as_any_mut()
+            .and_then(|a| a.downcast_mut::<MultiPickerDialog>())
+            .expect("multi picker");
+        let b = p
+            .shuttle_mut()
+            .expect("shuttle present")
+            .state()
+            .get_bounds();
+        assert!(
+            b.a.x >= 2 && b.a.y >= 2,
+            "shuttle top-left must clear the frame border + breathing gap (was {:?})",
+            b.a
+        );
     }
 
     /// Seed two group candidates, baseline Members = [g1]; moving g2 from
