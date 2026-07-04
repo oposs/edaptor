@@ -16,6 +16,7 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::ui::panes::field_label::FieldLabel;
 use crate::ui::panes::launch_view::LaunchValueView;
+use crate::ui::panes::list_view::ListValueView;
 use crate::ui::panes::value_lines::{bullet_lines, masked_line, NOT_SET};
 use crate::ui::scroll_group::ScrollGroup;
 use crate::ui::widget::{inline_editable, is_modal_field, present_field};
@@ -331,8 +332,9 @@ impl FormPane {
 
     /// Rebuild one label+value block per field into the `ScrollGroup`. Called when
     /// the shown entry changes (different `dn`), the field set resizes, or the pane
-    /// is resized. Single-value text fields get an editable `InputLine`; every
-    /// other field gets a read-only `LaunchValueView` bullet block (Stage 1).
+    /// is resized. Single-value text fields get an editable `InputLine`; multi-value
+    /// `List` fields get an inline `ListValueView`; the modal-launch fields get a
+    /// read-only `LaunchValueView` bullet block.
     /// Borrow discipline: clone the fields, drop the state borrow, then mutate the
     /// scroll group.
     fn rebuild_cells(&mut self, ctx: &mut Context) {
@@ -395,10 +397,23 @@ impl FormPane {
                         il.state_mut().help_ctx = hctx;
                         sg.add_content(Box::new(il), Rect::new(0, 0, w, 1))
                     }
-                    ValueKind::List { .. } | ValueKind::Launch => {
-                        // Stage 1: List fields also render as a read-only bullet
-                        // block that opens the existing modal on an action key.
-                        // Stage 2 replaces the List arm with the inline editor.
+                    ValueKind::List { ordered } => {
+                        // Inline editor: a `ListValueView` wrapping the field's
+                        // values. It edits in place (Enter/Ctrl+Enter/Backspace/…)
+                        // and signals field navigation via `take_boundary_exit`.
+                        let handle = HelpCtx::custom("edaptor.field.list.handle");
+                        let v = ListValueView::new(
+                            Rect::new(0, 0, w, 1),
+                            &f.values,
+                            *ordered,
+                            hctx,
+                            handle,
+                        );
+                        sg.add_content(Box::new(v), Rect::new(0, 0, w, 1))
+                    }
+                    ValueKind::Launch => {
+                        // A read-only bullet block that opens the existing modal
+                        // on an action key (password/choice/picker/objectClass).
                         let v = LaunchValueView::new(Rect::new(0, 0, w, 1), hctx);
                         sg.add_content(Box::new(v), Rect::new(0, 0, w, 1))
                     }
@@ -520,13 +535,17 @@ impl FormPane {
                                     lv.set_lines(launch_lines(field));
                                 }
                             }
-                            ValueKind::List { ordered } => {
-                                // Stage 1: still a read-only bullet block.
+                            ValueKind::List { .. } => {
+                                // Reset the inline editor's model from the field's
+                                // values. This runs only on external-change ticks
+                                // (`form_needs_render` / width reflow) — never
+                                // mid-typing — so resetting is correct here, mirroring
+                                // the InputLine re-push contract for Text fields.
                                 if let Some(lv) = v
                                     .as_any_mut()
-                                    .and_then(|a| a.downcast_mut::<LaunchValueView>())
+                                    .and_then(|a| a.downcast_mut::<ListValueView>())
                                 {
-                                    lv.set_lines(bullet_lines(&field.values, *ordered));
+                                    lv.resync(&field.values);
                                 }
                             }
                         }
@@ -691,13 +710,86 @@ impl FormPane {
         self.kinds.get(idx).copied()
     }
 
-    /// Whether the focused field renders as a `LaunchValueView` (List or Launch):
+    /// Whether the focused field renders as a `LaunchValueView` (Launch only):
     /// an action key on it requests activation of the field's modal editor.
+    /// `List` fields edit inline and are handled on their own routing path.
     fn focused_is_launch_view(&mut self) -> bool {
-        matches!(
-            self.focused_kind(),
-            Some(ValueKind::List { .. } | ValueKind::Launch)
-        )
+        matches!(self.focused_kind(), Some(ValueKind::Launch))
+    }
+
+    /// Whether the focused field renders as an inline `ListValueView`.
+    fn focused_is_list_view(&mut self) -> bool {
+        matches!(self.focused_kind(), Some(ValueKind::List { .. }))
+    }
+
+    /// Read (and clear) the focused `ListValueView`'s one-shot boundary-exit
+    /// signal: `Some(-1)` when Up hit the top, `Some(1)` when Down hit the
+    /// bottom, `None` otherwise (or the focused child is not a list view).
+    fn focused_list_take_boundary_exit(&mut self) -> Option<i32> {
+        let cur = self.scroll_mut().and_then(|sg| sg.current())?;
+        self.scroll_mut()
+            .and_then(|sg| sg.child_mut(cur))
+            .and_then(|v| v.as_any_mut())
+            .and_then(|a| a.downcast_mut::<ListValueView>())
+            .and_then(|lv| lv.take_boundary_exit())
+    }
+
+    /// The current display-line count of the focused `ListValueView`, if the
+    /// focused field is a list. Used to detect a line-count change after an edit
+    /// and trigger a relayout so the block grows / shrinks live.
+    fn focused_list_line_count(&mut self) -> Option<i32> {
+        let cur = self.scroll_mut().and_then(|sg| sg.current())?;
+        self.scroll_mut()
+            .and_then(|sg| sg.child_mut(cur))
+            .and_then(|v| v.as_any_mut())
+            .and_then(|a| a.downcast_mut::<ListValueView>())
+            .map(|lv| lv.line_count())
+    }
+
+    /// Recompute every block's height from the current view state and, if it
+    /// differs from the laid-out heights, relayout so the edited list block
+    /// grows / shrinks and the following blocks shift. Uses the live
+    /// `ListValueView::line_count()` for list fields and `block_height` for the
+    /// rest. Keeps the focused block visible afterwards. No-op when nothing moved.
+    fn relayout_after_list_edit(&mut self, ctx: &mut Context) {
+        // Snapshot field values + kinds under a short state borrow, then drop it
+        // before touching any views (borrow discipline).
+        let fields: Vec<EditField> = {
+            let st = self.state.borrow();
+            match st.edit_form.as_ref() {
+                None => return,
+                Some(form) => form.fields.clone(),
+            }
+        };
+        let (value_ids, kinds) = (self.value_ids.clone(), self.kinds.clone());
+        let mut heights: Vec<i32> = Vec::with_capacity(kinds.len());
+        if let Some(sg) = self.scroll_mut() {
+            for (i, kind) in kinds.iter().enumerate() {
+                let h = match kind {
+                    ValueKind::List { .. } => value_ids
+                        .get(i)
+                        .and_then(|&vid| sg.child_mut(vid))
+                        .and_then(|v| v.as_any_mut())
+                        .and_then(|a| a.downcast_mut::<ListValueView>())
+                        .map(|lv| lv.line_count())
+                        .unwrap_or(1),
+                    _ => fields.get(i).map(|f| block_height(f, *kind)).unwrap_or(1),
+                };
+                heights.push(h);
+            }
+        }
+        if heights != self.block_heights {
+            let (label_w, inner_w) = (self.label_w, self.built_w);
+            self.layout_blocks(label_w, inner_w, &heights);
+            // Keep the focused block on screen after it grew / shifted.
+            if let Some(cur) = self.scroll_mut().and_then(|sg| sg.current()) {
+                if let Some(sg) = self.scroll_mut() {
+                    if let Some(logical) = sg.logical_of(cur) {
+                        sg.ensure_visible(logical, ctx);
+                    }
+                }
+            }
+        }
     }
 
     /// Read (and clear) the focused `LaunchValueView`'s one-shot activate flag. The
@@ -715,11 +807,14 @@ impl FormPane {
             .unwrap_or(false)
     }
 
-    /// Sync each editable value InputLine's text into `edit_form`; refresh header.
+    /// Sync each editable value view into `edit_form`; refresh header.
+    /// `Text` fields pull their `InputLine` text (single value); inline `List`
+    /// fields pull the full value vector from their `ListValueView`.
     /// Borrow discipline: collect indices (drop state borrow), read from scroll group
     /// (drop sg borrow), then mutate state (drop before touching group header).
     fn sync_into_form(&mut self) {
-        // Collect editable field indices; drop borrow before accessing views.
+        // Collect editable Text-field indices; drop borrow before accessing views.
+        // (List fields are pulled separately below, keyed on `self.kinds`.)
         let editable: Vec<usize> = {
             let st = self.state.borrow();
             match st.edit_form.as_ref() {
@@ -734,24 +829,41 @@ impl FormPane {
             }
         }; // state borrow dropped
 
-        // Read current InputLine texts from the ScrollGroup.
-        let value_ids = self.value_ids.clone();
-        let mut edits: Vec<(usize, String)> = Vec::new();
+        // Read current texts (Text) and value vectors (List) from the ScrollGroup.
+        let (value_ids, kinds) = (self.value_ids.clone(), self.kinds.clone());
+        let mut text_edits: Vec<(usize, String)> = Vec::new();
+        let mut list_edits: Vec<(usize, Vec<String>)> = Vec::new();
         if let Some(sg) = self.scroll_mut() {
             for &i in &editable {
                 if let Some(&vid) = value_ids.get(i) {
                     if let Some(FieldValue::Text(s)) = sg.child_mut(vid).and_then(|v| v.value()) {
-                        edits.push((i, s));
+                        text_edits.push((i, s));
                     }
+                }
+            }
+            for (i, kind) in kinds.iter().enumerate() {
+                if !matches!(kind, ValueKind::List { .. }) {
+                    continue;
+                }
+                if let Some(vals) = value_ids
+                    .get(i)
+                    .and_then(|&vid| sg.child_mut(vid))
+                    .and_then(|v| v.as_any_mut())
+                    .and_then(|a| a.downcast_mut::<ListValueView>())
+                    .map(|lv| lv.to_values())
+                {
+                    list_edits.push((i, vals));
                 }
             }
         } // sg borrow dropped
 
         // Write edits back into the form; borrow_mut dropped before header is computed.
+        // Do NOT set `form_needs_render` — that would force a resync that resets the
+        // inline editor's cursor mid-edit. The dirty state is updated in place.
         {
             let mut st = self.state.borrow_mut();
             if let Some(form) = st.edit_form.as_mut() {
-                for (i, s) in edits {
+                for (i, s) in text_edits {
                     if form
                         .fields
                         .get(i)
@@ -759,6 +871,13 @@ impl FormPane {
                         != Some(Some(s.as_str()))
                     {
                         form.set_value(i, s);
+                    }
+                }
+                for (i, vals) in list_edits {
+                    if let Some(f) = form.fields.get_mut(i) {
+                        if f.values != vals {
+                            f.values = vals;
+                        }
                     }
                 }
             }
@@ -886,14 +1005,33 @@ impl View for FormPane {
             return;
         }
 
-        // Up/Down move focus between focusable fields (Tab is reserved for switching
-        // panes, consumed by the Splitter). Consume the key so it stays in this pane.
+        // Route keystrokes by the focused field's value-view kind. A focused
+        // inline `ListValueView` gets first crack at every key so it can edit
+        // in place; field navigation across a list boundary is driven SOLELY by
+        // its `take_boundary_exit()` flag (the view always consumes Up/Down, so
+        // we never infer navigation from an unconsumed event). For Text and
+        // Launch fields, Up/Down move focus between fields as before.
+        let is_keydown = matches!(ev, Event::KeyDown(_));
         let nav = matches!(ev, Event::KeyDown(k) if matches!(k.key, Key::Up | Key::Down));
-        if nav {
+        if is_keydown && self.focused_is_list_view() {
+            // The list view edits (or moves the caret / reorders). Snapshot its
+            // line count first so we can detect a grow / shrink afterwards.
+            let before = self.focused_list_line_count();
+            self.group.handle_event(ev, ctx);
+            // Boundary navigation: the view flags an edge-hit on Up/Down; on that
+            // signal, move to the previous / next field.
+            if let Some(dir) = self.focused_list_take_boundary_exit() {
+                self.focus_field(dir, ctx);
+            } else if self.focused_list_line_count() != before {
+                // The edit changed the block's line count: relayout so it grows /
+                // shrinks and the following blocks shift, then keep it visible.
+                self.relayout_after_list_edit(ctx);
+            }
+        } else if nav {
             let down = matches!(ev, Event::KeyDown(k) if k.key == Key::Down);
             self.focus_field(if down { 1 } else { -1 }, ctx);
             ev.clear();
-        } else if matches!(ev, Event::KeyDown(_)) && self.focused_is_launch_view() {
+        } else if is_keydown && self.focused_is_launch_view() {
             // Action key on a read-only launch/list block: route it to the focused
             // `LaunchValueView` (nav keys pass through untouched; any other key sets
             // its activate flag and consumes the event). If it requested activation,
@@ -1955,6 +2093,111 @@ mod tests {
             out.iter()
                 .any(|e| matches!(e, Event::Command(cmd) if *cmd == ACTIVATE)),
             "an action key on a Launch field must post ACTIVATE"
+        );
+    }
+
+    /// Build a plain multi-value (unordered `List`) field with the given values.
+    fn multi_list(label: &str, values: &[&str]) -> EditField {
+        EditField {
+            label: label.into(),
+            must: false,
+            editable: true,
+            multi: true,
+            secret: false,
+            ordered: false,
+            orphaned: false,
+            kind: FieldKind::Text,
+            widget: WidgetSpec::ReadOnlyText,
+            widget_binding: None,
+            values: values.iter().map(|s| s.to_string()).collect(),
+            baseline: values.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+
+    #[test]
+    fn list_field_grows_block_when_item_added() {
+        // A focused inline List field that gains an item must grow its block by one
+        // row, pushing the following field's block down by one.
+        let (_shared, mut pane) =
+            build_pane_with_form(vec![multi_list("mail", &["a@x"]), ef("cn", "z", true)]);
+        let mut out = VecDeque::new();
+        let mut timers = tv::timer::TimerQueue::new();
+        let mut deferred = Vec::new();
+        let mut ctx = headless_ctx(&mut out, &mut timers, &mut deferred);
+        let mut ev = Event::Broadcast {
+            command: REFRESH,
+            source: None,
+        };
+        pane.handle_event(&mut ev, &mut ctx); // render + focus first focusable (mail)
+
+        // The List field is a ListValueView and is focused.
+        assert_eq!(pane.kinds[0], ValueKind::List { ordered: false });
+        assert_eq!(pane.focused_field_idx(), Some(0));
+
+        // Block heights: mail=1 (single value), cn=1. Record the following field's top.
+        assert_eq!(pane.block_heights, vec![1, 1]);
+        let cn_vid = pane.value_ids[1];
+        let cn_top_before = pane
+            .scroll_mut()
+            .and_then(|sg| sg.logical_of(cn_vid))
+            .map(|r| r.a.y)
+            .unwrap();
+
+        // Move to the end of "a@x" and press Enter → splits into ["a@x", ""] → 2 rows.
+        let mut end = Event::KeyDown(tv::KeyEvent::from(tv::Key::End));
+        pane.handle_event(&mut end, &mut ctx);
+        let mut enter = Event::KeyDown(tv::KeyEvent::from(tv::Key::Enter));
+        pane.handle_event(&mut enter, &mut ctx);
+
+        // The List block grew by one row; the following field shifted down by one.
+        assert_eq!(
+            pane.block_heights[0], 2,
+            "the List block grew to two rows after Enter"
+        );
+        let cn_top_after = pane
+            .scroll_mut()
+            .and_then(|sg| sg.logical_of(cn_vid))
+            .map(|r| r.a.y)
+            .unwrap();
+        assert_eq!(
+            cn_top_after,
+            cn_top_before + 1,
+            "the following field's block moved down by one row"
+        );
+    }
+
+    #[test]
+    fn down_past_list_bottom_moves_to_next_field() {
+        // Repeated Down inside a focused List field must eventually cross the bottom
+        // boundary and move focus to the next focusable field (via boundary-exit).
+        let (_shared, mut pane) = build_pane_with_form(vec![
+            multi_list("mail", &["a@x", "b@x"]),
+            ef("cn", "z", true),
+        ]);
+        let mut out = VecDeque::new();
+        let mut timers = tv::timer::TimerQueue::new();
+        let mut deferred = Vec::new();
+        let mut ctx = headless_ctx(&mut out, &mut timers, &mut deferred);
+        let mut ev = Event::Broadcast {
+            command: REFRESH,
+            source: None,
+        };
+        pane.handle_event(&mut ev, &mut ctx); // focus the List field (index 0)
+        assert_eq!(pane.focused_field_idx(), Some(0));
+
+        // Press Down a few times: within the two-row list it moves the caret, and the
+        // Down that hits the bottom edge crosses to the next field (cn, index 1).
+        for _ in 0..4 {
+            if pane.focused_field_idx() == Some(1) {
+                break;
+            }
+            let mut d = Event::KeyDown(tv::KeyEvent::from(tv::Key::Down));
+            pane.handle_event(&mut d, &mut ctx);
+        }
+        assert_eq!(
+            pane.focused_field_idx(),
+            Some(1),
+            "Down past the list bottom moves focus to the next field"
         );
     }
 

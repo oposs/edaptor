@@ -40,9 +40,7 @@ const SURFACE_ROLES: SurfaceRoles = SurfaceRoles {
 ///   [`take_boundary_exit`](Self::take_boundary_exit) to decide whether to
 ///   move focus to the previous / next field).
 ///
-/// Task 8 wires this into the form pane; until then `#[allow(dead_code)]` is
-/// present to silence the "never constructed" lint.
-#[allow(dead_code)]
+/// The form pane (Task 8) constructs this for every multi-value `List` field.
 pub(crate) struct ListValueView {
     model: ListModel,
     state: ViewState,
@@ -58,7 +56,6 @@ pub(crate) struct ListValueView {
     help_ctx_handle: HelpCtx,
 }
 
-#[allow(dead_code)]
 impl ListValueView {
     /// Build a `ListValueView` from an initial value slice.
     ///
