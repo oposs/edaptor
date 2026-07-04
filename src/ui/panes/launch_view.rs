@@ -7,8 +7,6 @@ use tvision_rs::{
     self as tv, DrawCtx, Event, HelpCtx, Key, Point, Rect, Role, SurfaceRoles, View, ViewState,
 };
 
-// Fields and methods will be consumed by the form pane in Task 4.
-#[allow(dead_code)]
 pub(crate) struct LaunchValueView {
     state: ViewState,
     lines: Vec<String>,
@@ -23,20 +21,26 @@ const SURFACE_ROLES: SurfaceRoles = SurfaceRoles {
     inactive: Role::InputInactive,
 };
 
-// Methods will be called by the form pane once Task 4 wires them in.
-#[allow(dead_code)]
 impl LaunchValueView {
     pub(crate) fn new(bounds: Rect, help_ctx: HelpCtx) -> Self {
         let mut state = ViewState::new(bounds);
         state.options.selectable = true;
         state.help_ctx = help_ctx;
-        Self { state, lines: vec!["<not set>".to_string()], activate: false }
+        Self {
+            state,
+            lines: vec!["<not set>".to_string()],
+            activate: false,
+        }
     }
 
     /// Replace the display lines. Pass the already-formatted strings (bullets,
     /// `*****`, or `<not set>`); the pane owns the formatting logic.
     pub(crate) fn set_lines(&mut self, lines: Vec<String>) {
-        self.lines = if lines.is_empty() { vec!["<not set>".to_string()] } else { lines };
+        self.lines = if lines.is_empty() {
+            vec!["<not set>".to_string()]
+        } else {
+            lines
+        };
     }
 
     /// Returns `true` once if the last event was an action key (the pane then
@@ -116,7 +120,10 @@ mod tests {
     use tvision_rs::{Event, Key, KeyEvent, Rect};
 
     fn view() -> LaunchValueView {
-        LaunchValueView::new(Rect::new(0, 0, 20, 1), HelpCtx::custom("edaptor.field.launch"))
+        LaunchValueView::new(
+            Rect::new(0, 0, 20, 1),
+            HelpCtx::custom("edaptor.field.launch"),
+        )
     }
 
     #[test]

@@ -137,6 +137,13 @@ All notable changes to eDAPtor are documented here. The format follows
 
 ### Changed
 
+- The entry form now lays out each attribute as **one variable-height block**
+  instead of a single fixed row. Single-value text fields keep their inline
+  editor; multi-value, object-class, membership, picker, ordered and password
+  fields render as a **read-only block** — a bulleted list (`- value`), `<not set>`
+  when empty, or `*****` for secrets — that grows to fit its values. Pressing any
+  key (or Enter) on such a block opens its editor modal, exactly as before.
+
 - The main browser now splits its width **one-third / two-thirds**: the left
   column (branch tree + members list) takes a third and the entry form fills the
   remaining two-thirds, giving the editor more room.

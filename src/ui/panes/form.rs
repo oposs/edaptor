@@ -9,16 +9,18 @@
 //! `EditForm.fields` whenever the shown entry changes.
 
 use tvision_rs::{
-    self as tv, delegate, Context, DrawCtx, Event, FieldValue, Group, InputLine, Key, Point, Rect,
-    Role, View,
+    self as tv, delegate, Context, DrawCtx, Event, FieldValue, Group, HelpCtx, InputLine, Key,
+    Point, Rect, Role, View,
 };
 use unicode_width::UnicodeWidthStr;
 
 use crate::ui::panes::field_label::FieldLabel;
+use crate::ui::panes::launch_view::LaunchValueView;
+use crate::ui::panes::value_lines::{bullet_lines, masked_line, NOT_SET};
 use crate::ui::scroll_group::ScrollGroup;
-use crate::ui::widget::{inline_editable, is_modal_field, widget_for};
+use crate::ui::widget::{inline_editable, is_modal_field, present_field};
 use crate::ui::{Shared, ACTIVATE, REFRESH};
-use crate::workflows::edit_form::{composed_create_dn, FormMode};
+use crate::workflows::edit_form::{composed_create_dn, EditField, FormMode};
 
 /// Smallest / largest width the label column is allowed to take. It is sized to
 /// fit the longest label (so every field name shows in full) but never eats more
@@ -39,21 +41,19 @@ fn label_col_width(longest: i32, w: i32) -> i32 {
 
 /// A field's value cell is focusable if it is inline-editable OR a modal-activated
 /// field (objectClass): the latter is read-only text but must accept focus + Enter.
-fn cell_focusable(f: &crate::workflows::edit_form::EditField) -> bool {
+fn cell_focusable(f: &EditField) -> bool {
     inline_editable(f) || is_modal_field(f)
 }
 
 /// Which value-view a field renders as in the form.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)] // consumed by view tasks that land in later PRs
 enum ValueKind {
     Text,
     List { ordered: bool },
     Launch,
 }
 
-#[allow(dead_code)] // called by view tasks that land in later PRs
-fn value_kind(f: &crate::workflows::edit_form::EditField) -> ValueKind {
+fn value_kind(f: &EditField) -> ValueKind {
     use crate::config::widget::WidgetKind;
     // objectClass always gets a modal picker — check it first before the multi path.
     // This mirrors the widget_for / is_modal_field priority in widget.rs.
@@ -76,8 +76,7 @@ fn value_kind(f: &crate::workflows::edit_form::EditField) -> ValueKind {
 /// Display rows a field occupies. `Text` is always one row; list/launch blocks
 /// grow with their values, and an empty value set collapses to the single
 /// `<not set>` row.
-#[allow(dead_code)] // called by view tasks that land in later PRs
-fn block_height(f: &crate::workflows::edit_form::EditField, kind: ValueKind) -> i32 {
+fn block_height(f: &EditField, kind: ValueKind) -> i32 {
     match kind {
         ValueKind::Text => 1,
         ValueKind::List { .. } | ValueKind::Launch => {
@@ -88,6 +87,45 @@ fn block_height(f: &crate::workflows::edit_form::EditField, kind: ValueKind) -> 
             }
             non_empty.iter().map(|v| v.split('\n').count() as i32).sum()
         }
+    }
+}
+
+/// The StatusLine help context for a field's value view. Task 10 adds the formal
+/// hint mapping keyed on these exact context names, so keeping them stable here
+/// makes that change purely additive.
+fn help_ctx_for(kind: ValueKind, field: &EditField) -> HelpCtx {
+    match kind {
+        ValueKind::Text => HelpCtx::custom("edaptor.field.text"),
+        ValueKind::List { ordered: false } => HelpCtx::custom("edaptor.field.list"),
+        ValueKind::List { ordered: true } => HelpCtx::custom("edaptor.field.list.ordered"),
+        ValueKind::Launch => {
+            if field.secret {
+                HelpCtx::custom("edaptor.field.launch.password")
+            } else {
+                HelpCtx::custom("edaptor.field.launch.picker")
+            }
+        }
+    }
+}
+
+/// The display lines for a `Launch`-kind value block:
+/// * secret fields → a single masked line;
+/// * multi-value fields → a bulleted list (ordering prefix stripped for XOrdered);
+/// * single-value fields → one line with the presented value (no bullet).
+fn launch_lines(field: &EditField) -> Vec<String> {
+    use crate::config::widget::WidgetKind;
+    if field.secret {
+        return masked_line();
+    }
+    if field.multi {
+        let ordered = matches!(field.widget_binding, Some(WidgetKind::XOrdered));
+        return bullet_lines(&field.values, ordered);
+    }
+    let presented = present_field(field);
+    if presented.trim().is_empty() {
+        vec![NOT_SET.to_string()]
+    } else {
+        vec![presented]
     }
 }
 
@@ -103,6 +141,13 @@ pub(crate) struct FormPane {
     value_ids: Vec<tv::ViewId>,
     /// One label `FieldLabel` id per field, parallel to `value_ids`.
     label_ids: Vec<tv::ViewId>,
+    /// The value-view kind of each field, parallel to `value_ids`. Drives how
+    /// `render` feeds the view and how navigation/activation treat the field.
+    kinds: Vec<ValueKind>,
+    /// The height of each field block at the last layout, parallel to `value_ids`.
+    /// Compared against freshly computed heights in `render` to relayout only when
+    /// a block's line count changed.
+    block_heights: Vec<i32>,
     /// DN of the entry whose cells are currently built; `None` before first render.
     built_dn: Option<String>,
     /// Width of the label column at the last rebuild (fit to the longest label).
@@ -152,6 +197,8 @@ impl FormPane {
             scroll_id,
             value_ids: Vec::new(),
             label_ids: Vec::new(),
+            kinds: Vec::new(),
+            block_heights: Vec::new(),
             built_dn: None,
             label_w: LABEL_MIN,
             built_w: 0,
@@ -259,25 +306,53 @@ impl FormPane {
         }
     }
 
-    /// Rebuild one label+value cell pair per field into the `ScrollGroup`. Called
-    /// when the shown entry changes (different `dn`). Borrow discipline: collect
-    /// field metadata, drop the state borrow, then mutate the scroll group.
+    /// Position every field block: the label on the block's first row (in the
+    /// right-aligned label column) and the value view spanning the whole block
+    /// height. Updates each child's *logical* rect via `ScrollGroup::set_logical`
+    /// so content height / hit-testing / scroll math stay consistent. Records the
+    /// per-field heights and returns the total content height.
+    fn layout_blocks(&mut self, label_w: i32, inner_w: i32, heights: &[i32]) -> i32 {
+        let mut y = 0;
+        let (lids, vids) = (self.label_ids.clone(), self.value_ids.clone());
+        if let Some(sg) = self.scroll_mut() {
+            for (i, &h) in heights.iter().enumerate() {
+                if let Some(&lid) = lids.get(i) {
+                    sg.set_logical(lid, Rect::new(0, y, label_w, y + 1));
+                }
+                if let Some(&vid) = vids.get(i) {
+                    sg.set_logical(vid, Rect::new(label_w, y, inner_w, y + h));
+                }
+                y += h;
+            }
+        }
+        self.block_heights = heights.to_vec();
+        y
+    }
+
+    /// Rebuild one label+value block per field into the `ScrollGroup`. Called when
+    /// the shown entry changes (different `dn`), the field set resizes, or the pane
+    /// is resized. Single-value text fields get an editable `InputLine`; every
+    /// other field gets a read-only `LaunchValueView` bullet block (Stage 1).
+    /// Borrow discipline: clone the fields, drop the state borrow, then mutate the
+    /// scroll group.
     fn rebuild_cells(&mut self, ctx: &mut Context) {
-        // Collect field metadata (drop state borrow before touching views).
-        let fields: Vec<(String, bool)> = {
+        // Clone the fields so classification/height/help-ctx can run outside the
+        // state borrow (drop it before touching views).
+        let fields: Vec<EditField> = {
             let st = self.state.borrow();
             match st.edit_form.as_ref() {
                 None => Vec::new(),
-                Some(form) => form
-                    .fields
-                    .iter()
-                    .map(|f| {
-                        let marker = if f.must { "*" } else { "" };
-                        (format!("{}{}", f.label, marker), cell_focusable(f))
-                    })
-                    .collect(),
+                Some(form) => form.fields.clone(),
             }
         }; // state borrow dropped
+
+        // Classify each field and compute its block height.
+        let kinds: Vec<ValueKind> = fields.iter().map(value_kind).collect();
+        let heights: Vec<i32> = fields
+            .iter()
+            .zip(&kinds)
+            .map(|(f, k)| block_height(f, *k))
+            .collect();
 
         // Build all cells. Accumulate IDs into locals so the `sg` borrow (from
         // `self.group`) does not overlap with writing `self.label_ids`/`self.value_ids`.
@@ -294,32 +369,53 @@ impl FormPane {
             // in full, right-aligned; the value editor fills the rest of the width.
             let longest = fields
                 .iter()
-                .map(|(label, _)| UnicodeWidthStr::width(label.as_str()) as i32)
+                .map(|f| {
+                    let marker = if f.must { "*" } else { "" };
+                    UnicodeWidthStr::width(format!("{}{}", f.label, marker).as_str()) as i32
+                })
                 .max()
                 .unwrap_or(0);
             label_w = label_col_width(longest, w);
-            for (row, (_label, editable)) in fields.iter().enumerate() {
-                let y = row as i32;
+            // Children are added at a placeholder rect; `layout_blocks` below stacks
+            // them at their real variable-height positions in one pass.
+            for (f, kind) in fields.iter().zip(&kinds) {
                 let lid = sg.add_content(
-                    Box::new(FieldLabel::label(Rect::new(0, y, label_w, y + 1))),
-                    Rect::new(0, y, label_w, y + 1),
+                    Box::new(FieldLabel::label(Rect::new(0, 0, label_w, 1))),
+                    Rect::new(0, 0, label_w, 1),
                 );
-                // The three-surface model is the framework default (tvision 0.9):
-                // only the focused field paints the bright well (InputNormal),
-                // non-focused fields use InputSurface (base3), and an inactive pane
-                // recedes to InputInactive (desktop) — the form's single-well look
-                // with no opt-in and no manual repaint.
-                let mut il = InputLine::with_limit(Rect::new(label_w, y, w, y + 1), 1024);
-                il.state.state.disabled = !editable;
-                let vid = sg.add_content(Box::new(il), Rect::new(label_w, y, w, y + 1));
+                let hctx = help_ctx_for(*kind, f);
+                let vid = match kind {
+                    ValueKind::Text => {
+                        // The three-surface model is the framework default (tvision
+                        // 0.9): only the focused field paints the bright well
+                        // (InputNormal), non-focused fields use InputSurface (base3),
+                        // and an inactive pane recedes to InputInactive (desktop).
+                        let mut il = InputLine::with_limit(Rect::new(0, 0, w, 1), 1024);
+                        il.state.state.disabled = !cell_focusable(f);
+                        il.state_mut().help_ctx = hctx;
+                        sg.add_content(Box::new(il), Rect::new(0, 0, w, 1))
+                    }
+                    ValueKind::List { .. } | ValueKind::Launch => {
+                        // Stage 1: List fields also render as a read-only bullet
+                        // block that opens the existing modal on an action key.
+                        // Stage 2 replaces the List arm with the inline editor.
+                        let v = LaunchValueView::new(Rect::new(0, 0, w, 1), hctx);
+                        sg.add_content(Box::new(v), Rect::new(0, 0, w, 1))
+                    }
+                };
                 new_lids.push(lid);
                 new_vids.push(vid);
             }
         } // sg borrow released; self is free again
         self.label_ids = new_lids;
         self.value_ids = new_vids;
+        self.kinds = kinds;
         self.label_w = label_w;
         self.built_w = inner_w;
+        // Stack the blocks at their variable heights (also records tops/heights).
+        // The ScrollGroup derives its content extent from the children's logical
+        // rects, so there is no separate content-height to set.
+        self.layout_blocks(label_w, inner_w, &heights);
 
         // Reposition the header row's two cells to the same columns as the fields:
         // the `dn` caption fills the label column, the DN value fills the rest.
@@ -365,23 +461,12 @@ impl FormPane {
             self.built_dn = cur_dn;
         }
 
-        // Collect display data (drop state borrow before touching views).
-        let rows: Vec<(String, String, bool)> = {
+        // Clone the fields so per-kind formatting runs outside the state borrow.
+        let fields: Vec<EditField> = {
             let st = self.state.borrow();
             match st.edit_form.as_ref() {
                 None => Vec::new(),
-                Some(form) => form
-                    .fields
-                    .iter()
-                    .map(|f| {
-                        let marker = if f.must { "*" } else { "" };
-                        (
-                            format!("{}{}", f.label, marker),
-                            widget_for(f).present(f),
-                            cell_focusable(f),
-                        )
-                    })
-                    .collect(),
+                Some(form) => form.fields.clone(),
             }
         }; // state borrow dropped
 
@@ -395,24 +480,68 @@ impl FormPane {
             h.set_value(FieldValue::Text(header));
         }
 
-        // Update each cell via the scroll group. Clone IDs before borrowing sg.
-        let (label_ids, value_ids) = (self.label_ids.clone(), self.value_ids.clone());
+        // Feed each value view by its kind and collect fresh block heights. Clone
+        // the parallel id/kind vectors before borrowing sg.
+        let (label_ids, value_ids, kinds) = (
+            self.label_ids.clone(),
+            self.value_ids.clone(),
+            self.kinds.clone(),
+        );
+        let mut heights: Vec<i32> = Vec::with_capacity(kinds.len());
         {
             let Some(sg) = self.scroll_mut() else {
                 return;
             };
-            for (i, (label, value, editable)) in rows.iter().enumerate() {
-                if let (Some(&lid), Some(&vid)) = (label_ids.get(i), value_ids.get(i)) {
+            for (i, kind) in kinds.iter().enumerate() {
+                let Some(field) = fields.get(i) else { continue };
+                heights.push(block_height(field, *kind));
+                if let Some(&lid) = label_ids.get(i) {
                     if let Some(l) = sg.child_mut(lid) {
-                        l.set_value(FieldValue::Text(label.clone()));
+                        let marker = if field.must { "*" } else { "" };
+                        l.set_value(FieldValue::Text(format!("{}{}", field.label, marker)));
                     }
+                }
+                if let Some(&vid) = value_ids.get(i) {
                     if let Some(v) = sg.child_mut(vid) {
-                        v.set_value(FieldValue::Text(value.clone()));
-                        v.state_mut().state.disabled = !editable;
+                        match kind {
+                            ValueKind::Text => {
+                                // For Text-kind fields `present_field` equals the raw
+                                // first value for editable free-text fields and keeps
+                                // the read-only presentation (checkbox/binary) for the
+                                // rest — matching the former `widget_for(f).present(f)`.
+                                v.set_value(FieldValue::Text(present_field(field)));
+                                v.state_mut().state.disabled = !cell_focusable(field);
+                            }
+                            ValueKind::Launch => {
+                                if let Some(lv) = v
+                                    .as_any_mut()
+                                    .and_then(|a| a.downcast_mut::<LaunchValueView>())
+                                {
+                                    lv.set_lines(launch_lines(field));
+                                }
+                            }
+                            ValueKind::List { ordered } => {
+                                // Stage 1: still a read-only bullet block.
+                                if let Some(lv) = v
+                                    .as_any_mut()
+                                    .and_then(|a| a.downcast_mut::<LaunchValueView>())
+                                {
+                                    lv.set_lines(bullet_lines(&field.values, *ordered));
+                                }
+                            }
+                        }
                     }
                 }
             }
         } // sg borrow dropped
+
+        // Relayout only when a block's line count changed (values grew/shrank),
+        // e.g. an async autonumber result or a picker edit; otherwise the stacked
+        // positions are already correct from the last rebuild.
+        if heights != self.block_heights {
+            let (label_w, inner_w) = (self.label_w, self.built_w);
+            self.layout_blocks(label_w, inner_w, &heights);
+        }
 
         // Land focus. On a width-only reflow, restore the previously focused field
         // (its new id at the same index) so a splitter drag never yanks focus back
@@ -556,16 +685,33 @@ impl FormPane {
         self.value_ids.iter().position(|id| *id == cur)
     }
 
-    /// Whether the focused field opens a modal editor (objectClass).
-    fn focused_is_modal(&mut self) -> bool {
-        let Some(idx) = self.focused_field_idx() else {
+    /// The value-view kind of the focused field, if any.
+    fn focused_kind(&mut self) -> Option<ValueKind> {
+        let idx = self.focused_field_idx()?;
+        self.kinds.get(idx).copied()
+    }
+
+    /// Whether the focused field renders as a `LaunchValueView` (List or Launch):
+    /// an action key on it requests activation of the field's modal editor.
+    fn focused_is_launch_view(&mut self) -> bool {
+        matches!(
+            self.focused_kind(),
+            Some(ValueKind::List { .. } | ValueKind::Launch)
+        )
+    }
+
+    /// Read (and clear) the focused `LaunchValueView`'s one-shot activate flag. The
+    /// view sets it from its own `handle_event` when an action key arrives; the pane
+    /// then posts `ACTIVATE`. `false` when the focused child is not a launch view.
+    fn focused_launch_take_activate(&mut self) -> bool {
+        let Some(cur) = self.scroll_mut().and_then(|sg| sg.current()) else {
             return false;
         };
-        let st = self.state.borrow();
-        st.edit_form
-            .as_ref()
-            .and_then(|f| f.fields.get(idx))
-            .map(is_modal_field)
+        self.scroll_mut()
+            .and_then(|sg| sg.child_mut(cur))
+            .and_then(|v| v.as_any_mut())
+            .and_then(|a| a.downcast_mut::<LaunchValueView>())
+            .map(|lv| lv.take_activate())
             .unwrap_or(false)
     }
 
@@ -706,28 +852,6 @@ impl View for FormPane {
             }
         }
 
-        // Enter on a modal row (objectClass) opens its editor via the controller:
-        // record the field index, post ACTIVATE (capture-free), consume the key.
-        let enter = matches!(ev, Event::KeyDown(k) if k.key == Key::Enter);
-        if enter && self.focused_is_modal() {
-            if let Some(idx) = self.focused_field_idx() {
-                self.state.borrow_mut().activate_field = Some(idx);
-                ctx.post(ACTIVATE);
-            }
-            ev.clear();
-            return;
-        }
-        // Swallow text edits on a modal row: its value comes from the picker, not
-        // typing. (The cell is enabled only so it can take focus + Enter.)
-        let edit_key = matches!(
-            ev,
-            Event::KeyDown(k) if matches!(k.key, Key::Char(_) | Key::Backspace | Key::Delete)
-        );
-        if edit_key && self.focused_is_modal() {
-            ev.clear();
-            return;
-        }
-
         // Tab is reserved for switching panes. Do not let the inner group consume
         // it for intra-pane focus cycling — return without clearing so the parent
         // Splitter receives it and moves to the next pane.
@@ -769,6 +893,19 @@ impl View for FormPane {
             let down = matches!(ev, Event::KeyDown(k) if k.key == Key::Down);
             self.focus_field(if down { 1 } else { -1 }, ctx);
             ev.clear();
+        } else if matches!(ev, Event::KeyDown(_)) && self.focused_is_launch_view() {
+            // Action key on a read-only launch/list block: route it to the focused
+            // `LaunchValueView` (nav keys pass through untouched; any other key sets
+            // its activate flag and consumes the event). If it requested activation,
+            // record the field index and post ACTIVATE so the controller opens the
+            // field's modal editor.
+            self.group.handle_event(ev, ctx);
+            if self.focused_launch_take_activate() {
+                if let Some(idx) = self.focused_field_idx() {
+                    self.state.borrow_mut().activate_field = Some(idx);
+                    ctx.post(ACTIVATE);
+                }
+            }
         } else {
             self.group.handle_event(ev, ctx);
         }
@@ -1704,6 +1841,120 @@ mod tests {
             focused_after,
             Some(pane.value_ids[2]),
             "a resize must preserve the focused field, not reset to the first"
+        );
+    }
+
+    #[test]
+    fn multi_value_field_block_is_multiple_rows_tall() {
+        // A 3-value plain multi field renders as one block three rows tall (List
+        // kind → read-only bullet block); the next field starts below it, not one
+        // row down. This pins the variable-height stacking.
+        let mail = EditField {
+            label: "mail".into(),
+            must: false,
+            editable: true,
+            multi: true,
+            secret: false,
+            ordered: false,
+            orphaned: false,
+            kind: FieldKind::Text,
+            widget: WidgetSpec::ReadOnlyText,
+            widget_binding: None,
+            values: vec!["a@x".into(), "b@x".into(), "c@x".into()],
+            baseline: vec!["a@x".into(), "b@x".into(), "c@x".into()],
+        };
+        let (_shared, mut pane) = build_pane_with_form(vec![mail, ef("cn", "z", true)]);
+        let mut out = VecDeque::new();
+        let mut timers = tv::timer::TimerQueue::new();
+        let mut deferred = Vec::new();
+        let mut ev = Event::Broadcast {
+            command: REFRESH,
+            source: None,
+        };
+        pane.handle_event(
+            &mut ev,
+            &mut headless_ctx(&mut out, &mut timers, &mut deferred),
+        );
+
+        // mail → 3-value List block (height 3); cn → Text block (height 1).
+        assert_eq!(pane.kinds[0], ValueKind::List { ordered: false });
+        assert_eq!(pane.kinds[1], ValueKind::Text);
+        assert_eq!(pane.block_heights, vec![3, 1]);
+        // The blocks stack by summing heights: mail spans logical rows 0..3, so cn
+        // begins at row 3 (three rows below), not one row down.
+        let mail_vid = pane.value_ids[0];
+        let cn_vid = pane.value_ids[1];
+        let mail_rect = pane
+            .scroll_mut()
+            .and_then(|sg| sg.logical_of(mail_vid))
+            .unwrap();
+        let cn_rect = pane
+            .scroll_mut()
+            .and_then(|sg| sg.logical_of(cn_vid))
+            .unwrap();
+        assert_eq!(mail_rect.a.y, 0, "the first block starts at logical row 0");
+        assert_eq!(
+            mail_rect.b.y - mail_rect.a.y,
+            3,
+            "the multi-value block's value view is three rows tall"
+        );
+        assert_eq!(
+            cn_rect.a.y, 3,
+            "the next field starts three rows below (blocks stack by summed height)"
+        );
+    }
+
+    #[test]
+    fn action_key_on_launch_field_posts_activate() {
+        // A Launch field (objectClass) renders as a read-only block; pressing ANY
+        // action key on it (not just Enter) must request activation: set
+        // activate_field and post ACTIVATE so the controller opens the modal.
+        let (shared, mut pane) = build_pane_with_form(vec![
+            ef("cn", "Bob", true),
+            EditField {
+                label: "objectClass".into(),
+                must: true,
+                editable: false,
+                multi: true,
+                secret: false,
+                ordered: false,
+                orphaned: false,
+                kind: FieldKind::Text,
+                widget: WidgetSpec::ReadOnlyText,
+                widget_binding: None,
+                values: vec!["top".into(), "person".into()],
+                baseline: vec!["top".into(), "person".into()],
+            },
+        ]);
+        let mut out = VecDeque::new();
+        let mut timers = tv::timer::TimerQueue::new();
+        let mut deferred = Vec::new();
+        let mut tick = Event::Broadcast {
+            command: REFRESH,
+            source: None,
+        };
+        pane.handle_event(
+            &mut tick,
+            &mut headless_ctx(&mut out, &mut timers, &mut deferred),
+        );
+        // Move focus to the objectClass (Launch) field.
+        let mut down = Event::KeyDown(tv::KeyEvent::from(tv::Key::Down));
+        pane.handle_event(
+            &mut down,
+            &mut headless_ctx(&mut out, &mut timers, &mut deferred),
+        );
+        assert_eq!(pane.focused_field_idx(), Some(1));
+        // Press a printable key — the launch path must post ACTIVATE for field 1.
+        let mut key = Event::KeyDown(tv::KeyEvent::from(tv::Key::Char('x')));
+        pane.handle_event(
+            &mut key,
+            &mut headless_ctx(&mut out, &mut timers, &mut deferred),
+        );
+        assert_eq!(shared.borrow().activate_field, Some(1));
+        assert!(
+            out.iter()
+                .any(|e| matches!(e, Event::Command(cmd) if *cmd == ACTIVATE)),
+            "an action key on a Launch field must post ACTIVATE"
         );
     }
 

@@ -12,6 +12,7 @@ use crate::schema::{FieldKind, SchemaModel};
 use crate::workflows::form_model::{FormField, FormModel, WidgetSpec};
 
 /// One editable field.
+#[derive(Clone)]
 pub struct EditField {
     pub label: String,
     pub must: bool,

@@ -69,6 +69,21 @@ impl ScrollGroup {
         self.group.child_mut(id)
     }
 
+    /// Update a content child's *logical* rect (its position in the un-scrolled
+    /// content plane) and reposition it for the current scroll `top`. This is the
+    /// hook a variable-height layout uses to re-place children after the initial
+    /// `add_content`: it keeps `content_height`, `local_bounds_of`, scroll math and
+    /// hit-testing consistent (a bare `child_mut(id).change_bounds(..)` would move
+    /// the view but leave the stored logical rect stale). No-op for unknown ids.
+    pub(crate) fn set_logical(&mut self, id: ViewId, logical: Rect) {
+        if let Some(entry) = self.content.iter_mut().find(|(i, _)| *i == id) {
+            entry.1 = logical;
+        } else {
+            return;
+        }
+        self.reposition_one(id, logical);
+    }
+
     pub(crate) fn content_height(&self) -> i32 {
         self.content.iter().map(|(_, r)| r.b.y).max().unwrap_or(0)
     }
