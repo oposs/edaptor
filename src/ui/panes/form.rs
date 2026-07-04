@@ -43,6 +43,54 @@ fn cell_focusable(f: &crate::workflows::edit_form::EditField) -> bool {
     inline_editable(f) || is_modal_field(f)
 }
 
+/// Which value-view a field renders as in the form.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)] // consumed by view tasks that land in later PRs
+enum ValueKind {
+    Text,
+    List { ordered: bool },
+    Launch,
+}
+
+#[allow(dead_code)] // called by view tasks that land in later PRs
+fn value_kind(f: &crate::workflows::edit_form::EditField) -> ValueKind {
+    use crate::config::widget::WidgetKind;
+    // objectClass always gets a modal picker — check it first before the multi path.
+    // This mirrors the widget_for / is_modal_field priority in widget.rs.
+    if f.label.eq_ignore_ascii_case("objectClass") {
+        return ValueKind::Launch;
+    }
+    if matches!(f.widget_binding, Some(WidgetKind::XOrdered)) {
+        return ValueKind::List { ordered: true };
+    }
+    if f.editable && f.multi && !f.orphaned && f.widget_binding.is_none() {
+        return ValueKind::List { ordered: false };
+    }
+    if crate::ui::widget::is_modal_field(f) {
+        // Remaining modal fields (Password/Choice/Picker/SambaSid) launch.
+        return ValueKind::Launch;
+    }
+    ValueKind::Text
+}
+
+/// Display rows a field occupies. `Text` is always one row; list/launch blocks
+/// grow with their values, and an empty value set collapses to the single
+/// `<not set>` row.
+#[allow(dead_code)] // called by view tasks that land in later PRs
+fn block_height(f: &crate::workflows::edit_form::EditField, kind: ValueKind) -> i32 {
+    match kind {
+        ValueKind::Text => 1,
+        ValueKind::List { .. } | ValueKind::Launch => {
+            let non_empty: Vec<&String> =
+                f.values.iter().filter(|v| !v.trim().is_empty()).collect();
+            if non_empty.is_empty() {
+                return 1; // the `<not set>` line
+            }
+            non_empty.iter().map(|v| v.split('\n').count() as i32).sum()
+        }
+    }
+}
+
 pub(crate) struct FormPane {
     /// Outer container: header row 0 (`dn` label + DN value) + ScrollGroup (1..h).
     group: Group,
@@ -1657,5 +1705,59 @@ mod tests {
             Some(pane.value_ids[2]),
             "a resize must preserve the focused field, not reset to the first"
         );
+    }
+
+    #[cfg(test)]
+    mod value_kind_tests {
+        use super::*;
+        use crate::config::widget::WidgetKind;
+        use crate::workflows::edit_form::EditField;
+
+        // Reuse the existing ef(...) test builder in this file (form.rs:799) where possible,
+        // extended locally for widget_binding/multi/ordered.
+        fn field(label: &str, multi: bool, binding: Option<WidgetKind>) -> EditField {
+            let mut f = super::ef(label, "", true); // ef sets editable=true, multi=false
+            f.multi = multi;
+            f.widget_binding = binding;
+            f
+        }
+
+        #[test]
+        fn single_value_text_is_text_kind() {
+            let f = field("cn", false, None);
+            assert_eq!(value_kind(&f), ValueKind::Text);
+            assert_eq!(block_height(&f, ValueKind::Text), 1);
+        }
+
+        #[test]
+        fn plain_multi_is_list_unordered() {
+            let f = field("mail", true, None);
+            assert_eq!(value_kind(&f), ValueKind::List { ordered: false });
+        }
+
+        #[test]
+        fn xordered_is_list_ordered() {
+            let f = field("olcAccess", true, Some(WidgetKind::XOrdered));
+            assert_eq!(value_kind(&f), ValueKind::List { ordered: true });
+        }
+
+        #[test]
+        fn objectclass_is_launch() {
+            let f = field("objectClass", true, None);
+            assert_eq!(value_kind(&f), ValueKind::Launch);
+        }
+
+        #[test]
+        fn empty_multi_block_is_one_line() {
+            let f = field("mail", true, None); // values empty
+            assert_eq!(block_height(&f, ValueKind::List { ordered: false }), 1);
+        }
+
+        #[test]
+        fn three_values_one_with_newline_is_four_lines() {
+            let mut f = field("mail", true, None);
+            f.values = vec!["a".into(), "b\ncont".into(), "c".into()];
+            assert_eq!(block_height(&f, ValueKind::List { ordered: false }), 4);
+        }
     }
 }
