@@ -313,7 +313,6 @@ impl ListModel {
         self.on_handle = true;
     }
 
-    #[allow(dead_code)] // Task 8 may use this; keep for API completeness
     pub(crate) fn leave_handle(&mut self) {
         self.on_handle = false;
     }

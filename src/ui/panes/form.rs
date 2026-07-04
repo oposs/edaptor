@@ -2207,6 +2207,123 @@ mod tests {
         );
     }
 
+    /// Build a helper for an ordered (XOrdered) multi-value list field.
+    fn multi_list_ordered(label: &str, values: &[&str]) -> EditField {
+        use crate::config::widget::WidgetKind;
+        EditField {
+            label: label.into(),
+            must: false,
+            editable: true,
+            multi: true,
+            secret: false,
+            ordered: true,
+            orphaned: false,
+            kind: FieldKind::Text,
+            widget: WidgetSpec::ReadOnlyText,
+            widget_binding: Some(WidgetKind::XOrdered),
+            values: values.iter().map(|s| s.to_string()).collect(),
+            baseline: values.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+
+    #[test]
+    fn list_edit_syncs_values_and_marks_dirty() {
+        // Integration: a keystroke sequence in a focused ListValueView must flow through
+        // sync_into_form into edit_form.fields[i].values with correct trimming, and the
+        // form must be dirty. This guards the List edit→edit_form seam end-to-end.
+        let (shared, mut pane) =
+            build_pane_with_form(vec![multi_list("mail", &["a@x"]), ef("cn", "z", true)]);
+        let mut out = VecDeque::new();
+        let mut timers = tv::timer::TimerQueue::new();
+        let mut deferred = Vec::new();
+        let mut ctx = headless_ctx(&mut out, &mut timers, &mut deferred);
+
+        // Render and focus the first (List) field.
+        let mut ev = Event::Broadcast {
+            command: REFRESH,
+            source: None,
+        };
+        pane.handle_event(&mut ev, &mut ctx);
+        assert_eq!(pane.focused_field_idx(), Some(0));
+
+        // Move to end of "a@x", press Enter to open a new empty item, then type "b@x".
+        // Each handle_event call ends with sync_into_form, so by the last key the
+        // edit_form sees the updated value vector.
+        let mut end = Event::KeyDown(tv::KeyEvent::from(tv::Key::End));
+        pane.handle_event(&mut end, &mut ctx);
+        let mut enter = Event::KeyDown(tv::KeyEvent::from(tv::Key::Enter));
+        pane.handle_event(&mut enter, &mut ctx);
+        for c in "b@x".chars() {
+            let mut k = Event::KeyDown(tv::KeyEvent::from(tv::Key::Char(c)));
+            pane.handle_event(&mut k, &mut ctx);
+        }
+
+        let st = shared.borrow();
+        let form = st.edit_form.as_ref().unwrap();
+        assert_eq!(
+            form.fields[0].values,
+            vec!["a@x".to_string(), "b@x".to_string()],
+            "sync_into_form must write the trimmed value vector into edit_form"
+        );
+        assert!(
+            form.is_dirty(),
+            "adding a value to a List field must mark the form dirty"
+        );
+    }
+
+    #[test]
+    fn ordered_list_edit_reconstructs_ordering_prefixes() {
+        // Integration: typing a new value into a focused XOrdered ListValueView must
+        // appear in edit_form with reconstructed {n} prefixes — proving that
+        // sync_into_form calls to_values(ordered=true) for ordered List fields.
+        let (shared, mut pane) = build_pane_with_form(vec![
+            multi_list_ordered("olcAccess", &["{0}read", "{1}write"]),
+            ef("cn", "z", true),
+        ]);
+        let mut out = VecDeque::new();
+        let mut timers = tv::timer::TimerQueue::new();
+        let mut deferred = Vec::new();
+        let mut ctx = headless_ctx(&mut out, &mut timers, &mut deferred);
+
+        // Render and focus the ordered List field.
+        let mut ev = Event::Broadcast {
+            command: REFRESH,
+            source: None,
+        };
+        pane.handle_event(&mut ev, &mut ctx);
+        assert_eq!(pane.focused_field_idx(), Some(0));
+
+        // Navigate to the end of the second value and press Enter to add a third item,
+        // then type "exec". The model strips ordering prefixes on load, reconstructs them
+        // on to_values(true), so edit_form should see {0}read, {1}write, {2}exec.
+        let mut down = Event::KeyDown(tv::KeyEvent::from(tv::Key::Down));
+        pane.handle_event(&mut down, &mut ctx);
+        let mut end = Event::KeyDown(tv::KeyEvent::from(tv::Key::End));
+        pane.handle_event(&mut end, &mut ctx);
+        let mut enter = Event::KeyDown(tv::KeyEvent::from(tv::Key::Enter));
+        pane.handle_event(&mut enter, &mut ctx);
+        for c in "exec".chars() {
+            let mut k = Event::KeyDown(tv::KeyEvent::from(tv::Key::Char(c)));
+            pane.handle_event(&mut k, &mut ctx);
+        }
+
+        let st = shared.borrow();
+        let form = st.edit_form.as_ref().unwrap();
+        assert_eq!(
+            form.fields[0].values,
+            vec![
+                "{0}read".to_string(),
+                "{1}write".to_string(),
+                "{2}exec".to_string()
+            ],
+            "sync_into_form must reconstruct {{n}} ordering prefixes for XOrdered fields"
+        );
+        assert!(
+            form.is_dirty(),
+            "adding a value to an ordered List field must mark the form dirty"
+        );
+    }
+
     #[cfg(test)]
     mod value_kind_tests {
         use super::*;
