@@ -7,6 +7,7 @@ use tvision_rs::{
 
 use crate::form::validate::format_validation_errors;
 use crate::ui::dialog::{confirm, error, guard, guard_decision, GuardDecision};
+use crate::ui::help_ctx::hint_for;
 use crate::ui::panes::{
     form::FormPane,
     leaf::LeafPane,
@@ -28,7 +29,7 @@ fn init_status_line(r: Rect) -> Option<Box<dyn View>> {
                 .item("~Alt-X~ Exit", alt('x'), REQUEST_QUIT)
         })
         .build();
-    Some(Box::new(StatusLine::new(r, defs)))
+    Some(Box::new(StatusLine::new(r, defs).with_hint(hint_for)))
 }
 
 fn init_menu_bar(r: Rect) -> Option<Box<dyn View>> {

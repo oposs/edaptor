@@ -8,6 +8,11 @@ All notable changes to eDAPtor are documented here. The format follows
 
 ### New
 
+- **Dynamic footer hints:** the bottom status line now shows context-sensitive
+  keyboard hints that update as focus moves between fields. Each field kind
+  displays its own hint (e.g. `↑↓ move · Enter next field` for text fields,
+  reorder instructions for ordered list handles). No configuration required.
+
 - **Inline multi-value editing:** free-text and ordered multi-value fields
   (e.g. `mail`, `olcAccess`) are now edited **in place** in the entry form — no
   modal dialog. Type directly into the bulleted list; **Enter** adds a value,

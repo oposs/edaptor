@@ -14,6 +14,10 @@ use tvision_rs::{
 };
 use unicode_width::UnicodeWidthStr;
 
+use crate::ui::help_ctx::{
+    FIELD_LAUNCH_PASSWORD, FIELD_LAUNCH_PICKER, FIELD_LIST, FIELD_LIST_HANDLE, FIELD_LIST_ORDERED,
+    FIELD_TEXT,
+};
 use crate::ui::panes::field_label::FieldLabel;
 use crate::ui::panes::launch_view::LaunchValueView;
 use crate::ui::panes::list_view::ListValueView;
@@ -93,19 +97,20 @@ fn block_height(f: &EditField, kind: ValueKind) -> i32 {
     }
 }
 
-/// The StatusLine help context for a field's value view. Task 10 adds the formal
-/// hint mapping keyed on these exact context names, so keeping them stable here
-/// makes that change purely additive.
+/// The StatusLine help context for a field's value view.
+/// Returns one of the `FIELD_*` constants from `crate::ui::help_ctx`; the status
+/// line's hint mapping references the same constants, so a rename can never
+/// silently break the hint display.
 fn help_ctx_for(kind: ValueKind, field: &EditField) -> HelpCtx {
     match kind {
-        ValueKind::Text => HelpCtx::custom("edaptor.field.text"),
-        ValueKind::List { ordered: false } => HelpCtx::custom("edaptor.field.list"),
-        ValueKind::List { ordered: true } => HelpCtx::custom("edaptor.field.list.ordered"),
+        ValueKind::Text => FIELD_TEXT,
+        ValueKind::List { ordered: false } => FIELD_LIST,
+        ValueKind::List { ordered: true } => FIELD_LIST_ORDERED,
         ValueKind::Launch => {
             if field.secret {
-                HelpCtx::custom("edaptor.field.launch.password")
+                FIELD_LAUNCH_PASSWORD
             } else {
-                HelpCtx::custom("edaptor.field.launch.picker")
+                FIELD_LAUNCH_PICKER
             }
         }
     }
@@ -403,7 +408,7 @@ impl FormPane {
                         // Inline editor: a `ListValueView` wrapping the field's
                         // values. It edits in place (Enter/Ctrl+Enter/Backspace/…)
                         // and signals field navigation via `take_boundary_exit`.
-                        let handle = HelpCtx::custom("edaptor.field.list.handle");
+                        let handle = FIELD_LIST_HANDLE;
                         let v = ListValueView::new(
                             Rect::new(0, 0, w, 1),
                             &f.values,
@@ -2253,6 +2258,83 @@ mod tests {
             let mut f = field("mail", true, None);
             f.values = vec!["a".into(), "b\ncont".into(), "c".into()];
             assert_eq!(block_height(&f, ValueKind::List { ordered: false }), 4);
+        }
+    }
+
+    /// Tests that `help_ctx_for` returns the matching constant from `ui::help_ctx`
+    /// for each `ValueKind`. Guards the pane ↔ status-line mapping so a rename
+    /// of either side is caught at compile time (the constants) and test time (the
+    /// name comparison).
+    #[cfg(test)]
+    mod help_ctx_for_tests {
+        use super::*;
+        use crate::config::widget::WidgetKind;
+        use crate::ui::help_ctx::{
+            FIELD_LAUNCH_PASSWORD, FIELD_LAUNCH_PICKER, FIELD_LIST, FIELD_LIST_ORDERED, FIELD_TEXT,
+        };
+
+        fn plain_field() -> EditField {
+            ef("cn", "value", true)
+        }
+
+        fn secret_field() -> EditField {
+            let mut f = ef("userPassword", "", true);
+            f.secret = true;
+            f
+        }
+
+        fn multi_field() -> EditField {
+            let mut f = ef("mail", "", true);
+            f.multi = true;
+            f
+        }
+
+        #[test]
+        fn text_kind_returns_field_text() {
+            let f = plain_field();
+            assert_eq!(help_ctx_for(ValueKind::Text, &f), FIELD_TEXT);
+        }
+
+        #[test]
+        fn list_unordered_returns_field_list() {
+            let f = multi_field();
+            assert_eq!(
+                help_ctx_for(ValueKind::List { ordered: false }, &f),
+                FIELD_LIST
+            );
+        }
+
+        #[test]
+        fn list_ordered_returns_field_list_ordered() {
+            let f = multi_field();
+            assert_eq!(
+                help_ctx_for(ValueKind::List { ordered: true }, &f),
+                FIELD_LIST_ORDERED
+            );
+        }
+
+        #[test]
+        fn launch_non_secret_returns_field_launch_picker() {
+            let f = plain_field();
+            assert_eq!(help_ctx_for(ValueKind::Launch, &f), FIELD_LAUNCH_PICKER);
+        }
+
+        #[test]
+        fn launch_secret_returns_field_launch_password() {
+            let f = secret_field();
+            assert_eq!(help_ctx_for(ValueKind::Launch, &f), FIELD_LAUNCH_PASSWORD);
+        }
+
+        #[test]
+        fn xordered_binding_help_ctx_is_list_ordered() {
+            // End-to-end: value_kind maps XOrdered → List { ordered: true };
+            // help_ctx_for then maps that to FIELD_LIST_ORDERED.
+            let mut f = ef("olcAccess", "", true);
+            f.multi = true;
+            f.widget_binding = Some(WidgetKind::XOrdered);
+            let kind = value_kind(&f);
+            assert_eq!(kind, ValueKind::List { ordered: true });
+            assert_eq!(help_ctx_for(kind, &f), FIELD_LIST_ORDERED);
         }
     }
 }
