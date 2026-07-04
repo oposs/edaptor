@@ -171,6 +171,13 @@ impl ListValueView {
 
             (Key::Left, _, _) => {
                 self.model.left();
+                // Unordered lists must never enter the reorder handle: if the
+                // model transitioned onto the handle (item 0, offset 0 → Left),
+                // pull it back immediately so on_handle() stays false for the
+                // help_ctx sync below and for any subsequent key handler.
+                if !self.ordered && self.model.on_handle() {
+                    self.model.leave_handle();
+                }
                 ev.clear();
             }
             (Key::Right, _, _) => {
@@ -519,6 +526,76 @@ mod tests {
         assert!(
             v.to_values()[0].starts_with('z'),
             "Home should move to start of item"
+        );
+    }
+
+    #[test]
+    fn help_ctx_switches_to_handle_on_handle_position() {
+        // ORDERED view: Left at (item 0, offset 0) enters the handle; the
+        // help context must flip to the handle context. A subsequent edit key
+        // (Right) leaves the handle and the context must revert to body.
+        let mut v = ListValueView::new(
+            Rect::new(0, 0, 20, 1),
+            &["abc".into()],
+            true, // ordered
+            body(),
+            handle(),
+        );
+        // Cursor starts at (0, 0); Left moves it onto the handle.
+        v.on_key(&mut key(Key::Left));
+        assert!(
+            v.model.on_handle(),
+            "model must be on the handle after Left at origin"
+        );
+        assert_eq!(
+            v.state.help_ctx,
+            handle(),
+            "help_ctx must switch to handle context while on the handle"
+        );
+        // Right leaves the handle; context must revert.
+        v.on_key(&mut key(Key::Right));
+        assert!(
+            !v.model.on_handle(),
+            "model must leave the handle after Right"
+        );
+        assert_eq!(
+            v.state.help_ctx,
+            body(),
+            "help_ctx must revert to body context after leaving the handle"
+        );
+    }
+
+    #[test]
+    fn unordered_list_never_enters_handle() {
+        // Regression test for Fix 1: an UNORDERED view must never end an event
+        // with on_handle()==true, and the help context must stay on body.
+        let mut v = ListValueView::new(
+            Rect::new(0, 0, 20, 1),
+            &["abc".into()],
+            false, // unordered
+            body(),
+            handle(),
+        );
+        // Drive the cursor to (item 0, offset 0) by pressing Home.
+        v.on_key(&mut key(Key::Home));
+        // Left at offset 0 would enter the handle on an ordered field;
+        // for unordered it must be blocked.
+        v.on_key(&mut key(Key::Left));
+        assert!(
+            !v.model.on_handle(),
+            "unordered list must never enter handle mode"
+        );
+        assert_eq!(
+            v.state.help_ctx,
+            body(),
+            "help_ctx must remain on body for unordered list after Left at origin"
+        );
+        // Verify the display still shows the plain bullet, not the hamburger.
+        let lines = v.model.display_lines();
+        assert!(
+            lines[0].starts_with("- "),
+            "unordered display must show '- ' bullet, not '≡': got {:?}",
+            lines[0]
         );
     }
 }
