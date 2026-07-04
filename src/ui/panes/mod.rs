@@ -3,6 +3,7 @@ pub(crate) mod form;
 pub(crate) mod launch_view;
 pub(crate) mod leaf;
 pub(crate) mod list_model;
+pub(crate) mod list_view;
 pub(crate) mod tree;
 pub(crate) mod value_lines;
 

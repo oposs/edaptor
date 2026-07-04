@@ -16,7 +16,6 @@ use tvision_rs::text;
 /// Result of a cursor move: `Moved` when the cursor changed inside the model,
 /// `Boundary` when it was already at an edge (the view bubbles field navigation).
 #[derive(Debug, PartialEq, Eq)]
-#[allow(dead_code)]
 pub(crate) enum Move {
     Moved,
     Boundary,
@@ -38,7 +37,6 @@ fn line_ranges(s: &str) -> Vec<(usize, usize)> {
     out
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub(crate) struct ListModel {
     items: Vec<String>,
@@ -48,7 +46,6 @@ pub(crate) struct ListModel {
     on_handle: bool,
 }
 
-#[allow(dead_code)]
 impl ListModel {
     /// Build from stored values. When `strip_ordering`, drop each value's `{n}`
     /// ordering prefix. Blank values are filtered out, so empty/all-blank input
@@ -311,10 +308,12 @@ impl ListModel {
         true
     }
 
+    #[allow(dead_code)] // Task 8 may use this; keep for API completeness
     pub(crate) fn enter_handle(&mut self) {
         self.on_handle = true;
     }
 
+    #[allow(dead_code)] // Task 8 may use this; keep for API completeness
     pub(crate) fn leave_handle(&mut self) {
         self.on_handle = false;
     }
@@ -340,11 +339,37 @@ impl ListModel {
         value_lines::format_items(&self.items, handle)
     }
 
+    /// Move the cursor to the start of the current display line (Home key).
+    /// Clears the handle flag. No-op when the model is empty.
+    pub(crate) fn home(&mut self) {
+        self.on_handle = false;
+        if self.items.is_empty() {
+            return;
+        }
+        let rows = self.rows();
+        let cur_row = self.locate().0;
+        self.off = rows[cur_row].1; // seg_start for this display line
+    }
+
+    /// Move the cursor to the end of the current display line (End key).
+    /// Clears the handle flag. No-op when the model is empty.
+    pub(crate) fn end(&mut self) {
+        self.on_handle = false;
+        if self.items.is_empty() {
+            return;
+        }
+        let rows = self.rows();
+        let cur_row = self.locate().0;
+        self.off = rows[cur_row].2; // seg_end for this display line
+    }
+
     /// `(col, row)` of the cursor in display space. `row` is the display-line
     /// index; `col` accounts for the 2-column `"- "`/indent prefix. While
-    /// `on_handle`, `col` is 0 (the marker cell).
+    /// `on_handle`, `col` is 0 (the marker cell). Returns `(0, 0)` whenever the
+    /// model is logically empty (including the `items == [""]` state) so the
+    /// caret does not land on the `<not set>` placeholder line.
     pub(crate) fn cursor_xy(&self) -> (i32, i32) {
-        if self.items.is_empty() {
+        if self.is_empty() {
             return (0, 0);
         }
         let mut row = 0i32;
@@ -748,5 +773,29 @@ mod tests {
         assert_eq!(m.cursor_xy(), (3, 0));
         m.down(); // item 1, col 1
         assert_eq!(m.cursor_xy(), (3, 1));
+    }
+
+    #[test]
+    fn cursor_xy_is_origin_when_logically_empty() {
+        // Verify that the blank-item state (`items == [""]`, `is_empty() == true`)
+        // also returns (0, 0) — the caret must not land on the `<not set>` line.
+        let mut m = m(&["a"]);
+        m.delete(); // remove 'a' → items = [""], is_empty() true
+        assert!(m.is_empty());
+        assert_eq!(m.cursor_xy(), (0, 0));
+    }
+
+    #[test]
+    fn delete_at_end_of_last_item_is_noop() {
+        // Pressing Delete at the very end of the last item must not panic and
+        // must leave the model unchanged.
+        let mut m = m(&["abc"]);
+        m.right();
+        m.right();
+        m.right(); // position at end of "abc" (off = 3)
+        let before = m.items.clone();
+        m.delete(); // end-of-item with no next item → no-op
+        assert_eq!(m.items, before);
+        assert_eq!(m.off, 3);
     }
 }

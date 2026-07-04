@@ -8,6 +8,12 @@ All notable changes to eDAPtor are documented here. The format follows
 
 ### New
 
+- **Inline multi-value editor (stage 2):** `ListValueView` — a tvision `View` that
+  wraps `ListModel` and drives an in-place bulleted-list editor with a text cursor,
+  full keyboard editing (Enter to split, Ctrl+Enter for continuations, Backspace /
+  Delete, Home / End, Up / Down with boundary-exit signalling, Ctrl+Up/Down
+  reorder for ordered fields). Not yet wired into the form pane (Task 8).
+
 - Picker dialogs (object classes, membership, multi-select pickers) now use the
   conventional transfer layout — **Available on the left, the selected set on the
   right** — with wide **Add** and **Remove** buttons under their respective
