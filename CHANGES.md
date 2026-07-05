@@ -8,6 +8,11 @@ All notable changes to eDAPtor are documented here. The format follows
 
 ### New
 
+- **New `lookup` widget kind.** A scalar attribute (e.g. `gidNumber`) is shown in
+  the form as `<value> (<name>)` and edited via an editable-combobox popup: type a
+  number freely or filter a candidate list and pick one. See
+  [Widgets → The lookup kind](https://oposs.github.io/edaptor/configuration/widgets.html#the-lookup-kind).
+
 - **Dynamic footer hints:** the bottom status line now shows context-sensitive
   keyboard hints that update as focus moves between fields. Each field kind
   displays its own hint (e.g. `↑↓ move · Enter next field` for text fields,

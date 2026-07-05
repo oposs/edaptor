@@ -560,10 +560,10 @@ mod tests {
             WidgetSpecCfg::Membership { via, .. } => assert_eq!(via, "member"),
             other => panic!("expected Membership for memberOf, got {other:?}"),
         }
-        // gidNumber migrated to a picker widget.
+        // gidNumber migrated to a lookup widget.
         assert!(
-            matches!(&user.widgets["gidNumber"], WidgetSpecCfg::Picker { .. }),
-            "expected Picker for gidNumber"
+            matches!(&user.widgets["gidNumber"], WidgetSpecCfg::Lookup { .. }),
+            "expected Lookup for gidNumber"
         );
     }
 
@@ -871,15 +871,16 @@ options = [ { value = "/bin/bash", label = "Bash" } ]
             }
             other => panic!("expected Picker for memberOf, got {other:?}"),
         }
-        // gidNumber resolves to a plain picker (no fan-out).
+        // gidNumber resolves to a lookup widget (shows friendly name in the form).
         let gid = widgets
             .iter()
             .find(|w| w.attr.eq_ignore_ascii_case("gidNumber"))
             .expect("gidNumber widget");
-        match &gid.kind {
-            crate::config::widget::WidgetKind::Picker(b) => assert_eq!(b.fanout_attr, None),
-            other => panic!("expected Picker for gidNumber, got {other:?}"),
-        }
+        assert!(
+            matches!(&gid.kind, crate::config::widget::WidgetKind::Lookup(_)),
+            "expected Lookup for gidNumber, got {:?}",
+            gid.kind
+        );
     }
 
     #[test]

@@ -12,6 +12,7 @@ configuration:
 |---|---|---|
 | [`choice`](#the-choice-kind) | a checklist (multi) / radio list (single) over a fixed set of options | enumerated or flag attributes — `loginShell`, `sambaAcctFlags` |
 | [`password`](#the-password-kind) | a masked **New + Confirm** set-password popup | password / hash attributes — `userPassword`, with optional Samba sync |
+| [`lookup`](#the-lookup-kind) | an editable-combobox popup: type a number or filter a candidate list and pick one | scalar values shown with a friendly name (`gidNumber` → group name) |
 | [`picker`](#the-picker-kind) | a live candidate search; stores the picked value(s) in this entry | value lookup (`gidNumber`) and DN/scalar lists (`member`, `memberUid`) |
 | [`membership`](#the-membership-kind) | a live candidate search; fans this entry's DN into a back-ref attr on each pick | back-reference views (`memberOf`) |
 
@@ -224,6 +225,10 @@ A single-select picker over `posixgroup` entries. Because `store = "gidNumber"`,
 eDAPtor writes the **chosen group's `gidNumber` scalar** into the user's
 `gidNumber` field — not the group's DN.
 
+> For `gidNumber` you will usually prefer the [`lookup` kind](#the-lookup-kind),
+> which additionally shows the group name in the form and lets you type a bare
+> number. The `picker` form above remains valid for pick-only behavior.
+
 #### `member` — multi-select, stores DNs
 
 ```toml
@@ -252,6 +257,57 @@ candidate = { base = "ou=people,dc=example,dc=org", object_classes = ["inetOrgPe
 Uses an inline candidate scope rather than a named profile. Useful when you need
 a picker over a subset of the directory that does not have (or need) a full
 `[[profile]]` entry of its own.
+
+## The `lookup` kind
+
+The `lookup` kind turns a **scalar attribute into a value shown with its friendly
+name**. In the form the field renders as `<value> (<name>)` — e.g. `5000 (staff)`
+for a `gidNumber` — by resolving the value against a candidate profile. Pressing
+Enter opens an **editable combobox**: type a number freely, or filter a list of
+candidates by name and pick one.
+
+```toml
+[profile.widget.gidNumber]
+kind      = "lookup"
+candidate = "posixgroup"
+store     = "gidNumber"
+label     = "{cn}"
+```
+
+### Options
+
+- **`kind`** *(required)* — must be `"lookup"`.
+- **`candidate`** *(required)* — the source of candidates. Same as
+  [`picker`](#the-picker-kind): a `[[profile]]` name string, or an inline scope
+  table.
+- **`store`** *(required)* — the scalar attribute stored in this entry's field. It
+  is **also the match key**: the friendly name is resolved by searching the
+  candidate for an entry whose `store` attribute equals the current value.
+- **`label`** *(optional, default `{cn}`)* — a label template rendered against the
+  resolved candidate to produce the friendly name (e.g. `{cn}`, `{cn} ({description})`).
+  Defaults to the candidate profile's own `label`, else `{cn}`.
+
+### The edit popup
+
+The popup is an **editable combobox**:
+
+- The **input** is authoritative. Its leading integer is the value that will be
+  stored — you can type any number, even one with no matching candidate.
+- Typing filters the **list** below (by name, or by numeric prefix). Rows show
+  `<name> (<value>)`, e.g. `staff (5000)`.
+- Picking a row (Enter/click) fills the input with `<value> (<name>)`.
+- **OK** is enabled only when the input has a leading number; it stores that
+  number.
+
+The always-visible form shows `<value> (<name>)` — a brief `<value> (…)` while the
+name resolves in the background, and just `<value>` if no candidate matches.
+
+### `lookup` vs `picker`
+
+Both can store a group's `gidNumber`. Use `picker` when you only ever pick an
+existing group and want a search-over-radio-list. Use `lookup` when you also want
+to **type an arbitrary number** and to **see the group name in the form** without
+opening the editor.
 
 ## The `membership` kind
 

@@ -57,12 +57,14 @@ options = [
   { value = "/sbin/nologin", label = "No login" },
 ]
 
-# gidNumber resolves a posixGroup and stores that group's gidNumber scalar.
+# gidNumber: shown in the form as "<number> (<group name>)" and edited via an
+# editable-combobox popup — type a number freely or filter the posixgroup list
+# and pick one.
 [profile.widget.gidNumber]
-kind      = "picker"
+kind      = "lookup"
 candidate = "posixgroup"
 store     = "gidNumber"
-select    = "single"
+label     = "{cn}"
 
 # memberOf is a synthetic back-ref: ticking a group writes `member` on it
 # (the memberOf attribute itself is overlay-maintained, never written directly).

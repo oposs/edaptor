@@ -101,7 +101,7 @@ the documentation rather than being duplicated:
 - **[Entry Profiles](https://oposs.github.io/edaptor/configuration/entry-profiles.html)**
   and **[Defaults](https://oposs.github.io/edaptor/configuration/defaults.html)**
 - **[Widgets](https://oposs.github.io/edaptor/configuration/widgets.html)** — the
-  `[profile.widget.<attr>]` palette: `password`, `choice`, `picker`, `membership`
+  `[profile.widget.<attr>]` palette: `password`, `choice`, `lookup`, `picker`, `membership`
   (these replaced the former `[profile.picker]` / `[profile.password]` layers)
 - **[Full Example](https://oposs.github.io/edaptor/configuration/full-example.html)**
   — the complete annotated `examples/config.toml`, copy-pasteable as a starting point
