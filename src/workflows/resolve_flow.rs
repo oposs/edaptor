@@ -14,22 +14,7 @@ use std::collections::HashMap;
 
 use crate::config::label::{render_label, LabelSeg};
 use crate::ldap::worker::{Request, Response, SearchScope, WorkerHandle};
-
-/// RFC-4515-escape a filter assertion value: `* ( ) \ NUL` become `\HH`.
-fn escape_filter_value(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for b in s.bytes() {
-        match b {
-            b'*' => out.push_str("\\2a"),
-            b'(' => out.push_str("\\28"),
-            b')' => out.push_str("\\29"),
-            b'\\' => out.push_str("\\5c"),
-            0 => out.push_str("\\00"),
-            _ => out.push(b as char),
-        }
-    }
-    out
-}
+use crate::workflows::pick_state::escape_filter;
 
 /// Build an exact-match filter `(&(objectClass=<oc>)(<attr>=<value>))` with the
 /// value RFC-4515-escaped. Used to find the single candidate whose `store`
@@ -39,7 +24,7 @@ pub fn build_equality_filter(oc: &str, attr: &str, value: &str) -> String {
         "(&(objectClass={})({}={}))",
         oc,
         attr,
-        escape_filter_value(value)
+        escape_filter(value)
     )
 }
 
