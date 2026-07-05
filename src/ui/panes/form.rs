@@ -600,12 +600,11 @@ impl FormPane {
     /// Vision behaviour); that whole-value selection would be wiped by the first
     /// keystroke, so we clear it and home the caret whenever focus lands on a field.
     fn place_cursor_home(&mut self, id: tv::ViewId) {
-        if let Some(il) = self
-            .scroll_mut()
-            .and_then(|sg| sg.child_mut(id))
-            .and_then(|v| v.as_any_mut())
-            .and_then(|a| a.downcast_mut::<InputLine>())
-        {
+        let Some(view) = self.scroll_mut().and_then(|sg| sg.child_mut(id)) else {
+            return;
+        };
+        let Some(any) = view.as_any_mut() else { return };
+        if let Some(il) = any.downcast_mut::<InputLine>() {
             // `home()` moves the caret to offset 0, collapses the selection, and
             // scrolls the field fully left. tvision-rs 0.11+ derives the screen
             // cursor from `cur_pos`/`first_pos` in `cursor_request`, so homing is
@@ -613,6 +612,10 @@ impl FormPane {
             // Vision default select-alls a field to the end on focus; this is what
             // undoes that so the first keystroke does not wipe the value.)
             il.home();
+        } else if let Some(lv) = any.downcast_mut::<ListValueView>() {
+            // Multi-value inline editor: land on the first line so navigating into
+            // the field always opens at the top (parity with the text fields).
+            lv.cursor_home();
         }
     }
 

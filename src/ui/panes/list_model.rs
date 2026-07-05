@@ -386,6 +386,36 @@ impl ListModel {
         self.off = rows[cur_row].2; // seg_end for this display line
     }
 
+    /// Reset the caret to the very first display line (item 0, offset 0) and
+    /// leave the reorder handle. Used when focus enters the field so it always
+    /// opens at the top, mirroring the single-line fields' home-on-focus.
+    pub(crate) fn cursor_to_start(&mut self) {
+        self.on_handle = false;
+        self.item = 0;
+        self.off = 0;
+    }
+
+    /// Place the caret at display position `(col, row)` — used for mouse clicks.
+    /// `row` selects the display line (clamped); `col` maps into the line's text
+    /// past the 2-column `"- "`/indent prefix, grapheme-aware and clamped to the
+    /// line end. No-op when the model has no items.
+    pub(crate) fn set_cursor_at_display(&mut self, col: i32, row: i32) {
+        self.on_handle = false;
+        if self.items.is_empty() {
+            self.item = 0;
+            self.off = 0;
+            return;
+        }
+        let rows = self.rows();
+        let r = (row.max(0) as usize).min(rows.len() - 1);
+        let (item, start, end) = rows[r];
+        let seg = &self.items[item][start..end];
+        let desired_col = (col - 2).max(0);
+        let (bytes, _) = text::scroll(seg, desired_col, false);
+        self.item = item;
+        self.off = start + bytes;
+    }
+
     /// `(col, row)` of the cursor in display space. `row` is the display-line
     /// index; `col` accounts for the 2-column `"- "`/indent prefix. While
     /// `on_handle`, `col` is 0 (the marker cell). Returns `(0, 0)` when the
@@ -820,6 +850,33 @@ mod tests {
     }
 
     // --- cursor_xy --------------------------------------------------------
+
+    #[test]
+    fn cursor_to_start_resets_to_first_line() {
+        let mut m = m(&["ab", "cd"]);
+        m.down();
+        m.right(); // move away: item 1, past 'c'
+        m.cursor_to_start();
+        assert_eq!(m.cursor_xy(), (2, 0)); // first line, caret just after "- "
+    }
+
+    #[test]
+    fn set_cursor_at_display_maps_click_position() {
+        let mut m = m(&["abc", "de"]);
+        // Row 1 = item 1 "de" shown as "- de"; col 3 lands after 'd'.
+        m.set_cursor_at_display(3, 1);
+        assert_eq!(m.cursor_xy(), (3, 1));
+        // Clicking past the end of a shorter line clamps to the line end.
+        m.set_cursor_at_display(99, 0); // row 0 = "abc"
+        assert_eq!(m.cursor_xy(), (5, 0)); // 2 prefix + width("abc")
+    }
+
+    #[test]
+    fn set_cursor_at_display_clamps_row() {
+        let mut m = m(&["a", "b"]);
+        m.set_cursor_at_display(2, 99); // row past the end clamps to last line
+        assert_eq!(m.cursor_xy(), (2, 1));
+    }
 
     #[test]
     fn cursor_xy_accounts_for_prefix() {

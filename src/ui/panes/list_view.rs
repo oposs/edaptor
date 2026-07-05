@@ -119,6 +119,31 @@ impl ListValueView {
         self.model = ListModel::from_values(values, self.ordered);
     }
 
+    /// Move the caret to the first display line. The form calls this when focus
+    /// lands on the field (via `place_cursor_home`) so a multi-value field always
+    /// opens at the top, matching the single-line fields' home-on-focus.
+    pub(crate) fn cursor_home(&mut self) {
+        self.model.cursor_to_start();
+        self.sync_help_ctx();
+    }
+
+    /// Position the caret at a view-local click `(x, y)`. Pure logic layer,
+    /// exercised directly in unit tests; called from [`View::handle_event`].
+    fn on_mouse(&mut self, x: i32, y: i32) {
+        self.model.set_cursor_at_display(x, y);
+        self.sync_help_ctx();
+    }
+
+    /// Update `state.help_ctx` from the current model state: the handle context
+    /// while the cursor sits on the reorder handle, else the body context.
+    fn sync_help_ctx(&mut self) {
+        self.state.help_ctx = if self.model.on_handle() {
+            self.help_ctx_handle
+        } else {
+            self.help_ctx_body
+        };
+    }
+
     /// Classify and apply a key event — the pure logic layer.
     ///
     /// Called from [`View::handle_event`] and exercised directly in unit tests
@@ -221,11 +246,7 @@ impl ListValueView {
         }
 
         // Keep the status-line help context in sync with the model state.
-        self.state.help_ctx = if self.model.on_handle() {
-            self.help_ctx_handle
-        } else {
-            self.help_ctx_body
-        };
+        self.sync_help_ctx();
     }
 }
 
@@ -255,8 +276,13 @@ impl View for ListValueView {
     }
 
     fn handle_event(&mut self, ev: &mut Event, _ctx: &mut tvision_rs::Context) {
-        if matches!(ev, Event::KeyDown(_)) {
-            self.on_key(ev);
+        match ev {
+            Event::KeyDown(_) => self.on_key(ev),
+            // A click positions the caret at the clicked line/column. `position`
+            // is view-local (the group translates it). The event is left
+            // unconsumed so the group still focuses this view on the click.
+            Event::MouseDown(m) => self.on_mouse(m.position.x, m.position.y),
+            _ => {}
         }
     }
 
@@ -303,6 +329,40 @@ mod tests {
     }
 
     // --- tests from the task brief ---
+
+    #[test]
+    fn cursor_home_lands_on_first_line() {
+        // Home-on-focus: after moving into the second line, cursor_home returns
+        // to the first item's start, so the next keystroke inserts there.
+        let mut v = ListValueView::new(
+            Rect::new(0, 0, 20, 2),
+            &["ab".into(), "cd".into()],
+            false,
+            body(),
+            handle(),
+        );
+        v.on_key(&mut key(Key::Down)); // to item 1 "cd"
+        v.cursor_home();
+        v.on_key(&mut key(Key::Char('X')));
+        assert_eq!(v.to_values(), vec!["Xab".to_string(), "cd".to_string()]);
+    }
+
+    #[test]
+    fn click_positions_caret_for_next_keystroke() {
+        // A click at (col, row) places the caret so a following character is
+        // inserted at the clicked spot. Row 1 = "cd" shown as "- cd"; col 3 lands
+        // just after 'c'.
+        let mut v = ListValueView::new(
+            Rect::new(0, 0, 20, 2),
+            &["ab".into(), "cd".into()],
+            false,
+            body(),
+            handle(),
+        );
+        v.on_mouse(3, 1);
+        v.on_key(&mut key(Key::Char('X')));
+        assert_eq!(v.to_values(), vec!["ab".to_string(), "cXd".to_string()]);
+    }
 
     #[test]
     fn down_at_bottom_sets_boundary_exit() {
