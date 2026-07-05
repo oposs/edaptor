@@ -127,9 +127,6 @@ pub(crate) struct LookupDialog {
     /// Current filtered view (indices into `all`), parallel to the ListBox rows.
     filtered: Vec<usize>,
     last_input: String,
-    /// Set true right after a programmatic pick so the input-change detector does
-    /// not immediately re-filter from the auto-filled `<value> (<name>)` text.
-    suppress_filter: bool,
     seeded: bool,
 }
 
@@ -186,7 +183,6 @@ impl LookupDialog {
             all: Vec::new(),
             filtered: Vec::new(),
             last_input: current,
-            suppress_filter: false,
             seeded: false,
         }
     }
@@ -304,8 +300,9 @@ impl LookupDialog {
         let (value, label) = self.all[ai].clone();
         let text = input_after_pick(&value, &label);
         self.set_input(&text, ctx);
+        // last_input is updated to match the text just written so the end-of-event
+        // change detector sees no change and does not spuriously re-filter.
         self.last_input = text;
-        self.suppress_filter = true;
         self.sync_ok(ctx);
     }
 }
@@ -351,8 +348,9 @@ impl View for LookupDialog {
                 if *command == Command::LIST_ITEM_SELECTED && *source == Some(self.list_id)
         );
 
-        // Nav keys are always forwarded directly to the list so the user can
-        // browse candidates regardless of which widget currently holds focus.
+        // Deliberate combobox idiom: nav keys are always routed to the list so
+        // the user can browse candidates while the input stays focused and
+        // editable. This mirrors the search-over-list routing in `picker.rs`.
         let nav = matches!(
             ev,
             Event::KeyDown(k)
@@ -370,15 +368,11 @@ impl View for LookupDialog {
             self.dlg.handle_event(ev, ctx);
         }
 
-        // Detect input changes → refilter (unless a pick just set the text) + re-stage.
+        // Detect input changes → refilter + re-stage.
         let cur = self.current_input();
         if cur != self.last_input {
             self.last_input = cur;
-            if self.suppress_filter {
-                self.suppress_filter = false;
-            } else {
-                self.apply_filter(ctx);
-            }
+            self.apply_filter(ctx);
             self.sync_ok(ctx);
         }
     }
@@ -478,6 +472,57 @@ mod dialog_tests {
             store: "gidNumber".into(),
             label_template: crate::config::label::parse_label_template("{cn}"),
         }
+    }
+
+    /// After a pick (LIST_ITEM_SELECTED), the next input change must trigger
+    /// apply_filter immediately — no 1-keystroke lag. This pins the fix that
+    /// removed the suppress_filter field: the last_input guard alone is
+    /// sufficient because set_value_ctx on InputLine is synchronous.
+    #[test]
+    fn input_change_after_pick_triggers_filter_immediately() {
+        let shared = shared_with_candidates(vec![("100", "users"), ("5000", "staff")]);
+        let mut dlg = LookupDialog::new(binding(), String::new(), shared.clone());
+        let mut out = VecDeque::new();
+        let mut timers = TimerQueue::new();
+        let mut deferred: Vec<Deferred> = Vec::new();
+        let mut ctx = tvision_rs::Context::new(&mut out, &mut timers, 0, &mut deferred);
+
+        // Seed candidates via REFRESH.
+        let mut ev = Event::Broadcast {
+            command: crate::ui::REFRESH,
+            source: None,
+        };
+        dlg.handle_event(&mut ev, &mut ctx);
+        // All 2 candidates visible initially.
+        assert_eq!(dlg.filtered.len(), 2, "both candidates visible before pick");
+
+        // Simulate a pick by broadcasting LIST_ITEM_SELECTED for the list_id.
+        // This calls pick_highlighted, which sets input to "100 (users)" and
+        // last_input to the same string.
+        let list_id = dlg.list_id;
+        let mut ev = Event::Broadcast {
+            command: tvision_rs::Command::LIST_ITEM_SELECTED,
+            source: Some(list_id),
+        };
+        dlg.handle_event(&mut ev, &mut ctx);
+
+        // Now simulate the user typing a filter ("staff") by directly setting
+        // the input value, then firing a no-op event to trigger change detection.
+        if let Some(v) = dlg.dlg.child_mut(dlg.input_id) {
+            v.set_value_ctx(tvision_rs::FieldValue::Text("staff".into()), &mut ctx);
+        }
+        let mut ev = Event::Broadcast {
+            command: crate::ui::REFRESH,
+            source: None,
+        };
+        dlg.handle_event(&mut ev, &mut ctx);
+
+        // apply_filter must have fired: "staff" matches only the staff candidate.
+        assert_eq!(
+            dlg.filtered.len(),
+            1,
+            "filter must take effect immediately after pick, no 1-keystroke lag"
+        );
     }
 
     #[test]
