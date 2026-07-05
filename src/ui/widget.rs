@@ -142,6 +142,8 @@ pub fn widget_for(field: &EditField) -> Box<dyn FieldWidget> {
         } else {
             Box::new(crate::ui::picker::PickerWidget)
         }
+    } else if matches!(field.widget_binding, Some(WidgetKind::Lookup(_))) {
+        Box::new(crate::ui::lookup::LookupWidget)
     } else if matches!(field.widget_binding, Some(WidgetKind::SambaSid)) {
         Box::new(SambaSidWidget)
     } else {
@@ -158,6 +160,7 @@ pub fn is_modal_field(field: &EditField) -> bool {
         || matches!(field.widget_binding, Some(WidgetKind::Password(_)))
         || matches!(field.widget_binding, Some(WidgetKind::Choice(_)))
         || matches!(field.widget_binding, Some(WidgetKind::Picker(_)))
+        || matches!(field.widget_binding, Some(WidgetKind::Lookup(_)))
         || matches!(field.widget_binding, Some(WidgetKind::SambaSid))
 }
 
@@ -256,6 +259,28 @@ mod tests {
         let f = field(&["x"], WidgetSpec::ReadOnlyText);
         assert!(!is_modal_field(&f));
         assert!(matches!(widget_for(&f).activate(&f), Activation::Inline));
+    }
+
+    #[test]
+    fn lookup_field_routes_to_lookup_widget_and_is_modal() {
+        use crate::config::relation::{CandidateScope, LookupBinding};
+        use crate::config::widget::WidgetKind;
+        let mut f = field(&["5000"], WidgetSpec::ReadOnlyText);
+        f.label = "gidNumber".into();
+        f.widget_binding = Some(WidgetKind::Lookup(LookupBinding {
+            attr: "gidNumber".into(),
+            scope: CandidateScope {
+                base: "ou=groups,dc=x".into(),
+                object_classes: vec!["posixGroup".into()],
+                search_attrs: vec!["cn".into()],
+                label_template: None,
+            },
+            store: "gidNumber".into(),
+            label_template: crate::config::label::parse_label_template("{cn}"),
+        }));
+        assert!(is_modal_field(&f), "lookup fields open a modal");
+        // widget_for returns a LookupWidget whose activate() yields a Modal editor.
+        assert!(matches!(widget_for(&f).activate(&f), Activation::Modal(_)));
     }
 
     #[test]
