@@ -5,7 +5,7 @@ A `[profile.widget.<attr>]` binding gives the field for attribute `<attr>` a
 palette*: the required `kind` key selects the behaviour, and each kind brings its
 own display and editing rules.
 
-Four kinds are available today, and more can be added without changing existing
+Five kinds are available today, and more can be added without changing existing
 configuration:
 
 | `kind` | Editor | Use it for |
