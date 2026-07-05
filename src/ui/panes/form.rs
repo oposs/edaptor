@@ -325,6 +325,18 @@ impl FormPane {
         self.header_text()
     }
 
+    /// Test seam: the first display line of field `i`'s LaunchValueView.
+    #[cfg(test)]
+    pub(crate) fn launch_line_for_test(&mut self, i: usize) -> String {
+        let vid = self.value_ids[i];
+        self.scroll_mut()
+            .and_then(|sg| sg.child_mut(vid))
+            .and_then(|v| v.as_any_mut())
+            .and_then(|a| a.downcast_mut::<LaunchValueView>())
+            .and_then(|lv| lv.first_line_for_test())
+            .unwrap_or_default()
+    }
+
     /// Compose the header string from the current form state.
     /// For `Edit` mode: `"<dn><mark>"`.
     /// For `Create` mode: `"<composed_dn> (new)<mark>"` where the RDN value is
@@ -564,6 +576,80 @@ impl FormPane {
             }
         }; // state borrow dropped
 
+        // Lookup fields: render `<value> (<name>)` from the resolution cache and
+        // kick off resolves for values not yet cached. Collect under one short
+        // borrow, then trigger (borrow-free) so we never submit while borrowed.
+        use crate::config::widget::WidgetKind;
+        use crate::workflows::resolve_flow::LookupKey;
+        let mut lookup_lines: Vec<Option<Vec<String>>> = vec![None; fields.len()];
+        struct ToResolve {
+            key: LookupKey,
+            base: String,
+            oc: String,
+            store: String,
+            value: String,
+            attrs: Vec<String>,
+            template: Vec<crate::config::label::LabelSeg>,
+        }
+        let mut to_resolve: Vec<ToResolve> = Vec::new();
+        {
+            let st = self.state.borrow();
+            for (i, f) in fields.iter().enumerate() {
+                let Some(WidgetKind::Lookup(b)) = &f.widget_binding else {
+                    continue;
+                };
+                let value = f
+                    .values
+                    .first()
+                    .map(|s| s.trim().to_string())
+                    .unwrap_or_default();
+                if value.is_empty() {
+                    lookup_lines[i] = Some(vec![NOT_SET.to_string()]);
+                    continue;
+                }
+                let key = LookupKey {
+                    scope_id: b.scope_id(),
+                    value: value.clone(),
+                };
+                match st.lookup_cache.get(&key) {
+                    Some(Some(name)) => lookup_lines[i] = Some(vec![format!("{value} ({name})")]),
+                    Some(None) => lookup_lines[i] = Some(vec![value.clone()]),
+                    None => {
+                        lookup_lines[i] = Some(vec![format!("{value} (\u{2026})")]);
+                        to_resolve.push(ToResolve {
+                            key,
+                            base: b.scope.base.clone(),
+                            oc: b.object_class().to_string(),
+                            store: b.store.clone(),
+                            value,
+                            attrs: {
+                                let mut a = crate::config::label::template_attrs(&b.label_template);
+                                if !a.iter().any(|x| x.eq_ignore_ascii_case(&b.store)) {
+                                    a.push(b.store.clone());
+                                }
+                                if !a.iter().any(|x| x.eq_ignore_ascii_case("cn")) {
+                                    a.push("cn".into());
+                                }
+                                a
+                            },
+                            template: b.label_template.clone(),
+                        });
+                    }
+                }
+            }
+        } // state borrow dropped
+        for r in to_resolve {
+            self.state.borrow_mut().resolve_lookup(
+                r.key,
+                &r.base,
+                &r.oc,
+                &r.store,
+                &r.value,
+                &r.attrs,
+                &r.template,
+            );
+        }
+
         // Compute header with a fresh short borrow (Create mode needs profiles too).
         // The `dn` caption is constant; the DN value goes into the title cell.
         let header = self.header_text();
@@ -615,7 +701,11 @@ impl FormPane {
                                     .as_any_mut()
                                     .and_then(|a| a.downcast_mut::<LaunchValueView>())
                                 {
-                                    lv.set_lines(launch_lines(field));
+                                    let lines = lookup_lines
+                                        .get(i)
+                                        .and_then(|o| o.clone())
+                                        .unwrap_or_else(|| launch_lines(field));
+                                    lv.set_lines(lines);
                                 }
                             }
                             ValueKind::List { .. } => {
@@ -2569,6 +2659,68 @@ mod tests {
             assert_eq!(kind, ValueKind::List { ordered: true });
             assert_eq!(help_ctx_for(kind, &f), FIELD_LIST_ORDERED);
         }
+    }
+
+    // ---- Task 6: lookup display helpers and tests ----
+
+    fn lookup_binding_for_test() -> crate::config::widget::WidgetKind {
+        use crate::config::relation::{CandidateScope, LookupBinding};
+        crate::config::widget::WidgetKind::Lookup(LookupBinding {
+            attr: "gidNumber".into(),
+            scope: CandidateScope {
+                base: "ou=groups,dc=x".into(),
+                object_classes: vec!["posixGroup".into()],
+                search_attrs: vec!["cn".into()],
+                label_template: None,
+            },
+            store: "gidNumber".into(),
+            label_template: crate::config::label::parse_label_template("{cn}"),
+        })
+    }
+
+    /// Build a pane whose single field is a `gidNumber` lookup with value `5000`,
+    /// and optionally pre-seed the resolution cache. Returns the rendered line for
+    /// that field's value view.
+    fn lookup_line_after_render(cache: Option<Option<String>>) -> String {
+        use crate::workflows::resolve_flow::LookupKey;
+        let mut field = ef("gidNumber", "5000", false);
+        field.widget_binding = Some(lookup_binding_for_test());
+        let (shared, mut pane) = build_pane_with_form(vec![field]);
+        if let Some(entry) = cache {
+            let key = LookupKey {
+                scope_id: "ou=groups,dc=x|posixGroup|gidNumber".into(),
+                value: "5000".into(),
+            };
+            shared.borrow_mut().lookup_cache.insert(key, entry);
+        }
+        let mut out = VecDeque::new();
+        let mut timers = tv::timer::TimerQueue::new();
+        let mut deferred = Vec::new();
+        let mut ctx = headless_ctx(&mut out, &mut timers, &mut deferred);
+        let mut ev = Event::Broadcast {
+            command: REFRESH,
+            source: None,
+        };
+        pane.handle_event(&mut ev, &mut ctx);
+        pane.launch_line_for_test(0)
+    }
+
+    #[test]
+    fn lookup_resolved_shows_value_and_name() {
+        assert_eq!(
+            lookup_line_after_render(Some(Some("staff".into()))),
+            "5000 (staff)"
+        );
+    }
+
+    #[test]
+    fn lookup_unresolved_not_found_shows_bare_value() {
+        assert_eq!(lookup_line_after_render(Some(None)), "5000");
+    }
+
+    #[test]
+    fn lookup_uncached_shows_ellipsis_placeholder() {
+        assert_eq!(lookup_line_after_render(None), "5000 (\u{2026})");
     }
 
     /// The label column shows the attribute name plus a curated hint.

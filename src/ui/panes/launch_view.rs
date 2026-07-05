@@ -49,6 +49,12 @@ impl LaunchValueView {
         std::mem::take(&mut self.activate)
     }
 
+    /// Test seam: the first display line, or `None` when no lines are set.
+    #[cfg(test)]
+    pub(crate) fn first_line_for_test(&self) -> Option<String> {
+        self.lines.first().cloned()
+    }
+
     /// Classify a key: nav keys pass through (leave `ev` untouched so the pane
     /// can move focus between fields); any other key marks an activation request
     /// and consumes the event.
