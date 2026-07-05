@@ -108,11 +108,18 @@ impl EditForm {
     /// (order-insensitive) unless the field is `ordered`, matching
     /// `changeset::diff` semantics so a pure reorder of an unordered attribute is
     /// NOT dirty.
+    ///
+    /// For `ordered` fields the comparison is order-sensitive but ignores the
+    /// `{n}` X-ORDERED prefixes: the editor canonicalises them on load
+    /// (`to_values` reconstructs `{0}`, `{1}`, …), so a baseline stored WITHOUT
+    /// prefixes — or with non-canonical ones — would otherwise read as dirty the
+    /// moment the form syncs, even with no edit. Stripping both sides compares the
+    /// meaningful sequence (content + order); a genuine reorder still changes it.
     pub fn is_dirty(&self) -> bool {
         self.fields.iter().any(|f| {
             let current = f.current_values();
             if f.ordered {
-                current != f.baseline
+                strip_ordering_seq(&current) != strip_ordering_seq(&f.baseline)
             } else {
                 !value_set_eq(&current, &f.baseline)
             }
@@ -207,6 +214,16 @@ impl EditForm {
             .map(|f| f.label.clone())
             .collect()
     }
+}
+
+/// Each value with its `{n}` X-ORDERED prefix stripped, order preserved. Used by
+/// the dirty check so an ordered field compares by content+order, not by the
+/// exact `{n}` serialization the editor canonicalises on load.
+fn strip_ordering_seq(values: &[String]) -> Vec<String> {
+    values
+        .iter()
+        .map(|v| crate::ui::ordered::strip_ordering(v).to_string())
+        .collect()
 }
 
 /// Order-insensitive value-set equality (same length, each element of each side

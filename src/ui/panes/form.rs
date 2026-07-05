@@ -44,6 +44,49 @@ fn label_col_width(longest: i32, w: i32) -> i32 {
     (longest + LABEL_GAP).clamp(LABEL_MIN, cap)
 }
 
+/// Short, human-readable hints for common but cryptic LDAP attribute names,
+/// shown in parentheses after the attribute in the form's label column (e.g.
+/// `sn (surname)`). Keyed by the lower-cased attribute name.
+///
+/// Deliberately curated and terse: only abbreviations whose meaning is not
+/// obvious get an entry — self-explanatory names (`description`, `title`,
+/// `homeDirectory`, …) are left bare. Schema `DESC` text is *not* used; it is
+/// typically a full sentence, far too long for the label column. Extend this
+/// table to cover more attributes.
+const ATTR_HINTS: &[(&str, &str)] = &[
+    ("cn", "common name"),
+    ("sn", "surname"),
+    ("gn", "given name"),
+    ("c", "country"),
+    ("l", "location"),
+    ("st", "state"),
+    ("o", "organization"),
+    ("ou", "org. unit"),
+    ("dc", "domain component"),
+    ("uid", "login name"),
+    ("gecos", "full name"),
+    ("mail", "email"),
+];
+
+/// The hint for `attr` from [`ATTR_HINTS`], if any (case-insensitive).
+fn attr_hint(attr: &str) -> Option<&'static str> {
+    let key = attr.to_ascii_lowercase();
+    ATTR_HINTS
+        .iter()
+        .find(|(a, _)| *a == key)
+        .map(|(_, hint)| *hint)
+}
+
+/// The label shown in the form's label column for `attr`: the attribute name,
+/// plus a parenthesised hint when [`ATTR_HINTS`] has one (e.g. `sn (surname)`).
+/// The `*` MUST marker is NOT included here — callers append it.
+fn display_label(attr: &str) -> String {
+    match attr_hint(attr) {
+        Some(hint) => format!("{attr} ({hint})"),
+        None => attr.to_string(),
+    }
+}
+
 /// A field's value cell is focusable when the user can interact with it:
 /// - `Text` inline-editable fields (single-value free text);
 /// - `List` inline-editor fields (multi-value, plain or XOrdered);
@@ -149,6 +192,10 @@ pub(crate) struct FormPane {
     value_ids: Vec<tv::ViewId>,
     /// One label `FieldLabel` id per field, parallel to `value_ids`.
     label_ids: Vec<tv::ViewId>,
+    /// The display label text per field (attr name + schema `DESC` hint), parallel
+    /// to `value_ids` and WITHOUT the `*` MUST marker. Computed once per rebuild
+    /// (schema lookups) and reused by `render` to feed each `FieldLabel`.
+    labels: Vec<String>,
     /// The value-view kind of each field, parallel to `value_ids`. Drives how
     /// `render` feeds the view and how navigation/activation treat the field.
     kinds: Vec<ValueKind>,
@@ -205,6 +252,7 @@ impl FormPane {
             scroll_id,
             value_ids: Vec::new(),
             label_ids: Vec::new(),
+            labels: Vec::new(),
             kinds: Vec::new(),
             block_heights: Vec::new(),
             built_dn: None,
@@ -321,14 +369,27 @@ impl FormPane {
     /// per-field heights and returns the total content height.
     fn layout_blocks(&mut self, label_w: i32, inner_w: i32, heights: &[i32]) -> i32 {
         let mut y = 0;
-        let (lids, vids) = (self.label_ids.clone(), self.value_ids.clone());
+        let (lids, vids, kinds) = (
+            self.label_ids.clone(),
+            self.value_ids.clone(),
+            self.kinds.clone(),
+        );
         if let Some(sg) = self.scroll_mut() {
             for (i, &h) in heights.iter().enumerate() {
                 if let Some(&lid) = lids.get(i) {
                     sg.set_logical(lid, Rect::new(0, y, label_w, y + 1));
                 }
                 if let Some(&vid) = vids.get(i) {
-                    sg.set_logical(vid, Rect::new(label_w, y, inner_w, y + h));
+                    // Editable text fields render as an `InputLine`, which insets its
+                    // content one column (the scroll-arrow/cursor gutter). Start the
+                    // cell one column left so the value text lands at the value-column
+                    // origin, flush with the read-only value views (DN title, list,
+                    // launch) that draw from column 0.
+                    let vx = match kinds.get(i) {
+                        Some(ValueKind::Text) => (label_w - 1).max(0),
+                        _ => label_w,
+                    };
+                    sg.set_logical(vid, Rect::new(vx, y, inner_w, y + h));
                 }
                 y += h;
             }
@@ -347,11 +408,20 @@ impl FormPane {
     fn rebuild_cells(&mut self, ctx: &mut Context) {
         // Clone the fields so classification/height/help-ctx can run outside the
         // state borrow (drop it before touching views).
-        let fields: Vec<EditField> = {
+        let (fields, labels): (Vec<EditField>, Vec<String>) = {
             let st = self.state.borrow();
             match st.edit_form.as_ref() {
-                None => Vec::new(),
-                Some(form) => form.fields.clone(),
+                None => (Vec::new(), Vec::new()),
+                Some(form) => {
+                    // Resolve each field's display label (attr + curated hint);
+                    // reused by `render`.
+                    let labels = form
+                        .fields
+                        .iter()
+                        .map(|f| display_label(&f.label))
+                        .collect();
+                    (form.fields.clone(), labels)
+                }
             }
         }; // state borrow dropped
 
@@ -378,9 +448,10 @@ impl FormPane {
             // in full, right-aligned; the value editor fills the rest of the width.
             let longest = fields
                 .iter()
-                .map(|f| {
+                .zip(&labels)
+                .map(|(f, lbl)| {
                     let marker = if f.must { "*" } else { "" };
-                    UnicodeWidthStr::width(format!("{}{}", f.label, marker).as_str()) as i32
+                    UnicodeWidthStr::width(format!("{lbl}{marker}").as_str()) as i32
                 })
                 .max()
                 .unwrap_or(0);
@@ -431,6 +502,7 @@ impl FormPane {
         } // sg borrow released; self is free again
         self.label_ids = new_lids;
         self.value_ids = new_vids;
+        self.labels = labels;
         self.kinds = kinds;
         self.label_w = label_w;
         self.built_w = inner_w;
@@ -504,10 +576,11 @@ impl FormPane {
 
         // Feed each value view by its kind and collect fresh block heights. Clone
         // the parallel id/kind vectors before borrowing sg.
-        let (label_ids, value_ids, kinds) = (
+        let (label_ids, value_ids, kinds, labels) = (
             self.label_ids.clone(),
             self.value_ids.clone(),
             self.kinds.clone(),
+            self.labels.clone(),
         );
         let mut heights: Vec<i32> = Vec::with_capacity(kinds.len());
         {
@@ -519,8 +592,11 @@ impl FormPane {
                 heights.push(block_height(field, *kind));
                 if let Some(&lid) = label_ids.get(i) {
                     if let Some(l) = sg.child_mut(lid) {
+                        // Prefer the precomputed display label (attr + DESC hint);
+                        // fall back to the raw attr if the vectors ever disagree.
+                        let base = labels.get(i).map(String::as_str).unwrap_or(&field.label);
                         let marker = if field.must { "*" } else { "" };
-                        l.set_value(FieldValue::Text(format!("{}{}", field.label, marker)));
+                        l.set_value(FieldValue::Text(format!("{base}{marker}")));
                     }
                 }
                 if let Some(&vid) = value_ids.get(i) {
@@ -791,13 +867,11 @@ impl FormPane {
         if heights != self.block_heights {
             let (label_w, inner_w) = (self.label_w, self.built_w);
             self.layout_blocks(label_w, inner_w, &heights);
-            // Keep the focused block on screen after it grew / shifted.
-            if let Some(cur) = self.scroll_mut().and_then(|sg| sg.current()) {
-                if let Some(sg) = self.scroll_mut() {
-                    if let Some(logical) = sg.logical_of(cur) {
-                        sg.ensure_visible(logical, ctx);
-                    }
-                }
+            // Keep the focused block on screen after it grew / shifted. Use the
+            // caret-aware path so an oversized list block tracks its caret row
+            // rather than parking an edge (and matches the per-event scroll).
+            if let Some(sg) = self.scroll_mut() {
+                sg.ensure_focused_visible(ctx);
             }
         }
     }
@@ -2275,6 +2349,45 @@ mod tests {
     }
 
     #[test]
+    fn ordered_list_load_without_edit_is_not_dirty() {
+        // Regression: an XOrdered field loaded with values that lack canonical
+        // `{n}` prefixes (e.g. a plain `description` treated as x_ordered) must
+        // NOT be marked dirty just because sync_into_form reconstructs the `{n}`
+        // prefixes on load. Navigating between such entries otherwise raised a
+        // phantom "unsaved changes" guard even though nothing was edited.
+        let (shared, mut pane) = build_pane_with_form(vec![
+            multi_list_ordered("description", &["hello", "world"]),
+            ef("cn", "z", true),
+        ]);
+        let mut out = VecDeque::new();
+        let mut timers = tv::timer::TimerQueue::new();
+        let mut deferred = Vec::new();
+        let mut ctx = headless_ctx(&mut out, &mut timers, &mut deferred);
+
+        // Render + a benign event → sync_into_form runs and reconstructs the `{n}`
+        // prefixes into `values`, exactly as navigation would.
+        let mut ev = Event::Broadcast {
+            command: REFRESH,
+            source: None,
+        };
+        pane.handle_event(&mut ev, &mut ctx);
+        let mut noop = Event::Broadcast {
+            command: REFRESH,
+            source: None,
+        };
+        pane.handle_event(&mut noop, &mut ctx);
+
+        let st = shared.borrow();
+        let form = st.edit_form.as_ref().unwrap();
+        assert!(
+            !form.is_dirty(),
+            "loading an ordered list (no edits) must not be dirty; values={:?} baseline={:?}",
+            form.fields[0].values,
+            form.fields[0].baseline
+        );
+    }
+
+    #[test]
     fn ordered_list_edit_reconstructs_ordering_prefixes() {
         // Integration: typing a new value into a focused XOrdered ListValueView must
         // appear in edit_form with reconstructed {n} prefixes — proving that
@@ -2455,6 +2568,32 @@ mod tests {
             let kind = value_kind(&f);
             assert_eq!(kind, ValueKind::List { ordered: true });
             assert_eq!(help_ctx_for(kind, &f), FIELD_LIST_ORDERED);
+        }
+    }
+
+    /// The label column shows the attribute name plus a curated hint.
+    mod display_label {
+        use super::*;
+
+        #[test]
+        fn appends_hint_for_known_attr() {
+            assert_eq!(display_label("sn"), "sn (surname)");
+            assert_eq!(display_label("l"), "l (location)");
+        }
+
+        #[test]
+        fn hint_lookup_is_case_insensitive() {
+            assert_eq!(display_label("SN"), "SN (surname)");
+            assert_eq!(display_label("OU"), "OU (org. unit)");
+        }
+
+        #[test]
+        fn bare_name_for_unmapped_attr() {
+            // Self-explanatory / descriptive names keep their bare name.
+            assert_eq!(display_label("homeDirectory"), "homeDirectory");
+            assert_eq!(display_label("uidNumber"), "uidNumber");
+            assert_eq!(display_label("givenName"), "givenName");
+            assert_eq!(display_label("somethingCustom"), "somethingCustom");
         }
     }
 }

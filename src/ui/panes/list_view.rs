@@ -10,7 +10,7 @@
 //! |-----|--------|
 //! | Printable char (no ctrl/alt) | insert character at cursor |
 //! | Enter | split current item (new item below) |
-//! | Ctrl+Enter | insert `\n` continuation within current item |
+//! | Ctrl+J (or Ctrl+Enter where the terminal supports it) | insert `\n` continuation within current item |
 //! | Backspace | delete previous grapheme / merge into previous item |
 //! | Delete | delete next grapheme / pull next item up |
 //! | Left / Right | move cursor by one grapheme / wrap across items |
@@ -158,8 +158,13 @@ impl ListValueView {
     /// Note on Ctrl+Enter / Ctrl+Up / Ctrl+Down: the framework encodes these as
     /// `KeyEvent { key: Key::Enter/Up/Down, modifiers: KeyModifiers { ctrl: true, .. } }`.
     /// Whether the terminal actually delivers these combinations depends on the
-    /// terminal emulator and whether it supports the Kitty keyboard protocol;
-    /// on bare VT100 terminals Ctrl+Enter is indistinguishable from Enter.
+    /// terminal emulator and whether it supports the Kitty keyboard protocol
+    /// (edaptor negotiates none); on bare VT100 terminals Ctrl+Enter is
+    /// indistinguishable from Enter. For the continuation-line action there is a
+    /// portable fallback: Ctrl+J, which the terminal delivers in raw mode as a
+    /// literal LF and crossterm surfaces as `Key::Char('j')` + Ctrl — distinct
+    /// from Enter on every terminal. (Ctrl+M is a carriage return === Enter, so it
+    /// is not a usable alternative.)
     /// Tests cover the framework-level encoding regardless of terminal support.
     pub(crate) fn on_key(&mut self, ev: &mut Event) {
         let Event::KeyDown(k) = ev else { return };
@@ -175,13 +180,19 @@ impl ListValueView {
                 ev.clear();
             }
 
-            // Enter splits the current item; Ctrl+Enter inserts a `\n`
-            // continuation within the current item.
+            // Enter splits the current item into a new value.
             (Key::Enter, false, _) => {
                 self.model.enter();
                 ev.clear();
             }
-            (Key::Enter, true, _) => {
+            // Insert a `\n` continuation line WITHIN the current value. Ctrl+Enter
+            // is the intuitive binding, but most terminals cannot distinguish it
+            // from plain Enter (no Kitty keyboard protocol is negotiated), so it
+            // only works where supported. Ctrl+J is the portable equivalent: in
+            // raw mode the terminal delivers it as a literal LF, which crossterm
+            // surfaces as `Key::Char('j')` + Ctrl — reliably distinct from Enter.
+            // (Ctrl+M is NOT an option: it is a carriage return, i.e. Enter.)
+            (Key::Enter, true, _) | (Key::Char('j'), true, false) => {
                 self.model.newline();
                 ev.clear();
             }
@@ -196,14 +207,10 @@ impl ListValueView {
             }
 
             (Key::Left, _, _) => {
-                self.model.left();
-                // Unordered lists must never enter the reorder handle: if the
-                // model transitioned onto the handle (item 0, offset 0 → Left),
-                // pull it back immediately so on_handle() stays false for the
-                // help_ctx sync below and for any subsequent key handler.
-                if !self.ordered && self.model.on_handle() {
-                    self.model.leave_handle();
-                }
+                // The model routes the handle vs. previous-item step by `ordered`:
+                // ordered lists step onto each item's reorder handle first,
+                // unordered lists skip the handle entirely.
+                self.model.left(self.ordered);
                 ev.clear();
             }
             (Key::Right, _, _) => {
@@ -288,6 +295,12 @@ impl View for ListValueView {
             Event::MouseDown(m) => self.on_mouse(m.position.x, m.position.y),
             _ => {}
         }
+        // Keep the hardware cursor in sync with the model *now*, not only at the
+        // next `draw`: the enclosing ScrollGroup reads `cursor_request()` right
+        // after this event to scroll a tall block so the caret stays visible, so a
+        // stale cursor would lag the scroll by a frame while arrowing through it.
+        let (col, row) = self.model.cursor_xy();
+        self.state.set_cursor(col, row);
     }
 
     /// Return the view-local hardware-cursor position when focused with a
@@ -505,6 +518,33 @@ mod tests {
         assert!(ev.is_nothing(), "Ctrl+Enter must be consumed");
         // The single item now contains an embedded newline → two display rows.
         assert_eq!(v.line_count(), 2);
+    }
+
+    #[test]
+    fn ctrl_j_inserts_continuation_newline() {
+        // Portable fallback for Ctrl+Enter: in raw mode the terminal delivers
+        // Ctrl+J as a literal LF, surfaced by crossterm as `Key::Char('j')` +
+        // Ctrl. It must insert a continuation line, exactly like Ctrl+Enter, so
+        // multi-line values stay editable where Ctrl+Enter is swallowed as Enter.
+        let mut v = ListValueView::new(
+            Rect::new(0, 0, 20, 2),
+            &["ab".into()],
+            false,
+            body(),
+            handle(),
+        );
+        // Cursor after 'a' (mid-value, so the newline survives to_values' trim).
+        v.on_key(&mut key(Key::Home));
+        v.on_key(&mut key(Key::Right));
+        let mut ev = ctrl_key(Key::Char('j'));
+        v.on_key(&mut ev);
+        assert!(ev.is_nothing(), "Ctrl+J must be consumed");
+        assert_eq!(
+            v.line_count(),
+            2,
+            "Ctrl+J inserts a `\\n` continuation line"
+        );
+        assert_eq!(v.to_values(), vec!["a\nb".to_string()]);
     }
 
     #[test]

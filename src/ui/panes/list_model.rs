@@ -114,19 +114,42 @@ impl ListModel {
 
     // --- cursor moves -----------------------------------------------------
 
-    pub(crate) fn left(&mut self) -> Move {
+    /// Move the caret one position left. `reorder` enables the per-item reorder
+    /// handle (ordered lists):
+    /// - on the handle → step off to the **previous item's end** (or `Boundary`
+    ///   at the very top, where there is no previous line);
+    /// - mid-text → step over one grapheme;
+    /// - at the start of a bullet (`off == 0`) → step onto **this item's** handle
+    ///   (every item, not just the first), so the next Left reaches the previous
+    ///   line.
+    ///
+    /// Unordered lists (`reorder = false`) have no handle: at `off == 0` they step
+    /// straight to the previous item's end.
+    pub(crate) fn left(&mut self, reorder: bool) -> Move {
         if self.on_handle {
-            // Already at the far left; nothing further to step onto.
-            return Move::Boundary;
+            // Leaving the handle leftward = go to the previous item's end. At the
+            // top of the list there is nothing further left.
+            if self.item == 0 {
+                return Move::Boundary;
+            }
+            self.on_handle = false;
+            self.item -= 1;
+            self.off = self.items[self.item].len();
+            return Move::Moved;
         }
         if self.off > 0 {
             self.off -= text::prev(&self.items[self.item], self.off);
             return Move::Moved;
         }
-        // off == 0
-        if self.item == 0 {
+        // off == 0: at the start of this bullet's text.
+        if reorder {
+            // Ordered: step onto this item's reorder handle first.
             self.on_handle = true;
             return Move::Moved;
+        }
+        // Unordered: no handle — step straight to the previous item's end.
+        if self.item == 0 {
+            return Move::Boundary;
         }
         self.item -= 1;
         self.off = self.items[self.item].len();
@@ -335,10 +358,6 @@ impl ListModel {
     #[allow(dead_code)] // Task 8 may use this; keep for API completeness
     pub(crate) fn enter_handle(&mut self) {
         self.on_handle = true;
-    }
-
-    pub(crate) fn leave_handle(&mut self) {
-        self.on_handle = false;
     }
 
     pub(crate) fn on_handle(&self) -> bool {
@@ -558,14 +577,14 @@ mod tests {
         m.insert_char('b');
         assert_eq!(m.items[0], "aéb");
         assert_eq!(m.off, 4); // 1 + 2 + 1
-        assert_eq!(m.left(), Move::Moved);
+        assert_eq!(m.left(false), Move::Moved);
         assert_eq!(m.off, 3); // stepped over 'b'
-        assert_eq!(m.left(), Move::Moved);
+        assert_eq!(m.left(false), Move::Moved);
         assert_eq!(m.off, 1); // stepped over 'é' (2 bytes), never mid-codepoint
-        assert_eq!(m.left(), Move::Moved);
+        assert_eq!(m.left(false), Move::Moved);
         assert_eq!(m.off, 0);
-        // Now at (0,0): one more left enters the handle.
-        assert_eq!(m.left(), Move::Moved);
+        // Now at (0,0): with reorder enabled, one more left enters the handle.
+        assert_eq!(m.left(true), Move::Moved);
         assert!(m.on_handle());
     }
 
@@ -578,7 +597,7 @@ mod tests {
             m.insert_char(c);
         }
         let end = m.off;
-        assert_eq!(m.left(), Move::Moved);
+        assert_eq!(m.left(false), Move::Moved);
         assert_eq!(end - m.off, fam.len()); // stepped the whole cluster at once
     }
 
@@ -770,7 +789,7 @@ mod tests {
     #[test]
     fn left_at_start_enters_handle_then_right_leaves() {
         let mut m = m(&["a"]);
-        assert_eq!(m.left(), Move::Moved); // onto handle
+        assert_eq!(m.left(true), Move::Moved); // onto handle
         assert!(m.on_handle());
         m.right();
         assert!(!m.on_handle());
@@ -809,10 +828,30 @@ mod tests {
 
     #[test]
     fn left_moves_to_end_of_previous_item() {
+        // Unordered: Left at the start of item 1 steps to the previous item's end.
         let mut m = m(&["ab", "cd"]);
         m.down(); // item 1, off 0
-        assert_eq!(m.left(), Move::Moved);
+        assert_eq!(m.left(false), Move::Moved);
         assert_eq!((m.item, m.off), (0, 2)); // end of "ab"
+    }
+
+    #[test]
+    fn ordered_left_at_later_item_start_enters_that_items_handle_first() {
+        // Regression: with reorder enabled, Left at the start of a NON-first item
+        // must step onto THAT item's handle before moving to the previous line —
+        // previously only the first line's bullet could be "hamburgerized".
+        let mut m = m(&["ab", "cd"]);
+        m.down(); // item 1, off 0
+        assert_eq!(m.left(true), Move::Moved);
+        assert!(
+            m.on_handle(),
+            "Left at item 1 start must enter item 1's handle"
+        );
+        assert_eq!(m.item, 1, "handle belongs to item 1, not the previous item");
+        // A further Left steps off the handle to the previous item's end.
+        assert_eq!(m.left(true), Move::Moved);
+        assert!(!m.on_handle());
+        assert_eq!((m.item, m.off), (0, 2), "end of the previous item \"ab\"");
     }
 
     #[test]

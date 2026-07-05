@@ -353,12 +353,19 @@ behaviour.
 |-----|--------|
 | **Printable char** | Insert character at cursor. On an empty field the first keystroke creates the first item. |
 | **Enter** | Split the current item at the cursor — text after the cursor becomes a new item below; at end of item adds a new empty item. |
-| **Ctrl+Enter** | Insert a continuation line (`\n`) within the current item. |
+| **Ctrl+J** | Insert a continuation line (`\n`) within the current item. (**Ctrl+Enter** does the same where the terminal can distinguish it, but most cannot — see note below — so **Ctrl+J** is the portable binding.) |
 | **Backspace** | Delete the character before the cursor. At offset 0 of an item, merge this item into the previous one; backspace once more on an empty item to remove its `- ` marker entirely. At the start of the first item, does nothing. |
 | **Delete** | Delete the character after the cursor. At the end of an item, pull the next item up (merge). |
 | **←** / **→** | Move cursor left / right within the item. |
 | **Home** / **End** | Move cursor to the start / end of the item. |
 | **↑** / **↓** | Move cursor to the item above / below. Crossing the top or bottom edge of the field moves focus to the neighbouring field. |
+
+> **Why Ctrl+J and not Ctrl+Enter?** Terminals only tell an application that
+> *Ctrl* was held together with *Enter* when the modern Kitty keyboard protocol
+> is active, which edaptor does not negotiate; on ordinary terminals Ctrl+Enter is
+> indistinguishable from a plain Enter. Ctrl+J, by contrast, is delivered as a
+> literal line-feed that is always distinct from Enter, so it works everywhere.
+> (Ctrl+M is *not* an alternative — it is a carriage return, i.e. Enter itself.)
 
 ### Reordering (ordered / X-ORDERED fields)
 
@@ -368,7 +375,7 @@ mechanics that plain multi-value fields do not:
 | Key | Action |
 |-----|--------|
 | **Ctrl+↑** / **Ctrl+↓** | Move the current item up / down regardless of cursor position. |
-| **←** at offset 0 | Move the cursor onto the `≡` handle. While on the handle, plain **↑** / **↓** move the item up / down; **→** (or any printable key) returns the cursor to the text. |
+| **←** at offset 0 | Move the cursor onto **that item's** `≡` handle — works on every item, not just the first. While on the handle, plain **↑** / **↓** move the item up / down; **→** (or any printable key) returns the cursor to the text, and **←** again steps to the end of the previous item. |
 
 The `{n}` ordering prefix is hidden during editing and regenerated from row
 order on save.
@@ -386,7 +393,7 @@ The bottom status line shows context-sensitive hints for the focused field:
 
 | Focused field state | Hint |
 |---------------------|------|
-| `ListValueView`, has items | `Enter add · Ctrl-Enter newline · Backspace empties→removes · ↑↓ move` |
+| `ListValueView`, has items | `Enter add · Ctrl-J newline · Backspace empties→removes · ↑↓ move` |
 | `ListValueView`, ordered (has items) | appends `· Ctrl-↑↓ or ← handle to reorder` |
 | `ListValueView`, empty | `Type to add first value` |
 | `ListValueView`, on `≡` handle | `↑↓ reorder · → back to text` |

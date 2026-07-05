@@ -123,6 +123,11 @@ impl ScrollGroup {
         self.content[idx].0
     }
 
+    #[cfg(test)]
+    pub(crate) fn top_for_test(&self) -> i32 {
+        self.top
+    }
+
     #[allow(dead_code)]
     pub(crate) fn clear_content(&mut self, ctx: &mut Context) {
         let ids: Vec<ViewId> = self.content.iter().map(|(id, _)| *id).collect();
@@ -192,10 +197,57 @@ impl ScrollGroup {
     }
 
     pub(crate) fn ensure_visible(&mut self, logical: Rect, ctx: &mut Context) {
+        // A block taller than the viewport cannot fit whole: `logical.a.y < top`
+        // (top clipped) and `logical.b.y > top + vh` (bottom clipped) are BOTH
+        // true, so the naive top/bottom branches below flip-flop `top` between the
+        // block's top and its bottom on every call — a visible ping-pong, since
+        // the scroll-to-focused path runs this on every event. Settle instead:
+        // once the block already spans the whole viewport, leave `top` alone; only
+        // scroll when an edge is stranded, bringing the nearest edge into view.
+        if logical.b.y - logical.a.y > self.viewport_h {
+            if logical.a.y > self.top {
+                self.scroll_to(logical.a.y, ctx);
+            } else if logical.b.y < self.top + self.viewport_h {
+                self.scroll_to(logical.b.y - self.viewport_h, ctx);
+            }
+            // else: block already covers the viewport → fixed point, no scroll.
+            return;
+        }
         if logical.a.y < self.top {
             self.scroll_to(logical.a.y, ctx);
         } else if logical.b.y > self.top + self.viewport_h {
             self.scroll_to(logical.b.y - self.viewport_h, ctx);
+        }
+    }
+
+    /// A one-row logical rect at the focused child's hardware-cursor row, or
+    /// `None` when the focused child exposes no visible cursor (e.g. a read-only
+    /// launch block). `Group::cursor_request` returns the caret in viewport-local
+    /// coordinates (child-view-local + child origin); adding `self.top` lifts it
+    /// back into logical (content) space, matching `logical_of`.
+    fn focused_cursor_row(&self, logical: Rect) -> Option<Rect> {
+        let vp = self.group.cursor_request()?;
+        let y = vp.y + self.top;
+        Some(Rect::new(logical.a.x, y, logical.b.x, y + 1))
+    }
+
+    /// Scroll so the focused content child stays within the viewport. For a child
+    /// TALLER than the viewport (an inline multi-value list block, e.g. a large
+    /// group's `memberUid`) the whole rect can never fit, so track the child's
+    /// hardware-cursor row instead — that keeps the caret on screen while editing
+    /// rather than parking the block's top or bottom edge (which oscillates). Both
+    /// the per-event scroll-to-focused and the form's post-edit relayout call this
+    /// so the two never disagree on where to scroll.
+    pub(crate) fn ensure_focused_visible(&mut self, ctx: &mut Context) {
+        if let Some(cur) = self.group.current() {
+            if let Some(logical) = self.logical_of(cur) {
+                let target = if logical.b.y - logical.a.y > self.viewport_h {
+                    self.focused_cursor_row(logical).unwrap_or(logical)
+                } else {
+                    logical
+                };
+                self.ensure_visible(target, ctx);
+            }
         }
     }
 
@@ -318,12 +370,9 @@ impl View for ScrollGroup {
             }
         }
         self.group.handle_event(ev, ctx);
-        // Scroll-to-focused: keep the focused content child within the viewport.
-        if let Some(cur) = self.group.current() {
-            if let Some(logical) = self.logical_of(cur) {
-                self.ensure_visible(logical, ctx);
-            }
-        }
+        // Scroll-to-focused: keep the focused content child (or, for an oversized
+        // block, its caret row) within the viewport.
+        self.ensure_focused_visible(ctx);
         // Hide the bar when this pane is not the active one (focus may have just
         // moved away without any scroll/resize to re-publish params).
         self.sync_bar_visibility(ctx);
@@ -581,6 +630,39 @@ mod tests {
     }
 
     #[test]
+    fn ensure_visible_settles_for_block_taller_than_the_viewport() {
+        // Regression: a focused block taller than the viewport must not
+        // oscillate. The form's inline multi-value list (e.g. a large group's
+        // memberUid) is ONE tall child; the scroll-to-focused path runs
+        // ensure_visible on every event (incl. the 50ms pump), and the old
+        // top/bottom branches flip-flopped `top` between the block's top and its
+        // bottom on successive calls — a visible on-screen ping-pong.
+        let mut sg = ScrollGroup::new(Rect::new(0, 0, 10, 5)); // viewport rows 0..5
+        let w = sg.inner_width();
+        for y in 0..30 {
+            sg.add_content(
+                Box::new(tv::InputLine::with_limit(Rect::new(0, y, w, y + 1), 64)),
+                Rect::new(0, y, w, y + 1),
+            );
+        }
+        let mut out = std::collections::VecDeque::new();
+        let mut timers = tv::timer::TimerQueue::new();
+        let mut deferred = Vec::new();
+        let mut ctx = Context::new(&mut out, &mut timers, 0, &mut deferred);
+        // A single 20-row block (rows 3..23) that dwarfs the 5-row viewport.
+        let block = Rect::new(0, 3, w, 23);
+        sg.ensure_visible(block, &mut ctx);
+        let first = sg.top_for_test();
+        sg.ensure_visible(block, &mut ctx);
+        let second = sg.top_for_test();
+        assert_eq!(
+            first, second,
+            "scroll must settle for an oversized block, not ping-pong \
+             (got top={first} then top={second})"
+        );
+    }
+
+    #[test]
     fn backdrop_fill_covers_uncovered_rows() {
         use tvision_rs::{Buffer, DrawCtx, Point, StaticText, Theme, View};
         // 2 content rows in a 6-row viewport → rows 2-5 are uncovered.
@@ -706,6 +788,61 @@ mod tests {
         assert!(
             <ScrollGroup as View>::cursor_request(&sg).is_some(),
             "on-screen focused field must request a cursor"
+        );
+    }
+
+    /// A focusable stub whose hardware cursor sits on a caller-chosen row — an
+    /// InputLine is single-line and snaps its cursor back to row 0, so it can't
+    /// stand in for a multi-row inline block.
+    struct CursorCell {
+        state: tv::ViewState,
+    }
+    impl tv::View for CursorCell {
+        fn state(&self) -> &tv::ViewState {
+            &self.state
+        }
+        fn state_mut(&mut self) -> &mut tv::ViewState {
+            &mut self.state
+        }
+        fn draw(&mut self, _ctx: &mut tv::DrawCtx) {}
+    }
+
+    #[test]
+    fn scroll_to_focused_tracks_the_caret_row_of_an_oversized_block() {
+        // A focused block taller than the viewport must scroll to the CARET row,
+        // not park the block's top or bottom edge — otherwise the caret can sit
+        // off-screen and editing (e.g. a large group's memberUid) is impossible.
+        let mut sg = ScrollGroup::new(Rect::new(0, 0, 10, 5)); // viewport rows 0..5
+        let w = sg.inner_width();
+        // ONE 20-row block, caret parked on view-local row 15.
+        let mut state = tv::ViewState::new(Rect::new(0, 0, w, 20));
+        state.options.selectable = true;
+        state.show_cursor();
+        state.set_cursor(0, 15);
+        let id = sg.add_content(Box::new(CursorCell { state }), Rect::new(0, 0, w, 20));
+        let mut out = std::collections::VecDeque::new();
+        let mut timers = tv::timer::TimerQueue::new();
+        let mut deferred = Vec::new();
+        let mut ctx = Context::new(&mut out, &mut timers, 0, &mut deferred);
+        sg.group.state_mut().state.focused = true;
+        sg.focus_child(id, &mut ctx);
+        // The group isn't focused headlessly; force the child's focus so its
+        // cursor_request() surfaces the caret.
+        if let Some(c) = sg.group.child_mut(id) {
+            c.state_mut().state.focused = true;
+        }
+        // A benign broadcast drives the scroll-to-focused tail of handle_event
+        // without disturbing the stub's cursor.
+        let mut ev = Event::Broadcast {
+            command: tv::Command::custom("edaptor.test.noop"),
+            source: None,
+        };
+        <ScrollGroup as View>::handle_event(&mut sg, &mut ev, &mut ctx);
+        let top = sg.top_for_test();
+        assert!(
+            (top..top + 5).contains(&15),
+            "caret row 15 must be inside the viewport rows {top}..{}",
+            top + 5
         );
     }
 

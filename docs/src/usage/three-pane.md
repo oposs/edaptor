@@ -45,7 +45,9 @@ accent colour, which ASCII cannot show.)*
 
 - **Entry (detail/edit form)** — a scrollable form for the selected entry. Each
   attribute is a variable-height block: single-value text fields show one line;
-  multi-value fields expand to fit their values as an inline bulleted list. The
+  multi-value fields expand to fit their values as an inline bulleted list. Cryptic
+  attribute names carry a short readable hint — for example `sn (surname)`,
+  `l (location)` or `ou (org. unit)` — so their meaning is obvious at a glance. The
   form is generated from the entry's `objectClass` definitions in the live schema,
   so it always matches what the directory actually allows. It re-loads as you move
   the highlight in the entry list. The pane title shows the current DN (or
@@ -85,7 +87,7 @@ follows focus and shows, in order:
   - Entries — `↑↓ Select · Type to search · Alt+N New · Alt+D Del`
   - Entry — **dynamic hints** that update with the focused field's type and
     state (e.g. `↑↓ move · Enter next field` for a plain text field,
-    `Enter add · Ctrl-Enter newline · Backspace empties→removes · ↑↓ move`
+    `Enter add · Ctrl-J newline · Backspace empties→removes · ↑↓ move`
     for an inline multi-value list, `any key: open picker · ↑↓ move` for a
     launch field such as `objectClass` or `memberOf`). `Alt+S Save · Alt+C Cancel`
     are always available.

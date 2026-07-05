@@ -36,10 +36,10 @@ pub(crate) fn hint_for(ctx: HelpCtx) -> Option<String> {
         match ctx.name() {
             "edaptor.field.text" => "\u{2191}\u{2193} move \u{00b7} Enter next field",
             "edaptor.field.list" => {
-                "Enter add \u{00b7} Ctrl-Enter newline \u{00b7} Backspace empties\u{2192}removes \u{00b7} \u{2191}\u{2193} move"
+                "Enter add \u{00b7} Ctrl-J newline \u{00b7} Backspace empties\u{2192}removes \u{00b7} \u{2191}\u{2193} move"
             }
             "edaptor.field.list.ordered" => {
-                "Enter add \u{00b7} Ctrl-Enter newline \u{00b7} Ctrl-\u{2191}\u{2193} or \u{2190} handle to reorder"
+                "Enter add \u{00b7} Ctrl-J newline \u{00b7} Ctrl-\u{2191}\u{2193} or \u{2190} handle to reorder"
             }
             "edaptor.field.list.handle" => "\u{2191}\u{2193} reorder \u{00b7} \u{2192} back to text",
             "edaptor.field.launch.picker" => "any key: open picker \u{00b7} \u{2191}\u{2193} move",
@@ -61,11 +61,11 @@ mod tests {
             (FIELD_TEXT, "↑↓ move · Enter next field"),
             (
                 FIELD_LIST,
-                "Enter add · Ctrl-Enter newline · Backspace empties→removes · ↑↓ move",
+                "Enter add · Ctrl-J newline · Backspace empties→removes · ↑↓ move",
             ),
             (
                 FIELD_LIST_ORDERED,
-                "Enter add · Ctrl-Enter newline · Ctrl-↑↓ or ← handle to reorder",
+                "Enter add · Ctrl-J newline · Ctrl-↑↓ or ← handle to reorder",
             ),
             (FIELD_LIST_HANDLE, "↑↓ reorder · → back to text"),
             (FIELD_LAUNCH_PICKER, "any key: open picker · ↑↓ move"),

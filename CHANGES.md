@@ -16,11 +16,13 @@ All notable changes to eDAPtor are documented here. The format follows
 - **Inline multi-value editing:** free-text and ordered multi-value fields
   (e.g. `mail`, `olcAccess`) are now edited **in place** in the entry form — no
   modal dialog. Type directly into the bulleted list; **Enter** adds a value,
-  **Ctrl+Enter** adds a wrapped continuation line, **Backspace/Delete** remove
-  characters and empty items, **Home/End** and **←/→** move within an item, and
-  **↑/↓** move between rows and cross to the neighbouring field at the top/bottom
-  edge. Ordered fields additionally support **Ctrl+↑/↓** reorder and a `≡` handle
-  (reachable with **←** on the first column). The field's block grows and shrinks
+  **Ctrl+J** adds a wrapped continuation line (portable across terminals, unlike
+  Ctrl+Enter which most terminals cannot distinguish from Enter),
+  **Backspace/Delete** remove characters and empty items, **Home/End** and
+  **←/→** move within an item, and **↑/↓** move between rows and cross to the
+  neighbouring field at the top/bottom edge. Ordered fields additionally support
+  **Ctrl+↑/↓** reorder and a `≡` handle (reachable with **←** at the start of any
+  item). The field's block grows and shrinks
   live as values are added or removed. Built on the new `ListValueView` (a tvision
   `View` wrapping `ListModel`).
 
@@ -35,6 +37,12 @@ All notable changes to eDAPtor are documented here. The format follows
 
 - tvision UI: clicking a form **label** now focuses the corresponding input field
   directly, without needing to navigate to it with the arrow keys.
+
+- **Readable attribute labels:** the entry form now appends a short, human-readable
+  hint next to cryptic attribute names — e.g. `sn (surname)`, `l (location)`,
+  `ou (org. unit)` — so their meaning is obvious at a glance. Hints come from a small
+  curated table of common LDAP abbreviations; descriptive or unlisted attributes
+  (`givenName`, `uidNumber`, …) show their bare name.
 
 - tvision UI: the entry list now shows a **`Filter:`** label to the left of the
   incremental-search box, making the filter prompt immediately recognisable.
@@ -262,6 +270,38 @@ All notable changes to eDAPtor are documented here. The format follows
   temporary git-pin for `exec_view_focused` has been removed.
 
 ### Fixed
+
+- tvision UI: in an ordered (X-ORDERED) inline list, the `≡` reorder handle is now
+  reachable from **every** item, not just the first. Pressing **←** at the start of
+  a bullet steps onto that item's handle first; a further **←** then moves to the
+  previous line. Previously **←** at the start of any line but the first jumped
+  straight to the previous item, so those items' handles could never be reached.
+
+- tvision UI: navigating between entries that have an **X-ORDERED** field (e.g. a
+  group's `description` configured as `x_ordered`) no longer pops the spurious
+  "unsaved changes" guard when nothing was edited. The inline editor canonicalises
+  the `{n}` ordering prefixes on load, so a value stored without them (or with
+  non-canonical ones) looked changed the instant the form synced. The dirty check
+  now compares the ordered sequence with the `{n}` prefixes stripped — a genuine
+  reorder or content edit is still detected, but pure re-serialization is not.
+
+- tvision UI: editing a multi-value field whose inline list is **taller than the
+  form pane** (e.g. the `memberUid` of a large group) no longer makes the view
+  "ping-pong" — flipping between the list's top and bottom edge on every frame so
+  the caret could never be seen. The form now scrolls to keep the **caret row**
+  visible while editing an oversized list block, instead of trying to fit the
+  whole block (which is impossible) and oscillating.
+
+- tvision UI: the entry form's value editors now line up flush with the read-only
+  value blocks (DN, lists, launch fields). Editable text fields render as an
+  `InputLine`, which insets its content one column; that column is now reclaimed so
+  values like `homeDirectory` / `uidNumber` no longer sit one character to the
+  right of everything else.
+
+- tvision UI: the **Discard** button in the unsaved-changes guard dialog is no
+  longer cramped. The standard 10-column button was too narrow for its label, so
+  the text ran into the drop shadow; the guard's buttons now use a wider face that
+  keeps a padding column after every label.
 
 - tvision UI: the object-class and membership picker dialogs can now be closed
   with the frame's **close icon** (top-left `[■]`) again. The embedded transfer
