@@ -12,6 +12,7 @@ use crate::workflows::edit_form::{build_edit_form, EditForm};
 use crate::workflows::labels::LabelRule;
 use crate::workflows::pick_state::Candidate;
 use crate::workflows::read_flow::ReadFlow;
+use crate::workflows::resolve_flow::{LookupKey, ResolveFlow, ResolveOutcome};
 use crate::workflows::search_flow::{SearchFlow, SearchOutcome};
 use crate::workflows::structure::Structure;
 #[cfg(test)]
@@ -61,6 +62,11 @@ pub struct UiState {
     pub search_flow: SearchFlow,
     /// Last search results delivered by `search_flow` (via `pump_worker`).
     pub search_results: Vec<Candidate>,
+    /// Async reverse name-resolution for `lookup` widgets.
+    pub resolve_flow: ResolveFlow,
+    /// Resolved friendly names for `lookup` fields, keyed by scope+value.
+    /// `Some(name)` = resolved; `None` = resolved but no candidate matched.
+    pub lookup_cache: std::collections::HashMap<LookupKey, Option<String>>,
     /// True when the last search was truncated at `PICKER_SEARCH_CAP`.
     pub search_truncated: bool,
     /// Read-only mode disables editing and the save path.
@@ -149,6 +155,8 @@ impl UiState {
             alloc_flow: AllocFlow::new(),
             search_flow: SearchFlow::new(),
             search_results: Vec::new(),
+            resolve_flow: ResolveFlow::new(),
+            lookup_cache: std::collections::HashMap::new(),
             search_truncated: false,
             read_only: false,
             status: String::new(),
@@ -241,6 +249,13 @@ impl UiState {
                 out.changed = true;
                 continue;
             }
+            // Reverse name-resolution: Entries/SearchError with resolve-range ids (4_000_000+).
+            let r_out = self.resolve_flow.on_response(resp);
+            if !matches!(r_out, ResolveOutcome::Ignored) {
+                self.apply_resolve_outcome(r_out);
+                out.changed = true;
+                continue;
+            }
             // Then writes (WriteOk/WriteError).
             let outcome = self.write_flow.on_response(resp);
             if !matches!(outcome, WriteOutcome::Ignored) {
@@ -323,6 +338,48 @@ impl UiState {
             let _ = self
                 .search_flow
                 .request(w, base, oc, term, attrs, store_attr);
+        }
+    }
+
+    /// Kick off a reverse name-resolution for a `lookup` field's value, unless it
+    /// is already cached or in flight. No-op without a live worker.
+    ///
+    /// Borrow-safe: a single atomic `&mut self`. Call as
+    /// `shared.borrow_mut().resolve_lookup(...)` — never while holding another borrow.
+    #[allow(clippy::too_many_arguments)]
+    pub fn resolve_lookup(
+        &mut self,
+        key: LookupKey,
+        base: &str,
+        oc: &str,
+        store_attr: &str,
+        value: &str,
+        attrs: &[String],
+        template: &[crate::config::label::LabelSeg],
+    ) {
+        if self.lookup_cache.contains_key(&key) || self.resolve_flow.is_pending(&key) {
+            return;
+        }
+        if let Some(w) = self.worker.as_ref() {
+            let _ =
+                self.resolve_flow
+                    .request(w, base, oc, store_attr, value, attrs, template.to_vec());
+        }
+    }
+
+    /// Apply one non-ignored resolve outcome: cache the name (or `None` when not
+    /// found) and flag a re-render so the form repaints `<value> (<name>)`.
+    pub fn apply_resolve_outcome(&mut self, out: ResolveOutcome) {
+        match out {
+            ResolveOutcome::Resolved { key, name } => {
+                self.lookup_cache.insert(key, Some(name));
+                self.form_needs_render = true;
+            }
+            ResolveOutcome::NotFound { key } => {
+                self.lookup_cache.insert(key, None);
+                self.form_needs_render = true;
+            }
+            ResolveOutcome::Ignored => {}
         }
     }
 
@@ -722,6 +779,8 @@ pub(crate) fn bootstrap(config: Config, password: String) -> Result<UiState> {
         alloc_flow: AllocFlow::new(),
         search_flow: SearchFlow::new(),
         search_results: Vec::new(),
+        resolve_flow: ResolveFlow::new(),
+        lookup_cache: std::collections::HashMap::new(),
         search_truncated: false,
         read_only: false,
         status: String::new(),
@@ -1410,6 +1469,110 @@ mod tests {
         );
         assert_eq!(st.status, "scan truncated", "status must show the error");
         assert!(st.form_needs_render, "form_needs_render must be set");
+    }
+
+    #[test]
+    fn resolve_lookup_dedups_by_cache_and_pending() {
+        use crate::config::label::parse_label_template;
+        use crate::workflows::resolve_flow::LookupKey;
+        let mut st = super::UiState::new_for_test(
+            crate::workflows::structure::Structure::build("dc=x", vec![]),
+            crate::schema::model::SchemaModel::from_raw(
+                &crate::ldap::worker::RawSubschema::default(),
+            ),
+            "dc=x".into(),
+            Vec::new(),
+            Vec::new(),
+        );
+        let key = LookupKey {
+            scope_id: "ou=groups,dc=x|posixGroup|gidNumber".into(),
+            value: "5000".into(),
+        };
+        let tmpl = parse_label_template("{cn}");
+        let attrs = vec!["cn".to_string()];
+        // No worker → request() is a no-op, but the pending/cache guards are pure.
+        // First: cache already has it → is_pending stays false, no attempt to submit.
+        st.lookup_cache.insert(key.clone(), Some("staff".into()));
+        st.resolve_lookup(
+            key.clone(),
+            "ou=groups,dc=x",
+            "posixGroup",
+            "gidNumber",
+            "5000",
+            &attrs,
+            &tmpl,
+        );
+        assert!(
+            !st.resolve_flow.is_pending(&key),
+            "cached key must not be resubmitted"
+        );
+    }
+
+    #[test]
+    fn apply_resolve_outcome_fills_cache_and_flags_render() {
+        use crate::workflows::resolve_flow::{LookupKey, ResolveOutcome};
+        let mut st = super::UiState::new_for_test(
+            crate::workflows::structure::Structure::build("dc=x", vec![]),
+            crate::schema::model::SchemaModel::from_raw(
+                &crate::ldap::worker::RawSubschema::default(),
+            ),
+            "dc=x".into(),
+            Vec::new(),
+            Vec::new(),
+        );
+        let key = LookupKey {
+            scope_id: "s".into(),
+            value: "5000".into(),
+        };
+        st.form_needs_render = false;
+        st.apply_resolve_outcome(ResolveOutcome::Resolved {
+            key: key.clone(),
+            name: "staff".into(),
+        });
+        assert_eq!(st.lookup_cache.get(&key), Some(&Some("staff".to_string())));
+        assert!(st.form_needs_render);
+
+        let key2 = LookupKey {
+            scope_id: "s".into(),
+            value: "9999".into(),
+        };
+        st.apply_resolve_outcome(ResolveOutcome::NotFound { key: key2.clone() });
+        assert_eq!(st.lookup_cache.get(&key2), Some(&None));
+    }
+
+    #[test]
+    fn process_responses_routes_resolve_entries_into_cache() {
+        use crate::config::label::parse_label_template;
+        use crate::workflows::resolve_flow::LookupKey;
+        let mut st = super::UiState::new_for_test(
+            crate::workflows::structure::Structure::build("dc=x", vec![]),
+            crate::schema::model::SchemaModel::from_raw(
+                &crate::ldap::worker::RawSubschema::default(),
+            ),
+            "dc=x".into(),
+            Vec::new(),
+            Vec::new(),
+        );
+        // Register an in-flight resolve for id 4_000_000, then feed its response.
+        let key = LookupKey {
+            scope_id: "dc=x|posixGroup|gidNumber".into(),
+            value: "5000".into(),
+        };
+        st.resolve_flow
+            .force_pending(4_000_000, key.clone(), parse_label_template("{cn}"));
+        let mut attrs = std::collections::BTreeMap::new();
+        attrs.insert("cn".to_string(), vec!["staff".to_string()]);
+        let resp = crate::ldap::worker::Response::Entries {
+            id: 4_000_000,
+            entries: vec![crate::ldap::worker::LdapEntry {
+                dn: "cn=staff,dc=x".into(),
+                attrs,
+                bin_attrs: Default::default(),
+            }],
+            truncated: false,
+        };
+        st.pump_responses_for_test(&[resp]);
+        assert_eq!(st.lookup_cache.get(&key), Some(&Some("staff".to_string())));
     }
 }
 
