@@ -60,6 +60,39 @@ impl PickerBinding {
     }
 }
 
+/// A `[profile.widget.<attr>]` `kind = "lookup"` binding resolved against the
+/// profile list. The stored value is a scalar (`store`); the same attribute is the
+/// reverse-lookup match key used to resolve the friendly name shown in the form.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LookupBinding {
+    /// The attribute this binds (e.g. `gidNumber`).
+    pub attr: String,
+    /// Resolved candidate search scope (where the named entries live).
+    pub scope: CandidateScope,
+    /// The candidate attribute matched on (== the stored scalar), e.g. `gidNumber`.
+    pub store: String,
+    /// Parsed display-label template for the resolved candidate (e.g. `{cn}`).
+    pub label_template: Vec<crate::config::label::LabelSeg>,
+}
+
+impl LookupBinding {
+    /// The candidate's first (structural) object class, or `""` when none.
+    pub fn object_class(&self) -> &str {
+        self.scope
+            .object_classes
+            .first()
+            .map(String::as_str)
+            .unwrap_or("")
+    }
+
+    /// A stable identity for this binding's candidate scope, independent of the
+    /// looked-up value. Used to key the `UiState` resolution cache so two entries
+    /// sharing a `gidNumber` share one resolved name.
+    pub fn scope_id(&self) -> String {
+        format!("{}|{}|{}", self.scope.base, self.object_class(), self.store)
+    }
+}
+
 pub(crate) fn scope_of(p: &EntryProfile) -> CandidateScope {
     let template = p
         .label

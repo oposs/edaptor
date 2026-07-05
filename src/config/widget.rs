@@ -41,6 +41,8 @@ pub enum WidgetKind {
     /// A unified candidate picker (covers `kind = "picker"` and `"membership"`).
     /// `fanout_attr = Some(_)` marks a membership/fan-out binding.
     Picker(crate::config::relation::PickerBinding),
+    /// A scalar value with a friendly-name popup (see `config::relation::LookupBinding`).
+    Lookup(crate::config::relation::LookupBinding),
     /// Auto-injected on the objectClass field. Candidates come from the schema
     /// at open-time; no LDAP search is performed. Never written to config.
     ObjectClassPicker,
@@ -188,6 +190,28 @@ pub fn resolve_widgets(profiles: &[EntryProfile]) -> Result<Vec<ResolvedWidget>,
                         store: crate::config::relation::StoreKey::Dn,
                         select: Some(Cardinality::Multi),
                         fanout_attr: Some(via.clone()),
+                    })
+                }
+                WidgetSpecCfg::Lookup {
+                    candidate,
+                    store,
+                    label,
+                } => {
+                    let scope = resolve_candidate(candidate, profiles)?;
+                    // Explicit widget `label` wins; else the candidate profile's own
+                    // label; else the bare `{cn}` default.
+                    let label_template = match label {
+                        Some(l) => crate::config::label::parse_label_template(l),
+                        None => scope
+                            .label_template
+                            .clone()
+                            .unwrap_or_else(|| crate::config::label::parse_label_template("{cn}")),
+                    };
+                    WidgetKind::Lookup(crate::config::relation::LookupBinding {
+                        attr: attr.clone(),
+                        scope,
+                        store: store.clone(),
+                        label_template,
                     })
                 }
                 WidgetSpecCfg::Readonly => {
@@ -635,6 +659,50 @@ mod tests {
             err.contains("nope"),
             "error names the missing profile: {err}"
         );
+    }
+
+    #[test]
+    fn resolve_lookup_builds_binding_with_default_label() {
+        use crate::config::{CandidateRef, EntryProfile, WidgetSpecCfg};
+        let group = EntryProfile {
+            name: "posixgroup".into(),
+            object_classes: vec!["posixGroup".into()],
+            search_base: "ou=groups,dc=x".into(),
+            search_attrs: vec!["cn".into()],
+            ..Default::default()
+        };
+        let mut user = EntryProfile {
+            name: "user".into(),
+            object_classes: vec!["posixAccount".into()],
+            ..Default::default()
+        };
+        user.widgets.insert(
+            "gidNumber".into(),
+            WidgetSpecCfg::Lookup {
+                candidate: CandidateRef::Profile("posixgroup".into()),
+                store: "gidNumber".into(),
+                label: None,
+            },
+        );
+        let widgets = resolve_widgets(&[group, user]).expect("resolve");
+        let w = widgets
+            .iter()
+            .find(|w| w.attr == "gidNumber")
+            .expect("gidNumber widget");
+        match &w.kind {
+            WidgetKind::Lookup(b) => {
+                assert_eq!(b.store, "gidNumber");
+                assert_eq!(b.scope.base, "ou=groups,dc=x");
+                assert_eq!(b.scope.object_classes, vec!["posixGroup".to_string()]);
+                // Default label template is {cn}.
+                assert_eq!(
+                    b.label_template,
+                    crate::config::label::parse_label_template("{cn}")
+                );
+                assert_eq!(b.scope_id(), "ou=groups,dc=x|posixGroup|gidNumber");
+            }
+            other => panic!("expected Lookup, got {other:?}"),
+        }
     }
 
     #[test]
