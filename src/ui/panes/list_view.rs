@@ -71,6 +71,10 @@ impl ListValueView {
     ) -> Self {
         let mut state = ViewState::new(bounds);
         state.options.selectable = true;
+        // Deliver the focusing click to `handle_event` (like InputLine) so the
+        // very first click positions the caret, instead of only focusing the
+        // field and requiring a second click to move within it.
+        state.options.first_click = true;
         state.help_ctx = help_ctx_body;
         // Enable the hardware text cursor; the position is updated in `draw`.
         state.show_cursor();
@@ -345,6 +349,21 @@ mod tests {
         v.cursor_home();
         v.on_key(&mut key(Key::Char('X')));
         assert_eq!(v.to_values(), vec!["Xab".to_string(), "cd".to_string()]);
+    }
+
+    #[test]
+    fn new_enables_first_click_so_the_focusing_click_positions() {
+        // Without `first_click`, the tvision group clears the focusing click
+        // instead of delivering it, so the first click only focuses and a second
+        // is needed to move the caret. InputLine sets it; so must we.
+        let v = ListValueView::new(
+            Rect::new(0, 0, 20, 2),
+            &["a".into()],
+            false,
+            body(),
+            handle(),
+        );
+        assert!(v.state.options.first_click);
     }
 
     #[test]
