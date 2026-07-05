@@ -4,6 +4,12 @@
 //! dialog. The value in the input is authoritative: its leading integer is the
 //! committed value; picking a candidate writes `<value> (<name>)` back into it.
 
+// NOTE: the pure helpers below carry `#[allow(dead_code)]` only because their
+// production callers land in Task 5 (the LookupDialog wires them in). Until then
+// they are exercised solely by this module's tests, which would otherwise trip
+// `dead_code` on the non-test lib build. Task 5 removes each `#[allow(dead_code)]`
+// as it adds the real call site.
+
 /// The pending value = the leading run of ASCII digits in `input`, if any.
 /// `"5000"` → `Some("5000")`; `"5000 (staff)"` → `Some("5000")`; `"staff"` → `None`;
 /// `""` → `None`.
