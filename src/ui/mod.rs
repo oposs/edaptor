@@ -4,6 +4,7 @@
 
 mod app;
 pub(crate) mod help_ctx;
+pub(crate) mod lookup;
 pub(crate) mod theme;
 // Keep `pub`: builders and guard_decision are not yet called from non-test code
 // (wired in Task 8). `pub` suppresses the dead_code lint without `#[allow]`.
