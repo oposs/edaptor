@@ -86,9 +86,25 @@ impl ListModel {
         }
     }
 
-    /// True when the model holds no non-blank content.
+    /// True when the model holds no list items at all — the `<not set>` state.
+    /// Blank items created while editing (e.g. by Enter) are NOT "empty": they
+    /// render as blank `-` bullets. A field returns to this state only when its
+    /// last value's content is deleted (see `collapse_if_single_blank`).
     pub(crate) fn is_empty(&self) -> bool {
-        self.items.iter().all(|s| s.trim().is_empty())
+        self.items.is_empty()
+    }
+
+    /// After deleting a value's content, a lone empty item means the field is
+    /// now unset: drop it so the display reverts to `<not set>` (spec: removing
+    /// the last value reverts to the unset state). Only called from the
+    /// content-deleting branches of `backspace`/`delete`, never after `enter`
+    /// (which deliberately creates blank lines to edit).
+    fn collapse_if_single_blank(&mut self) {
+        if self.items.len() == 1 && self.items[0].is_empty() {
+            self.items.clear();
+            self.item = 0;
+            self.off = 0;
+        }
     }
 
     /// Byte length of the current item (0 when the model is empty).
@@ -233,10 +249,16 @@ impl ListModel {
     }
 
     /// Split the current item at the cursor; the tail becomes a new item below,
-    /// cursor to its start. At end-of-item this inserts an empty item below.
+    /// cursor to its start. At end-of-item this inserts an empty item below. On
+    /// an unset field, Enter creates a single blank line to type into (not two).
     pub(crate) fn enter(&mut self) {
         self.on_handle = false;
-        self.ensure_item();
+        if self.items.is_empty() {
+            self.items.push(String::new());
+            self.item = 0;
+            self.off = 0;
+            return;
+        }
         let tail = self.items[self.item].split_off(self.off);
         self.items.insert(self.item + 1, tail);
         self.item += 1;
@@ -261,6 +283,7 @@ impl ListModel {
             let start = self.off - step;
             self.items[self.item].replace_range(start..self.off, "");
             self.off = start;
+            self.collapse_if_single_blank();
             return;
         }
         // off == 0: merge into the previous item (removes an empty item's marker).
@@ -284,6 +307,7 @@ impl ListModel {
                 .map(|(l, _)| l)
                 .unwrap_or(0);
             self.items[self.item].replace_range(self.off..self.off + step, "");
+            self.collapse_if_single_blank();
             return;
         }
         // end-of-item: pull the next item up.
@@ -364,9 +388,10 @@ impl ListModel {
 
     /// `(col, row)` of the cursor in display space. `row` is the display-line
     /// index; `col` accounts for the 2-column `"- "`/indent prefix. While
-    /// `on_handle`, `col` is 0 (the marker cell). Returns `(0, 0)` whenever the
-    /// model is logically empty (including the `items == [""]` state) so the
-    /// caret does not land on the `<not set>` placeholder line.
+    /// `on_handle`, `col` is 0 (the marker cell). Returns `(0, 0)` when the
+    /// model has no items (the `<not set>` state) so the caret does not land on
+    /// the placeholder line; a blank item (e.g. from Enter) renders as a `-`
+    /// bullet and the caret sits just after the marker.
     pub(crate) fn cursor_xy(&self) -> (i32, i32) {
         if self.is_empty() {
             return (0, 0);
@@ -449,6 +474,38 @@ mod tests {
         assert!(!m.is_empty());
         m.backspace();
         assert!(m.is_empty());
+    }
+
+    #[test]
+    fn enter_on_empty_creates_one_blank_bullet() {
+        // A single Enter on an unset field creates exactly ONE visible blank
+        // bullet (not two, and not a hidden item).
+        let mut m = ListModel::from_values(&[], false);
+        m.enter();
+        assert_eq!(m.display_lines(), v(&["- "]));
+    }
+
+    #[test]
+    fn repeated_enter_shows_blank_bullets_not_collapsed() {
+        // Regression (user report "adds N entries at once"): blank items created
+        // by Enter must DISPLAY as blank bullets immediately, not collapse to a
+        // single `<not set>` line that only reveals them once a letter is typed.
+        let mut m = ListModel::from_values(&[], false);
+        m.enter();
+        m.enter();
+        m.enter();
+        m.enter();
+        assert_eq!(m.display_lines(), v(&["- ", "- ", "- ", "- "]));
+    }
+
+    #[test]
+    fn blank_lines_then_letter_do_not_multiply() {
+        let mut m = ListModel::from_values(&[], false);
+        m.enter();
+        m.enter();
+        assert_eq!(m.display_lines(), v(&["- ", "- "])); // visible BEFORE typing
+        m.insert_char('x'); // into the current (last) item
+        assert_eq!(m.display_lines(), v(&["- ", "- x"]));
     }
 
     // --- inserts ----------------------------------------------------------
@@ -776,11 +833,13 @@ mod tests {
 
     #[test]
     fn cursor_xy_is_origin_when_logically_empty() {
-        // Verify that the blank-item state (`items == [""]`, `is_empty() == true`)
-        // also returns (0, 0) — the caret must not land on the `<not set>` line.
+        // Deleting the last value's content collapses the lone empty item back to
+        // the unset state (items == []): the field reverts to `<not set>` and the
+        // caret returns to the origin rather than landing on the placeholder line.
         let mut m = m(&["a"]);
-        m.delete(); // remove 'a' → items = [""], is_empty() true
+        m.delete(); // remove 'a' → items collapse to [] (unset)
         assert!(m.is_empty());
+        assert_eq!(m.display_lines(), v(&["<not set>"]));
         assert_eq!(m.cursor_xy(), (0, 0));
     }
 
