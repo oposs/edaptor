@@ -20,12 +20,7 @@ use crate::workflows::pick_state::escape_filter;
 /// value RFC-4515-escaped. Used to find the single candidate whose `store`
 /// attribute equals the field's stored value.
 pub fn build_equality_filter(oc: &str, attr: &str, value: &str) -> String {
-    format!(
-        "(&(objectClass={})({}={}))",
-        oc,
-        attr,
-        escape_filter(value)
-    )
+    format!("(&(objectClass={})({}={}))", oc, attr, escape_filter(value))
 }
 
 /// Identity of one reverse-lookup: a scope (base|objectClass|store attr) plus the
