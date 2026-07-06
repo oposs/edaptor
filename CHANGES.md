@@ -147,6 +147,11 @@ All notable changes to eDAPtor are documented here. The format follows
 
 ### Changed
 
+- **Navigating the tree resets the entries search.** Moving the highlight in the
+  branch tree (pane 1) now clears any active incremental search string in the
+  entries list (pane 2), so the newly selected branch is always listed unfiltered
+  instead of staying narrowed by the previous branch's find query.
+
 - The entry form now lays out each attribute as **one variable-height block**
   instead of a single fixed row. Single-value text fields keep their inline
   editor. Free-text and ordered multi-value fields are edited **in place** as a

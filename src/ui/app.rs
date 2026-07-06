@@ -216,8 +216,7 @@ pub(crate) fn dispatch(prog: &mut Program, cmd: Command, state: &Shared) {
                 } else if let Some(GuardTarget::Branch(dn)) = target {
                     // Save submitted: switch the branch now (form will reload clean).
                     let mut st = state.borrow_mut();
-                    st.current_branch = Some(dn);
-                    st.list_dirty = true;
+                    st.commit_branch(dn);
                     st.guard_target = None;
                 }
             }
@@ -227,9 +226,7 @@ pub(crate) fn dispatch(prog: &mut Program, cmd: Command, state: &Shared) {
                 match target {
                     Some(GuardTarget::Leaf(dn, ocs)) => state.borrow_mut().reread_public(&dn, &ocs),
                     Some(GuardTarget::Branch(dn)) => {
-                        let mut st = state.borrow_mut();
-                        st.current_branch = Some(dn);
-                        st.list_dirty = true;
+                        state.borrow_mut().commit_branch(dn);
                     }
                     None => {}
                 }

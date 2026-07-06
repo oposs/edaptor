@@ -68,6 +68,8 @@ impl LeafPane {
     }
 
     fn repopulate(&mut self, ctx: &mut Context) {
+        // Snapshot the shared search first (borrow dropped before any ctx call).
+        let search = self.state.borrow().search.clone();
         let rows: Vec<String> = self
             .state
             .borrow()
@@ -78,8 +80,17 @@ impl LeafPane {
         if let Some(list) = self.group.child_mut(self.list_id) {
             if let Some(lb) = list.as_any_mut().and_then(|a| a.downcast_mut::<ListBox>()) {
                 lb.new_list(rows, ctx);
+                // Keep the list's own incremental find query in step with the
+                // shared search string. Tree navigation clears `state.search`
+                // (see `UiState::commit_branch`); drop the now-stale find query
+                // so the new branch's leaves are shown unfiltered instead of
+                // staying narrowed by the previous branch's search.
+                if search.is_empty() && lb.find_query().is_some() {
+                    lb.clear_find(ctx);
+                }
             }
         }
+        self.last_search = search;
         self.last_sel = -1;
         self.sync_scrollbar(ctx);
     }
@@ -151,6 +162,15 @@ impl LeafPane {
             .and_then(|a| a.downcast_mut::<ListBox>())
             .map(|lb| lb.list().to_vec())
             .unwrap_or_default()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn find_query_for_test(&mut self) -> Option<String> {
+        self.group
+            .child_mut(self.list_id)
+            .and_then(|v| v.as_any_mut())
+            .and_then(|a| a.downcast_mut::<ListBox>())
+            .and_then(|lb| lb.find_query().map(str::to_string))
     }
 
     /// Pure selector: when the highlight lands on a new row, record the requested
@@ -733,6 +753,91 @@ mod tests {
         assert!(
             pane.list_text_for_test().is_empty(),
             "a non-matching query leaves zero rows so 'No match' can render"
+        );
+    }
+
+    #[test]
+    fn navigating_the_tree_resets_the_leaf_find_query() {
+        // Two sibling branches, each with two leaves. Type a find query while
+        // ou=p is shown, then navigate to ou=q (as the tree pane does, via
+        // `commit_branch`) and drive the REFRESH. The leaf list must forget the
+        // previous branch's search: `state.search` clears, the ListBox find
+        // query clears, and ou=q's leaves list unfiltered.
+        let leaf = |dn: &str, cn: &str| StructureInput {
+            dn: dn.into(),
+            cn: Some(cn.into()),
+            description: None,
+            object_classes: vec![],
+            attrs: BTreeMap::new(),
+        };
+        let branch = |dn: &str| StructureInput {
+            dn: dn.into(),
+            cn: None,
+            description: None,
+            object_classes: vec![],
+            attrs: BTreeMap::new(),
+        };
+        let inputs = vec![
+            branch("dc=x"),
+            branch("ou=p,dc=x"),
+            leaf("cn=alice,ou=p,dc=x", "alice"),
+            leaf("cn=bob,ou=p,dc=x", "bob"),
+            branch("ou=q,dc=x"),
+            leaf("cn=carol,ou=q,dc=x", "carol"),
+            leaf("cn=dave,ou=q,dc=x", "dave"),
+        ];
+        let structure = Structure::build("dc=x", inputs);
+        let schema = SchemaModel::from_raw(&RawSubschema::default());
+        let mut state =
+            UiState::new_for_test(structure, schema, "dc=x".into(), Vec::new(), Vec::new());
+        state.current_branch = Some("ou=p,dc=x".into());
+        let shared: Shared = Rc::new(RefCell::new(state));
+
+        let mut pane = LeafPane::new(Rect::new(0, 0, 30, 10), shared.clone());
+        let mut out: VecDeque<Event> = VecDeque::new();
+        let mut timers = tv::timer::TimerQueue::new();
+        let mut deferred: Vec<tv::Deferred> = Vec::new();
+        let mut ctx = tv::Context::new(&mut out, &mut timers, 0, &mut deferred);
+
+        shared.borrow_mut().list_dirty = true;
+        let mut seed = Event::Broadcast {
+            command: REFRESH,
+            source: None,
+        };
+        pane.handle_event(&mut seed, &mut ctx);
+
+        // Narrow ou=p to just "alice".
+        let mut k = Event::KeyDown(tv::KeyEvent::from(tv::Key::Char('a')));
+        pane.handle_event(&mut k, &mut ctx);
+        let mut k = Event::KeyDown(tv::KeyEvent::from(tv::Key::Char('l')));
+        pane.handle_event(&mut k, &mut ctx);
+        assert_eq!(shared.borrow().search, "al", "find query is active on ou=p");
+        assert_eq!(pane.find_query_for_test().as_deref(), Some("al"));
+
+        // Navigate the tree to ou=q (clean form → immediate commit).
+        shared.borrow_mut().commit_branch("ou=q,dc=x".into());
+        let mut refresh = Event::Broadcast {
+            command: REFRESH,
+            source: None,
+        };
+        pane.handle_event(&mut refresh, &mut ctx);
+
+        assert_eq!(
+            shared.borrow().search,
+            "",
+            "tree navigation clears the shared leaf search"
+        );
+        assert_eq!(
+            pane.find_query_for_test(),
+            None,
+            "the ListBox's own incremental find query is dropped too"
+        );
+        // ‹self› row + both leaves — unfiltered, not narrowed by ou=p's "al".
+        let rows = pane.list_text_for_test();
+        assert_eq!(rows.len(), 3, "‹self› + two ou=q leaves, got {rows:?}");
+        assert!(
+            rows.contains(&"carol".to_string()) && rows.contains(&"dave".to_string()),
+            "both ou=q leaves are listed, got {rows:?}"
         );
     }
 }

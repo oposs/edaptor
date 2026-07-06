@@ -606,7 +606,8 @@ impl UiState {
     ///
     /// - nothing requested → `false`.
     /// - same as `current_branch` → `false` (no-op).
-    /// - form **clean** → switch (`current_branch = dn`, `list_dirty = true`), `false`.
+    /// - form **clean** → switch via [`commit_branch`](Self::commit_branch)
+    ///   (also clears the leaf search), `false`.
     /// - form **dirty** → stash [`GuardTarget::Branch`] and return `true`; the form
     ///   stays pinned until the guard's decision.
     pub fn reconcile_branch(&mut self) -> bool {
@@ -625,10 +626,22 @@ impl UiState {
             self.guard_target = Some(GuardTarget::Branch(dn));
             true
         } else {
-            self.current_branch = Some(dn);
-            self.list_dirty = true;
+            self.commit_branch(dn);
             false
         }
+    }
+
+    /// Commit a navigation to `dn` as the shown branch: switch, mark the leaf
+    /// list dirty, and **drop any active leaf search** so the new branch is
+    /// listed unfiltered. Navigating the tree (pane 1) must reset the leaf
+    /// list's incremental find (pane 2); this is the single commit point for
+    /// that reset, shared by [`reconcile_branch`] and the dirty-form guard
+    /// paths. The `LeafPane` mirrors the cleared `search` back onto its
+    /// `ListBox` find query on the next repopulate.
+    pub fn commit_branch(&mut self, dn: String) {
+        self.current_branch = Some(dn);
+        self.list_dirty = true;
+        self.search = String::new();
     }
 }
 

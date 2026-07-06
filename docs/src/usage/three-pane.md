@@ -32,7 +32,9 @@ accent colour, which ASCII cannot show.)*
   (an entry that has children), with the base DN as the root. The whole
   structure is loaded eagerly at startup, so navigation is instant and eDAPtor
   knows exactly which nodes are branches and which are leaves. Selecting a branch
-  drives the entry list. Move with `↑↓`, fold/unfold a branch with `←→`.
+  drives the entry list. Move with `↑↓`, fold/unfold a branch with `←→`. Moving to
+  a different branch clears any active entry-list filter, so the new branch always
+  lists unfiltered.
 
 - **Entries (entry list)** — the entries directly under the selected branch. The
   first row is a `‹self›` row representing the branch entry itself (editable like
