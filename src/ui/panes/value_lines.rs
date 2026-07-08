@@ -4,6 +4,14 @@
 
 pub(crate) const NOT_SET: &str = "<not set>";
 
+/// Columns the value content is inset from the left of its cell. tvision's
+/// `InputLine` reserves this one leading column (its scroll-arrow/cursor gutter)
+/// and paints it with the field background; the non-`InputLine` value views
+/// (launch block, inline list editor) match it so every value cell shows the
+/// same one-column pad of field background before the content, and all value
+/// text lines up in one column across field kinds.
+pub(crate) const VALUE_INDENT: i32 = 1;
+
 /// The bullet marker rendered for the item currently in reorder-handle mode
 /// (see `ListModel`). A single-column glyph so the `"- "`/`"≡ "` prefixes stay
 /// the same display width.

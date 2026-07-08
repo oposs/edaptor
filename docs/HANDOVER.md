@@ -4,11 +4,82 @@ Carries the **current concern** into the next session. Not a project history —
 that see `git log`, the specs under `docs/superpowers/specs/`, the SDD ledger
 (`.superpowers/sdd/progress.md`), and project memory (`…/memory/MEMORY.md`).
 
-**Date:** 2026-07-03 · **Current concern: finish the Shuttle buttons + resizable
-dialog work** on branch `feat/shuttle-widget`. Tasks 1–4 of the plan are
-**implemented and committed** (`make check` green); Task 4 is **not yet
-peer-reviewed**, the interactive resize has **not been manually verified**, and
-**Task 5 (docs/changelog) is not started**. Pick up exactly there.
+**Date:** 2026-07-06 · **Current concern: a fresh theme + a README demo movie,
+plus a new standalone tool `ansidrama`.** All on branch `feat/shuttle-widget`.
+The theme/form work and the demo are **done and `make check` green but
+UNCOMMITTED**; small follow-ups remain (section C). The older shuttle-buttons work
+(dated 2026-07-03, further down) is **complete**.
+
+## CURRENT CONCERN (2026-07-06)
+
+### A. UNCOMMITTED edaptor UI work on `feat/shuttle-widget` (`make check` green)
+
+A big set of visual changes, all tested, **not yet committed** (`git status` shows
+them). If the next session is happy, commit in logical chunks. What changed:
+
+- **New light theme** (`src/ui/theme.rs`): replaced Solarized with **white content
+  panes on a white desktop (splitter lines separate panes); the focused pane tinted
+  soft post-it yellow**; fresh-blue accent; red hotkeys; menu/status on light grey.
+  Nine constants → `INK MUTED CANVAS SURFACE ACTIVE INPUT ACCENT STAGED HOTKEY`.
+  Tests rewritten.
+- **Form polish** (`form.rs`, `field_label.rs`, `list_view.rs`, `launch_view.rs`,
+  `value_lines.rs`): value cells are **white wells** on the yellow pane; every value
+  kind fills from the value-column origin with a 1-col content pad (`VALUE_INDENT`)
+  so text lines up; the non-scrolling **`dn` header is a title rule** (double line
+  with the DN punched through) + a **blank breathing row** below it; the **label
+  column gained a 1-col left pad** (`LABEL_LEFT_PAD`) so the longest label no longer
+  touches the divider.
+- **Bugfix** (`list_model.rs`): Backspace on a lone blank inline-list bullet now
+  reverts the field to `<not set>` (was stuck until a char was typed+deleted).
+- `CHANGES.md` + docs touched; `examples/*.toml` and `lookup.rs` had prior edits.
+
+### B. The README demo movie (in `docs/demo/`, UNTRACKED)
+
+- **`docs/demo/edaptor.webp`** — produced by the new `ansidrama` tool (section D).
+  ~960×684, ~38 s, ~460 KB. Tour: intro card → nav to ou=people → Tab to list →
+  **type "johnson" to filter** → Tab to form + scroll → *Group membership* card →
+  readers group → **member shuttle: add 3, grow+shrink the dialog (mouse), click OK**
+  → *Multi-value* card → **description: add alice/bob/carol, reorder via ≡ handle** →
+  **Alt-S save → Enter confirms (writes LDAP)** → closing card.
+- **`docs/demo/tour.toml`** — the ansidrama record script (coords tuned for 120×38).
+- **`docs/demo/reset.sh`** — resets the `readers` group so the tour records
+  deterministically. **Run before AND after each record** (the save writes real LDAP
+  changes). Needs the podman LDAP up.
+- **Re-record:** `bash docs/demo/reset.sh && (cd ../ansidrama && cargo run -q -j4 --
+  record ../edaptor/docs/demo/tour.toml --dump-png ../edaptor/docs/demo/frames) &&
+  bash docs/demo/reset.sh`. Takes ~1.5 min — run it in the BACKGROUND (exceeds the
+  2-min shell limit). View the real animation via
+  `convert edaptor.webp -coalesce out%04d.png` (NOT `webp[N]`, which yields raw diff
+  rectangles that look ghosted).
+
+### C. TODO (small, agreed with the user)
+
+1. **edaptor: Save-confirm dialog** (`src/ui/dialog/confirm.rs`) can grow taller than
+   the screen and clip the changeset. Cap its height to the actual screen height and
+   make the changeset **scroll with a scrollbar** (model on the shuttle's
+   ListBox+ScrollBar, or edaptor's `ScrollGroup`). `confirm::build` needs the screen
+   height plumbed from `app.rs` (`Program`); currently takes only `ldif`.
+2. **demo tweak:** the "scroll the form" step uses 8 Downs but the form is tall
+   enough that the viewport doesn't visibly scroll — bump to ~16 Downs (or
+   `PageDown`) in `tour.toml`.
+3. Optional: embed the webp in edaptor `README.md`; trim the loop (~38 s → ~28 s).
+
+### D. `ansidrama` — the standalone tool (separate repo, COMMITTED)
+
+At **`~/checkouts/ansidrama`** (own git repo, 6 commits, fmt/clippy/tests green).
+A deterministic **terminal-session → animated-WebP** recorder; pure Rust + one
+runtime dep (`tmux`). Subcommands: `encode` (ANSI snapshots / title-cards → WebP —
+the core) and `record` (drive a command in tmux per a scene script; one frame **per
+key / per char / per mouse cell-step**; then encode). Friendly `click/drag/scroll`
+(→ SGR mouse); silent-movie **title cards** (big title + smaller subtitle, double
+frame; `card_font_px`/`card_subtitle_px`); **mouse-pointer overlay** + **block
+text-cursor** (inverse video, from tmux `#{cursor_flag/x/y}`); configurable
+`font_px`/`type_cs`/`move_cs`/`max_fps`. Bundled JetBrains Mono; box/block glyphs
+hand-painted. Generic — edaptor is its first consumer. Not yet on crates.io.
+
+---
+
+## COMPLETED EARLIER (2026-07-03) — Shuttle buttons + resizable dialog *(done, committed)*
 
 ---
 

@@ -79,7 +79,7 @@ object_classes = ["inetOrgPerson", "posixAccount", "shadowAccount"]
 # Mail variant:  add "mailAccount" and uncomment the mail widget blocks below
 rdn_attr       = "uid"
 search_base    = "ou=people,dc=example,dc=com"
-show           = ["uid", "cn", "sn", "givenName", "mail", "uidNumber", "gidNumber",
+show           = ["uid", "cn", "sn", "givenName", "mail", "userPassword", "uidNumber", "gidNumber",
                   "homeDirectory", "loginShell"]
 search_attrs   = ["cn", "uid", "mail"]
 label          = "{cn} ({uid})"

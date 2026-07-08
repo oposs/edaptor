@@ -3,6 +3,7 @@
 //! activation request when the user presses any action key. Editing happens in
 //! the modal the pane opens — this view never mutates values.
 
+use crate::ui::panes::value_lines::VALUE_INDENT;
 use tvision_rs::{
     self as tv, DrawCtx, Event, HelpCtx, Key, Point, Rect, Role, SurfaceRoles, View, ViewState,
 };
@@ -98,7 +99,7 @@ impl View for LaunchValueView {
         ctx.fill(Rect::new(0, 0, size.x, size.y), ' ', color);
         for (row, line) in self.lines.iter().enumerate() {
             if (row as i32) < size.y {
-                ctx.put_str(0, row as i32, line, color);
+                ctx.put_str(VALUE_INDENT, row as i32, line, color);
             }
         }
     }

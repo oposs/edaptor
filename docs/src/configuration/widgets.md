@@ -289,13 +289,16 @@ label     = "{cn}"
 
 ### The edit popup
 
-The popup is an **editable combobox**:
+The popup is an **editable combobox** — an input field with a candidate list below:
 
 - The **input** is authoritative. Its leading integer is the value that will be
   stored — you can type any number, even one with no matching candidate.
-- Typing filters the **list** below (by name, or by numeric prefix). Rows show
+- Typing in the input drives the **list**'s incremental search: it narrows in
+  place to the rows matching what you typed (by name or number). Rows show
   `<name> (<value>)`, e.g. `staff (5000)`.
-- Picking a row (Enter/click) fills the input with `<value> (<name>)`.
+- **Navigating the list** (↑/↓, or Enter/double-click) copies the highlighted row
+  into the input as `<value> (<name>)` — which gives it a leading number and
+  enables **OK**.
 - **OK** is enabled only when the input has a leading number; it stores that
   number.
 

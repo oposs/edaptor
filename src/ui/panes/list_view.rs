@@ -22,6 +22,7 @@
 use tvision_rs::{DrawCtx, Event, HelpCtx, Key, Point, Rect, Role, SurfaceRoles, View, ViewState};
 
 use crate::ui::panes::list_model::{ListModel, Move};
+use crate::ui::panes::value_lines::VALUE_INDENT;
 
 /// Surface roles for the value block — mirrors `InputLine::SURFACE_ROLES` so
 /// the inline editor blends with the form palette.
@@ -134,7 +135,10 @@ impl ListValueView {
     /// Position the caret at a view-local click `(x, y)`. Pure logic layer,
     /// exercised directly in unit tests; called from [`View::handle_event`].
     fn on_mouse(&mut self, x: i32, y: i32) {
-        self.model.set_cursor_at_display(x, y);
+        // Content is drawn inset by `VALUE_INDENT`; map the click back before it
+        // reaches the model so a click lands on the character under the cursor.
+        self.model
+            .set_cursor_at_display((x - VALUE_INDENT).max(0), y);
         self.sync_help_ctx();
     }
 
@@ -278,12 +282,13 @@ impl View for ListValueView {
         ctx.fill(Rect::new(0, 0, size.x, size.y), ' ', color);
         for (row, line) in self.model.display_lines().iter().enumerate() {
             if (row as i32) < size.y {
-                ctx.put_str(0, row as i32, line, color);
+                ctx.put_str(VALUE_INDENT, row as i32, line, color);
             }
         }
         // Update the cursor position; `cursor_request` reads it on the next pump.
+        // Shift by the content indent so the caret sits over the drawn text.
         let (col, row) = self.model.cursor_xy();
-        self.state.set_cursor(col, row);
+        self.state.set_cursor(col + VALUE_INDENT, row);
     }
 
     fn handle_event(&mut self, ev: &mut Event, _ctx: &mut tvision_rs::Context) {
@@ -300,7 +305,7 @@ impl View for ListValueView {
         // after this event to scroll a tall block so the caret stays visible, so a
         // stale cursor would lag the scroll by a frame while arrowing through it.
         let (col, row) = self.model.cursor_xy();
-        self.state.set_cursor(col, row);
+        self.state.set_cursor(col + VALUE_INDENT, row);
     }
 
     /// Return the view-local hardware-cursor position when focused with a
@@ -382,8 +387,9 @@ mod tests {
     #[test]
     fn click_positions_caret_for_next_keystroke() {
         // A click at (col, row) places the caret so a following character is
-        // inserted at the clicked spot. Row 1 = "cd" shown as "- cd"; col 3 lands
-        // just after 'c'.
+        // inserted at the clicked spot. Row 1 = "cd" shown as "- cd"; the content is
+        // drawn inset by `VALUE_INDENT`, so a click at display col `3 + VALUE_INDENT`
+        // lands just after 'c'.
         let mut v = ListValueView::new(
             Rect::new(0, 0, 20, 2),
             &["ab".into(), "cd".into()],
@@ -391,7 +397,7 @@ mod tests {
             body(),
             handle(),
         );
-        v.on_mouse(3, 1);
+        v.on_mouse(3 + VALUE_INDENT, 1);
         v.on_key(&mut key(Key::Char('X')));
         assert_eq!(v.to_values(), vec!["ab".to_string(), "cXd".to_string()]);
     }

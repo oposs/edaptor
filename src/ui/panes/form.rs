@@ -34,14 +34,18 @@ const LABEL_MIN: i32 = 6;
 const LABEL_MAX: i32 = 30;
 /// One column of breathing room kept after the right-aligned label text.
 const LABEL_GAP: i32 = 1;
+/// One column of left margin so the longest label never touches the pane's left
+/// edge (the splitter divider) — matching the tree/leaf panes, which indent their
+/// content one column.
+const LABEL_LEFT_PAD: i32 = 1;
 
 /// Width for the label column given the longest label (display columns) and the
-/// available inner width: fit the longest label plus a gap, but clamp so it stays
-/// within `[LABEL_MIN, min(LABEL_MAX, w/2)]` — the value editor always keeps at
-/// least half the pane.
+/// available inner width: fit the longest label plus a gap and a one-column left
+/// margin, but clamp so it stays within `[LABEL_MIN, min(LABEL_MAX, w/2)]` — the
+/// value editor always keeps at least half the pane.
 fn label_col_width(longest: i32, w: i32) -> i32 {
     let cap = (w / 2).clamp(LABEL_MIN, LABEL_MAX);
-    (longest + LABEL_GAP).clamp(LABEL_MIN, cap)
+    (longest + LABEL_GAP + LABEL_LEFT_PAD).clamp(LABEL_MIN, cap)
 }
 
 /// Short, human-readable hints for common but cryptic LDAP attribute names,
@@ -234,13 +238,18 @@ impl FormPane {
         // Row 0: the header, laid out like a field row — a `dn` label in the
         // label column and the DN value (styled as a title) in the value column.
         // Both are repositioned to the real label width on the first rebuild.
-        let header_label = FieldLabel::label(Rect::new(0, 0, LABEL_MIN, 1));
+        let mut header_label = FieldLabel::label(Rect::new(0, 0, LABEL_MIN, 1));
+        header_label.set_rule(true);
         let header_label_id = group.insert(Box::new(header_label));
         let mut header_value = FieldLabel::title(Rect::new(LABEL_MIN, 0, w, 1));
+        header_value.set_rule(true);
         header_value.state.grow_mode.hi_x = true;
         let header_value_id = group.insert(Box::new(header_value));
-        // Rows 1..h: scrollable content pane. grow_mode hi_x+hi_y so it fills the pane.
-        let mut sg = ScrollGroup::new(Rect::new(0, 1, w, h));
+        // Row 0: the `dn` title rule. Row 1: left blank for breathing room below the
+        // title. Rows 2..h: scrollable content pane. grow_mode hi_x+hi_y keeps the
+        // top edge at row 2 while the bottom tracks the pane, so the field rows fill
+        // the rest. The blank row shows the pane's own backdrop surface.
+        let mut sg = ScrollGroup::new(Rect::new(0, 2, w, h));
         sg.state_mut().grow_mode.hi_x = true;
         sg.state_mut().grow_mode.hi_y = true;
         let scroll_id = group.insert(Box::new(sg));
@@ -381,27 +390,21 @@ impl FormPane {
     /// per-field heights and returns the total content height.
     fn layout_blocks(&mut self, label_w: i32, inner_w: i32, heights: &[i32]) -> i32 {
         let mut y = 0;
-        let (lids, vids, kinds) = (
-            self.label_ids.clone(),
-            self.value_ids.clone(),
-            self.kinds.clone(),
-        );
+        let (lids, vids) = (self.label_ids.clone(), self.value_ids.clone());
         if let Some(sg) = self.scroll_mut() {
             for (i, &h) in heights.iter().enumerate() {
                 if let Some(&lid) = lids.get(i) {
                     sg.set_logical(lid, Rect::new(0, y, label_w, y + 1));
                 }
                 if let Some(&vid) = vids.get(i) {
-                    // Editable text fields render as an `InputLine`, which insets its
-                    // content one column (the scroll-arrow/cursor gutter). Start the
-                    // cell one column left so the value text lands at the value-column
-                    // origin, flush with the read-only value views (DN title, list,
-                    // launch) that draw from column 0.
-                    let vx = match kinds.get(i) {
-                        Some(ValueKind::Text) => (label_w - 1).max(0),
-                        _ => label_w,
-                    };
-                    sg.set_logical(vid, Rect::new(vx, y, inner_w, y + h));
+                    // All value cells start at the value-column origin (`label_w`) and
+                    // fill their whole width with the field background. Each kind then
+                    // insets its content one column (`VALUE_INDENT`): the `InputLine`
+                    // via its built-in scroll-arrow/cursor gutter, the list/launch
+                    // views explicitly. So every value cell shows the same one-column
+                    // pad of field background before the content, and all value text
+                    // lines up at `label_w + 1` — no white well juts left of the rest.
+                    sg.set_logical(vid, Rect::new(label_w, y, inner_w, y + h));
                 }
                 y += h;
             }
@@ -524,7 +527,10 @@ impl FormPane {
         self.layout_blocks(label_w, inner_w, &heights);
 
         // Reposition the header row's two cells to the same columns as the fields:
-        // the `dn` caption fills the label column, the DN value fills the rest.
+        // the `dn` caption fills the label column, the DN value cell starts at the
+        // value-column origin (`label_w`) — like every value cell — and insets its
+        // text by `VALUE_INDENT`, so the title rule runs unbroken across both cells
+        // and the DN value lines up with the fields below.
         let full_w = self.group.state().get_extent().b.x;
         if let Some(v) = self.group.child_mut(self.header_label_id) {
             v.change_bounds(Rect::new(0, 0, label_w, 1));
@@ -1347,7 +1353,8 @@ mod tests {
         let mut pane = FormPane::new(Rect::new(0, 0, 40, 6), shared);
         // Simulate Splitter driving a resize: just change_bounds, no on_bounds_changed.
         <FormPane as View>::change_bounds(&mut pane, Rect::new(0, 0, 80, 20));
-        // Header spans the new full width; scroll child fills rows 1..20.
+        // Header spans the new full width; scroll child fills rows 2..20 (row 1 is
+        // the blank breathing line below the title rule).
         assert_eq!(
             pane.header_bounds_for_test().b.x,
             80,
@@ -1355,7 +1362,7 @@ mod tests {
         );
         assert_eq!(
             pane.scroll_bounds_for_test(),
-            Rect::new(0, 1, 80, 20),
+            Rect::new(0, 2, 80, 20),
             "scroll group must fill remaining width+height (hi_x+hi_y)"
         );
     }
@@ -1763,8 +1770,9 @@ mod tests {
         // A pane-local point inside a field's label cell must resolve to that
         // field's value-editor id (so a label click can focus the value editor).
         // Geometry: the label column spans x 0..label_w (sized to the longest
-        // label); the ScrollGroup starts at pane row 1 (header is row 0) with
-        // scroll top=0, so field row i's label occupies pane-local y = i + 1.
+        // label); the ScrollGroup starts at pane row 2 (header is row 0, row 1 is
+        // the blank breathing line) with scroll top=0, so field row i's label
+        // occupies pane-local y = i + 2.
         let shared = state_with_form();
         let mut pane = FormPane::new(Rect::new(0, 0, 80, 20), shared);
         let mut out = VecDeque::new();
@@ -1779,22 +1787,23 @@ mod tests {
 
         let v0 = pane.value_ids[0];
         let v1 = pane.value_ids[1];
-        // Inside row-0 / row-1 label cells → paired value ids.
+        // Inside row-0 / row-1 label cells → paired value ids (pane-local y = i + 2).
         assert_eq!(
-            pane.value_id_for_label_hit(Point::new(5, 1)),
+            pane.value_id_for_label_hit(Point::new(5, 2)),
             Some(v0),
             "click inside row-0 label maps to field 0's value editor"
         );
         assert_eq!(
-            pane.value_id_for_label_hit(Point::new(5, 2)),
+            pane.value_id_for_label_hit(Point::new(5, 3)),
             Some(v1),
             "click inside row-1 label maps to field 1's value editor"
         );
-        // The header row (y=0) is not a label cell.
+        // The header row (y=0) and the blank breathing row (y=1) are not label cells.
         assert_eq!(pane.value_id_for_label_hit(Point::new(5, 0)), None);
+        assert_eq!(pane.value_id_for_label_hit(Point::new(5, 1)), None);
         // A point in the value column (x >= label_w) is not a label hit.
         assert_eq!(
-            pane.value_id_for_label_hit(Point::new(pane.label_w + 2, 1)),
+            pane.value_id_for_label_hit(Point::new(pane.label_w + 2, 2)),
             None
         );
         // A point below the last field is not a label hit.
@@ -1933,6 +1942,7 @@ mod tests {
         let chip = theme.style(Role::ListFocused).bg; // blue current-row chip
         let faded = theme.style(Role::ListSelected).bg; // faded (unfocused) chip
         let input_bg = theme.style(Role::InputNormal).bg; // focused input well
+        let well = theme.style(Role::InputSurface).bg; // non-focused value well (white)
         let accent = theme.style(Role::InputSelected).bg; // select-all highlight
         let label_w = pane.label_w as u16;
 
@@ -1964,42 +1974,56 @@ mod tests {
         };
         let bg = |buf: &Buffer, x: u16, y: u16| -> Color { buf.get(x, y).style().bg };
 
-        // Row layout: header at pane y 0; field 0 ("cn", the active field) at y 1;
-        // field 1 ("creatorsName", read-only, non-selected) at y 2.
+        // Row layout: header rule at pane y 0; blank breathing row at y 1; field 0
+        // ("cn", the active field) at y 2; field 1 ("creatorsName", read-only,
+        // non-selected) at y 3.
         let focused = draw(&mut pane, true);
         // Selected field's label → blue chip.
-        assert_eq!(bg(&focused, 0, 1), chip, "active label gets the blue chip");
+        assert_eq!(bg(&focused, 0, 2), chip, "active label gets the blue chip");
         // Focused field's value → bright input well, and NOT a select-all bar.
         assert_eq!(
-            bg(&focused, label_w, 1),
+            bg(&focused, label_w, 2),
             input_bg,
             "active field is the input well"
         );
         assert_ne!(
-            bg(&focused, label_w + 1, 1),
+            bg(&focused, label_w + 1, 2),
             accent,
             "the focused field must not be select-all'd (no blue value bar)"
         );
-        // Non-selected value field → pane surface, no special background.
+        // Non-selected value field → a white input well that stands out on the
+        // yellow active pane (editable field = white well; focused = blue). The old
+        // theme blended it into the near-white pane; on a tinted pane a well reads
+        // clearer, and it keeps dialogs (white surface) from lighting a non-focused
+        // input yellow.
         assert_eq!(
-            bg(&focused, 40, 2),
-            base3,
-            "non-selected field carries no special background (blends into base3)"
+            bg(&focused, 40, 3),
+            well,
+            "non-selected field is a white value well on the pane"
         );
-        // Empty area below the fields is the bright fill.
-        assert_eq!(bg(&focused, 40, 8), base3, "focused fill is bright");
+        assert_ne!(
+            bg(&focused, 40, 3),
+            base3,
+            "the value well is distinct from the pane surface"
+        );
+        // Empty area below the fields is the bright pane fill.
+        assert_eq!(
+            bg(&focused, 40, 8),
+            base3,
+            "focused fill is the pane surface"
+        );
 
         let unfocused = draw(&mut pane, false);
         // Selected label fades (like the list panes' unfocused current row).
-        assert_eq!(bg(&unfocused, 0, 1), faded, "unfocused active label fades");
+        assert_eq!(bg(&unfocused, 0, 2), faded, "unfocused active label fades");
         // Value cells recede to the deselected surface too — the whole form dims.
         assert_eq!(
-            bg(&unfocused, label_w, 1),
+            bg(&unfocused, label_w, 2),
             desktop,
             "unfocused value cell recedes to the deselected surface"
         );
         assert_eq!(
-            bg(&unfocused, 40, 2),
+            bg(&unfocused, 40, 3),
             desktop,
             "unfocused non-selected value cell recedes too"
         );

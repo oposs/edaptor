@@ -14,6 +14,7 @@
 //! `ListFocused` / `ListSelected`, the lighter label text is `Disabled`'s
 //! foreground, and the value/title text is body text (`ListNormal` fg).
 
+use crate::ui::panes::value_lines::VALUE_INDENT;
 use tvision_rs::{DrawCtx, FieldValue, Rect, Role, View, ViewState};
 use unicode_width::UnicodeWidthStr;
 
@@ -42,6 +43,11 @@ pub(crate) struct FieldLabel {
     kind: LabelKind,
     /// Whether this label's field is the current/selected one (highlight chip).
     active: bool,
+    /// Whether to render as a title rule: the row's empty space is filled with a
+    /// double horizontal line, with the text punched through it (one space of
+    /// clearance either side). Used for the form's non-scrolling `dn` header so it
+    /// reads as the panel's title, distinct from the scrolling field rows.
+    rule: bool,
 }
 
 impl FieldLabel {
@@ -51,7 +57,14 @@ impl FieldLabel {
             text: String::new(),
             kind,
             active: false,
+            rule: false,
         }
+    }
+
+    /// Render this cell as a title rule (double horizontal line with the text
+    /// punched through). See [`FieldLabel::rule`].
+    pub(crate) fn set_rule(&mut self, rule: bool) {
+        self.rule = rule;
     }
 
     /// A left-aligned, bold DN-value title cell.
@@ -97,6 +110,41 @@ impl View for FieldLabel {
 
     fn draw(&mut self, ctx: &mut DrawCtx) {
         let size = self.state.size;
+
+        // Title rule (the `dn` header): fill the row with a double horizontal line
+        // in the muted frame colour, then punch the text through with one space of
+        // clearance either side so it reads as the panel's title.
+        if self.rule {
+            let focused = ctx.owner_active();
+            let surface = ctx.style(if focused {
+                Role::ListNormal
+            } else {
+                Role::ListInactive
+            });
+            let mut line = surface;
+            line.fg = ctx.style(Role::Disabled).fg;
+            ctx.fill(Rect::new(0, 0, size.x, size.y), '═', line);
+            if self.text.is_empty() {
+                return;
+            }
+            let mut ts = surface;
+            if focused && self.kind == LabelKind::Title {
+                ts.modifiers.bold = true;
+            } else {
+                ts.fg = ctx.style(Role::Disabled).fg;
+            }
+            let text_w = UnicodeWidthStr::width(self.text.as_str()) as i32;
+            let x = match self.kind {
+                // The value aligns with the other value cells' content (one column
+                // in); the `dn` caption stays right-aligned in the label column.
+                LabelKind::Title => VALUE_INDENT,
+                LabelKind::Label => (size.x - text_w - LABEL_GAP).max(0),
+            };
+            // Punch the text through the line with a blank space either side.
+            let padded = format!(" {} ", self.text);
+            ctx.put_str((x - 1).max(0), 0, &padded, ts);
+            return;
+        }
 
         // The selected field's label gets the "current row" chip — full blue when
         // the pane is focused, faded blue when it is not — exactly like the tree

@@ -311,6 +311,10 @@ impl ListModel {
         }
         // off == 0: merge into the previous item (removes an empty item's marker).
         if self.item == 0 {
+            // No previous item to merge into. A lone blank bullet (e.g. one left
+            // by Enter on an unset field) reverts to `<not set>` — mirroring the
+            // content-deleting branch above, so Backspace clears it directly.
+            self.collapse_if_single_blank();
             return;
         }
         let cur = self.items.remove(self.item);
@@ -532,6 +536,20 @@ mod tests {
         let mut m = ListModel::from_values(&[], false);
         m.enter();
         assert_eq!(m.display_lines(), v(&["- "]));
+    }
+
+    #[test]
+    fn backspace_on_lone_blank_bullet_reverts_to_unset() {
+        // Regression (user report): Enter on an unset field creates a blank `-`
+        // bullet; a bare Backspace on it (cursor at start, no content) must
+        // remove it and revert to `<not set>` — same as typing a char and
+        // deleting it. The off==0/item==0 boundary must also collapse.
+        let mut m = ListModel::from_values(&[], false);
+        m.enter();
+        assert_eq!(m.display_lines(), v(&["- "]));
+        m.backspace();
+        assert!(m.is_empty());
+        assert_eq!(m.display_lines(), v(&["<not set>"]));
     }
 
     #[test]

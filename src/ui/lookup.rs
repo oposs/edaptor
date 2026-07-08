@@ -1,8 +1,14 @@
 //! The `lookup` widget: a scalar field shown as `<value> (<name>)` and edited via
 //! an editable-combobox popup. This module holds the pure input model (parse /
-//! validity / filter / display) plus the FieldWidget/editor/dialog.
+//! validity / display) plus the FieldWidget/editor/dialog.
 //! The value in the input is authoritative: its leading integer is the
 //! committed value; picking a candidate writes `<value> (<name>)` back into it.
+//!
+//! The dialog is a combobox: an `InputLine` on top drives the candidate `ListBox`
+//! below via the list's own incremental find (`FindMode::Filter`, fed with
+//! [`ListViewer::set_find_query`] on 0.12+). Typing narrows the list in place;
+//! navigating the list copies the focused row's `<value> (<name>)` back into the
+//! input, which enables OK via the leading number.
 
 /// The pending value = the leading run of ASCII digits in `input`, if any.
 /// `"5000"` → `Some("5000")`; `"5000 (staff)"` → `Some("5000")`; `"staff"` → `None`;
@@ -23,17 +29,6 @@ pub(crate) fn leading_number(input: &str) -> Option<String> {
 /// OK is enabled iff the input yields a committable value.
 pub(crate) fn ok_enabled(input: &str) -> bool {
     leading_number(input).is_some()
-}
-
-/// List-filter predicate: empty filter matches all; otherwise the candidate
-/// matches when its label contains `filter` (case-insensitive) OR its value
-/// starts with `filter` (numeric-prefix search when the user types digits).
-pub(crate) fn row_matches(label: &str, value: &str, filter: &str) -> bool {
-    let f = filter.trim();
-    if f.is_empty() {
-        return true;
-    }
-    label.to_ascii_lowercase().contains(&f.to_ascii_lowercase()) || value.starts_with(f)
 }
 
 /// A list row renders as `"{label} ({value})"`, e.g. `"staff (5000)"`.
@@ -59,7 +54,7 @@ pub(crate) fn highlight_index(rows: &[(String, String)], input: &str) -> Option<
 
 use tvision_rs::{
     self as tv, delegate, Button, ButtonFlags, Command, Context, Dialog, Event, FieldValue,
-    InputLine, Key, ListBox, Rect, View,
+    FindMode, InputLine, Key, ListBox, ListViewer, Rect, View,
 };
 
 use crate::config::relation::LookupBinding;
@@ -114,18 +109,18 @@ impl FieldEditor for LookupEditor {
     }
 }
 
-/// The interactive combobox: an input + OK/Cancel on row 1, a filtered candidate
-/// list below. Candidates load once (empty-term search) and filter locally.
+/// The interactive combobox: an input + OK/Cancel on row 2 (one blank row below
+/// the title), a candidate list below. Candidates load once (empty-term search);
+/// the list narrows itself via `FindMode::Filter`, fed from the input.
 pub(crate) struct LookupDialog {
     dlg: Dialog,
     input_id: tv::ViewId,
     list_id: tv::ViewId,
     shared: Shared,
     binding: LookupBinding,
-    /// All loaded candidates (value, label), unfiltered.
+    /// All loaded candidates (value, label). Fed to the list as its find source;
+    /// the list narrows the *displayed* rows itself (`FindMode::Filter`).
     all: Vec<(String, String)>,
-    /// Current filtered view (indices into `all`), parallel to the ListBox rows.
-    filtered: Vec<usize>,
     last_input: String,
     seeded: bool,
 }
@@ -139,13 +134,14 @@ impl LookupDialog {
         dlg.state_mut().options.center_x = true;
         dlg.state_mut().options.center_y = true;
 
-        // Row 1: input on the left, OK/Cancel buttons to its right (same row).
-        // Buttons use Button::new + insert_child (like guard.rs) so we can control
-        // exact placement — button_row always appends to the dialog's bottom row.
-        let input = InputLine::with_limit(Rect::new(2, 1, 40, 2), 128);
+        // Row 2 (one blank row below the title): input on the left, OK/Cancel
+        // buttons to its right (same row). Buttons use Button::new + insert_child
+        // (like guard.rs) so we can control exact placement — button_row always
+        // appends to the dialog's bottom row.
+        let input = InputLine::with_limit(Rect::new(2, 2, 40, 3), 128);
         let input_id = dlg.insert_child(Box::new(input));
         let ok = Button::new(
-            Rect::new(41, 1, 51, 3),
+            Rect::new(41, 2, 51, 4),
             "~O~K",
             Command::OK,
             ButtonFlags {
@@ -155,15 +151,17 @@ impl LookupDialog {
         );
         dlg.insert_child(Box::new(ok));
         let cancel = Button::new(
-            Rect::new(52, 1, 62, 3),
+            Rect::new(52, 2, 62, 4),
             "~C~ancel",
             Command::CANCEL,
             ButtonFlags::new(),
         );
         dlg.insert_child(Box::new(cancel));
 
-        // Rows 3..: the list spans the full inner width below the input row.
-        let list = ListBox::new(Rect::new(2, 3, 62, 18), 1, None, None);
+        // Rows 4..: the list spans the full inner width below the input row. It
+        // owns filtering: `FindMode::Filter` narrows the displayed rows to those
+        // matching the query the input feeds via `set_find_query`.
+        let list = ListBox::new(Rect::new(2, 4, 62, 18), 1, None, None).with_find(FindMode::Filter);
         let list_id = dlg.insert_child(Box::new(list));
 
         // Seed the InputLine with the current value (dialog scatter protocol;
@@ -181,7 +179,6 @@ impl LookupDialog {
             shared,
             binding,
             all: Vec::new(),
-            filtered: Vec::new(),
             last_input: current,
             seeded: false,
         }
@@ -215,33 +212,20 @@ impl LookupDialog {
     }
 
     /// Copy the pump-delivered candidates into `all`, rendering labels via the
-    /// binding's template, then refilter.
+    /// binding's template, then hand the full row set to the list as its find
+    /// source and focus the row that matches the seeded value.
     fn sync_candidates(&mut self, ctx: &mut Context) {
         let results: Vec<Candidate> = self.shared.borrow().search_results.clone();
         self.all = results
             .into_iter()
             .map(|c| (c.store_value, c.label))
             .collect();
-        self.apply_filter(ctx);
-    }
-
-    /// Rebuild the ListBox from `all` filtered by the current input text.
-    fn apply_filter(&mut self, ctx: &mut Context) {
-        let filter = self.current_input();
-        self.filtered = self
+        // Feed the full candidate set as the list's source. `FindMode::Filter`
+        // shows all rows until a query narrows them; the list owns the narrowing.
+        let rows: Vec<String> = self
             .all
             .iter()
-            .enumerate()
-            .filter(|(_, (value, label))| row_matches(label, value, &filter))
-            .map(|(i, _)| i)
-            .collect();
-        let rows: Vec<String> = self
-            .filtered
-            .iter()
-            .map(|&i| {
-                let (value, label) = &self.all[i];
-                row_display(value, label)
-            })
+            .map(|(value, label)| row_display(value, label))
             .collect();
         if let Some(lb) = self
             .dlg
@@ -251,10 +235,10 @@ impl LookupDialog {
         {
             lb.new_list(rows, ctx);
         }
-        // Highlight the exact numeric match, if any.
-        let rows_ref: Vec<(String, String)> =
-            self.filtered.iter().map(|&i| self.all[i].clone()).collect();
-        if let Some(idx) = highlight_index(&rows_ref, &filter) {
+        // Focus the row whose value matches the seeded input's leading number, so
+        // the current selection is highlighted when the dialog opens. With an
+        // empty query the displayed rows equal `all`, so the index lines up.
+        if let Some(idx) = highlight_index(&self.all, &self.last_input) {
             if let Some(list) = self.dlg.child_mut(self.list_id) {
                 list.set_value_ctx(FieldValue::Int(idx as i32), ctx);
             }
@@ -288,21 +272,37 @@ impl LookupDialog {
         }
     }
 
-    /// Pick the highlighted row: write `<value> (<name>)` into the input.
-    fn pick_highlighted(&mut self, ctx: &mut Context) {
-        let idx = match self.dlg.child_mut(self.list_id).and_then(|v| v.value()) {
-            Some(FieldValue::Int(i)) if i >= 0 => i as usize,
-            _ => return,
+    /// Copy the focused row into the input as `<value> (<name>)`. Called when the
+    /// user engages the list (navigation or selection); the leading number then
+    /// enables OK. Maps the focused *displayed* row (the list narrows its own
+    /// rows) back to a candidate by its rendered text.
+    fn mirror_focused(&mut self, ctx: &mut Context) {
+        let text = {
+            let Some(lb) = self
+                .dlg
+                .child_mut(self.list_id)
+                .and_then(|v| v.as_any_mut())
+                .and_then(|a| a.downcast_mut::<ListBox>())
+            else {
+                return;
+            };
+            let idx = match lb.value() {
+                Some(FieldValue::Int(i)) if i >= 0 => i as usize,
+                _ => return,
+            };
+            match lb.list().get(idx) {
+                Some(row) => row.clone(),
+                None => return,
+            }
         };
-        let Some(&ai) = self.filtered.get(idx) else {
+        let Some((value, label)) = self.all.iter().find(|(v, l)| row_display(v, l) == text) else {
             return;
         };
-        let (value, label) = self.all[ai].clone();
-        let text = input_after_pick(&value, &label);
-        self.set_input(&text, ctx);
+        let new_text = input_after_pick(value, label);
+        self.set_input(&new_text, ctx);
         // last_input is updated to match the text just written so the end-of-event
-        // change detector sees no change and does not spuriously re-filter.
-        self.last_input = text;
+        // change detector sees no change and does not feed it back as a query.
+        self.last_input = new_text;
         self.sync_ok(ctx);
     }
 }
@@ -358,21 +358,34 @@ impl View for LookupDialog {
         );
 
         if list_selected {
-            self.pick_highlighted(ctx);
+            self.mirror_focused(ctx);
             ev.clear();
         } else if nav {
+            // Route the nav key to the list (it moves the focused row), then copy
+            // the now-focused row into the input — engaging the list is what fills
+            // the field and enables OK.
             if let Some(list) = self.dlg.child_mut(self.list_id) {
                 list.handle_event(ev, ctx);
             }
+            self.mirror_focused(ctx);
         } else {
             self.dlg.handle_event(ev, ctx);
         }
 
-        // Detect input changes → refilter + re-stage.
+        // Detect typed input changes → drive the list's incremental find + re-stage.
+        // A change from `mirror_focused` is already reflected in `last_input`, so it
+        // is not fed back here as a query.
         let cur = self.current_input();
         if cur != self.last_input {
-            self.last_input = cur;
-            self.apply_filter(ctx);
+            self.last_input = cur.clone();
+            if let Some(lb) = self
+                .dlg
+                .child_mut(self.list_id)
+                .and_then(|v| v.as_any_mut())
+                .and_then(|a| a.downcast_mut::<ListBox>())
+            {
+                lb.set_find_query(&cur, ctx);
+            }
             self.sync_ok(ctx);
         }
     }
@@ -397,16 +410,6 @@ mod tests {
         assert!(ok_enabled("5000 (staff)"));
         assert!(!ok_enabled("staff"));
         assert!(!ok_enabled(""));
-    }
-
-    #[test]
-    fn row_matches_by_label_substring_and_value_prefix() {
-        assert!(row_matches("staff", "5000", "")); // empty → all
-        assert!(row_matches("staff", "5000", "sta")); // label substring, ci
-        assert!(row_matches("Staff", "5000", "aff"));
-        assert!(row_matches("staff", "5000", "50")); // numeric prefix on value
-        assert!(!row_matches("staff", "5000", "99"));
-        assert!(!row_matches("users", "100", "xyz"));
     }
 
     #[test]
@@ -474,12 +477,22 @@ mod dialog_tests {
         }
     }
 
-    /// After a pick (LIST_ITEM_SELECTED), the next input change must trigger
-    /// apply_filter immediately — no 1-keystroke lag. This pins the fix that
-    /// removed the suppress_filter field: the last_input guard alone is
-    /// sufficient because set_value_ctx on InputLine is synchronous.
+    /// Read the list's currently displayed (narrowed) row count.
+    fn list_row_count(dlg: &mut LookupDialog) -> usize {
+        dlg.dlg
+            .child_mut(dlg.list_id)
+            .and_then(|v| v.as_any_mut())
+            .and_then(|a| a.downcast_mut::<ListBox>())
+            .map(|lb| lb.list().len())
+            .unwrap_or(0)
+    }
+
+    /// After a pick (LIST_ITEM_SELECTED) copies a row into the input, the next
+    /// typed change must feed the list's find immediately — no 1-keystroke lag.
+    /// The `last_input` guard alone suffices because `set_value_ctx` on InputLine
+    /// is synchronous.
     #[test]
-    fn input_change_after_pick_triggers_filter_immediately() {
+    fn typing_after_pick_narrows_the_list_immediately() {
         let shared = shared_with_candidates(vec![("100", "users"), ("5000", "staff")]);
         let mut dlg = LookupDialog::new(binding(), String::new(), shared.clone());
         let mut out = VecDeque::new();
@@ -493,12 +506,16 @@ mod dialog_tests {
             source: None,
         };
         dlg.handle_event(&mut ev, &mut ctx);
-        // All 2 candidates visible initially.
-        assert_eq!(dlg.filtered.len(), 2, "both candidates visible before pick");
+        // All 2 candidates displayed initially (empty query).
+        assert_eq!(
+            list_row_count(&mut dlg),
+            2,
+            "both candidates visible before pick"
+        );
 
         // Simulate a pick by broadcasting LIST_ITEM_SELECTED for the list_id.
-        // This calls pick_highlighted, which sets input to "100 (users)" and
-        // last_input to the same string.
+        // mirror_focused copies the focused row ("100 (users)") into the input and
+        // sets last_input to the same string.
         let list_id = dlg.list_id;
         let mut ev = Event::Broadcast {
             command: tvision_rs::Command::LIST_ITEM_SELECTED,
@@ -506,22 +523,23 @@ mod dialog_tests {
         };
         dlg.handle_event(&mut ev, &mut ctx);
 
-        // Now simulate the user typing a filter ("staff") by directly setting
-        // the input value, then firing a no-op event to trigger change detection.
+        // Now simulate the user typing a query ("staff") by setting the input
+        // value directly, then firing a benign event so the end-of-event change
+        // detector runs (REFRESH returns early, so use an unrelated broadcast).
         if let Some(v) = dlg.dlg.child_mut(dlg.input_id) {
             v.set_value_ctx(tvision_rs::FieldValue::Text("staff".into()), &mut ctx);
         }
         let mut ev = Event::Broadcast {
-            command: crate::ui::REFRESH,
+            command: tvision_rs::Command::custom("test.tick"),
             source: None,
         };
         dlg.handle_event(&mut ev, &mut ctx);
 
-        // apply_filter must have fired: "staff" matches only the staff candidate.
+        // set_find_query("staff") must have fired: only the staff row survives.
         assert_eq!(
-            dlg.filtered.len(),
+            list_row_count(&mut dlg),
             1,
-            "filter must take effect immediately after pick, no 1-keystroke lag"
+            "typed query must narrow the list immediately after a pick, no lag"
         );
     }
 
