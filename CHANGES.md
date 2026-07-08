@@ -8,6 +8,14 @@ All notable changes to eDAPtor are documented here. The format follows
 
 ### New
 
+### Changed
+
+### Fixed
+
+## 1.0.0 - 2026-07-08
+
+### New
+
 - **New `lookup` widget kind.** A scalar attribute (e.g. `gidNumber`) is shown in
   the form as `<value> (<name>)` and edited via an editable-combobox popup. Typing
   in the input drives the candidate list's incremental search (it narrows in place
@@ -146,7 +154,6 @@ All notable changes to eDAPtor are documented here. The format follows
 - tvision UI (preview): the three panes now fill their area and the entry form
   scrolls — a vertical scrollbar appears when an entry has more attributes than
   fit, and every attribute is reachable (the former 32-row display cap is gone).
-
 ### Changed
 
 - **Membership editor reads people as `cn (uid)`.** Both the *Available* and
