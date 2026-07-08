@@ -20,13 +20,9 @@ rpassword = "7"          # read the bind password without echo
 ldap-types = { version = "0.7", default-features = false, features = ["chumsky"] }
 chumsky = "0.12"
 oid = "0.3"
-# TUI stack (ratatui, no vendored forks). tui-prompts is the Unicode-correct
-# edit-state engine; rendering is hand-styled so each pane owns its background.
-ratatui = "0.30"
-tui-tree-widget = "0.24"
-tui-prompts = "0.6"
-crossterm = "0.29"
 unicode-width = "0.2"
+# tvision-rs is the TUI framework driving the edaptor browser (tree / leaf list / entry form).
+tvision-rs = "0.12"
 
 [dev-dependencies]
 tempfile = "3"

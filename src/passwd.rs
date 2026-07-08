@@ -6,7 +6,7 @@
 //! holds the pure decision logic; the LDAP round-trips live in `run_passwd`.
 
 use crate::config::EntryProfile;
-use crate::ui::picker::escape_filter;
+use crate::workflows::pick_state::escape_filter;
 
 /// True when `arg` looks like a DN rather than a bare username: a DN always
 /// contains at least one `=` (the RDN assertion), a username never does.

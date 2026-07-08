@@ -46,21 +46,9 @@ enum Command {
 fn main() -> Result<()> {
     let cli = Cli::parse();
     let Cli { config, command } = cli;
-    let config_path: PathBuf = if let Some(p) = config {
-        p
-    } else {
-        let candidates = edaptor::config::discovery::discover_configs();
-        match candidates.len() {
-            0 => anyhow::bail!(
-                "no config found in ~/.config/edaptor/ or /etc/edaptor/; \
-                 use --config to specify one"
-            ),
-            1 => candidates.into_iter().next().unwrap().path,
-            _ => match edaptor::ui::config_picker::pick_config(candidates)? {
-                Some(p) => p,
-                None => return Ok(()),
-            },
-        }
+    let config_path: PathBuf = match edaptor::ui::startup::resolve_config_path(config)? {
+        Some(p) => p,
+        None => return Ok(()), // user cancelled the config picker
     };
     let config = Config::load(&config_path)?;
     let password = if config.auth.needs_password() {
@@ -113,11 +101,11 @@ fn prompt_new_password() -> Result<String> {
     Ok(first)
 }
 
-/// Launch the three-pane ratatui TUI. The event loop, state, rendering and the
-/// write-path orchestration all live in [`edaptor::ui::app`]; this just hands off
+/// Launch the three-pane tvision TUI. The event loop, state, rendering and the
+/// write-path orchestration all live in [`edaptor::ui`]; this just hands off
 /// the connection details.
 fn run_tui(config: Config, password: String) -> Result<()> {
-    edaptor::ui::app::run(config, password)
+    edaptor::ui::run(config, password)
 }
 
 fn print_schema(report: &SchemaReport) {

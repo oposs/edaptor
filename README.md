@@ -2,9 +2,14 @@
 
 *The TUI LDAP editor* — a terminal UI for administering an OpenLDAP directory —
 adding, modifying and removing **users** and **groups**, and managing **group
-memberships** — built in Rust with [ratatui](https://ratatui.rs/).
+memberships** — built in Rust with [tvision-rs](https://github.com/oetiker/tvision-rs).
 
 > The name is **e**ditor and L**DAP**, creatively merged.
+
+![eDAPtor in action](docs/demo/edaptor.webp)
+
+*Screencast recorded with [ansidrama](https://github.com/oetiker/ansidrama), a
+deterministic terminal-session → animated-WebP recorder.*
 
 📖 **Documentation:** <https://oposs.github.io/edaptor>
 
@@ -23,11 +28,13 @@ overlays, and the Samba schema).
 
 ## Status
 
-**Working.** The core milestones are implemented on a three-pane ratatui
+**Working.** The core milestones are implemented on a three-pane tvision-rs
 interface: schema-driven create/edit/rename/delete, defaults and auto-numbering,
-inline passwords with the Samba lifecycle, unified candidate pickers, and
-symmetric membership editing. See the [documentation](https://oposs.github.io/edaptor)
-for usage, and `docs/superpowers/specs/` for the design specifications.
+inline passwords with the Samba lifecycle, unified candidate pickers, symmetric
+membership editing, and **inline multi-value editing** (free-text and ordered
+multi-value attributes are edited in place as a bulleted list — no modal). See
+the [documentation](https://oposs.github.io/edaptor) for usage, and
+`docs/superpowers/specs/` for the design specifications.
 
 ## Highlights of the design
 
@@ -99,7 +106,7 @@ the documentation rather than being duplicated:
 - **[Entry Profiles](https://oposs.github.io/edaptor/configuration/entry-profiles.html)**
   and **[Defaults](https://oposs.github.io/edaptor/configuration/defaults.html)**
 - **[Widgets](https://oposs.github.io/edaptor/configuration/widgets.html)** — the
-  `[profile.widget.<attr>]` palette: `password`, `choice`, `picker`, `membership`
+  `[profile.widget.<attr>]` palette: `password`, `choice`, `lookup`, `picker`, `membership`
   (these replaced the former `[profile.picker]` / `[profile.password]` layers)
 - **[Full Example](https://oposs.github.io/edaptor/configuration/full-example.html)**
   — the complete annotated `examples/config.toml`, copy-pasteable as a starting point

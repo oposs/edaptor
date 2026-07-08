@@ -1,626 +1,601 @@
-//! Pure state for the value-editor's picker mode: a current selection that is
-//! ALWAYS shown, merged with the latest (size-capped) search results. No ratatui.
+//! Picker field widget (single-select over live LDAP results). A
+//! `WidgetKind::Picker` binding that resolves to single cardinality and is not a
+//! fan-out opens a modal with a search `InputLine` over a radio `ListBox`.
+//! Multi-select pickers are served by `ui::multi_picker` (the Shuttle dialog).
+//!
+//! Typing in the search box submits an async candidate search (`SearchFlow`)
+//! via the worker; results arrive on the next pump tick and are broadcast as
+//! `REFRESH`, which the dialog copies into its neutral `PickState` and
+//! re-renders. Insert selects the highlighted row (radio); OK commits
+//! `SetValues(pick_state.selected_values())`. Space is intentionally NOT
+//! intercepted so it can be typed into the search box for multi-word queries.
+//!
+//! Mirrors the `oc_picker` / `choice` modal structure: one file holds
+//! `PickerWidget` (FieldWidget), `PickerEditor` (FieldEditor) and `PickerDialog`
+//! (the interactive `Dialog` view). Multi-select and fan-out pickers are served by `ui::multi_picker`.
 
-use std::collections::BTreeMap;
+use tvision_rs::{
+    self as tv, delegate, ButtonFlags, ButtonRowAlign, Command, Context, Dialog, Event, FieldValue,
+    InputLine, Key, ListBox, Rect, View,
+};
 
-/// RFC 4515 filter-value escaping for the five special bytes.
-pub fn escape_filter(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for ch in s.chars() {
-        match ch {
-            '*' => out.push_str(r"\2a"),
-            '(' => out.push_str(r"\28"),
-            ')' => out.push_str(r"\29"),
-            '\\' => out.push_str(r"\5c"),
-            '\0' => out.push_str(r"\00"),
-            _ => out.push(ch),
-        }
-    }
-    out
-}
+use crate::config::relation::{Cardinality, PickerBinding, StoreKey};
+use crate::config::widget::WidgetKind;
+use crate::schema::SchemaModel;
+use crate::ui::widget::{Activation, Capability, CommitOutcome, FieldEditor, FieldWidget};
+use crate::ui::{Shared, REFRESH};
+use crate::workflows::edit_form::EditField;
+use crate::workflows::pick_state::{Candidate, PickState};
 
-/// Build the candidate search filter. Empty `term` → objectClass only; otherwise
-/// AND each objectClass with an OR of `attr=*term*` over each search attribute.
-///
-/// Single class, no term: `(objectClass=X)` — bare, no outer `(&...)`.
-/// Otherwise: `(&(objectClass=a)(objectClass=b)(|(attr=*term*)))`.
-pub fn build_member_filter(
-    object_classes: &[String],
-    search_attrs: &[String],
-    term: &str,
-) -> String {
-    let oc_filters: String = object_classes
-        .iter()
-        .map(|oc| format!("(objectClass={})", escape_filter(oc)))
-        .collect();
-    let has_term_group = !term.is_empty() && !search_attrs.is_empty();
-    // Single class, no term group: return bare filter (preserves legacy shape).
-    if object_classes.len() == 1 && !has_term_group {
-        return oc_filters;
-    }
-    if has_term_group {
-        let esc = escape_filter(term);
-        let ors: String = search_attrs
-            .iter()
-            .map(|a| format!("({a}=*{esc}*)"))
-            .collect();
-        format!("(&{oc_filters}(|{ors}))")
-    } else {
-        format!("(&{oc_filters})")
-    }
-}
+// ---------------------------------------------------------------------------
+// PickerWidget — FieldWidget plugin
+// ---------------------------------------------------------------------------
 
-/// A candidate's display label: first `cn` value, else the raw DN.
-pub fn candidate_label(dn: &str, attrs: &BTreeMap<String, Vec<String>>) -> String {
-    attrs
-        .iter()
-        .find(|(k, _)| k.eq_ignore_ascii_case("cn"))
-        .and_then(|(_, v)| v.first().cloned())
-        .unwrap_or_else(|| dn.to_string())
-}
+/// The plugin for `WidgetKind::Picker`-bound fields (non-fan-out). `present`
+/// joins the selected store values; `activate` opens a `PickerDialog`.
+pub(crate) struct PickerWidget;
 
-/// One candidate: the real entry `dn` (fan-out target; also the key/store value
-/// when `store = dn`), the human `label` shown, and `store_value` — the scalar
-/// committed into the field and the identity key for dedupe/toggle/selection.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Candidate {
-    pub dn: String,
-    pub label: String,
-    /// The value committed for this pick (the DN for `store = dn`, else the
-    /// chosen `store` attribute). Also the identity key.
-    pub store_value: String,
-}
-
-/// Pull the scalar `value_attr` from a candidate's attributes (first value).
-pub fn pick_value(
-    attrs: &std::collections::BTreeMap<String, Vec<String>>,
-    value_attr: &str,
-) -> Option<String> {
-    attrs
-        .iter()
-        .find(|(k, _)| k.eq_ignore_ascii_case(value_attr))
-        .and_then(|(_, vs)| vs.first())
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-}
-
-/// A row as displayed in the picker: a candidate plus whether it is selected.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct VisibleRow {
-    pub candidate: Candidate,
-    pub selected: bool,
-    /// True when this row's store value was already persisted (saved) on the
-    /// entry when the picker opened — lets the UI mark it (e.g. `*`), including a
-    /// saved member toggled off (`selected == false`, `saved == true`).
-    pub saved: bool,
-}
-
-/// Server-side size cap used for picker candidate searches. Shared between
-/// `service_picker_search` (where it is passed as `size_limit`) and the
-/// `handle_worker_response` intercept (where hitting this count means there may
-/// be more matching entries the server did not return).
-pub const PICKER_SEARCH_CAP: i32 = 100;
-
-/// Picker state: the current selection (always shown) and the latest results.
-#[derive(Debug, Clone, Default)]
-pub struct PickerState {
-    pub selected: Vec<Candidate>,
-    pub results: Vec<Candidate>,
-    /// Store values that were already persisted (saved) on the entry when the
-    /// picker opened — seeded from the initial `selected` (the DN for `store =
-    /// dn`). Used to mark saved rows in the UI; a saved member toggled off stays
-    /// here (so it can show as "will be removed").
-    pub saved: Vec<String>,
-    pub cursor: usize,
-    /// First visible row index — the scroll offset for the candidate list, kept
-    /// in sync with `cursor` by the renderer (via `clamp_scroll`) so the cursor
-    /// is always on screen even with hundreds of candidates.
-    pub scroll: usize,
-    /// True while an incremental search term is active. Flips `visible()` so the
-    /// fresh search matches lead and the already-selected members trail (easier
-    /// to act on a search result); with no term, selected members lead.
-    pub search_active: bool,
-    /// True when the last search returned exactly `PICKER_SEARCH_CAP` entries —
-    /// a heuristic signal that the server may have more matching entries.
-    pub truncated: bool,
-    /// True ⇒ keys (store values) compare case-insensitively (DN store); false ⇒
-    /// exact (scalar store). Set at construction from the binding's `StoreKey`.
-    pub key_ci: bool,
-}
-
-/// Compare two store-value keys. Case-insensitive for DN stores (`ci == true`),
-/// exact otherwise. A free function so closures in `visible()` can call it
-/// without borrowing `&self` while `self.saved`/`selected`/`results` are borrowed.
-fn same_key(ci: bool, a: &str, b: &str) -> bool {
-    if ci {
-        a.eq_ignore_ascii_case(b)
-    } else {
-        a == b
-    }
-}
-
-impl PickerState {
-    pub fn new(selected: Vec<Candidate>, key_ci: bool) -> Self {
-        let saved = selected.iter().map(|c| c.store_value.clone()).collect();
-        PickerState {
-            selected,
-            results: Vec::new(),
-            saved,
-            cursor: 0,
-            scroll: 0,
-            search_active: false,
-            truncated: false,
-            key_ci,
-        }
+impl FieldWidget for PickerWidget {
+    fn capability(&self) -> Capability {
+        Capability::NeedsWorkerSearch
     }
 
-    /// Visible rows. Ordering depends on whether a search is active:
-    ///
-    /// - **No search term** (`search_active == false`): every selected candidate
-    ///   first (marked), then each result not already selected. A selected entry
-    ///   never vanishes — selection is independent of the results.
-    /// - **Search active** (`search_active == true`): the fresh search results
-    ///   lead (each marked if it is also selected), then the selected members
-    ///   that did NOT match the term trail at the end. This keeps the matches
-    ///   you are searching for at the top instead of buried below the existing
-    ///   selection.
-    ///
-    /// Either way, saved-but-removed members not otherwise shown are appended so
-    /// the UI can render them as "will be removed".
-    pub fn visible(&self) -> Vec<VisibleRow> {
-        let ci = self.key_ci;
-        let is_saved = |sv: &str| self.saved.iter().any(|d| same_key(ci, d, sv));
-        let is_selected = |sv: &str| {
-            self.selected
-                .iter()
-                .any(|s| same_key(ci, &s.store_value, sv))
-        };
-        let in_results = |sv: &str| {
-            self.results
-                .iter()
-                .any(|r| same_key(ci, &r.store_value, sv))
-        };
-        let mut rows: Vec<VisibleRow> = Vec::new();
-        if self.search_active {
-            // Results first (marked when also selected)...
-            for r in &self.results {
-                rows.push(VisibleRow {
-                    saved: is_saved(&r.store_value),
-                    selected: is_selected(&r.store_value),
-                    candidate: r.clone(),
-                });
-            }
-            // ...then selected members that did not match the search.
-            for c in &self.selected {
-                if !in_results(&c.store_value) {
-                    rows.push(VisibleRow {
-                        saved: is_saved(&c.store_value),
-                        candidate: c.clone(),
-                        selected: true,
-                    });
-                }
-            }
+    fn present(&self, field: &EditField) -> String {
+        if field.values.is_empty() {
+            "\u{2039}none\u{203a}".to_string() // ‹none›
         } else {
-            // Selected first, then results not already selected.
-            for c in &self.selected {
-                rows.push(VisibleRow {
-                    saved: is_saved(&c.store_value),
-                    candidate: c.clone(),
-                    selected: true,
-                });
-            }
-            for r in &self.results {
-                if !is_selected(&r.store_value) {
-                    rows.push(VisibleRow {
-                        saved: is_saved(&r.store_value),
-                        candidate: r.clone(),
-                        selected: false,
-                    });
-                }
-            }
+            field.values.join(", ")
         }
-        // Saved members that are neither still selected nor in the current
-        // results (e.g. toggled off with no active search) still need a row so
-        // the UI can show them as "saved, will be removed". Synthesize from the
-        // saved store value — the friendly label is not retained in `saved`.
-        for sv in &self.saved {
-            let in_selected = self
-                .selected
-                .iter()
-                .any(|s| same_key(ci, &s.store_value, sv));
-            let in_results = self
-                .results
-                .iter()
-                .any(|r| same_key(ci, &r.store_value, sv));
-            if !in_selected && !in_results {
-                rows.push(VisibleRow {
-                    candidate: Candidate {
-                        dn: sv.clone(),
-                        label: sv.clone(),
-                        store_value: sv.clone(),
+    }
+
+    fn activate(&self, field: &EditField) -> Activation {
+        match &field.widget_binding {
+            Some(WidgetKind::Picker(b))
+                if b.fanout_attr.is_none() && b.cardinality(field.multi) == Cardinality::Single =>
+            {
+                Activation::Modal(Box::new(PickerEditor {
+                    label: field.label.clone(),
+                    binding: b.clone(),
+                    current: field.values.clone(),
+                    multi: field.multi,
+                }))
+            }
+            _ => Activation::Inline,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// PickerEditor — FieldEditor (carries state into the dialog builder)
+// ---------------------------------------------------------------------------
+
+/// Carries the field's binding + current values into the dialog builder.
+pub(crate) struct PickerEditor {
+    label: String,
+    binding: PickerBinding,
+    current: Vec<String>,
+    /// The field's schema arity, used to derive cardinality when `select = auto`.
+    multi: bool,
+}
+
+impl FieldEditor for PickerEditor {
+    fn into_view(
+        self: Box<Self>,
+        _schema: &SchemaModel,
+        shared: Shared,
+    ) -> (Box<dyn View>, tv::ViewId) {
+        let PickerEditor {
+            label,
+            binding,
+            current,
+            multi,
+        } = *self;
+        // Multi-select pickers are routed to MultiPickerDialog; this dialog is
+        // single-select only.
+        debug_assert_eq!(binding.cardinality(multi), Cardinality::Single);
+        let dlg = PickerDialog::new(label, binding, current, shared);
+        // Focus the search box so typing searches immediately (search-as-you-type);
+        // arrow keys are forwarded to the list by `handle_event` (the search-over-
+        // list idiom, mirroring `LeafPane`).
+        let focus = dlg.search_id;
+        (Box::new(dlg), focus)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// PickerDialog — the interactive modal with live search
+// ---------------------------------------------------------------------------
+
+/// Search box (row 1) over a ticked candidate `ListBox`. Maintains a neutral
+/// `PickState`; results arrive via the pump and the `REFRESH` broadcast.
+pub(crate) struct PickerDialog {
+    dlg: Dialog,
+    search_id: tv::ViewId,
+    list_id: tv::ViewId,
+    shared: Shared,
+    pick: PickState,
+    /// Resolved candidate-search scope.
+    base: String,
+    oc: String,
+    attrs: Vec<String>,
+    /// `Some(attr)` for a scalar store; `None` for a DN store.
+    store_attr: Option<String>,
+    last_search: String,
+    seeded: bool,
+}
+
+impl PickerDialog {
+    fn new(label: String, binding: PickerBinding, current: Vec<String>, shared: Shared) -> Self {
+        let title = format!("Select {label}");
+        let mut dlg = Dialog::new(Rect::new(0, 0, 60, 22), Some(title));
+        dlg.state_mut().options.center_x = true;
+        dlg.state_mut().options.center_y = true;
+        // Search box (row 1) + list (rows 3..18) inside the dialog frame.
+        let search = InputLine::with_limit(Rect::new(2, 1, 58, 2), 128);
+        let search_id = dlg.insert_child(Box::new(search));
+        let list = ListBox::new(Rect::new(2, 3, 58, 18), 1, None, None);
+        let list_id = dlg.insert_child(Box::new(list));
+        dlg.button_row(
+            &[
+                (
+                    "~O~K",
+                    Command::OK,
+                    ButtonFlags {
+                        default: true,
+                        ..ButtonFlags::new()
                     },
-                    selected: false,
-                    saved: true,
-                });
+                ),
+                ("~C~ancel", Command::CANCEL, ButtonFlags::new()),
+            ],
+            ButtonRowAlign::Right,
+        );
+
+        // Resolve the search scope from the binding. The candidate filter searches
+        // the first object class (the structural class for the candidate profile);
+        // the requested attrs cover cn/uid (the filter dimensions), the label
+        // attrs, and the scalar store attribute when present.
+        let store_attr = match &binding.store {
+            StoreKey::Dn => None,
+            StoreKey::Attr(a) => Some(a.clone()),
+        };
+        let key_ci = matches!(binding.store, StoreKey::Dn);
+        let oc = binding
+            .scope
+            .object_classes
+            .first()
+            .cloned()
+            .unwrap_or_default();
+        let mut attrs: Vec<String> = vec!["cn".to_string(), "uid".to_string()];
+        for a in &binding.scope.search_attrs {
+            if !attrs.iter().any(|x| x.eq_ignore_ascii_case(a)) {
+                attrs.push(a.clone());
             }
         }
-        rows
-    }
-
-    pub fn set_results(&mut self, results: Vec<Candidate>) {
-        self.results = results;
-        // A new result set replaces the list — return to the top so the cursor
-        // lands on the first row (the first match when a search is active).
-        self.cursor = 0;
-        self.scroll = 0;
-    }
-
-    pub fn move_cursor(&mut self, delta: i32) {
-        let n = self.visible().len();
-        if n == 0 {
-            self.cursor = 0;
-            return;
+        if let Some(a) = &store_attr {
+            if !attrs.iter().any(|x| x.eq_ignore_ascii_case(a)) {
+                attrs.push(a.clone());
+            }
         }
-        let next = (self.cursor as i32 + delta).clamp(0, n as i32 - 1);
-        self.cursor = next as usize;
+
+        // Seed the selection from the field's current values. For a DN store the
+        // value is the DN; for a scalar store it is the scalar — either way it is
+        // both the `store_value` (commit key) and a placeholder label until a
+        // search reveals the friendly one.
+        let selected: Vec<Candidate> = current
+            .into_iter()
+            .map(|v| Candidate {
+                dn: v.clone(),
+                label: v.clone(),
+                store_value: v,
+            })
+            .collect();
+        let pick = PickState::new(selected, key_ci);
+
+        PickerDialog {
+            dlg,
+            search_id,
+            list_id,
+            shared,
+            pick,
+            base: binding.scope.base.clone(),
+            oc,
+            attrs,
+            store_attr,
+            last_search: String::new(),
+            seeded: false,
+        }
     }
 
-    /// Toggle the cursor row's membership in the selection.
-    pub fn toggle_cursor(&mut self) {
-        let rows = self.visible();
-        let Some(row) = rows.get(self.cursor) else {
+    /// Radio marker for the highlighted single-select candidate.
+    fn marker(&self, selected: bool, _saved: bool) -> &'static str {
+        if selected {
+            "(\u{2022}) "
+        } else {
+            "( ) "
+        }
+    }
+
+    /// Rebuild the ListBox rows from `pick.visible()`. Preserve the cursor on a
+    /// toggle (rows keep order); reset to top when the result set changes.
+    fn rebuild_list(&mut self, ctx: &mut Context, preserve_cursor: bool) {
+        let rows: Vec<String> = self
+            .pick
+            .visible()
+            .iter()
+            .map(|r| format!("{}{}", self.marker(r.selected, r.saved), r.candidate.label))
+            .collect();
+        let rows_len = rows.len();
+        if let Some(list) = self.dlg.child_mut(self.list_id) {
+            let saved_sel: Option<i32> = if preserve_cursor {
+                match list.value() {
+                    Some(FieldValue::Int(i)) => Some(i),
+                    _ => None,
+                }
+            } else {
+                None
+            };
+            if let Some(lb) = list.as_any_mut().and_then(|a| a.downcast_mut::<ListBox>()) {
+                lb.new_list(rows, ctx);
+            }
+            if let Some(sel) = saved_sel {
+                let clamped = sel.min((rows_len.saturating_sub(1)) as i32).max(0);
+                list.set_value_ctx(FieldValue::Int(clamped), ctx);
+            }
+        }
+    }
+
+    /// Copy the latest pump-delivered search results into `pick` and re-render.
+    /// Borrow-safe: clones out of `shared` then drops the borrow before mutating.
+    fn sync_results(&mut self, ctx: &mut Context) {
+        let (results, truncated) = {
+            let st = self.shared.borrow();
+            (st.search_results.clone(), st.search_truncated)
+        };
+        self.pick.set_results(results);
+        self.pick.truncated = truncated;
+        self.pick.search_active = !self.last_search.is_empty();
+        self.rebuild_list(ctx, false);
+    }
+
+    /// Write the prospective commit (the selected store values) into shared state.
+    fn update_staged(&self) {
+        let values = self.pick.selected_values();
+        self.shared.borrow_mut().staged_commit = Some(CommitOutcome::SetValues(values));
+    }
+
+    /// Submit a candidate search for `term` via the worker. One atomic borrow.
+    fn submit_search(&self, term: &str) {
+        self.shared.borrow_mut().submit_search(
+            &self.base,
+            &self.oc,
+            term,
+            &self.attrs,
+            self.store_attr.as_deref(),
+        );
+    }
+
+    /// The current search-box text.
+    fn current_search(&mut self) -> String {
+        match self.dlg.child_mut(self.search_id).and_then(|v| v.value()) {
+            Some(FieldValue::Text(s)) => s,
+            _ => String::new(),
+        }
+    }
+
+    /// The list-highlight index, if any.
+    fn highlighted_index(&mut self) -> Option<usize> {
+        match self.dlg.child_mut(self.list_id).and_then(|v| v.value()) {
+            Some(FieldValue::Int(i)) if i >= 0 => Some(i as usize),
+            _ => None,
+        }
+    }
+
+    /// Pick the candidate at visible-row `idx`: replaces the current selection.
+    fn pick_at(&mut self, idx: usize, ctx: &mut Context) {
+        let rows = self.pick.visible();
+        let Some(row) = rows.get(idx) else {
             return;
         };
-        let sv = row.candidate.store_value.clone();
-        let ci = self.key_ci;
-        if let Some(pos) = self
-            .selected
-            .iter()
-            .position(|s| same_key(ci, &s.store_value, &sv))
-        {
-            self.selected.remove(pos);
-        } else {
-            self.selected.push(row.candidate.clone());
-        }
-        let n = self.visible().len();
-        if self.cursor >= n {
-            self.cursor = n.saturating_sub(1);
-        }
-    }
-
-    /// Store values of the current selection — what a direct-write commit writes.
-    pub fn selected_values(&self) -> Vec<String> {
-        self.selected
-            .iter()
-            .map(|c| c.store_value.clone())
-            .collect()
-    }
-
-    /// Real entry DNs of the current selection — fan-out targets (`store = dn`).
-    pub fn selected_dns(&self) -> Vec<String> {
-        self.selected.iter().map(|c| c.dn.clone()).collect()
+        let cand = row.candidate.clone();
+        // Single-select radio: the pick replaces the whole selection.
+        self.pick.selected = vec![cand];
+        self.rebuild_list(ctx, true);
+        self.update_staged();
     }
 }
+
+#[delegate(to = dlg)]
+impl View for PickerDialog {
+    fn as_any_mut(&mut self) -> Option<&mut dyn core::any::Any> {
+        Some(self)
+    }
+
+    /// Seed on first open: copy any already-delivered results into `pick`, render
+    /// the selection (selected-first), stage the current selection, and kick off
+    /// an initial (empty-term) candidate search so the list fills in.
+    fn reset_current(&mut self, ctx: &mut Context) {
+        self.dlg.reset_current(ctx);
+        if !self.seeded {
+            self.seeded = true;
+            self.sync_results(ctx);
+            self.update_staged();
+            self.submit_search("");
+        }
+    }
+
+    fn handle_event(&mut self, ev: &mut Event, ctx: &mut Context) {
+        // Fallback seed for paths that deliver events without reset_current.
+        if !self.seeded {
+            self.seeded = true;
+            self.sync_results(ctx);
+            self.update_staged();
+            self.submit_search("");
+        }
+
+        // Pump-delivered results: refresh the list from shared state.
+        if matches!(ev, Event::Broadcast { command, .. } if *command == REFRESH) {
+            self.sync_results(ctx);
+            self.dlg.handle_event(ev, ctx);
+            return;
+        }
+
+        // Insert toggles/selects the highlighted candidate; Space is NOT
+        // intercepted here so it falls through to the search InputLine.
+        let insert = matches!(ev, Event::KeyDown(k) if k.key == Key::Insert);
+        let nav = matches!(
+            ev,
+            Event::KeyDown(k)
+                if matches!(k.key, Key::Up | Key::Down | Key::PageUp | Key::PageDown)
+        );
+
+        if insert {
+            if let Some(idx) = self.highlighted_index() {
+                self.pick_at(idx, ctx);
+            }
+            ev.clear();
+        } else if nav {
+            if let Some(list) = self.dlg.child_mut(self.list_id) {
+                list.handle_event(ev, ctx);
+            }
+        } else {
+            self.dlg.handle_event(ev, ctx);
+        }
+
+        // Submit a fresh search when the search text changed.
+        let cur = self.current_search();
+        if cur != self.last_search {
+            self.last_search = cur.clone();
+            self.pick.search_active = !cur.is_empty();
+            self.submit_search(&cur);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::relation::CandidateScope;
+    use crate::ldap::worker::RawSubschema;
+    use crate::schema::FieldKind;
+    use crate::workflows::form_model::WidgetSpec;
+    use std::cell::RefCell;
+    use std::rc::Rc;
+    use tvision_rs::{timer::TimerQueue, Deferred, KeyEvent};
 
-    fn c(dn: &str) -> Candidate {
-        Candidate {
-            dn: dn.into(),
-            label: dn.into(),
-            store_value: dn.into(), // store = dn: store_value == dn
+    fn schema() -> SchemaModel {
+        SchemaModel::from_raw(&RawSubschema::default())
+    }
+
+    fn test_shared() -> Shared {
+        use crate::workflows::structure::Structure;
+        let st = crate::ui::state::UiState::new_for_test(
+            Structure::build("dc=example,dc=org", vec![]),
+            schema(),
+            "dc=example,dc=org".into(),
+            Vec::new(),
+            Vec::new(),
+        );
+        Rc::new(RefCell::new(st))
+    }
+
+    fn headless_ctx<'a>(
+        out: &'a mut std::collections::VecDeque<tv::Event>,
+        timers: &'a mut TimerQueue,
+        deferred: &'a mut Vec<Deferred>,
+    ) -> Context<'a> {
+        Context::new(out, timers, 0, deferred)
+    }
+
+    fn dn_scope() -> CandidateScope {
+        CandidateScope {
+            base: "ou=people,dc=example,dc=org".into(),
+            object_classes: vec!["inetOrgPerson".into()],
+            search_attrs: vec!["uid".into(), "cn".into()],
+            label_template: None,
         }
     }
 
+    fn picker_field(
+        label: &str,
+        values: &[&str],
+        binding: PickerBinding,
+        multi: bool,
+    ) -> EditField {
+        EditField {
+            label: label.into(),
+            must: false,
+            editable: true,
+            multi,
+            secret: false,
+            ordered: false,
+            orphaned: false,
+            kind: FieldKind::Text,
+            widget: WidgetSpec::ReadOnlyText,
+            widget_binding: Some(WidgetKind::Picker(binding)),
+            values: values.iter().map(|s| s.to_string()).collect(),
+            baseline: values.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+
+    fn single_dn_binding() -> PickerBinding {
+        PickerBinding {
+            attr: "secretary".into(),
+            scope: dn_scope(),
+            store: StoreKey::Dn,
+            select: Some(Cardinality::Single),
+            fanout_attr: None,
+        }
+    }
+
+    fn cand(dn: &str, store: &str, label: &str) -> Candidate {
+        Candidate {
+            dn: dn.into(),
+            label: label.into(),
+            store_value: store.into(),
+        }
+    }
+
+    // -- Task 13: present joins selected store values ----------------------
+
     #[test]
-    fn scalar_store_keys_by_value_exact() {
-        let mut p = PickerState::new(
-            vec![Candidate {
-                dn: "alice".into(),
-                label: "alice".into(),
-                store_value: "alice".into(),
-            }],
-            false, // key_ci = false (scalar, exact)
-        );
-        p.set_results(vec![Candidate {
-            dn: "uid=Alice,ou=people".into(),
-            label: "Alice".into(),
-            store_value: "Alice".into(),
-        }]);
-        let dns: Vec<_> = p
-            .visible()
-            .iter()
-            .map(|r| r.candidate.store_value.clone())
-            .collect();
-        assert_eq!(dns, vec!["alice".to_string(), "Alice".to_string()]); // distinct
+    fn present_joins_values_or_none() {
+        let w = PickerWidget;
+        let mut f = picker_field("secretary", &[], single_dn_binding(), false);
+        assert_eq!(w.present(&f), "\u{2039}none\u{203a}");
+        f.values = vec!["uid=a,ou=people,dc=example,dc=org".into()];
+        assert_eq!(w.present(&f), "uid=a,ou=people,dc=example,dc=org");
+        f.values = vec!["uid=a,o=x".into(), "uid=b,o=x".into()];
+        assert_eq!(w.present(&f), "uid=a,o=x, uid=b,o=x");
     }
 
     #[test]
-    fn dn_store_keys_case_insensitively() {
-        let mut p = PickerState::new(vec![c("UID=Bob,OU=people")], true); // key_ci = true
-        p.set_results(vec![c("uid=bob,ou=people")]); // same DN, different case
-        assert_eq!(p.visible().len(), 1);
+    fn single_nonfanout_picker_activates_modal() {
+        // PickerWidget handles single-select non-fanout only.
+        let binding = PickerBinding {
+            attr: "gidNumber".into(),
+            scope: dn_scope(),
+            store: StoreKey::Attr("gidNumber".into()),
+            select: Some(Cardinality::Single),
+            fanout_attr: None,
+        };
+        let f = picker_field("gidNumber", &[], binding, false);
+        assert!(matches!(PickerWidget.activate(&f), Activation::Modal(_)));
     }
 
     #[test]
-    fn selected_values_returns_store_values() {
-        let mut p = PickerState::new(vec![], false);
-        p.set_results(vec![
-            Candidate {
-                dn: "uid=a,o=x".into(),
-                label: "A".into(),
-                store_value: "1001".into(),
+    fn multi_nonfanout_picker_does_not_activate_here() {
+        // A multi non-fanout binding is routed to MultiPickerWidget, not PickerWidget.
+        let binding = PickerBinding {
+            attr: "member".into(),
+            scope: dn_scope(),
+            store: StoreKey::Dn,
+            select: Some(Cardinality::Multi),
+            fanout_attr: None,
+        };
+        let f = picker_field("member", &[], binding, true);
+        assert!(matches!(PickerWidget.activate(&f), Activation::Inline));
+    }
+
+    #[test]
+    fn fanout_picker_does_not_activate_here() {
+        // A fan-out binding is routed to MultiPickerWidget; this widget yields Inline.
+        let mut b = single_dn_binding();
+        b.fanout_attr = Some("member".into());
+        let f = picker_field("memberOf", &[], b, false);
+        assert!(matches!(PickerWidget.activate(&f), Activation::Inline));
+    }
+
+    // -- Task 14: headless dialog — seed results, pick, assert staged --------
+
+    /// Single-select radio: a pick replaces the selection (does not accumulate).
+    #[test]
+    fn single_pick_replaces_selection() {
+        let shared = test_shared();
+        shared.borrow_mut().search_results = vec![
+            cand("cn=devs,ou=groups,dc=example,dc=org", "1001", "devs"),
+            cand("cn=ops,ou=groups,dc=example,dc=org", "1002", "ops"),
+        ];
+        let binding = PickerBinding {
+            attr: "gidNumber".into(),
+            scope: CandidateScope {
+                base: "ou=groups,dc=example,dc=org".into(),
+                object_classes: vec!["posixGroup".into()],
+                search_attrs: vec!["cn".into()],
+                label_template: None,
             },
-            Candidate {
-                dn: "uid=b,o=x".into(),
-                label: "B".into(),
-                store_value: "1002".into(),
-            },
-        ]);
-        p.cursor = 0;
-        p.toggle_cursor();
-        p.cursor = 1;
-        p.toggle_cursor();
-        let mut vals = p.selected_values();
-        vals.sort();
-        assert_eq!(vals, vec!["1001".to_string(), "1002".to_string()]);
-    }
+            store: StoreKey::Attr("gidNumber".into()),
+            select: Some(Cardinality::Single),
+            fanout_attr: None,
+        };
+        let ed: Box<dyn FieldEditor> = Box::new(PickerEditor {
+            label: "gidNumber".into(),
+            binding,
+            current: vec![],
+            multi: false,
+        });
+        let (mut view, _focus) = ed.into_view(&schema(), shared.clone());
 
-    #[test]
-    fn selected_stays_visible_when_results_exclude_it() {
-        // Seed selection = [A]; a search returns only [B] (A does not match).
-        let mut p = PickerState::new(vec![c("A")], true);
-        p.set_results(vec![c("B")]);
-        let dns: Vec<_> = p.visible().iter().map(|r| r.candidate.dn.clone()).collect();
-        assert_eq!(dns, vec!["A".to_string(), "B".to_string()]); // A still present
-        assert!(p.visible()[0].selected);
-        assert!(!p.visible()[1].selected);
-    }
+        let mut out = std::collections::VecDeque::new();
+        let mut timers = TimerQueue::new();
+        let mut deferred = Vec::new();
+        let mut ctx = headless_ctx(&mut out, &mut timers, &mut deferred);
+        view.reset_current(&mut ctx);
 
-    #[test]
-    fn results_already_selected_are_not_duplicated() {
-        let mut p = PickerState::new(vec![c("A")], true);
-        p.set_results(vec![c("A"), c("B")]);
-        let dns: Vec<_> = p.visible().iter().map(|r| r.candidate.dn.clone()).collect();
-        assert_eq!(dns, vec!["A".to_string(), "B".to_string()]);
-    }
+        let dlg = view
+            .as_any_mut()
+            .and_then(|a| a.downcast_mut::<PickerDialog>())
+            .expect("downcast");
 
-    #[test]
-    fn toggle_adds_and_removes() {
-        let mut p = PickerState::new(vec![], true);
-        p.set_results(vec![c("A"), c("B")]);
-        p.cursor = 0; // A
-        p.toggle_cursor();
-        assert_eq!(p.selected_dns(), vec!["A".to_string()]);
-        // A now sorts into the selected block at index 0; toggle it off again.
-        p.cursor = 0;
-        p.toggle_cursor();
-        assert!(p.selected_dns().is_empty());
-    }
-
-    #[test]
-    fn cursor_clamps() {
-        let mut p = PickerState::new(vec![c("A")], true);
-        p.move_cursor(5);
-        assert_eq!(p.cursor, 0); // only one visible row
-        p.move_cursor(-5);
-        assert_eq!(p.cursor, 0);
-    }
-
-    #[test]
-    fn move_cursor_advances_and_stops_at_last() {
-        let mut p = PickerState::new(vec![c("A")], true);
-        p.set_results(vec![c("B"), c("C")]);
-        p.move_cursor(1);
-        assert_eq!(p.cursor, 1);
-        p.move_cursor(1);
-        assert_eq!(p.cursor, 2);
-        p.move_cursor(1);
-        assert_eq!(p.cursor, 2);
-    }
-
-    #[test]
-    fn escapes_filter_specials() {
-        assert_eq!(escape_filter("a*b(c)\\d"), r"a\2ab\28c\29\5cd");
-    }
-
-    #[test]
-    fn builds_or_filter_with_objectclass_and_term() {
-        let f = build_member_filter(
-            &["inetOrgPerson".into()],
-            &["uid".into(), "cn".into()],
-            "ann",
-        );
-        assert_eq!(f, "(&(objectClass=inetOrgPerson)(|(uid=*ann*)(cn=*ann*)))");
-    }
-
-    #[test]
-    fn empty_term_filters_objectclass_only() {
-        let f = build_member_filter(&["groupOfNames".into()], &["cn".into()], "");
-        assert_eq!(f, "(objectClass=groupOfNames)");
-    }
-
-    #[test]
-    fn empty_search_attrs_with_term_returns_oc_only() {
-        let f = build_member_filter(&["inetOrgPerson".into()], &[], "ann");
-        assert_eq!(f, "(objectClass=inetOrgPerson)");
-    }
-
-    #[test]
-    fn member_filter_ands_multiple_object_classes() {
-        let f = build_member_filter(
-            &["posixAccount".into(), "inetOrgPerson".into()],
-            &["cn".into(), "uid".into()],
-            "ali",
-        );
-        assert!(f.starts_with("(&(objectClass=posixAccount)(objectClass=inetOrgPerson)"));
-        assert!(f.contains("(cn=*ali*)"));
-        assert!(f.contains("(uid=*ali*)"));
-    }
-
-    #[test]
-    fn member_filter_single_class_unchanged_shape() {
-        let f = build_member_filter(&["inetOrgPerson".into()], &["cn".into()], "bob");
-        assert_eq!(f, "(&(objectClass=inetOrgPerson)(|(cn=*bob*)))");
-    }
-
-    #[test]
-    fn label_prefers_cn_then_dn() {
-        use std::collections::BTreeMap;
-        let mut attrs = BTreeMap::new();
-        attrs.insert("cn".to_string(), vec!["Ann Smith".to_string()]);
-        assert_eq!(candidate_label("uid=ann,ou=people", &attrs), "Ann Smith");
+        // Pick row 0 (devs → 1001) via Insert.
+        if let Some(list) = dlg.dlg.child_mut(dlg.list_id) {
+            list.set_value_ctx(FieldValue::Int(0), &mut ctx);
+        }
+        let mut ev = Event::KeyDown(KeyEvent::from(Key::Insert));
+        dlg.handle_event(&mut ev, &mut ctx);
         assert_eq!(
-            candidate_label("uid=bob,ou=people", &BTreeMap::new()),
-            "uid=bob,ou=people"
+            shared.borrow().staged_commit,
+            Some(CommitOutcome::SetValues(vec!["1001".to_string()]))
         );
-    }
 
-    #[test]
-    fn truncated_defaults_false_and_is_settable() {
-        let mut p = PickerState::new(vec![c("A")], true);
-        assert!(!p.truncated, "truncated should default to false");
-        p.truncated = true;
-        assert!(p.truncated, "truncated should be settable");
-        // Default trait also produces false.
-        let p2 = PickerState::default();
-        assert!(
-            !p2.truncated,
-            "Default impl should also set truncated=false"
-        );
-    }
-
-    #[test]
-    fn pick_value_returns_scalar_case_insensitive() {
-        use std::collections::BTreeMap;
-        let mut attrs = BTreeMap::new();
-        attrs.insert("gidNumber".to_string(), vec!["1234".to_string()]);
-        // Attr name lookup is case-insensitive.
-        assert_eq!(pick_value(&attrs, "gidnumber"), Some("1234".to_string()));
-        assert_eq!(pick_value(&attrs, "gidNumber"), Some("1234".to_string()));
-    }
-
-    #[test]
-    fn pick_value_trims_and_returns_none_when_absent_or_empty() {
-        use std::collections::BTreeMap;
-        let mut attrs = BTreeMap::new();
-        attrs.insert("gidNumber".to_string(), vec!["  42  ".to_string()]);
-        attrs.insert("blank".to_string(), vec!["   ".to_string()]);
-        assert_eq!(pick_value(&attrs, "gidNumber"), Some("42".to_string()));
-        // Absent attribute → None.
-        assert_eq!(pick_value(&attrs, "uidNumber"), None);
-        // Present but whitespace-only → None.
-        assert_eq!(pick_value(&attrs, "blank"), None);
-    }
-
-    #[test]
-    fn picker_search_cap_is_100() {
-        assert_eq!(PICKER_SEARCH_CAP, 100);
-    }
-
-    #[test]
-    fn new_marks_seeded_selection_as_saved() {
-        let state = PickerState::new(vec![c("uid=bob,ou=people")], true);
-        assert_eq!(state.saved, vec!["uid=bob,ou=people".to_string()]);
-    }
-
-    #[test]
-    fn visible_flags_saved_rows() {
-        // Open with bob saved (seeded selection); search adds carol (not saved).
-        let mut p = PickerState::new(vec![c("uid=bob,ou=people")], true);
-        p.set_results(vec![c("uid=carol,ou=people")]);
-        let rows = p.visible();
-        let bob = rows
-            .iter()
-            .find(|r| r.candidate.dn == "uid=bob,ou=people")
-            .expect("bob row present");
-        assert!(bob.saved, "bob is a saved member");
-        assert!(bob.selected, "bob is selected");
-        let carol = rows
-            .iter()
-            .find(|r| r.candidate.dn == "uid=carol,ou=people")
-            .expect("carol row present");
-        assert!(!carol.saved, "carol was not saved at open");
-    }
-
-    #[test]
-    fn search_active_puts_matches_first_and_selected_after() {
-        // Selected = [A, B]; a search returns [C, D] (neither selected) plus B
-        // (which is selected). With search active, results lead and the
-        // non-matching selected member (A) trails.
-        let mut p = PickerState::new(vec![c("A"), c("B")], true);
-        p.set_results(vec![c("C"), c("D"), c("B")]);
-        p.search_active = true;
-        let rows = p.visible();
-        let dns: Vec<_> = rows.iter().map(|r| r.candidate.dn.clone()).collect();
+        // Pick row 1 (ops → 1002) via Insert: single-select must REPLACE, not add.
+        if let Some(list) = dlg.dlg.child_mut(dlg.list_id) {
+            list.set_value_ctx(FieldValue::Int(1), &mut ctx);
+        }
+        let mut ev = Event::KeyDown(KeyEvent::from(Key::Insert));
+        dlg.handle_event(&mut ev, &mut ctx);
         assert_eq!(
-            dns,
-            vec!["C", "D", "B", "A"],
-            "results first, then unmatched selected"
-        );
-        // B appears in the results block but is marked selected (no duplicate).
-        let b = rows.iter().filter(|r| r.candidate.dn == "B").count();
-        assert_eq!(b, 1, "B not duplicated");
-        assert!(
-            rows.iter()
-                .find(|r| r.candidate.dn == "B")
-                .unwrap()
-                .selected
-        );
-        assert!(
-            rows.iter()
-                .find(|r| r.candidate.dn == "A")
-                .unwrap()
-                .selected
-        );
-        assert!(
-            !rows
-                .iter()
-                .find(|r| r.candidate.dn == "C")
-                .unwrap()
-                .selected
+            shared.borrow().staged_commit,
+            Some(CommitOutcome::SetValues(vec!["1002".to_string()])),
+            "single-select replaces the prior pick"
         );
     }
 
+    /// Seeding from current values shows them selected-first before any search.
     #[test]
-    fn no_search_keeps_selected_first() {
-        // Same data, search inactive → original order: selected lead.
-        let mut p = PickerState::new(vec![c("A"), c("B")], true);
-        p.set_results(vec![c("C"), c("D"), c("B")]);
-        assert!(!p.search_active, "defaults inactive");
-        let dns: Vec<_> = p.visible().iter().map(|r| r.candidate.dn.clone()).collect();
+    fn reset_seeds_current_selection() {
+        let shared = test_shared();
+        let ed: Box<dyn FieldEditor> = Box::new(PickerEditor {
+            label: "secretary".into(),
+            binding: single_dn_binding(),
+            current: vec!["uid=carol,ou=people,dc=example,dc=org".into()],
+            multi: false,
+        });
+        let (mut view, _focus) = ed.into_view(&schema(), shared.clone());
+        let mut out = std::collections::VecDeque::new();
+        let mut timers = TimerQueue::new();
+        let mut deferred = Vec::new();
+        let mut ctx = headless_ctx(&mut out, &mut timers, &mut deferred);
+        view.reset_current(&mut ctx);
         assert_eq!(
-            dns,
-            vec!["A", "B", "C", "D"],
-            "selected first, then unselected results"
+            shared.borrow().staged_commit,
+            Some(CommitOutcome::SetValues(vec![
+                "uid=carol,ou=people,dc=example,dc=org".to_string()
+            ])),
+            "the seeded selection is staged on open"
         );
-    }
-
-    #[test]
-    fn set_results_resets_cursor_and_scroll_to_top() {
-        let mut p = PickerState::new(vec![], true);
-        p.set_results(vec![c("A"), c("B"), c("C")]);
-        p.cursor = 2;
-        p.scroll = 1;
-        p.set_results(vec![c("X"), c("Y")]);
-        assert_eq!(p.cursor, 0, "cursor returns to top on new results");
-        assert_eq!(p.scroll, 0, "scroll returns to top on new results");
-    }
-
-    #[test]
-    fn toggling_off_a_saved_member_keeps_saved_true() {
-        // Open with bob saved, then toggle bob off.
-        let mut p = PickerState::new(vec![c("uid=bob,ou=people")], true);
-        p.cursor = 0; // bob
-        p.toggle_cursor();
-        let rows = p.visible();
-        let bob = rows
-            .iter()
-            .find(|r| r.candidate.dn == "uid=bob,ou=people")
-            .expect("bob row still present (from results or saved)");
-        assert!(!bob.selected, "bob is no longer selected");
-        assert!(bob.saved, "bob remains flagged as saved");
     }
 }

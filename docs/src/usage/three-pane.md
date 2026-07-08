@@ -1,62 +1,79 @@
 # The Three-Pane TUI
 
-eDAPtor presents the directory as three side-by-side panes — a navigation
-tree, an entry list, and a detail/edit form — over a single bottom status
-line. The layout is persistent: you keep the directory, the current container's
-entries, and the selected entry's form all on screen at once, instead of losing
-context to a modal dialog every time you edit.
+eDAPtor presents the directory as three panes — a navigation tree, an entry
+list, and a detail/edit form — over a single bottom status line. The tree
+(top-left) and the selected branch's entries (bottom-left) share the left
+column; the detail/edit form fills the full-height right column. The layout is
+persistent: you keep the directory, the current container's entries, and the
+selected entry's form all on screen at once, instead of losing context to a
+modal dialog every time you edit.
 
 ## The three panes
 
 ```
-┌─ DIT ───────┐┌─ Entries ────────┐╔═ Entry — uid=bob,ou=people,… ═╗
-│ dc=example  ││ /                │║ uid           bob             ║
-│ ├─ people   ││ ‹self› people    │║ cn            Bob Baker       ║
-│ └─ groups   ││ Bob Baker (bob)  │║ sn            Baker           ║
-│             ││ Babs Carr (babs) │║ givenName     Bob             ║
-│             ││ Carl Diaz (carl) │║ mail          bob@example.org ║
-│             ││ …                │║ uidNumber     10001           ║
-│             ││                  │║ …                             ║
-└─────────────┘└──────────────────┘╚═══════════════════════════════╝
+┌─ DIT ───────────┐╔═ Entry — uid=bob,ou=people,… ═╗
+│ dc=example      │║ uid           bob             ║
+│ ├─ people       │║ cn            Bob Baker       ║
+│ └─ groups       │║ sn            Baker           ║
+├─ Entries ───────┤║ givenName     Bob             ║
+│ ‹self› people   │║ mail          bob@example.org ║
+│ Bob Baker (bob) │║ uidNumber     10001           ║
+│ Babs Carr (babs)│║ …                             ║
+│ Carl Diaz (carl)│║                               ║
+└─────────────────┘╚═══════════════════════════════╝
  ↑↓ Field · ↵ Edit · Alt+S Save · Alt+C Cancel · Alt+X Quit
 ```
 
-*(The form pane is focused here, so it carries the bold double border. In a real
-terminal the active border is also drawn in cyan, which ASCII cannot show.)*
+*(The form pane is focused here, so it carries the bold double border and a
+brighter background. In a real terminal the active border is drawn in a blue
+accent colour, which ASCII cannot show.)*
 
 - **DIT (navigation tree)** — the directory's branch structure: every container
   (an entry that has children), with the base DN as the root. The whole
   structure is loaded eagerly at startup, so navigation is instant and eDAPtor
   knows exactly which nodes are branches and which are leaves. Selecting a branch
-  drives the entry list. Move with `↑↓`, fold/unfold a branch with `←→`.
+  drives the entry list. Move with `↑↓`, fold/unfold a branch with `←→`. Moving to
+  a different branch clears any active entry-list filter, so the new branch always
+  lists unfiltered.
 
 - **Entries (entry list)** — the entries directly under the selected branch. The
-  top row is an incremental-search box (shown as `/ …`); below it is a
-  `‹self›` row representing the branch entry itself (editable like any other
-  entry), followed by the branch's leaf entries. Each entry is shown with its
-  profile **label** — for example `Bob Baker (bob)` from a `label = "{cn} ({uid})"`
-  — rather than a raw DN. Just start typing to filter the list (the search
-  matches against the rendered label). Moving the highlight with `↑↓` selects the
-  current entry and loads it into the form.
+  first row is a `‹self›` row representing the branch entry itself (editable like
+  any other entry), followed by the branch's leaf entries. Each entry is shown
+  with its profile **label** — for example `Bob Baker (bob)` from a
+  `label = "{cn} ({uid})"` — rather than a raw DN. Just start typing to filter the
+  list in place (the incremental find matches against the rendered label and
+  highlights the match; Backspace widens, Esc clears). Moving the highlight with
+  `↑↓` selects the current entry and loads it into the form.
 
-- **Entry (detail/edit form)** — a scrollable form for the selected entry, one
-  row per attribute (label on the left, value on the right). The form is
-  generated from the entry's `objectClass` definitions in the live schema, so it
-  always matches what the directory actually allows. It re-loads as you move the
-  highlight in the entry list. The pane title shows the current DN (or
-  `New entry` while creating). Move between fields with `↑↓`, open a field for
-  editing with `↵`.
+- **Entry (detail/edit form)** — a scrollable form for the selected entry. Each
+  attribute is a variable-height block: single-value text fields show one line;
+  multi-value fields expand to fit their values as an inline bulleted list. Cryptic
+  attribute names carry a short readable hint — for example `sn (surname)`,
+  `l (location)` or `ou (org. unit)` — so their meaning is obvious at a glance. The
+  form is generated from the entry's `objectClass` definitions in the live schema,
+  so it always matches what the directory actually allows. It re-loads as you move
+  the highlight in the entry list. The pane title shows the current DN (or
+  `New entry` while creating). Move between fields with `↑↓`; the status line
+  shows context-sensitive editing hints for the focused field.
 
 ## Focus and the status line
 
-Exactly one pane is focused at a time. The focused pane is marked by a **bold,
-double-line border** (drawn in cyan); the other two panes get a dim single-line
-border. There is no background inversion — eDAPtor uses the terminal's default
-(typically light/white) background everywhere, so it reads cleanly in any
-color scheme.
+Exactly one pane is focused at a time. The interface uses a **light Solarized-Light
+colour scheme**: cream/tan panels, dark slate text, and a blue accent. The focused
+pane is rendered in a brighter cream tone; unfocused panes are slightly greyed.
+Within the entry form, **editable fields have a visibly brighter background** than
+read-only labels, making the edit affordance immediately apparent. A vertical
+scrollbar appears in a pane **only while it is focused** and only when the content
+overflows the visible height.
 
-- **`Tab`** moves focus forward (DIT → Entries → Entry → DIT).
+- **`Tab`** moves focus forward (DIT → Entries → Entry → DIT) — it cycles panes
+  only and does **not** descend into a pane's internal fields.
 - **`Shift-Tab`** moves focus backward.
+- Use the **arrow keys** to move within the focused pane.
+- The **mouse wheel** scrolls the pane under the pointer: it moves the highlight
+  in the tree or entry list, and in the entry form it moves between fields,
+  scrolling the form so the focused field stays on screen.
+- **Clicking a form label** moves focus to that field's input directly.
 
 Moving focus off the form pane while it has unsaved edits opens the dirty-guard
 (see [Creating, Editing, Renaming, Deleting](crud.md)).
@@ -70,7 +87,12 @@ follows focus and shows, in order:
 - the **focused pane's hotkeys**:
   - DIT — `↑↓ Move · ←→ Fold · Alt+R Refresh`
   - Entries — `↑↓ Select · Type to search · Alt+N New · Alt+D Del`
-  - Entry — `↑↓ Field · ↵ Edit · Alt+S Save · Alt+C Cancel`
+  - Entry — **dynamic hints** that update with the focused field's type and
+    state (e.g. `↑↓ move · Enter next field` for a plain text field,
+    `Enter add · Ctrl-J newline · Backspace empties→removes · ↑↓ move`
+    for an inline multi-value list, `any key: open picker · ↑↓ move` for a
+    launch field such as `objectClass` or `memberOf`). `Alt+S Save · Alt+C Cancel`
+    are always available.
 - `Alt+X Quit`, so the global quit is discoverable from anywhere;
 - last, the current DN with a trailing `*` when the form has unsaved edits.
 

@@ -163,6 +163,17 @@ pub enum WidgetSpecCfg {
         /// The back-ref attribute written on each picked candidate (e.g. `member`).
         via: String,
     },
+    /// Scalar value with a friendly-name popup: type a number freely OR filter a
+    /// candidate list and pick one. The form shows `<value> (<name>)` by resolving
+    /// `store == value` against the candidate. `store` is required (it is both the
+    /// stored scalar and the reverse-lookup match key). `label` is the candidate's
+    /// display template; defaults to the candidate profile's `label`, else `{cn}`.
+    Lookup {
+        candidate: CandidateRef,
+        store: String,
+        #[serde(default)]
+        label: Option<String>,
+    },
     /// Display-only; the attribute is excluded from the changeset.
     Readonly,
     /// OpenLDAP X-ORDERED attribute: strips/regenerates `{n}` ordering prefixes.
@@ -549,11 +560,46 @@ mod tests {
             WidgetSpecCfg::Membership { via, .. } => assert_eq!(via, "member"),
             other => panic!("expected Membership for memberOf, got {other:?}"),
         }
-        // gidNumber migrated to a picker widget.
+        // gidNumber migrated to a lookup widget.
         assert!(
-            matches!(&user.widgets["gidNumber"], WidgetSpecCfg::Picker { .. }),
-            "expected Picker for gidNumber"
+            matches!(&user.widgets["gidNumber"], WidgetSpecCfg::Lookup { .. }),
+            "expected Lookup for gidNumber"
         );
+    }
+
+    #[test]
+    fn lookup_widget_parses_with_candidate_store_and_label() {
+        let toml = r#"
+            [server]
+            uri = "ldap://x"
+            base_dn = "dc=x"
+            [auth]
+            bind_dn = "cn=admin,dc=x"
+
+            [[profile]]
+            name = "user"
+            object_classes = ["posixAccount"]
+
+            [profile.widget.gidNumber]
+            kind = "lookup"
+            candidate = "posixgroup"
+            store = "gidNumber"
+            label = "{cn}"
+        "#;
+        let cfg: super::Config = toml::from_str(toml).expect("parse");
+        let user = &cfg.profiles[0];
+        match &user.widgets["gidNumber"] {
+            WidgetSpecCfg::Lookup {
+                candidate,
+                store,
+                label,
+            } => {
+                assert!(matches!(candidate, CandidateRef::Profile(n) if n == "posixgroup"));
+                assert_eq!(store, "gidNumber");
+                assert_eq!(label.as_deref(), Some("{cn}"));
+            }
+            other => panic!("expected Lookup, got {other:?}"),
+        }
     }
 
     #[test]
@@ -825,15 +871,16 @@ options = [ { value = "/bin/bash", label = "Bash" } ]
             }
             other => panic!("expected Picker for memberOf, got {other:?}"),
         }
-        // gidNumber resolves to a plain picker (no fan-out).
+        // gidNumber resolves to a lookup widget (shows friendly name in the form).
         let gid = widgets
             .iter()
             .find(|w| w.attr.eq_ignore_ascii_case("gidNumber"))
             .expect("gidNumber widget");
-        match &gid.kind {
-            crate::config::widget::WidgetKind::Picker(b) => assert_eq!(b.fanout_attr, None),
-            other => panic!("expected Picker for gidNumber, got {other:?}"),
-        }
+        assert!(
+            matches!(&gid.kind, crate::config::widget::WidgetKind::Lookup(_)),
+            "expected Lookup for gidNumber, got {:?}",
+            gid.kind
+        );
     }
 
     #[test]

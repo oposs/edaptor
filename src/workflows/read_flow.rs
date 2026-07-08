@@ -4,7 +4,7 @@
 //! [`ReadFlow::request_entry`] submits a base-scope search for that DN (all user
 //! attributes). The event loop drains the worker and feeds responses to
 //! [`ReadFlow::on_response`], which correlates by id (D4) and builds the
-//! schema-driven [`FormModel`]; the ratatui UI ([`crate::ui::view`]) renders it.
+//! schema-driven [`FormModel`]; the tvision UI (`crate::ui`) renders it.
 
 use std::collections::HashMap;
 
@@ -13,7 +13,7 @@ use anyhow::Result;
 use crate::config::EntryProfile;
 use crate::ldap::worker::{LdapEntry, Request, Response, SearchScope, WorkerHandle};
 use crate::schema::SchemaModel;
-use crate::ui::form::{build_form_model, FormModel};
+use crate::workflows::form_model::{build_form_model, FormModel};
 
 /// Outcome of feeding a polled [`Response`] to the read flow.
 pub enum ReadOutcome {

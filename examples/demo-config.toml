@@ -24,7 +24,7 @@ name           = "user"
 object_classes = ["inetOrgPerson", "posixAccount", "shadowAccount", "sambaSamAccount"]
 rdn_attr       = "uid"
 search_base    = "ou=people,dc=example,dc=org"
-show           = ["uid", "cn", "sn", "givenName", "mail", "ou", "uidNumber", "gidNumber", "homeDirectory"]
+show           = ["uid", "cn", "sn", "givenName", "mail", "userPassword", "ou", "uidNumber", "gidNumber", "homeDirectory"]
 search_attrs   = ["cn", "uid", "mail"]
 label          = "{cn} ({uid})"
 
@@ -57,12 +57,14 @@ options = [
   { value = "/sbin/nologin", label = "No login" },
 ]
 
-# gidNumber resolves a posixGroup and stores that group's gidNumber scalar.
+# gidNumber: shown in the form as "<number> (<group name>)" and edited via an
+# editable-combobox popup — type a number freely or filter the posixgroup list
+# and pick one.
 [profile.widget.gidNumber]
-kind      = "picker"
+kind      = "lookup"
 candidate = "posixgroup"
 store     = "gidNumber"
-select    = "single"
+label     = "{cn}"
 
 # memberOf is a synthetic back-ref: ticking a group writes `member` on it
 # (the memberOf attribute itself is overlay-maintained, never written directly).
@@ -83,6 +85,13 @@ label          = "{cn}"
 [profile.widget.member]
 kind      = "picker"
 candidate = "user"
+
+# DEMO ONLY: treat the group's multi-valued `description` as an X-ORDERED
+# editable list so the ordered editor is drivable against the demo server.
+# Note: saving writes `{n}`-prefixed values; edaptor strips them on read, so
+# round-trips stay self-consistent (other tools will see the `{n}` tags).
+[profile.widget.description]
+kind = "x_ordered"
 
 [[profile]]
 name           = "posixgroup"

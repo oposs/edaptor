@@ -54,7 +54,7 @@ name           = "user"
 object_classes = ["inetOrgPerson", "posixAccount", "shadowAccount"]
 rdn_attr       = "uid"
 search_base    = "ou=people,dc=example,dc=com"
-show           = ["uid", "cn", "sn", "givenName", "mail", "uidNumber", "gidNumber", "homeDirectory"]
+show           = ["uid", "cn", "sn", "givenName", "mail", "userPassword", "uidNumber", "gidNumber", "homeDirectory"]
 search_attrs   = ["cn", "uid", "mail"]        # picker searches these attributes
 # How an entry of this profile is labelled in the membership picker. `{attr}` is
 # substituted by that attribute's value; literal text is kept. Defaults to cn.

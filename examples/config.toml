@@ -45,7 +45,7 @@ name           = "user"
 object_classes = ["inetOrgPerson", "posixAccount", "shadowAccount"]
 rdn_attr       = "uid"
 search_base    = "ou=people,dc=example,dc=com"
-show           = ["uid", "cn", "sn", "givenName", "mail", "uidNumber", "gidNumber", "homeDirectory"]
+show           = ["uid", "cn", "sn", "givenName", "mail", "userPassword", "uidNumber", "gidNumber", "homeDirectory"]
 search_attrs   = ["cn", "uid", "mail"]        # picker searches these attributes
 # How an entry of this profile is labelled in the membership picker. `{attr}` is
 # substituted by that attribute's value; literal text is kept. Defaults to cn.
@@ -107,14 +107,15 @@ options = [
 #   via         (membership, required) — the back-ref attribute; this entry's DN is
 #                 added/removed in `via` on each picked candidate.
 
-# gidNumber: auto-configured for posixAccount (picks the first posixGroup profile
-# via the _posix_group_ sentinel). Declare here to pin the candidate to a
-# specific profile name or to customise store/select.
+# gidNumber: shown in the form as "<number> (<group name>)" and edited via an
+# editable-combobox popup — type a number freely or filter the posixgroup list
+# and pick one. The lookup kind resolves the friendly name from the candidate
+# profile's `store` attribute without requiring a separate search.
 [profile.widget.gidNumber]
-kind      = "picker"
+kind      = "lookup"
 candidate = "posixgroup"
 store     = "gidNumber"
-select    = "single"
+label     = "{cn}"
 
 # memberOf: the auto-config marks memberOf as `readonly` (overlay-maintained).
 # Declare it as `membership` here to make it an interactive group-membership

@@ -4,7 +4,7 @@
 
 eDAPtor is a terminal UI for administering an OpenLDAP directory — adding,
 modifying and removing **users** and **groups**, and managing **group
-memberships** — built in Rust with [ratatui](https://ratatui.rs/).
+memberships** — built in Rust with [tvision-rs](https://github.com/oetiker/tvision-rs).
 
 > The name is **e**ditor and L**DAP**, creatively merged.
 

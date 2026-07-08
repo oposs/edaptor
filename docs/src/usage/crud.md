@@ -14,23 +14,48 @@ so every editable attribute appears with the right cardinality and the
 read-only / system attributes are shown but not editable.
 
 1. Focus the form pane (`Tab` until the **Entry** pane has the double border).
-2. Move between fields with `↑↓`, open the highlighted field with `↵`, and type
-   the new value.
-3. As soon as a value differs from what was read, the form is **dirty**: a `*`
+2. Move between fields with `↑↓`. The **bottom status line** shows
+   context-sensitive editing hints for the focused field.
+3. **Single-value text fields** — type directly into the field.
+4. **Multi-value free-text and ordered fields** — the field renders as an inline
+   bulleted list; type, use **Enter** to add an item, **Backspace** to remove
+   characters (and empty items), **↑/↓** to move between items, and
+   **Ctrl+↑/↓** (or the `≡` handle via **←** at offset 0) to reorder ordered
+   fields. See [Inline multi-value editing](../configuration/widgets.md#inline-multi-value-editing)
+   for the full key reference.
+5. **Object-class, membership, picker, choice, and password fields** — the
+   field shows a read-only block (`<not set>` if empty, `*****` for passwords)
+   that highlights as a whole when focused. Press any action key (or **Enter**)
+   to open the field's editor modal.
+6. As soon as a value differs from what was read, the form is **dirty**: a `*`
    appears next to the DN in the status line.
-4. Press **`Alt+S`** to save. eDAPtor diffs your edits against the original
+7. Press **`Alt+S`** to save. eDAPtor diffs your edits against the original
    entry, builds the change, shows the LDIF preview, and applies it on
    confirmation. If nothing actually changed, it reports that instead of writing.
-5. Press **`Alt+C`** to cancel, reverting the form to the last-read values.
+8. Press **`Alt+C`** to cancel, reverting the form to the last-read values.
 
 ### Changing objectClasses
 
-The `objectClass` field opens a schema-seeded multi-select picker. Tick or untick
-classes and press **Alt+S** to commit. The form immediately updates: new
-MUST/MAY fields appear for the added classes, and any attribute no longer
-permitted by the remaining classes is shown **crossed out** (it will be deleted
-on save). Press **Alt+C** to discard the objectClass change and return to the
-server state. See [objectClass Picker](../configuration/widgets.md#objectclass-picker-auto-injected)
+The `objectClass` field opens a schema-seeded **two-column editor** (the shared
+*Shuttle* view): active (current) classes on the left, available classes on the
+right. Highlight an available class and press **Insert** to move it into the
+active set; highlight an active class and press **Delete** to remove it. **Enter**
+while a list holds focus does the same move (toward the active set from the
+available list, out of it from the active list). The same actions are available
+as on-screen **[Add]** / **[Remove]** buttons (also reachable with **Alt+A** /
+**Alt+R**). Each column shows a scroll bar when its list overflows. **Tab** /
+**Shift-Tab** move focus between the two lists and the buttons; the arrow keys
+drive whichever list is focused. Typing while the available list is focused
+filters it in place (incremental find; Backspace widens, Esc clears). STRUCTURAL
+classes that were already on the entry are shown locked (marked `*`) and cannot
+be removed; a structural class you add during this edit can still be removed
+again. Press the **OK** button to confirm, or the **Cancel** button to close the
+editor without committing. The form immediately
+updates: new MUST/MAY fields appear for
+added classes, and any attribute no longer permitted by the remaining classes is
+shown **crossed out** (it will be deleted on save). Press **Alt+C** in the form
+to discard all objectClass changes and revert to the server state. See
+[objectClass Editor](../configuration/widgets.md#objectclass-editor-auto-injected)
 for full details.
 
 ### The dirty-guard

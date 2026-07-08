@@ -3,21 +3,20 @@
 A `[profile.widget.<attr>]` binding gives the field for attribute `<attr>` a
 **richer editor than a plain text box**. It is eDAPtor's extensible *widget
 palette*: the required `kind` key selects the behaviour, and each kind brings its
-own editor and storage rules. Pressing **Enter** on a widget-bound field opens
-that kind's editor; the field is read-only to inline typing and shows a
-human-readable summary (or masked bullets) the rest of the time.
+own display and editing rules.
 
-Four kinds are available today, and more can be added without changing existing
+Five kinds are available today, and more can be added without changing existing
 configuration:
 
 | `kind` | Editor | Use it for |
 |---|---|---|
 | [`choice`](#the-choice-kind) | a checklist (multi) / radio list (single) over a fixed set of options | enumerated or flag attributes — `loginShell`, `sambaAcctFlags` |
 | [`password`](#the-password-kind) | a masked **New + Confirm** set-password popup | password / hash attributes — `userPassword`, with optional Samba sync |
+| [`lookup`](#the-lookup-kind) | an editable-combobox popup: type a number or filter a candidate list and pick one | scalar values shown with a friendly name (`gidNumber` → group name) |
 | [`picker`](#the-picker-kind) | a live candidate search; stores the picked value(s) in this entry | value lookup (`gidNumber`) and DN/scalar lists (`member`, `memberUid`) |
 | [`membership`](#the-membership-kind) | a live candidate search; fans this entry's DN into a back-ref attr on each pick | back-reference views (`memberOf`) |
 
-Additionally, the **`objectClass` field** receives an [auto-injected picker](#objectclass-picker-auto-injected)
+Additionally, the **`objectClass` field** receives an [auto-injected dual-list editor](#objectclass-editor-auto-injected)
 with no configuration required — it is always present when editing any entry.
 
 A widget is declared as a sub-table of an [entry profile](entry-profiles.md),
@@ -168,6 +167,17 @@ field**. Pressing Enter opens an overlay that searches entries from a linked
 profile; the operator selects one or more candidates and eDAPtor writes the
 right value(s) into this entry's attribute.
 
+A **single-select** picker (`select = "single"`) presents a search box over a
+radio list. A **multi-select** picker (`select = "multi"`, the default for
+multi-valued attributes such as `member` and `memberUid`) presents a two-column
+**Available (left) | Selected (right)** shuttle: type to search, then
+Insert/Enter/[Add] to move a candidate in and Delete/[Remove] to move it out.
+A wide **Add** button sits under the Available column and a wide **Remove** button
+under the Selected column; the one under the focused list is **highlighted**, both
+stay usable at all times, and Tab skips them. The dialog is resizable — drag its
+lower-right corner and the columns reflow, down to a minimum that keeps both
+columns usable.
+
 ```toml
 [profile.widget.gidNumber]
 kind      = "picker"
@@ -215,6 +225,10 @@ A single-select picker over `posixgroup` entries. Because `store = "gidNumber"`,
 eDAPtor writes the **chosen group's `gidNumber` scalar** into the user's
 `gidNumber` field — not the group's DN.
 
+> For `gidNumber` you will usually prefer the [`lookup` kind](#the-lookup-kind),
+> which additionally shows the group name in the form and lets you type a bare
+> number. The `picker` form above remains valid for pick-only behavior.
+
 #### `member` — multi-select, stores DNs
 
 ```toml
@@ -243,6 +257,60 @@ candidate = { base = "ou=people,dc=example,dc=org", object_classes = ["inetOrgPe
 Uses an inline candidate scope rather than a named profile. Useful when you need
 a picker over a subset of the directory that does not have (or need) a full
 `[[profile]]` entry of its own.
+
+## The `lookup` kind
+
+The `lookup` kind turns a **scalar attribute into a value shown with its friendly
+name**. In the form the field renders as `<value> (<name>)` — e.g. `5000 (staff)`
+for a `gidNumber` — by resolving the value against a candidate profile. Pressing
+Enter opens an **editable combobox**: type a number freely, or filter a list of
+candidates by name and pick one.
+
+```toml
+[profile.widget.gidNumber]
+kind      = "lookup"
+candidate = "posixgroup"
+store     = "gidNumber"
+label     = "{cn}"
+```
+
+### Options
+
+- **`kind`** *(required)* — must be `"lookup"`.
+- **`candidate`** *(required)* — the source of candidates. Same as
+  [`picker`](#the-picker-kind): a `[[profile]]` name string, or an inline scope
+  table.
+- **`store`** *(required)* — the scalar attribute stored in this entry's field. It
+  is **also the match key**: the friendly name is resolved by searching the
+  candidate for an entry whose `store` attribute equals the current value.
+- **`label`** *(optional, default `{cn}`)* — a label template rendered against the
+  resolved candidate to produce the friendly name (e.g. `{cn}`, `{cn} ({description})`).
+  Defaults to the candidate profile's own `label`, else `{cn}`.
+
+### The edit popup
+
+The popup is an **editable combobox** — an input field with a candidate list below:
+
+- The **input** is authoritative. Its leading integer is the value that will be
+  stored — you can type any number, even one with no matching candidate.
+- Typing in the input drives the **list**'s incremental search: it narrows in
+  place to the rows matching what you typed (by name or number). Rows show
+  `<name> (<value>)`, e.g. `staff (5000)`.
+- **Navigating the list** (↑/↓, or Enter/double-click) copies the highlighted row
+  into the input as `<value> (<name>)` — which gives it a leading number and
+  enables **OK**.
+- **OK** is enabled only when the input has a leading number; it stores that
+  number.
+
+The always-visible form shows `<value> (<name>)` — a brief `<value> (…)` while the
+name resolves in the background, and just `<value>` if no candidate matches.
+
+### `lookup` vs `picker`
+
+Both can store a group's `gidNumber`. Use `picker` when you only ever pick an
+existing group and want a search-over-radio-list. Use `lookup` when you also want
+to **type an arbitrary number** and to **see the group name in the form** without
+opening the editor.
 
 ## The `membership` kind
 
@@ -315,9 +383,11 @@ Built-in assignments: `memberOf` (all standard object classes), `sambaNTPassword
 ### `x_ordered`
 
 For OpenLDAP **X-ORDERED** multi-value attributes (e.g. `olcAccess`,
-`olcDbIndex`). The `{n}` ordering prefix is stripped for display and
-reconstructed on save. Changing the set of values or their order produces a
-single `REPLACE` operation.
+`olcDbIndex`). These are edited **in place** in the entry form as a bulleted
+list, with full reorder support (see [Inline multi-value editing](#inline-multi-value-editing)
+below). The `{n}` ordering prefix is hidden during editing and regenerated from
+row order when the entry is saved. Changing the set of values or their order
+produces a single `REPLACE` operation.
 
 ```toml
 [profile.widget.myOrderedAttr]
@@ -328,13 +398,95 @@ Built-in assignments: `olcAccess`, `olcDbIndex`, `olcSuffix`, `olcRootDN`,
 `olcLimits`, `olcSyncrepl` (all under the `olcGlobal` / `olcDatabaseConfig`
 object classes).
 
-## `objectClass` Picker (auto-injected)
+## Inline multi-value editing
 
-The `objectClass` field automatically receives a schema-seeded picker. No
-configuration is needed — it is always present when editing any entry. When you
-press Enter on the `objectClass` field, a multi-select popup opens listing all
-objectClass names known from the server's subschema. Tick or untick classes; press
-**Alt+S** to commit.
+Any multi-value attribute that accepts free-text or ordered values is edited
+**in place** in the entry form — no modal dialog. The field renders as a
+bulleted list (`- value`) that grows and shrinks live as you add or remove
+items. An empty field shows `<not set>`. No configuration is needed for this
+behaviour.
+
+### Key bindings
+
+| Key | Action |
+|-----|--------|
+| **Printable char** | Insert character at cursor. On an empty field the first keystroke creates the first item. |
+| **Enter** | Split the current item at the cursor — text after the cursor becomes a new item below; at end of item adds a new empty item. |
+| **Ctrl+J** | Insert a continuation line (`\n`) within the current item. (**Ctrl+Enter** does the same where the terminal can distinguish it, but most cannot — see note below — so **Ctrl+J** is the portable binding.) |
+| **Backspace** | Delete the character before the cursor. At offset 0 of an item, merge this item into the previous one; backspace once more on an empty item to remove its `- ` marker entirely. At the start of the first item, does nothing. |
+| **Delete** | Delete the character after the cursor. At the end of an item, pull the next item up (merge). |
+| **←** / **→** | Move cursor left / right within the item. |
+| **Home** / **End** | Move cursor to the start / end of the item. |
+| **↑** / **↓** | Move cursor to the item above / below. Crossing the top or bottom edge of the field moves focus to the neighbouring field. |
+
+> **Why Ctrl+J and not Ctrl+Enter?** Terminals only tell an application that
+> *Ctrl* was held together with *Enter* when the modern Kitty keyboard protocol
+> is active, which edaptor does not negotiate; on ordinary terminals Ctrl+Enter is
+> indistinguishable from a plain Enter. Ctrl+J, by contrast, is delivered as a
+> literal line-feed that is always distinct from Enter, so it works everywhere.
+> (Ctrl+M is *not* an alternative — it is a carriage return, i.e. Enter itself.)
+
+### Reordering (ordered / X-ORDERED fields)
+
+`x_ordered` attributes (e.g. `olcAccess`) additionally support two reorder
+mechanics that plain multi-value fields do not:
+
+| Key | Action |
+|-----|--------|
+| **Ctrl+↑** / **Ctrl+↓** | Move the current item up / down regardless of cursor position. |
+| **←** at offset 0 | Move the cursor onto **that item's** `≡` handle — works on every item, not just the first. While on the handle, plain **↑** / **↓** move the item up / down; **→** (or any printable key) returns the cursor to the text, and **←** again steps to the end of the previous item. |
+
+The `{n}` ordering prefix is hidden during editing and regenerated from row
+order on save.
+
+### Commit and empty state
+
+Empty rows are dropped automatically when focus leaves the field or the entry
+is saved. Removing the last item reverts the field to `<not set>`. The result
+feeds directly into `EditField.values` — the same changeset/diff path as
+single-value fields; no new write path is introduced.
+
+### Footer hints
+
+The bottom status line shows context-sensitive hints for the focused field:
+
+| Focused field state | Hint |
+|---------------------|------|
+| `ListValueView`, has items | `Enter add · Ctrl-J newline · Backspace empties→removes · ↑↓ move` |
+| `ListValueView`, ordered (has items) | appends `· Ctrl-↑↓ or ← handle to reorder` |
+| `ListValueView`, empty | `Type to add first value` |
+| `ListValueView`, on `≡` handle | `↑↓ reorder · → back to text` |
+
+## `objectClass` Editor (auto-injected)
+
+The `objectClass` field automatically receives a schema-seeded **two-column
+editor** (the shared *Shuttle* view). No configuration is needed — it is always
+present when editing any entry. Pressing Enter on the `objectClass` field opens a
+two-column picker:
+
+- **Left column (Available)** — the objectClasses known from the server's
+  subschema. Type while this list is focused to filter it in place (incremental
+  find).
+- **Right column (Active)** — the entry's *active* objectClasses (currently
+  applied).
+
+A wide **Add** button sits under the Available (left) column and a wide **Remove**
+button under the Active (right) column. The button under the focused list is
+**highlighted**; both stay usable at all times, and Tab skips both. The dialog is
+resizable: drag its lower-right corner and the columns, buttons, and OK/Cancel
+reflow, down to a minimum that keeps both columns usable.
+
+| Action | Keys |
+|--------|------|
+| Move focus between the two lists and OK/Cancel | Tab / Shift-Tab |
+| Add (highlighted available → active) | Insert, the **[Add]** button (Alt+A), or Enter on the available list |
+| Remove (highlighted active → available) | Delete, the **[Remove]** button (Alt+R), or Enter on the active list |
+| Filter the available column | type while the available list is focused (Backspace widens, Esc clears) |
+| Commit | the **OK** button |
+
+**STRUCTURAL** classes that were already on the entry are shown in the active
+column but are **locked** (marked `*`) and cannot be removed; a structural class
+added during this edit can still be removed again.
 
 After committing, the edit form immediately reflects the schema change:
 

@@ -47,6 +47,52 @@ pub struct PickerBinding {
     pub fanout_attr: Option<String>,
 }
 
+impl PickerBinding {
+    /// Resolve the effective cardinality: an explicit `select` wins; otherwise
+    /// derive it from the field's schema arity (`select = "auto"`). This is the
+    /// single source of the rule shared by `widget_for` routing and the editors.
+    pub fn cardinality(&self, field_multi: bool) -> Cardinality {
+        self.select.unwrap_or(if field_multi {
+            Cardinality::Multi
+        } else {
+            Cardinality::Single
+        })
+    }
+}
+
+/// A `[profile.widget.<attr>]` `kind = "lookup"` binding resolved against the
+/// profile list. The stored value is a scalar (`store`); the same attribute is the
+/// reverse-lookup match key used to resolve the friendly name shown in the form.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LookupBinding {
+    /// The attribute this binds (e.g. `gidNumber`).
+    pub attr: String,
+    /// Resolved candidate search scope (where the named entries live).
+    pub scope: CandidateScope,
+    /// The candidate attribute matched on (== the stored scalar), e.g. `gidNumber`.
+    pub store: String,
+    /// Parsed display-label template for the resolved candidate (e.g. `{cn}`).
+    pub label_template: Vec<crate::config::label::LabelSeg>,
+}
+
+impl LookupBinding {
+    /// The candidate's first (structural) object class, or `""` when none.
+    pub fn object_class(&self) -> &str {
+        self.scope
+            .object_classes
+            .first()
+            .map(String::as_str)
+            .unwrap_or("")
+    }
+
+    /// A stable identity for this binding's candidate scope, independent of the
+    /// looked-up value. Used to key the `UiState` resolution cache so two entries
+    /// sharing a `gidNumber` share one resolved name.
+    pub fn scope_id(&self) -> String {
+        format!("{}|{}|{}", self.scope.base, self.object_class(), self.store)
+    }
+}
+
 pub(crate) fn scope_of(p: &EntryProfile) -> CandidateScope {
     let template = p
         .label
@@ -128,5 +174,43 @@ mod tests {
             sa.iter().any(|a| a == "displayName"),
             "label-template attr joins the search: {sa:?}"
         );
+    }
+}
+
+#[cfg(test)]
+mod cardinality_tests {
+    use super::*;
+
+    fn binding(select: Option<Cardinality>) -> PickerBinding {
+        PickerBinding {
+            attr: "member".into(),
+            scope: CandidateScope {
+                base: "ou=people,dc=example,dc=org".into(),
+                object_classes: vec!["inetOrgPerson".into()],
+                search_attrs: vec!["cn".into()],
+                label_template: None,
+            },
+            store: StoreKey::Dn,
+            select,
+            fanout_attr: None,
+        }
+    }
+
+    #[test]
+    fn cardinality_prefers_explicit_select() {
+        assert_eq!(
+            binding(Some(Cardinality::Single)).cardinality(true),
+            Cardinality::Single
+        );
+        assert_eq!(
+            binding(Some(Cardinality::Multi)).cardinality(false),
+            Cardinality::Multi
+        );
+    }
+
+    #[test]
+    fn cardinality_falls_back_to_field_arity() {
+        assert_eq!(binding(None).cardinality(true), Cardinality::Multi);
+        assert_eq!(binding(None).cardinality(false), Cardinality::Single);
     }
 }

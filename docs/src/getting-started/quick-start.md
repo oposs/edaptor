@@ -25,20 +25,22 @@ scripts/test-ldap.sh stop
 
 ## What you will see
 
-On launch, eDAPtor presents a three-pane layout: the directory tree (DIT) on the
-left, the entries within the selected node in the middle, and the selected
-entry's attributes on the right. The focused pane is drawn with a double border.
+On launch, eDAPtor presents a three-pane layout: the directory tree (DIT) at the
+top-left, the entries within the selected node below it at the bottom-left, and
+the selected entry's attributes in the full-height pane on the right. The focused
+pane is drawn with a double border.
 
 ```
-┌─ DIT ───────┐┌─ Entries ────────┐╔═ Entry — uid=bob,ou=people,… ═╗
-│ dc=example  ││ /                │║ uid           bob             ║
-│ ├─ people   ││ ‹self› people    │║ cn            Bob Baker       ║
-│ └─ groups   ││ Bob Baker (bob)  │║ sn            Baker           ║
-│             ││ Babs Carr (babs) │║ givenName     Bob             ║
-│             ││ Carl Diaz (carl) │║ mail          bob@example.org ║
-│             ││ …                │║ uidNumber     10001           ║
-│             ││                  │║ …                             ║
-└─────────────┘└──────────────────┘╚═══════════════════════════════╝
+┌─ DIT ───────────┐╔═ Entry — uid=bob,ou=people,… ═╗
+│ dc=example      │║ uid           bob             ║
+│ ├─ people       │║ cn            Bob Baker       ║
+│ └─ groups       │║ sn            Baker           ║
+├─ Entries ───────┤║ givenName     Bob             ║
+│ ‹self› people   │║ mail          bob@example.org ║
+│ Bob Baker (bob) │║ uidNumber     10001           ║
+│ Babs Carr (babs)│║ …                             ║
+│ Carl Diaz (carl)│║                               ║
+└─────────────────┘╚═══════════════════════════════╝
  ↑↓ Field · ↵ Edit · Alt+S Save · Alt+C Cancel · Alt+X Quit
 ```
 

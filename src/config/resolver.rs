@@ -159,6 +159,10 @@ impl<'a> WidgetResolver<'a> {
                     fanout_attr: Some(via.clone()),
                 }))
             }
+            // Lookup is only ever set via explicit profile config (layer 3) and
+            // flows through `widget_for` verbatim. It never appears in the baked-in
+            // bundle, so there is nothing to convert here.
+            WidgetSpecCfg::Lookup { .. } => None,
         }
     }
 
@@ -305,6 +309,36 @@ mod tests {
             ),
             "expected SambaSid when samba enabled"
         );
+    }
+
+    #[test]
+    fn resolver_surfaces_lookup_from_profile_config() {
+        use crate::config::relation::{CandidateScope, LookupBinding};
+        use crate::config::widget::{ResolvedWidget, WidgetKind};
+        let schema = crate::schema::model::SchemaModel::from_raw(
+            &crate::ldap::worker::RawSubschema::default(),
+        );
+        let profiles: Vec<crate::config::EntryProfile> = vec![];
+        let widgets = vec![ResolvedWidget {
+            owner_object_classes: vec!["posixAccount".into()],
+            attr: "gidNumber".into(),
+            kind: WidgetKind::Lookup(LookupBinding {
+                attr: "gidNumber".into(),
+                scope: CandidateScope {
+                    base: "ou=groups,dc=x".into(),
+                    object_classes: vec!["posixGroup".into()],
+                    search_attrs: vec!["cn".into()],
+                    label_template: None,
+                },
+                store: "gidNumber".into(),
+                label_template: crate::config::label::parse_label_template("{cn}"),
+            }),
+        }];
+        let r = WidgetResolver::new(&schema, &profiles, &widgets, false);
+        assert!(matches!(
+            r.resolve_kind("gidNumber", &["posixAccount".into()]),
+            Some(WidgetKind::Lookup(_))
+        ));
     }
 
     #[test]
