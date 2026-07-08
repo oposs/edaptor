@@ -6,6 +6,11 @@ memberships** — built in Rust with [tvision-rs](https://github.com/oetiker/tvi
 
 > The name is **e**ditor and L**DAP**, creatively merged.
 
+![eDAPtor in action](docs/demo/edaptor.webp)
+
+*Screencast recorded with [ansidrama](https://github.com/oetiker/ansidrama), a
+deterministic terminal-session → animated-WebP recorder.*
+
 📖 **Documentation:** <https://oposs.github.io/edaptor>
 
 ## What makes it different

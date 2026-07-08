@@ -9,9 +9,11 @@ All notable changes to eDAPtor are documented here. The format follows
 ### New
 
 - **New `lookup` widget kind.** A scalar attribute (e.g. `gidNumber`) is shown in
-  the form as `<value> (<name>)` and edited via an editable-combobox popup: type a
-  number freely or filter a candidate list and pick one. See
-  [Widgets → The lookup kind](https://oposs.github.io/edaptor/configuration/widgets.html#the-lookup-kind).
+  the form as `<value> (<name>)` and edited via an editable-combobox popup. Typing
+  in the input drives the candidate list's incremental search (it narrows in place
+  to matching rows); navigating the list (↑/↓ or Enter) copies the highlighted row
+  back into the input, which enables **OK**. You can also just type a number freely.
+  See [Widgets → The lookup kind](https://oposs.github.io/edaptor/configuration/widgets.html#the-lookup-kind).
 
 - **Dynamic footer hints:** the bottom status line now shows context-sensitive
   keyboard hints that update as focus moves between fields. Each field kind
@@ -147,10 +149,42 @@ All notable changes to eDAPtor are documented here. The format follows
 
 ### Changed
 
+- **Membership editor reads people as `cn (uid)`.** Both the *Available* and
+  *Members* columns of the member editor now label people as `cn (uid)` (matching
+  the entry list), instead of a bare common name. Entries without a `uid` (e.g.
+  nested groups) keep their common name.
+
+- **Existing members resolve on open.** When the membership editor opens, a
+  group's current members are resolved to their friendly `cn (uid)` labels right
+  away — previously a pre-existing member only got a readable label if it happened
+  to appear in the (capped) candidate search, so members past the first 100 stayed
+  shown as raw DNs.
+
 - **Navigating the tree resets the entries search.** Moving the highlight in the
   branch tree (pane 1) now clears any active incremental search string in the
   entries list (pane 2), so the newly selected branch is always listed unfiltered
   instead of staying narrowed by the previous branch's find query.
+
+- **Fresh light colour scheme.** The Solarized Light palette is replaced by a
+  cleaner white-and-yellow theme: panes are white, separated only by the splitter's
+  divider lines, and the **focused pane is tinted a soft post-it yellow** so "you
+  are here" reads at a glance. The current row / default button use a fresh blue
+  accent, editable fields render as white wells (the focused one tinted faintly
+  blue), shortcut letters stay red, and the menu bar / status line sit on a light
+  grey chrome. Colours remain centralised in `src/ui/theme.rs`.
+
+- **Entry-form layout polish.** Every value cell now starts at the value column
+  with a one-column pad of field background before its content, so editable inputs,
+  inline lists and read-only values all line up in a single column (the editable
+  input's well no longer juts a column to the left). The non-scrolling `dn` header
+  is now rendered as a **title rule** — a double horizontal line with the DN punched
+  through it — with a blank breathing line beneath it before the fields start, so it
+  reads clearly as the panel's title.
+
+- The example configs now list `userPassword` in the user profile's `show`
+  order, so the password field surfaces near the top of the form (right after
+  `mail`) instead of falling to the bottom with the remaining optional
+  attributes.
 
 - The entry form now lays out each attribute as **one variable-height block**
   instead of a single fixed row. Single-value text fields keep their inline
@@ -280,6 +314,18 @@ All notable changes to eDAPtor are documented here. The format follows
   temporary git-pin for `exec_view_focused` has been removed.
 
 ### Fixed
+
+- tvision UI: in a lookup pop-up (e.g. **Select gidNumber**), the text input no
+  longer turns yellow while the candidate list has focus. A non-focused editable
+  field now renders as a plain white well everywhere, so it blends into the white
+  dialog instead of lighting up the active-pane tint precisely when it is *not*
+  the focused control.
+
+- tvision UI: in an inline multi-value field, **Backspace** on a blank bullet left
+  by **Enter** (cursor at its start, nothing typed) now removes it and reverts the
+  field to `<not set>`. Previously the blank `-` was stuck until you typed a
+  character and deleted it, because the unset-collapse only ran on the
+  content-deleting path, never at the start-of-first-item boundary.
 
 - tvision UI: in an ordered (X-ORDERED) inline list, the `≡` reorder handle is now
   reachable from **every** item, not just the first. Pressing **←** at the start of

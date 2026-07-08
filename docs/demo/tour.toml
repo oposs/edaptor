@@ -1,0 +1,144 @@
+launch = "/home/oetiker/scratch/cargo-target/debug/edaptor --config /home/oetiker/checkouts/edaptor/examples/demo-config.toml"
+cols = 120
+rows = 38
+font_px = 18
+card_font_px = 48
+card_subtitle_px = 22
+max_fps = 30
+env = { EDAPTOR_TEST_ADMIN_PW = "adminpassword" }
+startup_ms = 2500
+settle_ms = 260
+type_cs = 8
+move_cs = 3
+out = "edaptor.webp"
+quit_keys = ["M-x"]
+
+# Wrap every frame (terminal + title cards) in a macOS-style window: rounded
+# corners, a dark title bar with the traffic-light dots, and a centred title.
+# A 1px inset just marks the window border against the terminal content.
+[chrome]
+style = "macos"
+title = "eDAPtor"
+padding = 1
+bar = "#2b2b2b"
+text = "#c9c9c9"
+
+# 1. intro
+[[scene]]
+card = { lines = ["eDAPtor", "", "a schema-driven LDAP directory editor"], fg = "#fef9c3", bg = "#1a1a1a", bold = true }
+hold_cs = 190
+[[scene]]
+keys = []
+hold_cs = 110
+
+# 2. find a user, then browse the form
+[[scene]]
+keys = ["Down", "Down", "Down", "Down"]
+hold_cs = 50
+[[scene]]
+keys = ["Enter"]
+hold_cs = 60
+[[scene]]
+keys = ["Tab"]
+hold_cs = 70
+[[scene]]
+text = "johnson"
+hold_cs = 120
+[[scene]]
+keys = ["Tab"]
+hold_cs = 70
+[[scene]]
+keys = ["Down", "Down", "Down", "Down", "Down", "Down", "Down", "Down"]
+hold_cs = 120
+
+# 3. group membership
+[[scene]]
+card = { lines = ["Group membership", "", "edit members in a two-column shuttle"], fg = "#fef9c3", bg = "#1a1a1a", bold = true }
+hold_cs = 170
+[[scene]]
+keys = ["Tab"]
+hold_cs = 50
+[[scene]]
+keys = ["Up", "Up"]
+hold_cs = 50
+[[scene]]
+keys = ["Enter"]
+hold_cs = 60
+[[scene]]
+keys = ["Tab", "Down"]
+hold_cs = 50
+[[scene]]
+keys = ["Enter"]
+hold_cs = 60
+[[scene]]
+keys = ["Tab", "Down", "Down", "Down"]
+hold_cs = 60
+[[scene]]
+keys = ["Enter"]
+hold_cs = 120
+[[scene]]
+keys = ["Enter"]
+hold_cs = 70
+[[scene]]
+keys = ["Enter"]
+hold_cs = 70
+[[scene]]
+keys = ["Enter"]
+hold_cs = 90
+[[scene]]
+drag = { from = [99, 31], to = [112, 36] }
+hold_cs = 110
+[[scene]]
+drag = { from = [112, 36], to = [99, 31] }
+hold_cs = 110
+[[scene]]
+click = { x = 82, y = 29 }
+hold_cs = 120
+
+# 4. multi-value add & reorder
+[[scene]]
+card = { lines = ["Multi-value attributes", "", "add values inline / reorder ordered lists"], fg = "#fef9c3", bg = "#1a1a1a", bold = true }
+hold_cs = 170
+[[scene]]
+keys = ["Up"]
+hold_cs = 70
+[[scene]]
+text = "alice"
+hold_cs = 60
+[[scene]]
+keys = ["Enter"]
+hold_cs = 40
+[[scene]]
+text = "bob"
+hold_cs = 60
+[[scene]]
+keys = ["Enter"]
+hold_cs = 40
+[[scene]]
+text = "carol"
+hold_cs = 80
+[[scene]]
+keys = ["Home", "Left"]
+hold_cs = 100
+[[scene]]
+keys = ["Up"]
+hold_cs = 60
+[[scene]]
+keys = ["Up"]
+hold_cs = 90
+[[scene]]
+keys = ["Right"]
+hold_cs = 100
+
+# 5. save (no card — just do it)
+[[scene]]
+keys = ["M-s"]
+hold_cs = 160
+[[scene]]
+keys = ["Enter"]
+hold_cs = 150
+
+# 6. closing
+[[scene]]
+card = { lines = ["eDAPtor", "", "oposs.github.io/edaptor"], fg = "#fef9c3", bg = "#1a1a1a", bold = true }
+hold_cs = 200
