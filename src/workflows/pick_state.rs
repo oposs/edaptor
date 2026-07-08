@@ -52,13 +52,21 @@ pub fn build_member_filter(
     }
 }
 
-/// A candidate's display label: first `cn` value, else the raw DN.
+/// A candidate's display label: `cn (uid)` when both are present (matching the
+/// leaf list's `{cn} ({uid})` label so people read the same everywhere), else the
+/// bare `cn` (e.g. groups, which have no `uid`), else the raw DN.
 pub fn candidate_label(dn: &str, attrs: &BTreeMap<String, Vec<String>>) -> String {
-    attrs
-        .iter()
-        .find(|(k, _)| k.eq_ignore_ascii_case("cn"))
-        .and_then(|(_, v)| v.first().cloned())
-        .unwrap_or_else(|| dn.to_string())
+    let first = |name: &str| {
+        attrs
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case(name))
+            .and_then(|(_, v)| v.first().cloned())
+    };
+    match (first("cn"), first("uid")) {
+        (Some(cn), Some(uid)) => format!("{cn} ({uid})"),
+        (Some(cn), None) => cn,
+        (None, _) => dn.to_string(),
+    }
 }
 
 /// One candidate: the real entry `dn` (fan-out target; also the key/store value
@@ -579,6 +587,25 @@ mod tests {
             candidate_label("uid=bob,ou=people", &BTreeMap::new()),
             "uid=bob,ou=people"
         );
+    }
+
+    #[test]
+    fn label_appends_uid_when_present() {
+        use std::collections::BTreeMap;
+        // A user with both cn and uid renders as "cn (uid)" — matching the leaf
+        // list's `{cn} ({uid})` label, so both columns of the membership editor
+        // identify people the same way the browser does.
+        let mut person = BTreeMap::new();
+        person.insert("cn".to_string(), vec!["Ann Smith".to_string()]);
+        person.insert("uid".to_string(), vec!["ann".to_string()]);
+        assert_eq!(
+            candidate_label("cn=ann,ou=people", &person),
+            "Ann Smith (ann)"
+        );
+        // An entry with a cn but no uid (e.g. a group) keeps the bare cn.
+        let mut group = BTreeMap::new();
+        group.insert("cn".to_string(), vec!["devs".to_string()]);
+        assert_eq!(candidate_label("cn=devs,ou=groups", &group), "devs");
     }
 
     #[test]

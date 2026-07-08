@@ -367,6 +367,26 @@ impl UiState {
         }
     }
 
+    /// Kick off a reverse name-resolution for a DN-keyed reference (a group
+    /// `member`), reading the entry by DN and caching its `cn (uid)` label under
+    /// the member scope ([`resolve_flow::member_key`]). Lets the membership editor
+    /// show pre-existing members with friendly names immediately, instead of only
+    /// those returned by the capped candidate search. Dedups against the cache and
+    /// any in-flight resolve; no-op without a live worker.
+    ///
+    /// Borrow-safe: a single atomic `&mut self` — never call while holding another
+    /// borrow.
+    pub fn resolve_member(&mut self, dn: &str) {
+        let key = crate::workflows::resolve_flow::member_key(dn);
+        if self.lookup_cache.contains_key(&key) || self.resolve_flow.is_pending(&key) {
+            return;
+        }
+        if let Some(w) = self.worker.as_ref() {
+            let attrs = ["cn".to_string(), "uid".to_string()];
+            let _ = self.resolve_flow.request_by_dn(w, dn, &attrs);
+        }
+    }
+
     /// Apply one non-ignored resolve outcome: cache the name (or `None` when not
     /// found) and flag a re-render so the form repaints `<value> (<name>)`.
     pub fn apply_resolve_outcome(&mut self, out: ResolveOutcome) {

@@ -14,7 +14,7 @@ use std::collections::HashMap;
 
 use crate::config::label::{render_label, LabelSeg};
 use crate::ldap::worker::{Request, Response, SearchScope, WorkerHandle};
-use crate::workflows::pick_state::escape_filter;
+use crate::workflows::pick_state::{candidate_label, escape_filter};
 
 /// Build an exact-match filter `(&(objectClass=<oc>)(<attr>=<value>))` with the
 /// value RFC-4515-escaped. Used to find the single candidate whose `store`
@@ -31,6 +31,16 @@ pub struct LookupKey {
     pub value: String,
 }
 
+/// The cache key for a DN-keyed reference (a group `member`), resolved by a base
+/// read of the DN. The sentinel `scope_id` has no `|`, so it can never collide
+/// with a scalar lookup's `base|oc|store_attr` scope id.
+pub fn member_key(dn: &str) -> LookupKey {
+    LookupKey {
+        scope_id: "@dn".to_string(),
+        value: dn.to_string(),
+    }
+}
+
 /// The result of correlating one worker response against the in-flight resolves.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ResolveOutcome {
@@ -42,10 +52,20 @@ pub enum ResolveOutcome {
     Ignored,
 }
 
-/// One in-flight resolve: the key it will produce and the label template to render.
+/// How to render a resolved entry into a display label.
+enum Render {
+    /// Scalar lookup (`gidNumber` → `staff`): render the profile label template.
+    Template(Vec<LabelSeg>),
+    /// DN-keyed reference (a group `member`): render `cn (uid)` / `cn` / DN via
+    /// [`candidate_label`], matching how the same person reads in the leaf list
+    /// and the candidate columns.
+    CnUid,
+}
+
+/// One in-flight resolve: the key it will produce and how to render its label.
 struct Pending {
     key: LookupKey,
-    template: Vec<LabelSeg>,
+    render: Render,
 }
 
 /// Async reverse name-resolution. Tracks every in-flight request id → its
@@ -103,7 +123,42 @@ impl ResolveFlow {
             scope_id: format!("{base}|{oc}|{store_attr}"),
             value: value.to_string(),
         };
-        self.inflight.insert(id, Pending { key, template });
+        self.inflight.insert(
+            id,
+            Pending {
+                key,
+                render: Render::Template(template),
+            },
+        );
+        Ok(id)
+    }
+
+    /// Submit a base-scoped read of `dn` to resolve a DN-keyed reference (a group
+    /// `member`). `attrs` are fetched and rendered as `cn (uid)` via
+    /// [`candidate_label`]. The resulting [`LookupKey`] uses the shared member
+    /// scope (see [`member_key`]). Records the id as pending.
+    pub fn request_by_dn(
+        &mut self,
+        worker: &WorkerHandle,
+        dn: &str,
+        attrs: &[String],
+    ) -> Result<u64> {
+        let id = self.alloc();
+        worker.submit(Request::Search {
+            id,
+            base: dn.to_string(),
+            scope: SearchScope::Base,
+            filter: "(objectClass=*)".to_string(),
+            attrs: attrs.to_vec(),
+            size_limit: Some(2),
+        })?;
+        self.inflight.insert(
+            id,
+            Pending {
+                key: member_key(dn),
+                render: Render::CnUid,
+            },
+        );
         Ok(id)
     }
 
@@ -120,10 +175,13 @@ impl ResolveFlow {
                     return ResolveOutcome::Ignored;
                 };
                 match entries.first() {
-                    Some(e) => ResolveOutcome::Resolved {
-                        key: p.key,
-                        name: render_label(&p.template, &e.attrs),
-                    },
+                    Some(e) => {
+                        let name = match &p.render {
+                            Render::Template(t) => render_label(t, &e.attrs),
+                            Render::CnUid => candidate_label(&p.key.value, &e.attrs),
+                        };
+                        ResolveOutcome::Resolved { key: p.key, name }
+                    }
                     None => ResolveOutcome::NotFound { key: p.key },
                 }
             }
@@ -138,7 +196,25 @@ impl ResolveFlow {
     /// Test-only: register an in-flight resolve without a live worker.
     #[cfg(test)]
     pub(crate) fn force_pending(&mut self, id: u64, key: LookupKey, template: Vec<LabelSeg>) {
-        self.inflight.insert(id, Pending { key, template });
+        self.inflight.insert(
+            id,
+            Pending {
+                key,
+                render: Render::Template(template),
+            },
+        );
+    }
+
+    /// Test-only: register an in-flight DN resolve (renders via `cn (uid)`).
+    #[cfg(test)]
+    pub(crate) fn force_pending_dn(&mut self, id: u64, dn: &str) {
+        self.inflight.insert(
+            id,
+            Pending {
+                key: member_key(dn),
+                render: Render::CnUid,
+            },
+        );
     }
 }
 
@@ -167,6 +243,35 @@ mod tests {
             build_equality_filter("posixGroup", "cn", "a*b"),
             "(&(objectClass=posixGroup)(cn=a\\2ab))"
         );
+    }
+
+    #[test]
+    fn dn_resolve_renders_cn_uid() {
+        // A DN-keyed member resolve renders `cn (uid)` from the base-read entry
+        // (matching the leaf list / candidate columns), keyed under the shared
+        // member scope.
+        let dn = "cn=user01,ou=users,dc=x";
+        let mut rf = ResolveFlow::new();
+        rf.force_pending_dn(4_000_000, dn);
+        let mut attrs: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        attrs.insert("cn".into(), vec!["User1".into()]);
+        attrs.insert("uid".into(), vec!["user01".into()]);
+        let resp = Response::Entries {
+            id: 4_000_000,
+            entries: vec![LdapEntry {
+                dn: dn.into(),
+                attrs,
+                bin_attrs: Default::default(),
+            }],
+            truncated: false,
+        };
+        match rf.on_response(&resp) {
+            ResolveOutcome::Resolved { key, name } => {
+                assert_eq!(key, member_key(dn));
+                assert_eq!(name, "User1 (user01)");
+            }
+            other => panic!("expected Resolved, got {other:?}"),
+        }
     }
 
     #[test]

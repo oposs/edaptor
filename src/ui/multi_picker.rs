@@ -48,6 +48,7 @@ use crate::ui::shuttle::{Shuttle, ShuttleRow, CMD_SHUTTLE_CHANGED};
 use crate::ui::widget::{Activation, Capability, CommitOutcome, FieldEditor, FieldWidget};
 use crate::ui::{Shared, REFRESH};
 use crate::workflows::edit_form::EditField;
+use crate::workflows::resolve_flow::member_key;
 
 // ---------------------------------------------------------------------------
 // MultiPickerWidget — FieldWidget plugin
@@ -281,16 +282,33 @@ impl MultiPickerDialog {
     /// Borrow-safe: clones out of `shared` and reads the staged set into locals,
     /// dropping both borrows before touching the Shuttle.
     fn sync_results(&mut self, ctx: &mut Context) {
-        let results = {
+        // Selected member keys (DNs) — read from the shuttle before borrowing
+        // `shared`, so the resolution-cache snapshot below can key on them.
+        let selected_keys: Vec<String> = self
+            .shuttle_mut()
+            .map(|sh| sh.selected().iter().map(|r| r.key.clone()).collect())
+            .unwrap_or_default();
+
+        // One shared borrow: clone the latest candidate results and snapshot any
+        // resolved-by-DN member labels (reverse-resolution cache) for the
+        // currently-selected members.
+        let (results, resolved) = {
             let st = self.shared.borrow();
-            st.search_results.clone()
+            let resolved: std::collections::HashMap<String, String> = selected_keys
+                .iter()
+                .filter_map(|k| match st.lookup_cache.get(&member_key(k)) {
+                    Some(Some(name)) => Some((k.to_lowercase(), name.clone())),
+                    _ => None,
+                })
+                .collect();
+            (st.search_results.clone(), resolved)
         };
 
-        // Upgrade the staged Members' labels from any matching candidate. A member
-        // is seeded only from its raw store value (a DN for `member`), so it first
-        // renders as that DN; once a candidate search reveals the same store value
-        // with a friendly label, adopt it so both columns show the same nice view.
-        // (Members not yet returned by a search keep their store value until then.)
+        // Upgrade the staged Members' labels. A member is seeded only from its raw
+        // store value (a DN for `member`), so it first renders as that DN. Prefer a
+        // live candidate label, else the resolved-by-DN label (from the proactive
+        // member resolve kicked off in `seed`), else keep the current label — so
+        // both columns show the same friendly `cn (uid)` view.
         let label_of: std::collections::HashMap<String, String> = results
             .iter()
             .map(|c| (c.store_value.to_lowercase(), c.label.clone()))
@@ -298,13 +316,18 @@ impl MultiPickerDialog {
         let relabeled: Option<Vec<ShuttleRow>> = self.shuttle_mut().map(|sh| {
             sh.selected()
                 .iter()
-                .map(|r| ShuttleRow {
-                    key: r.key.clone(),
-                    label: label_of
-                        .get(&r.key.to_lowercase())
+                .map(|r| {
+                    let key_lc = r.key.to_lowercase();
+                    let label = label_of
+                        .get(&key_lc)
+                        .or_else(|| resolved.get(&key_lc))
                         .cloned()
-                        .unwrap_or_else(|| r.label.clone()),
-                    locked: r.locked,
+                        .unwrap_or_else(|| r.label.clone());
+                    ShuttleRow {
+                        key: r.key.clone(),
+                        label,
+                        locked: r.locked,
+                    }
                 })
                 .collect()
         });
@@ -359,6 +382,16 @@ impl MultiPickerDialog {
     fn seed(&mut self, ctx: &mut Context) {
         self.seeded = true;
         let seed = std::mem::take(&mut self.seed_members);
+        // Proactively resolve each existing member DN to a `cn (uid)` label, so
+        // pre-existing members read like people immediately rather than only the
+        // ones that surface in the capped candidate search. Only DN-keyed refs
+        // carry a DN to read; scalar-store multi-values already hold their value.
+        if self.store_attr.is_none() {
+            let dns: Vec<String> = seed.iter().map(|r| r.key.clone()).collect();
+            for dn in dns {
+                self.shared.borrow_mut().resolve_member(&dn);
+            }
+        }
         if let Some(sh) = self.shuttle_mut() {
             sh.set_selected(seed, ctx);
         }
@@ -750,6 +783,38 @@ mod tests {
         assert!(
             !members.iter().any(|s| s.contains(G1)),
             "the raw DN must no longer be shown once a label is known, got {members:?}"
+        );
+    }
+
+    #[test]
+    fn seeded_member_adopts_resolved_label_from_cache() {
+        let shared = test_shared();
+        // No candidate search result for this member — but the reverse-resolution
+        // cache already holds its friendly label (populated by the proactive
+        // per-member resolve kicked off when the editor opens). The seeded member
+        // must still read as the resolved label, not the raw DN — this is the fix
+        // for pre-existing members that fall outside the capped candidate search.
+        shared
+            .borrow_mut()
+            .lookup_cache
+            .insert(member_key(G1), Some("devs (developers)".into()));
+        let mut view = build_dialog(&shared, &[G1]);
+        let mut out = std::collections::VecDeque::new();
+        let mut timers = TimerQueue::new();
+        let mut deferred = Vec::new();
+        with_ctx(&mut out, &mut timers, &mut deferred, |ctx| {
+            view.reset_current(ctx)
+        });
+
+        let d = dialog_mut(&mut view);
+        let members = d.shuttle_mut().expect("shuttle present").selected_text();
+        assert!(
+            members.iter().any(|s| s.contains("devs (developers)")),
+            "the seeded member must adopt the DN-resolved cache label, got {members:?}"
+        );
+        assert!(
+            !members.iter().any(|s| s.contains(G1)),
+            "the raw DN must no longer be shown once resolved, got {members:?}"
         );
     }
 
