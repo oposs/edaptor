@@ -97,32 +97,41 @@ pub fn recompute_live(
 Reuses the existing `resolve_template(&segs, current)` (returns `None` when any
 source is empty) and `Seg`.
 
-### 2. Model — `src/workflows/edit_form.rs` + `src/workflows/create.rs`
+### 2. Session state — `src/ui/state.rs` (`UiState`)
 
-- `EditForm` gains `live_templates: BTreeMap<String, LiveTemplateState>`, default
-  empty. Empty in edit mode ⇒ the whole feature is inert there.
-- `build_create_form` populates it via `defaults::live_templates(&profile.defaults)`
-  after the fields are built. (The one-shot `apply_static_defaults` pass is
-  unchanged; at create time the template targets stay empty and hand off to the
-  live latches.)
+The latch map is create-session state, so it lives in `UiState` next to
+`edit_form`, **not** in `EditForm` (which has ~35 struct-literal sites — adding a
+required field there is needless churn). `UiState` is built through constructors
+(`new`, `new_for_test`), so the addition is cheap.
+
+- `UiState` gains `live_templates: BTreeMap<String, LiveTemplateState>`, initialised
+  empty in both constructors.
+- `open_create` (`src/ui/app.rs`) builds it fresh via
+  `defaults::live_templates(&profile.defaults)` when it installs a create form (it
+  already borrows the profile there). Because `open_create` is the *only* create-form
+  builder and the view hook (below) is gated on `mode == Create`, a stale map left
+  from a prior session is never consulted — every create session rebuilds it.
+- The one-shot `apply_static_defaults` pass in `build_create_form` is unchanged; at
+  create time the template targets stay empty and hand off to the live latches.
 
 ### 3. View — `src/ui/panes/form.rs`
 
-The `EditForm` (with its `live_templates` latches) lives in shared `UiState`
-(`self.state.borrow().edit_form`); `sync_into_form()` has just written the on-screen
-editor values back into it. In `handle_event`, after `sync_into_form()`, add a
+`edit_form` and `live_templates` both live in shared `UiState`
+(`self.state.borrow()`); `sync_into_form()` has just written the on-screen editor
+values back into `edit_form`. In `handle_event`, after `sync_into_form()`, add a
 create-mode-only step `self.apply_live_templates(ctx)`.
 
 `apply_live_templates` (respecting the existing borrow discipline — borrow shared
 state, compute, release, then write editors):
-1. Under a short borrow of `edit_form`: confirm `mode` is `Create`; snapshot
+1. Under a short `borrow_mut` of `UiState`: confirm `edit_form.mode` is `Create`
+   (else return); split-borrow `edit_form` and `live_templates` disjointly; snapshot
    current field values into a `BTreeMap<attr, Vec<String>>` (case-insensitive attr
    match, mirroring existing helpers); run
-   `recompute_live(&mut edit_form.live_templates, &current)` and also update
-   `edit_form.fields[i].values` for each returned change. Collect the
-   `(field_index, value)` changes.
-2. Release the borrow, then for each change call `set_value_text(i, value)` to push
-   the new text into the on-screen editor.
+   `recompute_live(&mut live_templates, &current)`; for each returned
+   `(attr, value)` update `edit_form.fields[i].values` (by case-insensitive label)
+   and collect the `(field_index, value)` change.
+2. Release the borrow, then for each change call `self.set_value_text(i, value)` to
+   push the new text into the on-screen editor.
 
 Targets are never the currently-focused field in practice (the operator edits a
 source; a different field updates), so `set_value_text` never disturbs the caret.
