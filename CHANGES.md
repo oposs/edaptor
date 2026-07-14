@@ -12,6 +12,10 @@ All notable changes to eDAPtor are documented here. The format follows
 
 ### Fixed
 
+- **PgUp/PgDn now page the entry form.** The scrollable form pane moves focus by a
+  full viewport on Page keys (previously only arrow-by-arrow scrolling worked); the
+  tree and leaf list panes already paged.
+
 ## 1.0.0 - 2026-07-08
 
 ### New

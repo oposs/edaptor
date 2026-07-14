@@ -251,6 +251,30 @@ impl ScrollGroup {
         }
     }
 
+    /// Move focus one viewport page up/down and scroll it into view. Mirrors the
+    /// bar-drag path (`focus_target_for_row` → `focus_child` → `ensure_visible`):
+    /// the target field is the focusable one nearest the focused row shifted by a
+    /// page, so PageUp/PageDown behave like the tree/leaf lists' page keys but land
+    /// on a real (editable) field. A no-op when the content fits the viewport (the
+    /// caller still consumes the key).
+    fn page(&mut self, down: bool, ctx: &mut Context) {
+        if self.max_top() == 0 {
+            return;
+        }
+        let step = self.viewport_h.max(1);
+        let target_row = if down {
+            self.focused_row() + step
+        } else {
+            self.focused_row() - step
+        };
+        if let Some(id) = self.focus_target_for_row(target_row) {
+            self.focus_child(id, ctx);
+            if let Some(logical) = self.logical_of(id) {
+                self.ensure_visible(logical, ctx);
+            }
+        }
+    }
+
     pub(crate) fn scroll_to(&mut self, top: i32, ctx: &mut Context) {
         let clamped = top.clamp(0, self.max_top());
         if clamped != self.top {
@@ -369,6 +393,16 @@ impl View for ScrollGroup {
                 }
             }
         }
+        // PageUp/PageDown page the form: the focused field's InputLine ignores them,
+        // so intercept here and move focus one viewport up/down (like the list panes).
+        if let Event::KeyDown(k) = ev {
+            if matches!(k.key, tv::Key::PageDown | tv::Key::PageUp) {
+                self.page(k.key == tv::Key::PageDown, ctx);
+                ev.clear();
+                self.sync_bar_visibility(ctx);
+                return;
+            }
+        }
         self.group.handle_event(ev, ctx);
         // Scroll-to-focused: keep the focused content child (or, for an oversized
         // block, its caret row) within the viewport.
@@ -426,6 +460,42 @@ mod tests {
         sg.set_top_for_test(2);
         assert_eq!(sg.child_mut(ids[0]).unwrap().state().get_bounds().a.y, -2);
         assert_eq!(sg.child_mut(ids[5]).unwrap().state().get_bounds().a.y, 3);
+    }
+
+    #[test]
+    fn page_keys_move_focus_by_a_viewport() {
+        use tvision_rs::Deferred;
+        let mut sg = ScrollGroup::new(Rect::new(0, 0, 20, 5)); // viewport height 5
+        let w = sg.inner_width();
+        let mut ids = Vec::new();
+        for y in 0..12 {
+            ids.push(sg.add_content(cell(y, w), Rect::new(0, y, w, y + 1)));
+        }
+        let mut out = std::collections::VecDeque::new();
+        let mut timers = tv::timer::TimerQueue::new();
+        let mut deferred: Vec<Deferred> = Vec::new();
+        let mut ctx = Context::new(&mut out, &mut timers, 0, &mut deferred);
+
+        // Focus the first field so paging has a reference row.
+        sg.focus_child(ids[0], &mut ctx);
+        assert_eq!(sg.focused_row(), 0);
+
+        // PageDown pages focus ~one viewport down (5 rows).
+        let mut pd = Event::KeyDown(tv::KeyEvent::from(tv::Key::PageDown));
+        <ScrollGroup as tv::View>::handle_event(&mut sg, &mut pd, &mut ctx);
+        let after_down = sg.focused_row();
+        assert!(
+            after_down >= 5,
+            "PageDown pages focus down a viewport (got row {after_down})"
+        );
+
+        // PageUp pages it back up.
+        let mut pu = Event::KeyDown(tv::KeyEvent::from(tv::Key::PageUp));
+        <ScrollGroup as tv::View>::handle_event(&mut sg, &mut pu, &mut ctx);
+        assert!(
+            sg.focused_row() < after_down,
+            "PageUp pages focus up from row {after_down}"
+        );
     }
 
     #[test]
