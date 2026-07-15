@@ -58,9 +58,11 @@ from a template.
 
 Example:
 
-    [profile.defaults]
-    cn          = "{givenName} {sn}"
-    displayName = "{givenName} {sn}"
+```toml
+[profile.defaults]
+cn          = "{givenName} {sn}"
+displayName = "{givenName} {sn}"
+```
 
 ## Auto-number
 

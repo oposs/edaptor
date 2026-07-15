@@ -60,8 +60,8 @@ label          = "{cn} ({uid})"               # e.g. "Bob Baker (bob)"
 #                          by a server size limit — bind with a high-limit identity)
 [profile.defaults]
 # In create mode these fill live from givenName/sn until you edit them.
-cn          = "{givenName} {sn}"
-displayName = "{givenName} {sn}"
+cn            = "{givenName} {sn}"
+displayName   = "{givenName} {sn}"
 loginShell    = "/bin/bash"
 homeDirectory = "/home/{uid}"
 uidNumber     = "{next:10000-60000}"
