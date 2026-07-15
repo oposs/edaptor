@@ -2882,6 +2882,60 @@ mod tests {
         );
     }
 
+    #[test]
+    fn edit_mode_ignores_live_templates_even_when_populated() {
+        // The FormMode::Create guard (not just the empty-map guard) must block
+        // live-fill in edit mode: seed a NON-EMPTY latch map on an edit-mode form
+        // and confirm a source change never rewrites cn.
+        use crate::config::defaults::{live_templates, parse_default_value, ProfileDefaults};
+        let (shared, mut pane) = build_pane_with_form(vec![
+            ef("givenName", "", true),
+            ef("sn", "", true),
+            ef("cn", "", true),
+        ]);
+        {
+            let mut d = ProfileDefaults::default();
+            d.entries.insert(
+                "cn".into(),
+                parse_default_value("{givenName} {sn}").unwrap(),
+            );
+            shared.borrow_mut().live_templates = live_templates(&d);
+        }
+        let mut out = VecDeque::new();
+        let mut timers = tv::timer::TimerQueue::new();
+        let mut deferred = Vec::new();
+        let mut ctx = headless_ctx(&mut out, &mut timers, &mut deferred);
+        let mut refresh = Event::Broadcast {
+            command: REFRESH,
+            source: None,
+        };
+        pane.handle_event(&mut refresh, &mut ctx);
+        pane.set_value_text(0, "John".into());
+        pane.set_value_text(1, "Doe".into());
+        let mut tick = Event::Broadcast {
+            command: REFRESH,
+            source: None,
+        };
+        pane.handle_event(&mut tick, &mut ctx);
+        let st = shared.borrow();
+        let cn = st
+            .edit_form
+            .as_ref()
+            .unwrap()
+            .fields
+            .iter()
+            .find(|f| f.label == "cn")
+            .unwrap();
+        assert!(
+            cn.values
+                .first()
+                .map(String::as_str)
+                .unwrap_or("")
+                .is_empty(),
+            "edit mode must not live-fill even with a populated latch map"
+        );
+    }
+
     /// The label column shows the attribute name plus a curated hint.
     mod display_label {
         use super::*;

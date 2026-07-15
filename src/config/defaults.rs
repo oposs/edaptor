@@ -216,6 +216,9 @@ pub fn live_templates(d: &ProfileDefaults) -> BTreeMap<String, LiveTemplateState
 }
 
 /// The first value of `attr` in `current` (case-insensitive key match), or "".
+/// Unlike `resolve_template`'s `Field` arm, this does NOT trim: it reads the
+/// target's *raw* value to compare against `last_written` (also stored raw), so
+/// the own-write/operator-edit disambiguation in `recompute_live` stays exact.
 fn first_value(current: &BTreeMap<String, Vec<String>>, attr: &str) -> String {
     current
         .iter()
