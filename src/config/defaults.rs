@@ -438,7 +438,8 @@ mod tests {
     fn defs(pairs: &[(&str, &str)]) -> ProfileDefaults {
         let mut d = ProfileDefaults::default();
         for (k, v) in pairs {
-            d.entries.insert(k.to_string(), parse_default_value(v).unwrap());
+            d.entries
+                .insert(k.to_string(), parse_default_value(v).unwrap());
         }
         d
     }
@@ -447,8 +448,8 @@ mod tests {
     fn live_templates_picks_only_templates() {
         let d = defs(&[
             ("cn", "{givenName} {sn}"),
-            ("loginShell", "/bin/bash"),        // literal → excluded
-            ("uidNumber", "{next:1000-2000}"),  // autonumber → excluded
+            ("loginShell", "/bin/bash"),       // literal → excluded
+            ("uidNumber", "{next:1000-2000}"), // autonumber → excluded
         ]);
         let states = live_templates(&d);
         assert_eq!(states.keys().collect::<Vec<_>>(), vec!["cn"]);
@@ -471,7 +472,10 @@ mod tests {
         let mut states = live_templates(&defs(&[("cn", "{givenName} {sn}")]));
         // First fill, then remove sn: the auto target must clear.
         recompute_live(&mut states, &cur(&[("givenName", "John"), ("sn", "Doe")]));
-        let changes = recompute_live(&mut states, &cur(&[("givenName", "John"), ("sn", ""), ("cn", "John Doe")]));
+        let changes = recompute_live(
+            &mut states,
+            &cur(&[("givenName", "John"), ("sn", ""), ("cn", "John Doe")]),
+        );
         assert_eq!(changes, vec![("cn".to_string(), "".to_string())]);
         assert!(states["cn"].auto);
         assert_eq!(states["cn"].last_written, "");
@@ -481,12 +485,18 @@ mod tests {
     fn recompute_stops_when_operator_overrides() {
         let mut states = live_templates(&defs(&[("cn", "{givenName} {sn}")]));
         recompute_live(&mut states, &cur(&[("givenName", "John"), ("sn", "Doe")])); // cn = "John Doe"
-        // Operator edits cn to something else, then changes a source.
-        let changes = recompute_live(&mut states, &cur(&[("givenName", "Jon"), ("sn", "Doe"), ("cn", "Johnny")]));
+                                                                                    // Operator edits cn to something else, then changes a source.
+        let changes = recompute_live(
+            &mut states,
+            &cur(&[("givenName", "Jon"), ("sn", "Doe"), ("cn", "Johnny")]),
+        );
         assert!(changes.is_empty(), "operator-owned field is not rewritten");
         assert!(!states["cn"].auto);
         // A further source change is still ignored.
-        let changes = recompute_live(&mut states, &cur(&[("givenName", "Jonathan"), ("sn", "Doe"), ("cn", "Johnny")]));
+        let changes = recompute_live(
+            &mut states,
+            &cur(&[("givenName", "Jonathan"), ("sn", "Doe"), ("cn", "Johnny")]),
+        );
         assert!(changes.is_empty());
         assert!(!states["cn"].auto);
     }
@@ -495,10 +505,16 @@ mod tests {
     fn recompute_rearms_when_target_cleared() {
         let mut states = live_templates(&defs(&[("cn", "{givenName} {sn}")]));
         recompute_live(&mut states, &cur(&[("givenName", "John"), ("sn", "Doe")]));
-        recompute_live(&mut states, &cur(&[("givenName", "John"), ("sn", "Doe"), ("cn", "Johnny")])); // owned
+        recompute_live(
+            &mut states,
+            &cur(&[("givenName", "John"), ("sn", "Doe"), ("cn", "Johnny")]),
+        ); // owned
         assert!(!states["cn"].auto);
         // Operator clears cn → re-arm and refill.
-        let changes = recompute_live(&mut states, &cur(&[("givenName", "John"), ("sn", "Doe"), ("cn", "")]));
+        let changes = recompute_live(
+            &mut states,
+            &cur(&[("givenName", "John"), ("sn", "Doe"), ("cn", "")]),
+        );
         assert_eq!(changes, vec![("cn".to_string(), "John Doe".to_string())]);
         assert!(states["cn"].auto);
     }
@@ -509,8 +525,17 @@ mod tests {
         // because the target now holds our written value.
         let mut states = live_templates(&defs(&[("cn", "{givenName} {sn}")]));
         recompute_live(&mut states, &cur(&[("givenName", "John"), ("sn", "Doe")]));
-        let changes = recompute_live(&mut states, &cur(&[("givenName", "John"), ("sn", "Doe"), ("cn", "John Doe")]));
-        assert!(changes.is_empty(), "no change: target already equals output");
-        assert!(states["cn"].auto, "still auto after our own write is read back");
+        let changes = recompute_live(
+            &mut states,
+            &cur(&[("givenName", "John"), ("sn", "Doe"), ("cn", "John Doe")]),
+        );
+        assert!(
+            changes.is_empty(),
+            "no change: target already equals output"
+        );
+        assert!(
+            states["cn"].auto,
+            "still auto after our own write is read back"
+        );
     }
 }
