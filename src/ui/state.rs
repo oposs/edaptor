@@ -111,6 +111,10 @@ pub struct UiState {
     /// Profile chooser → controller: the index the user highlighted when OK was
     /// pressed. Set by `ProfileChooser`; read by `dispatch` to select a profile.
     pub chosen_profile: Option<usize>,
+    /// Container chooser → controller: the row the user highlighted (0 = current
+    /// branch, 1 = the profile's search_base) when OK was pressed. Set by
+    /// `ContainerChooser`; read by `dispatch` in the create container rule.
+    pub chosen_container: Option<usize>,
     /// True when the LDAP connection is encrypted (LDAPS, StartTLS, or ldapi://).
     /// The password widget refuses to operate when this is false.
     pub connection_encrypted: bool,
@@ -179,6 +183,7 @@ impl UiState {
             activate_field: None,
             staged_commit: None,
             chosen_profile: None,
+            chosen_container: None,
             connection_encrypted: false,
             resolved_widgets: Vec::new(),
             pending_password: None,
@@ -837,6 +842,7 @@ pub(crate) fn bootstrap(config: Config, password: String) -> Result<UiState> {
         activate_field: None,
         staged_commit: None,
         chosen_profile: None,
+        chosen_container: None,
         connection_encrypted,
         resolved_widgets,
         pending_password: None,

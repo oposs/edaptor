@@ -7,6 +7,7 @@
 // warnings (each is referenced from the smoke tests below).
 pub mod config_picker;
 pub mod confirm;
+pub mod container_chooser;
 pub mod error;
 pub mod guard;
 pub mod profile_chooser;
@@ -98,5 +99,27 @@ mod tests {
         );
         let shared = Rc::new(RefCell::new(st));
         let _v = profile_chooser::build(vec!["People".into(), "Groups".into()], shared);
+    }
+
+    #[test]
+    fn container_chooser_builds_without_panic() {
+        use crate::ldap::worker::RawSubschema;
+        use crate::workflows::structure::Structure;
+        use std::cell::RefCell;
+        use std::rc::Rc;
+        let schema = crate::schema::SchemaModel::from_raw(&RawSubschema::default());
+        let st = crate::ui::state::UiState::new_for_test(
+            Structure::build("dc=example,dc=org", vec![]),
+            schema,
+            "dc=example,dc=org".into(),
+            Vec::new(),
+            Vec::new(),
+        );
+        let shared = Rc::new(RefCell::new(st));
+        let _v = container_chooser::build(
+            "dc=example,dc=org".into(),
+            "ou=people,dc=example,dc=org".into(),
+            shared,
+        );
     }
 }
