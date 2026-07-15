@@ -193,6 +193,43 @@ fn dn_boundary_match(a: &str, b: &str) -> bool {
     a.ends_with(&format!(",{b}")) || b.ends_with(&format!(",{a}"))
 }
 
+/// Where a create should land, given the operator's current tree branch and the
+/// chosen profile's `search_base`. Pure. Callers pass DNs already known to be on the
+/// same path (guaranteed by [`profiles_for_container`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CreateContainer {
+    /// Unambiguous — create at this container DN.
+    Unambiguous(String),
+    /// The current branch is an ancestor of the profile's home OU — ask which target.
+    Ask { here: String, home: String },
+}
+
+/// Decide the create container (see [`CreateContainer`]). Rules (case-insensitive,
+/// DN-boundary): equal, or `current` at/inside `search_base` (`search_base` a proper
+/// suffix of `current`) → create at `current`. `current` above `search_base`
+/// (`current` a proper suffix of `search_base`) → ask. Any other relationship (should
+/// not reach here) → create at `current`, never silently relocating. Pure.
+pub fn resolve_create_container(current_branch: &str, search_base: &str) -> CreateContainer {
+    let cur = current_branch.trim();
+    let base = search_base.trim();
+    let cur_l = cur.to_lowercase();
+    let base_l = base.to_lowercase();
+
+    // Equal, or current is at/inside the home OU → create where we stand.
+    if cur_l == base_l || cur_l.ends_with(&format!(",{base_l}")) {
+        return CreateContainer::Unambiguous(cur.to_string());
+    }
+    // Current is an ancestor of the home OU → ambiguous, ask.
+    if !base_l.is_empty() && base_l.ends_with(&format!(",{cur_l}")) {
+        return CreateContainer::Ask {
+            here: cur.to_string(),
+            home: base.to_string(),
+        };
+    }
+    // Not on the same path (unexpected): default to current, never relocate.
+    CreateContainer::Unambiguous(cur.to_string())
+}
+
 /// Compose the DN and attribute set for a new entry of `profile`'s object class.
 ///
 /// The DN is `<rdn_attr>=<rdn_value>,<container_dn>`. The attribute set is the
@@ -837,5 +874,53 @@ mod tests {
         // autonumber is NOT filled here (needs a worker scan); it's surfaced.
         assert_eq!(autonum, vec![("uidNumber".to_string(), 10000, 60000)]);
         assert!(!attrs.contains_key("uidNumber"));
+    }
+
+    #[test]
+    fn resolve_container_equal_is_unambiguous() {
+        let c =
+            resolve_create_container("ou=people,dc=example,dc=org", "ou=people,dc=example,dc=org");
+        assert_eq!(
+            c,
+            CreateContainer::Unambiguous("ou=people,dc=example,dc=org".to_string())
+        );
+    }
+
+    #[test]
+    fn resolve_container_inside_home_is_unambiguous_current() {
+        // Standing INSIDE the home OU (deeper): create where we stand.
+        let c = resolve_create_container(
+            "ou=staff,ou=people,dc=example,dc=org",
+            "ou=people,dc=example,dc=org",
+        );
+        assert_eq!(
+            c,
+            CreateContainer::Unambiguous("ou=staff,ou=people,dc=example,dc=org".to_string())
+        );
+    }
+
+    #[test]
+    fn resolve_container_above_home_asks() {
+        // Standing ABOVE the home OU: ambiguous.
+        let c = resolve_create_container("dc=example,dc=org", "ou=people,dc=example,dc=org");
+        assert_eq!(
+            c,
+            CreateContainer::Ask {
+                here: "dc=example,dc=org".to_string(),
+                home: "ou=people,dc=example,dc=org".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn resolve_container_is_case_insensitive() {
+        let c = resolve_create_container("DC=Example,DC=Org", "ou=people,dc=example,dc=org");
+        assert_eq!(
+            c,
+            CreateContainer::Ask {
+                here: "DC=Example,DC=Org".to_string(),
+                home: "ou=people,dc=example,dc=org".to_string(),
+            }
+        );
     }
 }
