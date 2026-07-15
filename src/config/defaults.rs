@@ -19,6 +19,17 @@ pub enum DefaultValue {
     AutoNumber { min: u64, max: u64 },
 }
 
+/// Per-target live-template latch (see the live-templated-defaults spec). `segs`
+/// is the parsed template; `auto` is true while the target still belongs to the
+/// template; `last_written` is the value we last wrote, used to tell our own
+/// writes apart from operator edits.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LiveTemplateState {
+    pub segs: Vec<Seg>,
+    pub auto: bool,
+    pub last_written: String,
+}
+
 /// A profile's `[profile.defaults]` table (attr -> parsed value), order-stable.
 #[derive(Debug, Clone, Default)]
 pub struct ProfileDefaults {
@@ -182,6 +193,74 @@ pub fn plan_defaults(
         }
     }
     out
+}
+
+/// Build the initial live-template latches from a profile's `[profile.defaults]`:
+/// one entry per Template default (literals and autonumbers are skipped). Each
+/// starts `auto = true`, `last_written = ""`.
+pub fn live_templates(d: &ProfileDefaults) -> BTreeMap<String, LiveTemplateState> {
+    d.entries
+        .iter()
+        .filter_map(|(attr, dv)| match dv {
+            DefaultValue::Template(segs) => Some((
+                attr.clone(),
+                LiveTemplateState {
+                    segs: segs.clone(),
+                    auto: true,
+                    last_written: String::new(),
+                },
+            )),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The first value of `attr` in `current` (case-insensitive key match), or "".
+fn first_value(current: &BTreeMap<String, Vec<String>>, attr: &str) -> String {
+    current
+        .iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case(attr))
+        .and_then(|(_, v)| v.first())
+        .cloned()
+        .unwrap_or_default()
+}
+
+/// Recompute every auto target against `current` field values, mutating the
+/// latches, and return the `(attr, new_value)` changes to apply to the form.
+/// Pure. Implements the per-pass rule from the spec:
+/// 1. if the target's current value differs from `last_written`, ownership is
+///    re-evaluated: `auto = value.is_empty()` (empty ⇒ re-arm, else operator owns);
+/// 2. while `auto`, mirror the template: `Some(out)` ⇒ write `out` if it differs;
+///    `None` (a source empty) ⇒ clear the target if non-empty.
+pub fn recompute_live(
+    states: &mut BTreeMap<String, LiveTemplateState>,
+    current: &BTreeMap<String, Vec<String>>,
+) -> Vec<(String, String)> {
+    let mut changes = Vec::new();
+    for (attr, st) in states.iter_mut() {
+        let value = first_value(current, attr);
+        if value != st.last_written {
+            st.auto = value.is_empty();
+        }
+        if !st.auto {
+            continue;
+        }
+        match resolve_template(&st.segs, current) {
+            Some(out) => {
+                if out != value {
+                    st.last_written = out.clone();
+                    changes.push((attr.clone(), out));
+                }
+            }
+            None => {
+                if !value.is_empty() {
+                    st.last_written = String::new();
+                    changes.push((attr.clone(), String::new()));
+                }
+            }
+        }
+    }
+    changes
 }
 
 #[cfg(test)]
@@ -352,5 +431,86 @@ mod tests {
                 max: 60000
             }]
         );
+    }
+
+    // --- live templated defaults ---
+
+    fn defs(pairs: &[(&str, &str)]) -> ProfileDefaults {
+        let mut d = ProfileDefaults::default();
+        for (k, v) in pairs {
+            d.entries.insert(k.to_string(), parse_default_value(v).unwrap());
+        }
+        d
+    }
+
+    #[test]
+    fn live_templates_picks_only_templates() {
+        let d = defs(&[
+            ("cn", "{givenName} {sn}"),
+            ("loginShell", "/bin/bash"),        // literal → excluded
+            ("uidNumber", "{next:1000-2000}"),  // autonumber → excluded
+        ]);
+        let states = live_templates(&d);
+        assert_eq!(states.keys().collect::<Vec<_>>(), vec!["cn"]);
+        let s = &states["cn"];
+        assert!(s.auto);
+        assert_eq!(s.last_written, "");
+    }
+
+    #[test]
+    fn recompute_fills_when_sources_present() {
+        let mut states = live_templates(&defs(&[("cn", "{givenName} {sn}")]));
+        let changes = recompute_live(&mut states, &cur(&[("givenName", "John"), ("sn", "Doe")]));
+        assert_eq!(changes, vec![("cn".to_string(), "John Doe".to_string())]);
+        assert_eq!(states["cn"].last_written, "John Doe");
+        assert!(states["cn"].auto);
+    }
+
+    #[test]
+    fn recompute_incomplete_source_clears_target() {
+        let mut states = live_templates(&defs(&[("cn", "{givenName} {sn}")]));
+        // First fill, then remove sn: the auto target must clear.
+        recompute_live(&mut states, &cur(&[("givenName", "John"), ("sn", "Doe")]));
+        let changes = recompute_live(&mut states, &cur(&[("givenName", "John"), ("sn", ""), ("cn", "John Doe")]));
+        assert_eq!(changes, vec![("cn".to_string(), "".to_string())]);
+        assert!(states["cn"].auto);
+        assert_eq!(states["cn"].last_written, "");
+    }
+
+    #[test]
+    fn recompute_stops_when_operator_overrides() {
+        let mut states = live_templates(&defs(&[("cn", "{givenName} {sn}")]));
+        recompute_live(&mut states, &cur(&[("givenName", "John"), ("sn", "Doe")])); // cn = "John Doe"
+        // Operator edits cn to something else, then changes a source.
+        let changes = recompute_live(&mut states, &cur(&[("givenName", "Jon"), ("sn", "Doe"), ("cn", "Johnny")]));
+        assert!(changes.is_empty(), "operator-owned field is not rewritten");
+        assert!(!states["cn"].auto);
+        // A further source change is still ignored.
+        let changes = recompute_live(&mut states, &cur(&[("givenName", "Jonathan"), ("sn", "Doe"), ("cn", "Johnny")]));
+        assert!(changes.is_empty());
+        assert!(!states["cn"].auto);
+    }
+
+    #[test]
+    fn recompute_rearms_when_target_cleared() {
+        let mut states = live_templates(&defs(&[("cn", "{givenName} {sn}")]));
+        recompute_live(&mut states, &cur(&[("givenName", "John"), ("sn", "Doe")]));
+        recompute_live(&mut states, &cur(&[("givenName", "John"), ("sn", "Doe"), ("cn", "Johnny")])); // owned
+        assert!(!states["cn"].auto);
+        // Operator clears cn → re-arm and refill.
+        let changes = recompute_live(&mut states, &cur(&[("givenName", "John"), ("sn", "Doe"), ("cn", "")]));
+        assert_eq!(changes, vec![("cn".to_string(), "John Doe".to_string())]);
+        assert!(states["cn"].auto);
+    }
+
+    #[test]
+    fn recompute_our_write_is_not_read_as_override() {
+        // Two passes with unchanged sources: the second must NOT flip auto off just
+        // because the target now holds our written value.
+        let mut states = live_templates(&defs(&[("cn", "{givenName} {sn}")]));
+        recompute_live(&mut states, &cur(&[("givenName", "John"), ("sn", "Doe")]));
+        let changes = recompute_live(&mut states, &cur(&[("givenName", "John"), ("sn", "Doe"), ("cn", "John Doe")]));
+        assert!(changes.is_empty(), "no change: target already equals output");
+        assert!(states["cn"].auto, "still auto after our own write is read back");
     }
 }
