@@ -115,6 +115,10 @@ pub struct UiState {
     /// branch, 1 = the profile's search_base) when OK was pressed. Set by
     /// `ContainerChooser`; read by `dispatch` in the create container rule.
     pub chosen_container: Option<usize>,
+    /// One-shot action to run after the TUI starts (set by `tui-create` via
+    /// `ui::run`; `None` for a normal launch). Posted once by the pump as `STARTUP`,
+    /// taken by `dispatch`. See [`crate::ui::StartupAction`].
+    pub pending_startup: Option<crate::ui::StartupAction>,
     /// True when the LDAP connection is encrypted (LDAPS, StartTLS, or ldapi://).
     /// The password widget refuses to operate when this is false.
     pub connection_encrypted: bool,
@@ -184,6 +188,7 @@ impl UiState {
             staged_commit: None,
             chosen_profile: None,
             chosen_container: None,
+            pending_startup: None,
             connection_encrypted: false,
             resolved_widgets: Vec::new(),
             pending_password: None,
@@ -843,6 +848,7 @@ pub(crate) fn bootstrap(config: Config, password: String) -> Result<UiState> {
         staged_commit: None,
         chosen_profile: None,
         chosen_container: None,
+        pending_startup: None,
         connection_encrypted,
         resolved_widgets,
         pending_password: None,

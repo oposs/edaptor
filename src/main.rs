@@ -62,7 +62,7 @@ fn main() -> Result<()> {
     };
 
     match command {
-        None => run_tui(config, password)?,
+        None => run_tui(config, password, None)?,
         Some(Command::Check) => {
             let summary = edaptor::run_check(config, password)?;
             println!("Connected to {}", summary.uri);
@@ -104,8 +104,12 @@ fn prompt_new_password() -> Result<String> {
 /// Launch the three-pane tvision TUI. The event loop, state, rendering and the
 /// write-path orchestration all live in [`edaptor::ui`]; this just hands off
 /// the connection details.
-fn run_tui(config: Config, password: String) -> Result<()> {
-    edaptor::ui::run(config, password)
+fn run_tui(
+    config: Config,
+    password: String,
+    startup: Option<edaptor::ui::StartupAction>,
+) -> Result<()> {
+    edaptor::ui::run(config, password, startup)
 }
 
 fn print_schema(report: &SchemaReport) {

@@ -12,6 +12,7 @@ pub(crate) struct PumpView {
     state: Shared,
     armed: bool,
     fullscreen_applied: bool,
+    startup_posted: bool,
 }
 
 impl PumpView {
@@ -21,6 +22,7 @@ impl PumpView {
             state,
             armed: false,
             fullscreen_applied: false,
+            startup_posted: false,
         }
     }
 
@@ -36,6 +38,18 @@ impl PumpView {
         }
         ctx.post(tv::Command::FULLSCREEN);
         self.fullscreen_applied = true;
+    }
+
+    /// One-shot: if a startup action is pending, post `STARTUP` so `dispatch` runs it
+    /// from the main loop (safe re-entry point, like `GUARD_NAV`). Posted at most once.
+    fn apply_startup_once(&mut self, ctx: &mut Context) {
+        if self.startup_posted {
+            return;
+        }
+        if self.state.borrow().pending_startup.is_some() {
+            ctx.post(crate::ui::STARTUP);
+        }
+        self.startup_posted = true;
     }
 }
 
@@ -61,6 +75,7 @@ impl View for PumpView {
         }
         if matches!(ev, Event::Timer(_)) {
             self.apply_fullscreen_once(ctx);
+            self.apply_startup_once(ctx);
             let r = self.state.borrow_mut().pump_worker();
             // Reconcile a pending leaf selection: load it (clean) or, if the form is
             // dirty, ask the dispatch closure to raise the guard. Posting from the
@@ -211,6 +226,61 @@ mod tests {
                 "fullscreen is posted at most once"
             );
         }
+    }
+
+    /// The pump posts `STARTUP` exactly once when a startup action is pending, and never
+    /// when none is set.
+    #[test]
+    fn posts_startup_command_once_when_pending() {
+        let make_state = |pending: bool| {
+            let structure = Structure::build("dc=x", Vec::new());
+            let schema = SchemaModel::from_raw(&crate::ldap::worker::RawSubschema::default());
+            let mut st = crate::ui::state::UiState::new_for_test(
+                structure,
+                schema,
+                "dc=x".into(),
+                Vec::new(),
+                Vec::new(),
+            );
+            if pending {
+                st.pending_startup =
+                    Some(crate::ui::StartupAction::ChooseThenCreate { container: None });
+            }
+            Rc::new(RefCell::new(st))
+        };
+        let count_startup = |out: &VecDeque<Event>| {
+            out.iter()
+                .filter(|e| matches!(e, Event::Command(c) if *c == crate::ui::STARTUP))
+                .count()
+        };
+
+        // Pending → posts once, then idempotent.
+        let mut pump = PumpView::new(make_state(true));
+        {
+            let mut out = VecDeque::new();
+            let mut timers = tv::timer::TimerQueue::new();
+            let mut deferred: Vec<tv::Deferred> = Vec::new();
+            let mut ctx = headless(&mut out, &mut timers, &mut deferred);
+            pump.apply_startup_once(&mut ctx);
+            assert_eq!(count_startup(&out), 1);
+        }
+        {
+            let mut out = VecDeque::new();
+            let mut timers = tv::timer::TimerQueue::new();
+            let mut deferred: Vec<tv::Deferred> = Vec::new();
+            let mut ctx = headless(&mut out, &mut timers, &mut deferred);
+            pump.apply_startup_once(&mut ctx);
+            assert_eq!(count_startup(&out), 0, "startup is posted at most once");
+        }
+
+        // Not pending → never posts.
+        let mut pump2 = PumpView::new(make_state(false));
+        let mut out = VecDeque::new();
+        let mut timers = tv::timer::TimerQueue::new();
+        let mut deferred: Vec<tv::Deferred> = Vec::new();
+        let mut ctx = headless(&mut out, &mut timers, &mut deferred);
+        pump2.apply_startup_once(&mut ctx);
+        assert_eq!(count_startup(&out), 0);
     }
 
     /// Regression: when BOTH `requested_leaf` and `requested_branch` are pending and

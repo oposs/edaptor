@@ -50,14 +50,34 @@ pub const REQUEST_QUIT: tv::Command = tv::Command::custom("edaptor.request_quit"
 pub const GUARD_NAV: tv::Command = tv::Command::custom("edaptor.guard_nav");
 pub const SHOW_ERROR: tv::Command = tv::Command::custom("edaptor.show_error");
 
+pub const STARTUP: tv::Command = tv::Command::custom("edaptor.startup");
+
+/// A one-shot action to run once the TUI has started (schema is already loaded by
+/// `bootstrap`). Carried on `UiState::pending_startup`, posted by the pump as the
+/// `STARTUP` command, and executed once in `app::dispatch`.
+#[derive(Debug, Clone)]
+pub enum StartupAction {
+    /// Open a create form for `profile_idx` under `container`.
+    Create {
+        profile_idx: usize,
+        container: String,
+    },
+    /// Show the all-profiles chooser, then open a create form for the pick under
+    /// `container` (the pick's `search_base` when `None`).
+    ChooseThenCreate { container: Option<String> },
+}
+
 use anyhow::Result;
 use tvision_rs::{self as tv, CrosstermBackend};
 
 use crate::config::Config;
 
-/// Spawn the worker, fetch schema + structure, then run the TUI.
-pub fn run(config: Config, password: String) -> Result<()> {
-    let state: Shared = Rc::new(RefCell::new(state::bootstrap(config, password)?));
+/// Spawn the worker, fetch schema + structure, then run the TUI. `startup` runs a
+/// one-shot action (e.g. open a create form) once the loop starts; `None` = normal browse.
+pub fn run(config: Config, password: String, startup: Option<StartupAction>) -> Result<()> {
+    let mut booted = state::bootstrap(config, password)?;
+    booted.pending_startup = startup;
+    let state: Shared = Rc::new(RefCell::new(booted));
     let backend = Box::new(CrosstermBackend::new()?);
     let mut program = app::build_program(backend, state.clone());
     let dispatch_state = state.clone();

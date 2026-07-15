@@ -16,7 +16,8 @@ use crate::ui::panes::{
 use crate::ui::pump::PumpView;
 use crate::ui::state::GuardTarget;
 use crate::ui::widget::{widget_for, Activation};
-use crate::ui::{Shared, ACTIVATE, CREATE, GUARD_NAV, REQUEST_QUIT, SAVE, SHOW_ERROR};
+use crate::ui::StartupAction;
+use crate::ui::{Shared, ACTIVATE, CREATE, GUARD_NAV, REQUEST_QUIT, SAVE, SHOW_ERROR, STARTUP};
 use crate::workflows::create::{resolve_create_container, CreateContainer};
 use crate::workflows::save::PrepareSave;
 
@@ -303,6 +304,46 @@ pub(crate) fn dispatch(prog: &mut Program, cmd: Command, state: &Shared) {
         if let Some(msg) = msg {
             let (view, ok) = error::build(&msg);
             prog.exec_view_focused(view, ok);
+        }
+    } else if cmd == STARTUP {
+        let action = state.borrow_mut().pending_startup.take();
+        match action {
+            Some(StartupAction::Create {
+                profile_idx,
+                container,
+            }) => {
+                open_create(state, profile_idx, &container);
+            }
+            Some(StartupAction::ChooseThenCreate { container }) => {
+                let names: Vec<String> = state
+                    .borrow()
+                    .profiles
+                    .iter()
+                    .map(|p| p.name.clone())
+                    .collect();
+                if names.is_empty() {
+                    state.borrow_mut().status = "No profiles configured.".into();
+                    return;
+                }
+                let (view, focus) = crate::ui::dialog::profile_chooser::build(names, state.clone());
+                if prog.exec_view_focused(view, focus) == Command::OK {
+                    let chosen = state.borrow_mut().chosen_profile.take();
+                    if let Some(idx) = chosen {
+                        let dn = container
+                            .clone()
+                            .unwrap_or_else(|| state.borrow().profiles[idx].search_base.clone());
+                        if dn.trim().is_empty() {
+                            state.borrow_mut().status =
+                                "Profile has no search_base; pass --container.".into();
+                            return;
+                        }
+                        open_create(state, idx, &dn);
+                    }
+                } else {
+                    state.borrow_mut().chosen_profile = None;
+                }
+            }
+            None => {}
         }
     }
 }
