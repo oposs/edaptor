@@ -8,6 +8,13 @@ All notable changes to eDAPtor are documented here. The format follows
 
 ### New
 
+- **Live autofill for templated defaults (create mode).** A `[profile.defaults]`
+  template such as `cn = "{givenName} {sn}"` now fills *and keeps updating* the
+  target as you type its sources when creating an entry, until you edit the target
+  yourself (clear it to re-arm). Literals and autonumbers are unchanged; editing
+  existing entries is unaffected. See
+  [Configuration → Defaults](https://oposs.github.io/edaptor/configuration/defaults.html).
+
 ### Changed
 
 ### Fixed

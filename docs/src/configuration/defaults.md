@@ -37,6 +37,31 @@ homeDirectory = "/home/{uid}"
 If the operator enters `uid = bob`, the empty `homeDirectory` becomes
 `/home/bob`. Literal text outside the braces is kept as-is.
 
+### Live templating in create mode
+
+When you create a new entry, a **template** default (one containing `{field}`
+placeholders, e.g. `cn = "{givenName} {sn}"`) does more than fill once: it keeps
+the target in sync with its sources **as you type**, for as long as you have not
+edited the target yourself.
+
+- The target fills the moment all its `{…}` sources have values, and re-computes
+  whenever a source changes.
+- If you type your own value into the target, eDAPtor stops tracking it — the
+  field is yours.
+- Clear the target back to empty and it **re-arms**: live tracking resumes.
+- While any `{…}` source is still empty, the auto target is shown empty.
+
+Literal defaults (`loginShell = "/bin/bash"`) and autonumber defaults
+(`{next:MIN-MAX}`) are **not** live — they are applied once. Live templating
+applies to **create mode only**; editing an existing entry never rewrites a field
+from a template.
+
+Example:
+
+    [profile.defaults]
+    cn          = "{givenName} {sn}"
+    displayName = "{givenName} {sn}"
+
 ## Auto-number
 
 The expression `"{next:MIN-MAX}"` allocates the **next free value in the inclusive
