@@ -90,6 +90,35 @@ currently selected branch.
    gives its parent its first child, the parent is promoted to a branch in the
    **DIT** tree.
 
+### Where a new entry is created
+
+New entries land in the container that matches the chosen profile. If you press **New**
+while the tree is focused on a branch *above* that profile's `search_base` (for example
+at the directory root), eDAPtor cannot tell whether you meant "here" or "in the
+profile's home OU", so it asks with a **Create where?** prompt:
+
+- **Here — `<current branch>`** creates the entry where the tree is focused.
+- **In `<search_base>`** creates it in the profile's home OU.
+
+Standing on the profile's `search_base` (or inside it) skips the prompt and creates the
+entry there directly.
+
+### Launching into a create form from the command line
+
+`edaptor tui-create <profile>` opens the TUI directly on a new-entry form for the named
+profile, skipping the browse-and-navigate step:
+
+    edaptor tui-create Users
+
+- `<profile>` is matched case-insensitively against the configured profile names. Omit
+  it to be shown a profile chooser at launch. An unknown name prints the list of valid
+  names and exits before the TUI starts.
+- `--container <DN>` overrides where the new object is created; by default it lands in
+  the profile's `search_base`.
+
+The form, defaults, autonumber, password entry, confirmation and write are exactly the
+interactive create flow — `tui-create` only chooses which form opens.
+
 ## Renaming (ModRdn)
 
 eDAPtor has no separate "rename" command — a rename is just an edit of the

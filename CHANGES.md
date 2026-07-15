@@ -15,7 +15,17 @@ All notable changes to eDAPtor are documented here. The format follows
   existing entries is unaffected. See
   [Configuration → Defaults](https://oposs.github.io/edaptor/configuration/defaults.html).
 
+- **`edaptor tui-create [<profile>] [--container <DN>]`.** Launch straight into a
+  profile's create form. With no `<profile>` a chooser is shown first; `--container`
+  defaults to the profile's `search_base`. An unknown profile name errors before the
+  TUI starts.
+
 ### Changed
+
+- **Creating above a profile's home OU now asks where to put the object.** Pressing
+  New while standing above a profile's `search_base` prompts "Create where?" —
+  the current branch or the profile's home OU — instead of silently composing the
+  entry at the current (wrong) location.
 
 ### Fixed
 
