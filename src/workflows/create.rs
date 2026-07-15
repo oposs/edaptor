@@ -230,6 +230,31 @@ pub fn resolve_create_container(current_branch: &str, search_base: &str) -> Crea
     CreateContainer::Unambiguous(cur.to_string())
 }
 
+/// Resolve the optional `<profile>` argument of `tui-create` against the configured
+/// profiles. `Some(name)` → the matching index (case-insensitive), or an error listing
+/// the valid names when unknown. `None` → `Ok(None)` (the caller shows the chooser).
+/// Pure.
+pub fn resolve_profile_arg(
+    profiles: &[EntryProfile],
+    name: Option<&str>,
+) -> Result<Option<usize>, String> {
+    let Some(name) = name else {
+        return Ok(None);
+    };
+    if let Some(idx) = profiles.iter().position(|p| p.name.eq_ignore_ascii_case(name)) {
+        return Ok(Some(idx));
+    }
+    let valid: Vec<&str> = profiles.iter().map(|p| p.name.as_str()).collect();
+    Err(format!(
+        "unknown profile '{name}'. Configured profiles: {}",
+        if valid.is_empty() {
+            "(none)".to_string()
+        } else {
+            valid.join(", ")
+        }
+    ))
+}
+
 /// Compose the DN and attribute set for a new entry of `profile`'s object class.
 ///
 /// The DN is `<rdn_attr>=<rdn_value>,<container_dn>`. The attribute set is the
@@ -563,6 +588,13 @@ mod tests {
     fn prof(base: &str) -> EntryProfile {
         EntryProfile {
             search_base: base.to_string(),
+            ..Default::default()
+        }
+    }
+
+    fn named(name: &str) -> EntryProfile {
+        EntryProfile {
+            name: name.to_string(),
             ..Default::default()
         }
     }
@@ -922,5 +954,27 @@ mod tests {
                 home: "ou=people,dc=example,dc=org".to_string(),
             }
         );
+    }
+
+    #[test]
+    fn resolve_profile_arg_none_yields_none() {
+        let ps = vec![named("Users"), named("Groups")];
+        assert_eq!(resolve_profile_arg(&ps, None), Ok(None));
+    }
+
+    #[test]
+    fn resolve_profile_arg_matches_case_insensitively() {
+        let ps = vec![named("Users"), named("Groups")];
+        assert_eq!(resolve_profile_arg(&ps, Some("users")), Ok(Some(0)));
+        assert_eq!(resolve_profile_arg(&ps, Some("GROUPS")), Ok(Some(1)));
+    }
+
+    #[test]
+    fn resolve_profile_arg_unknown_lists_valid_names() {
+        let ps = vec![named("Users"), named("Groups")];
+        let err = resolve_profile_arg(&ps, Some("Admins")).unwrap_err();
+        assert!(err.contains("Admins"));
+        assert!(err.contains("Users"));
+        assert!(err.contains("Groups"));
     }
 }
