@@ -1,4 +1,4 @@
-# Design: make the create-template concept usable — CLI `create` + TUI container rule
+# Design: make the create-template concept usable — `tui-create` launcher + TUI container rule
 
 **Date:** 2026-07-15 · **Branch:** `feat/usability` · **Item (c)** of the usability batch
 (see `docs/HANDOVER.md`). Item (b), the companion group / multi-add, is a **separate**
@@ -17,9 +17,10 @@ defaults/autonumber → confirm → add), but two gaps make it hazardous or inco
    `container = current_branch` (the root). The object is composed as
    `uid=alice,dc=example,dc=org` — the **wrong place**.
 
-2. **No `edaptor create` CLI subcommand.** `src/main.rs` has `check` / `schema` /
-   `passwd` only. Operators want a scriptable, headless way to create an entry from a
-   profile without launching the TUI.
+2. **No quick launcher into a create form.** `src/main.rs` has `check` / `schema` /
+   `passwd` only. To make (say) a new user, an operator must launch the TUI, navigate to
+   the right OU, and hit New. There is no way to jump straight into a named profile's
+   create form.
 
 ## Scope
 
@@ -27,16 +28,18 @@ One spec, two independent code paths:
 
 - **Part 1** — a container-choice rule in the TUI create flow (`src/ui/app.rs` +
   `src/workflows/create.rs` + a small dialog).
-- **Part 2** — a flag-driven `edaptor create` subcommand (`src/main.rs` +
-  `src/lib.rs`).
+- **Part 2** — an `edaptor tui-create <profile> [--container <DN>]` subcommand that
+  launches the TUI straight into a profile's create form (`src/main.rs` + `src/ui`).
 
-Both lean entirely on **existing pure cores** (`apply_static_defaults`, `plan_create`,
-`fold_create_password`, `build_add_entry`, `render_add`, `decide_allocation`) plus the
-`run_passwd` worker pattern. No new write primitive is introduced.
+Both reuse existing machinery: Part 1 the pure `dn_boundary_match` / create planners,
+Part 2 the **entire interactive create flow** (`open_create` and everything it drives —
+widgets, live templates, autonumber, confirm, save). No new write path or headless
+planner is introduced.
 
 Out of scope: companion private-group creation / any multi-entry add (item (b)); a
-`--container` override for the CLI (YAGNI); an interactive TUI-style CLI prompt flow
-(the decided CLI shape is flag-driven).
+*headless* (non-TUI) create/write path — `tui-create` deliberately drops into the
+interactive create form, so secrets, autonumber, confirm and write are handled by the
+existing TUI machinery, not re-implemented.
 
 ---
 
@@ -107,126 +110,117 @@ options, no filtering.
 
 ---
 
-## Part 2 — `edaptor create` CLI subcommand
+## Part 2 — `edaptor tui-create` subcommand
+
+Instead of a headless write path, `tui-create` is a **launcher**: it starts the normal
+TUI but, once the schema has loaded, drops straight into a profile's create form rather
+than idling on browse. Everything after that — widgets, live templates, autonumber,
+password entry, the confirm dialog, the write — is the **existing interactive create
+flow**, unchanged. Cancelling or saving leaves the operator in the normal app.
 
 ### Invocation
 
 ```
-edaptor create --profile <NAME> [--password-stdin] [--yes] <attr=value> [<attr=value> ...]
+edaptor tui-create [<profile>] [--container <DN>]
 ```
 
-- `--profile <NAME>` — profile name, matched case-insensitively against
-  `config.profiles`. Omitted with **exactly one** profile configured → that profile is
-  used. Omitted with **>1**, or an **unknown** name → error listing available names.
-- `<attr=value>` positionals — split on the **first** `=`; attr and value trimmed;
-  empty values dropped. Repeat an attr for multi-valued (`mail=a@x mail=b@x`).
-  `objectClass` is **not** accepted here — it comes from the profile.
-- `--password-stdin` — read exactly one line from stdin as the cleartext password
-  (trailing newline stripped) and route it through the profile's password widget.
-- `--yes` — write without the confirmation prompt.
+- `<profile>` — **optional** positional, matched case-insensitively against
+  `config.profiles`.
+  - Given and known → open that profile's create form.
+  - Given but **unknown** → error listing the available profile names; exits before
+    launching the TUI (fail fast, no wasted terminal takeover).
+  - **Omitted** → launch the TUI and immediately show the profile-chooser dialog over
+    **all** profiles; the operator's pick opens the create form.
+- `--container <DN>` — where the new object lands. **Defaults to the chosen profile's
+  `search_base`.** It is a direct override (advanced use), so the Part-1
+  ask-which-container dialog never fires here — there is no "current branch" to be
+  ambiguous against. A blank/whitespace value is rejected; an otherwise-malformed DN is
+  left for the server to reject at write time.
 
-### `run_create` in `src/lib.rs` (mirrors `run_passwd`)
+### Startup-action wiring
 
-Signature (headless, worker injected the same way as `run_passwd`):
+The create flow already exists (`open_create` in `src/ui/app.rs`); Part 2 only needs a
+way to *trigger* it at launch. Thread an optional startup action from `main` through
+`ui::run` into the app:
 
 ```rust
-pub fn run_create(
-    config: Config,
-    bind_password: String,
-    profile_name: Option<&str>,
-    attr_args: &[String],      // raw "attr=value" strings
-    password_stdin: bool,
-    assume_yes: bool,
-) -> Result<String>            // Ok(message) e.g. "Created uid=alice,ou=people,…"
+pub enum StartupAction {
+    /// Open a create form for this profile under this container as soon as the
+    /// schema is ready. `container` defaults to the profile's search_base.
+    Create { profile_idx: usize, container: String },
+    /// No profile named on the command line → show the all-profiles chooser first,
+    /// then open_create with the picked profile (container from --container or its
+    /// search_base).
+    ChooseThenCreate { container: Option<String> },
+}
 ```
 
-Flow:
-
-1. **Resolve profile** from `config.profiles` (rules above). Empty `search_base` on the
-   chosen profile → error. `container = profile.search_base`.
-2. **Parse args** into `BTreeMap<String, Vec<String>>` (first-`=` split; trim; drop
-   empties; repeat = multi-valued). Reject an explicit `objectClass=…` arg with a clear
-   message (it is profile-controlled).
-3. **TLS gate** — only when `--password-stdin` is set: enforce
-   `samba::password::is_secure(&config.server)` (same guard as `passwd`). A plain create
-   does not require TLS (matches `check` / `schema`).
-4. **Spawn worker** (`WorkerHandle::spawn`), as `run_passwd` does.
-5. **Static defaults** — `apply_static_defaults(&profile.defaults, &mut attrs)` fills
-   literals + `{attr}` templates and returns the `{next:MIN-MAX}` autonumber requests.
-6. **Autonumber scan** — for each `(attr, min, max)`: a synchronous
-   `Request::Search { base: search_base, scope: Subtree, filter: "(<attr>=*)",
-   attrs: [<attr>] }`, collect the integer values, `decide_allocation(values, truncated,
-   min, max)` → fill `attrs[attr]`. On `Err` (size-limit truncation, range exhausted) →
-   propagate the error.
-7. **Plan** — build an `EditEntry { dn: "", attrs }` and call
-   `plan_create(schema, profile, container, &edited)`:
-   - `CreatePrep::Error(msg)` → return `Err`.
-   - `CreatePrep::Confirm { dn, attrs, ldif, .. }` → continue with these.
-8. **Password fold** — if `--password-stdin`:
-   - Read one line from stdin. Resolve the profile's `ResolvedWidget`s and call
-     `fold_create_password(&dn, &mut attrs, Some(clear), &widgets, now)`.
-   - `Some(masked_ldif)` → use it as the preview.
-   - `None` (no password widget matched the entry's object classes) → **error**: the
-     operator asked to set a password but the profile has no password widget.
-   If `--password-stdin` is **not** set, keep `plan_create`'s `ldif` unchanged.
-9. **Preview + confirm gate** — print the (masked) LDIF. Then:
-   - `--yes` → proceed to write.
-   - not `--yes` **and** stdin is an interactive TTY **and** stdin was not consumed by
-     `--password-stdin` → prompt `Proceed? [y/N]`; anything but yes aborts (`Err` or a
-     clean "aborted" message — see error handling).
-   - otherwise (non-interactive, or stdin already consumed) → **fail fast**: error
-     "refusing to create without --yes". Never a silent no-op.
-10. **Write** — `worker.request(Request::Add { id, dn, attrs })`; map `WriteOk` → ok,
-    `WriteError { msg }` → `Err(msg)`, anything else → `Err(unexpected …)`. Then
-    **re-read** the DN (`Request::Search` scope Base) to confirm it resolves, exactly as
-    `passwd` does. Return `Ok("Created <dn>")`.
+- `ui::run(config, password, startup: Option<StartupAction>)` — the existing no-subcommand
+  path passes `None` (unchanged behaviour). `tui-create` passes `Some(...)`.
+- The action fires **after the initial schema load completes** (the create form is
+  schema-driven; `open_create` reads `st.read_flow.schema()`). Concretely: the app's
+  post-load step checks a stored `pending_startup` and, if present, dispatches it once —
+  `Create` → `open_create(state, profile_idx, &container)`; `ChooseThenCreate` → run the
+  profile chooser over all profiles, then `open_create` with the pick and the resolved
+  container. Then clear it so it never re-fires.
+- Profile-name → index resolution for the `Create` case happens in `main` (so an unknown
+  name errors before the TUI starts). `container` is resolved in `main` too: `--container`
+  if given, else `profiles[idx].search_base`.
 
 ### `src/main.rs`
 
-Add `Command::Create { profile, password_stdin, yes, attrs }` (clap), and in `main`
-dispatch to `run_create`, printing the returned message. The `--config` global flag and
-existing bind-password resolution are unchanged.
+Add `Command::TuiCreate { profile: Option<String>, container: Option<String> }` (clap;
+subcommand name `tui-create`). In `main`:
+
+1. If `profile` is `Some`, resolve it against `config.profiles` (case-insensitive);
+   unknown → `Err` listing names. Build `StartupAction::Create { profile_idx, container:
+   --container.unwrap_or(search_base) }`.
+2. If `profile` is `None` → `StartupAction::ChooseThenCreate { container }`.
+3. Call `run_tui(config, password, Some(action))`.
+
+The `--config` global flag and bind-password resolution are unchanged.
 
 ---
 
 ## Error handling
 
-- **Fail fast, no silent success** — the `passwd` philosophy. Unknown profile, empty
-  `search_base`, `objectClass=` arg, schema-validation failure (`plan_create` Error),
-  autonumber exhaustion/truncation, `--password-stdin` without a password widget, TLS
-  gate when setting a password, and "no `--yes` in a non-interactive context" all
-  return `Err` with an actionable message; `main` surfaces it and exits non-zero.
-- **Password never on the argv** — only via `--password-stdin`; the LDIF preview is
-  always masked (`mask_password_attrs` inside `fold_create_password`).
-- **Confirmation aborts cleanly** — declining the `[y/N]` prompt writes nothing and
-  exits without an error stack (a plain "aborted, nothing created" message).
+- **Fail before takeover.** `tui-create` resolves the profile name in `main` *before*
+  launching the TUI, so an unknown name prints an actionable error (with the list of
+  valid names) and exits non-zero without ever taking over the terminal. A blank
+  `--container` is rejected the same way.
+- **In-form errors** (schema validation, autonumber exhaustion, write failure) surface
+  through the **existing** create / confirm / save UI — `tui-create` changes only *where
+  the form opens*, not how it validates or writes. Secrets stay masked in the confirm
+  preview exactly as today.
+- **Part 1** never silently relocates: on any unexpected container relationship the pure
+  helper defaults to the current branch.
 
 ## Testing
 
 Pure unit tests (no live LDAP):
 
-- `resolve_create_container` — the three cases: equal, current-inside-home (both →
-  `Unambiguous`), current-above-home (→ `Ask` with correct `here`/`home`); plus a
-  case-insensitivity check.
-- CLI arg parsing — first-`=` split (`homeDirectory=/home/x=y` keeps `/home/x=y`),
-  trimming, empty-value drop, multi-valued via repeat, `objectClass=` rejected.
-- Profile resolution — exactly-one default, unknown-name error, ambiguous (>1 without
-  `--profile`) error, case-insensitive match.
+- `resolve_create_container` (Part 1) — the three cases: equal, current-inside-home
+  (both → `Unambiguous`), current-above-home (→ `Ask` with correct `here`/`home`); plus
+  a case-insensitivity check.
+- Profile-name resolution (Part 2) — a small pure helper mapping an optional name +
+  `config.profiles` to a profile index, or a "not found; valid names are …" error,
+  case-insensitive. This is the only headless logic `tui-create` adds; keeping it a pure
+  function makes it testable without the TUI.
 
-The composition/validation/password/autonumber cores (`build_add_entry`, `plan_create`,
-`fold_create_password`, `apply_static_defaults`, `decide_allocation`) are already
-covered by existing tests; `run_create` orchestrates them, so its own coverage focuses
-on the new argument/profile/confirm logic. Live-directory behaviour is verified manually
-against the podman demo LDAP.
+Part 2's create form is the existing, already-tested interactive flow; the new surface
+is just the launch trigger. `tui-create`'s end-to-end behaviour (form opens on the right
+profile/container; chooser appears when the name is omitted) is verified manually against
+the podman demo LDAP.
 
 ## Docs (part of "done")
 
-- **`CHANGES.md`** — Unreleased: the container-choice prompt, and the new `create`
-  subcommand.
+- **`CHANGES.md`** — Unreleased: the container-choice prompt (Part 1), and the new
+  `tui-create` subcommand (Part 2).
 - **mdBook (`docs/src/`)** — document the container-choice behaviour on the create /
-  create-templates page, and add the `edaptor create` subcommand to the CLI/commands
-  reference (invocation, `--profile`, `attr=value`, `--password-stdin`, `--yes`,
-  container = `search_base`). Update `SUMMARY.md` if a new page is added.
+  create-templates page, and add `edaptor tui-create` to the CLI/commands reference
+  (invocation, optional `<profile>` with chooser fallback, `--container` default =
+  `search_base`, note that it opens the interactive create form). Update `SUMMARY.md`
+  if a new page is added.
 - **README** — orientation only; a one-line pointer to the new subcommand if warranted,
   no reference detail.
 
@@ -234,8 +228,9 @@ against the podman demo LDAP.
 
 1. Part 1 pure core (`resolve_create_container` + tests).
 2. Part 1 dialog + `app.rs` wiring.
-3. Part 2 `run_create` + arg/profile parsing helpers + tests.
-4. Part 2 `main.rs` subcommand.
+3. Part 2 `StartupAction` plumbing through `ui::run` + the post-load dispatch + the pure
+   profile-name resolver (+ tests).
+4. Part 2 `main.rs` `tui-create` subcommand.
 5. Docs + `CHANGES.md`.
 
 Each step keeps `make check` green.
