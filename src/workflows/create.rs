@@ -241,7 +241,10 @@ pub fn resolve_profile_arg(
     let Some(name) = name else {
         return Ok(None);
     };
-    if let Some(idx) = profiles.iter().position(|p| p.name.eq_ignore_ascii_case(name)) {
+    if let Some(idx) = profiles
+        .iter()
+        .position(|p| p.name.eq_ignore_ascii_case(name))
+    {
         return Ok(Some(idx));
     }
     let valid: Vec<&str> = profiles.iter().map(|p| p.name.as_str()).collect();
