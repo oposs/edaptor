@@ -341,8 +341,14 @@ fn open_create(state: &Shared, profile_idx: usize, container: &str) {
         );
         crate::workflows::widget_bind::apply_widget_bindings(&mut form, &resolver, &ocs);
     }
+    // Build the create-mode live-template latches from the profile's defaults.
+    let live = {
+        let st = state.borrow();
+        crate::config::defaults::live_templates(&st.profiles[profile_idx].defaults)
+    };
     let mut st = state.borrow_mut();
     st.edit_form = Some(form);
+    st.live_templates = live;
     st.form_needs_render = true;
     // Post a background scan for each autonumber field (split-borrow idiom: worker
     // and alloc_flow are borrowed disjointly from st).

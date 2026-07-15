@@ -54,6 +54,12 @@ pub struct UiState {
     pub search: String,
     /// The loaded editable form (None until a leaf is read).
     pub edit_form: Option<EditForm>,
+    /// Create-mode live-template latches (attr → latch), built by `open_create`
+    /// from the profile's `[profile.defaults]` templates. Empty in edit mode;
+    /// consulted only while the form is in `Create` mode. See
+    /// `config::defaults::recompute_live`.
+    pub live_templates:
+        std::collections::BTreeMap<String, crate::config::defaults::LiveTemplateState>,
     /// Async write flow (validate/diff/submit/correlate).
     pub write_flow: WriteFlow,
     /// Async autonumber allocation flow (scan + pick next-free).
@@ -151,6 +157,7 @@ impl UiState {
             current_leaf: None,
             search: String::new(),
             edit_form: None,
+            live_templates: std::collections::BTreeMap::new(),
             write_flow: WriteFlow::new(),
             alloc_flow: AllocFlow::new(),
             search_flow: SearchFlow::new(),
@@ -808,6 +815,7 @@ pub(crate) fn bootstrap(config: Config, password: String) -> Result<UiState> {
         current_leaf: None,
         search: String::new(),
         edit_form: None,
+        live_templates: std::collections::BTreeMap::new(),
         write_flow: WriteFlow::new(),
         alloc_flow: AllocFlow::new(),
         search_flow: SearchFlow::new(),

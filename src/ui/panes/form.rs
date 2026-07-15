@@ -297,8 +297,9 @@ impl FormPane {
             .unwrap_or(true)
     }
 
-    /// Test seam: set the value InputLine text for field `i`.
-    #[cfg(test)]
+    /// Set the value InputLine text for field `i`, pushing it into the on-screen
+    /// editor. Used by `apply_live_templates` to mirror a recomputed live default
+    /// into its editor, and by tests as a seam to drive typed input.
     pub(crate) fn set_value_text(&mut self, i: usize, text: String) {
         let vid = self.value_ids[i];
         if let Some(sg) = self.scroll_mut() {
@@ -1069,6 +1070,50 @@ impl FormPane {
             h.set_value(FieldValue::Text(text));
         }
     }
+
+    /// Create-mode only: recompute live templated defaults (e.g. `cn` from
+    /// `givenName`/`sn`) and push any changes into the on-screen editors. No-op in
+    /// edit mode (`live_templates` empty and the mode guard fails). Borrow shared
+    /// state, compute, release, then write the editors.
+    fn apply_live_templates(&mut self, _ctx: &mut Context) {
+        let changes: Vec<(usize, String)> = {
+            let mut st = self.state.borrow_mut();
+            let crate::ui::state::UiState {
+                edit_form,
+                live_templates,
+                ..
+            } = &mut *st;
+            let Some(form) = edit_form.as_mut() else {
+                return;
+            };
+            if !matches!(form.mode, FormMode::Create { .. }) {
+                return;
+            }
+            if live_templates.is_empty() {
+                return;
+            }
+            let current: std::collections::BTreeMap<String, Vec<String>> = form
+                .fields
+                .iter()
+                .map(|f| (f.label.clone(), f.values.clone()))
+                .collect();
+            let mut out = Vec::new();
+            for (attr, value) in crate::config::defaults::recompute_live(live_templates, &current) {
+                if let Some(i) = form
+                    .fields
+                    .iter()
+                    .position(|f| f.label.eq_ignore_ascii_case(&attr))
+                {
+                    form.fields[i].values = vec![value.clone()];
+                    out.push((i, value));
+                }
+            }
+            out
+        };
+        for (i, value) in changes {
+            self.set_value_text(i, value);
+        }
+    }
 }
 
 #[delegate(to = group)]
@@ -1229,6 +1274,9 @@ impl View for FormPane {
         }
         // Keep edit_form current with the on-screen editors.
         self.sync_into_form();
+        // Create mode: mirror live templated defaults (cn/displayName) into the
+        // still-auto target fields.
+        self.apply_live_templates(ctx);
     }
 }
 
@@ -2745,6 +2793,93 @@ mod tests {
     #[test]
     fn lookup_uncached_shows_ellipsis_placeholder() {
         assert_eq!(lookup_line_after_render(None), "5000 (\u{2026})");
+    }
+
+    #[test]
+    fn create_live_template_fills_cn_from_given_and_sn() {
+        use crate::config::defaults::{live_templates, parse_default_value, ProfileDefaults};
+        let (shared, mut pane) = build_pane_with_create_form(
+            0,
+            "dc=x",
+            "uid",
+            vec![
+                ef("givenName", "", true),
+                ef("sn", "", true),
+                ef("cn", "", true),
+            ],
+        );
+        // Seed the create-mode latches the way open_create would.
+        {
+            let mut d = ProfileDefaults::default();
+            d.entries.insert(
+                "cn".into(),
+                parse_default_value("{givenName} {sn}").unwrap(),
+            );
+            shared.borrow_mut().live_templates = live_templates(&d);
+        }
+        let mut out = VecDeque::new();
+        let mut timers = tv::timer::TimerQueue::new();
+        let mut deferred = Vec::new();
+        let mut ctx = headless_ctx(&mut out, &mut timers, &mut deferred);
+        let mut refresh = Event::Broadcast {
+            command: REFRESH,
+            source: None,
+        };
+        pane.handle_event(&mut refresh, &mut ctx); // initial render seeds editors
+
+        // Type into the source editors, then pump one event so the hook recomputes.
+        pane.set_value_text(0, "John".into());
+        pane.set_value_text(1, "Doe".into());
+        let mut tick = Event::Broadcast {
+            command: REFRESH,
+            source: None,
+        };
+        pane.handle_event(&mut tick, &mut ctx);
+
+        let cn = shared.borrow();
+        let cn = cn.edit_form.as_ref().unwrap();
+        let cn = cn.fields.iter().find(|f| f.label == "cn").unwrap();
+        assert_eq!(cn.values, vec!["John Doe".to_string()]);
+    }
+
+    #[test]
+    fn edit_mode_never_live_fills() {
+        // An edit-mode form with empty live_templates must not touch cn even if a
+        // template-shaped default would apply.
+        let (shared, mut pane) = build_pane_with_form(vec![
+            ef("givenName", "John", true),
+            ef("sn", "Doe", true),
+            ef("cn", "", true),
+        ]);
+        // live_templates stays empty (edit mode): the hook is gated on Create.
+        let mut out = VecDeque::new();
+        let mut timers = tv::timer::TimerQueue::new();
+        let mut deferred = Vec::new();
+        let mut ctx = headless_ctx(&mut out, &mut timers, &mut deferred);
+        let mut tick = Event::Broadcast {
+            command: REFRESH,
+            source: None,
+        };
+        pane.handle_event(&mut tick, &mut ctx);
+        let st = shared.borrow();
+        let cn = st
+            .edit_form
+            .as_ref()
+            .unwrap()
+            .fields
+            .iter()
+            .find(|f| f.label == "cn")
+            .unwrap();
+        // Robust against empty being stored as [] or [""]: it must NOT have been filled.
+        assert_ne!(cn.values.first().map(String::as_str), Some("John Doe"));
+        assert!(
+            cn.values
+                .first()
+                .map(String::as_str)
+                .unwrap_or("")
+                .is_empty(),
+            "edit mode leaves cn empty"
+        );
     }
 
     /// The label column shows the attribute name plus a curated hint.
