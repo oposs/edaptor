@@ -670,7 +670,7 @@ fn do_create(prog: &mut Program, state: &Shared) {
     };
     use crate::workflows::edit_form::FormMode;
     // 1. Compute the plan + extract pending password (borrow drops before exec_view).
-    let (prep, pending, pending_pw_attrs, resolved_widgets) = {
+    let (prep, pending, pending_pw_attrs, resolved_widgets, companion_spec) = {
         let st = state.borrow();
         let Some(form) = st.edit_form.as_ref() else {
             return;
@@ -683,6 +683,7 @@ fn do_create(prog: &mut Program, state: &Shared) {
             return;
         };
         let profile = &st.profiles[*profile_idx];
+        let companion_spec = profile.companion.clone();
         let prep = plan_create(
             st.read_flow.schema(),
             profile,
@@ -692,7 +693,13 @@ fn do_create(prog: &mut Program, state: &Shared) {
         let pending = st.pending_password.clone();
         let pending_pw_attrs = st.pending_password_attrs.clone();
         let resolved_widgets = st.resolved_widgets.clone();
-        (prep, pending, pending_pw_attrs, resolved_widgets)
+        (
+            prep,
+            pending,
+            pending_pw_attrs,
+            resolved_widgets,
+            companion_spec,
+        )
     };
     match prep {
         CreatePrep::Error(msg) => {
@@ -728,17 +735,65 @@ fn do_create(prog: &mut Program, state: &Shared) {
                 strip_sentinel_from_attrs(&mut attrs, &pending_pw_attrs);
             }
             let ldif = masked.unwrap_or(ldif);
-            let (view, save) = crate::ui::dialog::confirm::build(&ldif);
+
+            // Plan the companion (if declared) against the primary's final attrs.
+            let companion = match &companion_spec {
+                Some(spec) => {
+                    let planned = {
+                        let st = state.borrow();
+                        crate::workflows::create::plan_companion(
+                            spec,
+                            &attrs,
+                            st.read_flow.schema(),
+                        )
+                    };
+                    match planned {
+                        Ok(c) => Some(c),
+                        Err(msg) => {
+                            let (view, ok) = crate::ui::dialog::error::build(&msg);
+                            prog.exec_view_focused(view, ok);
+                            return; // companion invalid → abort the whole create
+                        }
+                    }
+                }
+                None => None,
+            };
+
+            // Preview: primary stanza, then the companion stanza when present.
+            let preview = match &companion {
+                Some(c) => format!("# New entry\n{ldif}\n# Companion entry\n{}", c.ldif),
+                None => ldif,
+            };
+            let (view, save) = crate::ui::dialog::confirm::build(&preview);
             if prog.exec_view_focused(view, save) != Command::OK {
                 return; // cancel: keep editing the create form.
             }
             let mut st = state.borrow_mut();
-            st.pending_password = None; // cleartext consumed; clear before worker picks it up
+            st.pending_password = None; // cleartext consumed
+            let supports_txn = st.server_supports_txn;
             let crate::ui::state::UiState {
                 worker, write_flow, ..
             } = &mut *st;
             if let Some(w) = worker.as_ref() {
-                let _ = write_flow.submit_create(w, &dn, attrs, false);
+                match companion {
+                    Some(c) if supports_txn => {
+                        // Atomic: companion first, primary last; re-read the primary.
+                        let _ = write_flow.submit_create_atomic(
+                            w,
+                            vec![(c.dn, c.attrs), (dn.clone(), attrs)],
+                            &dn,
+                            false,
+                        );
+                    }
+                    Some(c) => {
+                        // Sequential fallback: companion first, then primary.
+                        let _ = write_flow
+                            .submit_create_with_companion(w, &c.dn, c.attrs, &dn, attrs, false);
+                    }
+                    None => {
+                        let _ = write_flow.submit_create(w, &dn, attrs, false);
+                    }
+                }
             }
         }
     }
