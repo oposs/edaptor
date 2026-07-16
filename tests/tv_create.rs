@@ -215,6 +215,7 @@ fn create_entry_via_neutral_create_path() {
         defaults: Default::default(),
         widgets: Default::default(),
         label: None,
+        companion: None,
     };
 
     let (mut create_form, _autonum) = build_create_form(&schema, &profile, 0, container);

@@ -903,6 +903,7 @@ mod tests {
             defaults: Default::default(),
             widgets: Default::default(),
             label: None,
+            companion: None,
         };
         let profiles = vec![p.clone()];
         assert!(profile_for(&profiles, &["inetOrgPerson".into(), "top".into()]).is_some());

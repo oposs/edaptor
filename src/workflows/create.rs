@@ -469,6 +469,7 @@ mod tests {
             defaults: Default::default(),
             widgets: Default::default(),
             label: None,
+            companion: None,
         }
     }
 
@@ -858,6 +859,7 @@ mod tests {
             defaults: Default::default(),
             widgets: Default::default(),
             label: None,
+            companion: None,
         };
         let (form, autonum) =
             build_create_form(&schema, &profile, 0, "ou=people,dc=example,dc=org");

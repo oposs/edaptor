@@ -215,6 +215,25 @@ pub struct EntryProfile {
     /// [`crate::config::relation::CandidateScope`].
     #[serde(default)]
     pub label: Option<String>,
+    /// Optional companion entry created atomically with the primary (`[profile.companion]`).
+    #[serde(default)]
+    pub companion: Option<CompanionSpec>,
+}
+
+/// A declarative companion entry created alongside the primary on `New`
+/// (e.g. a `posixGroup` mirroring a POSIX user). `attributes` values use the same
+/// literal / `{attr}` template syntax as `[profile.defaults]`, resolved against the
+/// primary's final attributes; `{next:…}` autonumbers are not allowed here (rejected
+/// at load). `objectClass` is fixed by `object_classes`, not an `attributes` key.
+#[derive(Debug, Deserialize, Default, Clone)]
+pub struct CompanionSpec {
+    pub object_classes: Vec<String>,
+    #[serde(default)]
+    pub rdn_attr: String,
+    #[serde(default)]
+    pub search_base: String,
+    #[serde(default)]
+    pub attributes: std::collections::BTreeMap<String, String>,
 }
 
 impl EntryProfile {
@@ -317,12 +336,55 @@ impl AuthConfig {
     }
 }
 
+/// Validate every profile's optional `[profile.companion]`. Each declared companion
+/// must have non-empty `object_classes`, `rdn_attr`, and `search_base`; `rdn_attr`
+/// must appear as an `attributes` key (so the RDN has a value source); and every
+/// attribute value must parse as a literal / `{attr}` template — a `{next:…}`
+/// autonumber is rejected (companions carry no independent allocation).
+fn validate_companions(profiles: &[EntryProfile]) -> Result<()> {
+    use crate::config::defaults::{parse_default_value, DefaultValue};
+    for p in profiles {
+        let Some(c) = &p.companion else { continue };
+        let who = format!("profile '{}' companion", p.name);
+        if c.object_classes.is_empty() {
+            anyhow::bail!("{who}: object_classes must not be empty");
+        }
+        if c.rdn_attr.trim().is_empty() {
+            anyhow::bail!("{who}: rdn_attr must not be empty");
+        }
+        if c.search_base.trim().is_empty() {
+            anyhow::bail!("{who}: search_base must not be empty");
+        }
+        if !c
+            .attributes
+            .keys()
+            .any(|k| k.eq_ignore_ascii_case(&c.rdn_attr))
+        {
+            anyhow::bail!(
+                "{who}: rdn_attr '{}' must be one of the companion attributes",
+                c.rdn_attr
+            );
+        }
+        for (attr, tmpl) in &c.attributes {
+            if let DefaultValue::AutoNumber { .. } = parse_default_value(tmpl)
+                .map_err(|e| anyhow::anyhow!("{who} attribute '{attr}': {e}"))?
+            {
+                anyhow::bail!(
+                    "{who} attribute '{attr}': {{next:…}} autonumber is not supported for companions"
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
 impl Config {
     pub fn load(path: &Path) -> Result<Config> {
         let text = std::fs::read_to_string(path)
             .with_context(|| format!("reading config {}", path.display()))?;
         let config: Config =
             toml::from_str(&text).with_context(|| format!("parsing config {}", path.display()))?;
+        validate_companions(&config.profiles)?;
         Ok(config)
     }
 
@@ -627,6 +689,7 @@ mod tests {
             defaults: Default::default(),
             widgets: Default::default(),
             label: None,
+            companion: None,
         };
         assert_eq!(
             p.search_attributes(),
@@ -1139,5 +1202,124 @@ mod meta_tests {
         .unwrap();
         assert_eq!(cfg.meta.name.as_deref(), Some("only a name"));
         assert!(cfg.meta.description.is_none());
+    }
+
+    fn parse_config_str(toml: &str) -> anyhow::Result<Config> {
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!("edaptor-cfg-test-{}.toml", toml.len()));
+        std::fs::write(&path, toml)?;
+        let cfg = Config::load(&path);
+        let _ = std::fs::remove_file(&path);
+        cfg
+    }
+
+    #[test]
+    fn parses_companion_block() {
+        let toml = r#"
+            [server]
+            uri = "ldap://x"
+            base_dn = "dc=x"
+            [auth]
+            bind_dn = "cn=admin,dc=x"
+            [[profile]]
+            name = "Users"
+            object_classes = ["inetOrgPerson","posixAccount"]
+            rdn_attr = "uid"
+            search_base = "ou=people,dc=x"
+            [profile.companion]
+            object_classes = ["posixGroup"]
+            rdn_attr = "cn"
+            search_base = "ou=groups,dc=x"
+            [profile.companion.attributes]
+            cn = "{uid}"
+            gidNumber = "{gidNumber}"
+        "#;
+        let cfg = parse_config_str(toml).expect("parses");
+        let c = cfg.profiles[0]
+            .companion
+            .as_ref()
+            .expect("companion present");
+        assert_eq!(c.object_classes, vec!["posixGroup"]);
+        assert_eq!(c.rdn_attr, "cn");
+        assert_eq!(c.search_base, "ou=groups,dc=x");
+        assert_eq!(c.attributes.get("cn"), Some(&"{uid}".to_string()));
+    }
+
+    #[test]
+    fn companion_without_rdn_attr_in_attributes_is_rejected() {
+        let toml = r#"
+            [server]
+            uri = "ldap://x"
+            base_dn = "dc=x"
+            [auth]
+            bind_dn = "cn=admin,dc=x"
+            [[profile]]
+            name = "Users"
+            object_classes = ["inetOrgPerson"]
+            rdn_attr = "uid"
+            search_base = "ou=people,dc=x"
+            [profile.companion]
+            object_classes = ["posixGroup"]
+            rdn_attr = "cn"
+            search_base = "ou=groups,dc=x"
+            [profile.companion.attributes]
+            gidNumber = "{gidNumber}"
+        "#;
+        let err = parse_config_str(toml).unwrap_err().to_string();
+        assert!(
+            err.contains("cn"),
+            "error should name the missing rdn attribute: {err}"
+        );
+    }
+
+    #[test]
+    fn companion_with_empty_object_classes_is_rejected() {
+        let toml = r#"
+            [server]
+            uri = "ldap://x"
+            base_dn = "dc=x"
+            [auth]
+            bind_dn = "cn=admin,dc=x"
+            [[profile]]
+            name = "Users"
+            object_classes = ["inetOrgPerson"]
+            rdn_attr = "uid"
+            search_base = "ou=people,dc=x"
+            [profile.companion]
+            object_classes = []
+            rdn_attr = "cn"
+            search_base = "ou=groups,dc=x"
+            [profile.companion.attributes]
+            cn = "{uid}"
+        "#;
+        assert!(parse_config_str(toml).is_err());
+    }
+
+    #[test]
+    fn companion_autonumber_attribute_is_rejected() {
+        let toml = r#"
+            [server]
+            uri = "ldap://x"
+            base_dn = "dc=x"
+            [auth]
+            bind_dn = "cn=admin,dc=x"
+            [[profile]]
+            name = "Users"
+            object_classes = ["inetOrgPerson"]
+            rdn_attr = "uid"
+            search_base = "ou=people,dc=x"
+            [profile.companion]
+            object_classes = ["posixGroup"]
+            rdn_attr = "cn"
+            search_base = "ou=groups,dc=x"
+            [profile.companion.attributes]
+            cn = "{uid}"
+            gidNumber = "{next:10000-20000}"
+        "#;
+        let err = parse_config_str(toml).unwrap_err().to_string();
+        assert!(
+            err.to_lowercase().contains("next") || err.contains("gidNumber"),
+            "autonumber in a companion must be rejected: {err}"
+        );
     }
 }
