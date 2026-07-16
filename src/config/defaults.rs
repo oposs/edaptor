@@ -142,8 +142,9 @@ fn is_empty(current: &BTreeMap<String, Vec<String>>, attr: &str) -> bool {
         .unwrap_or(true)
 }
 
-/// Resolve a template against current field values; `None` if any `{field}` is empty.
-fn resolve_template(segs: &[Seg], current: &BTreeMap<String, Vec<String>>) -> Option<String> {
+/// Resolve a template against a values map; `None` if any `{field}` is empty. Pure.
+/// Reused by `plan_defaults` (create-form defaults) and `create::plan_companion`.
+pub fn resolve_template(segs: &[Seg], current: &BTreeMap<String, Vec<String>>) -> Option<String> {
     let mut out = String::new();
     for seg in segs {
         match seg {

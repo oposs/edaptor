@@ -59,6 +59,89 @@ pub fn plan_create(
     }
 }
 
+/// A planned companion `Add` (see [`plan_companion`]).
+#[derive(Debug)]
+pub struct CompanionAdd {
+    pub dn: String,
+    pub attrs: BTreeMap<String, Vec<String>>,
+    pub ldif: String,
+}
+
+/// Plan the companion entry for a create, resolving its `attributes` templates against
+/// the primary's **final** attributes (`primary_attrs` = the map `plan_create` returns).
+/// Composes `objectClass` (`["top"] + object_classes`, deduped), the DN
+/// (`<rdn_attr>=<resolved rdn>,<search_base>`), and validates against `schema`. Pure.
+/// Errors on an empty RDN, a `{next:…}` template (unsupported), or a schema-validation
+/// failure — surfaced before any write.
+pub fn plan_companion(
+    spec: &crate::config::CompanionSpec,
+    primary_attrs: &BTreeMap<String, Vec<String>>,
+    schema: &SchemaModel,
+) -> Result<CompanionAdd, String> {
+    use crate::config::defaults::{parse_default_value, resolve_template, DefaultValue};
+
+    let mut attrs: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for (attr, tmpl) in &spec.attributes {
+        let resolved: Option<String> = match parse_default_value(tmpl)? {
+            DefaultValue::Literal(s) => {
+                let t = s.trim();
+                (!t.is_empty()).then(|| t.to_string())
+            }
+            DefaultValue::Template(segs) => resolve_template(&segs, primary_attrs),
+            DefaultValue::AutoNumber { .. } => {
+                return Err(format!(
+                "companion attribute '{attr}' uses a {{next:…}} autonumber, which is unsupported"
+            ))
+            }
+        };
+        if let Some(v) = resolved {
+            if !v.is_empty() {
+                attrs.insert(attr.clone(), vec![v]);
+            }
+        }
+    }
+
+    // objectClass: "top" first, then each class, deduped case-insensitively.
+    let mut oc: Vec<String> = vec!["top".to_string()];
+    for c in &spec.object_classes {
+        if !oc.iter().any(|x| x.eq_ignore_ascii_case(c)) {
+            oc.push(c.clone());
+        }
+    }
+    attrs.insert("objectClass".to_string(), oc);
+
+    // RDN from the (already-resolved) rdn attribute.
+    let rdn_value = attrs
+        .iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case(&spec.rdn_attr))
+        .and_then(|(_, v)| v.first().cloned())
+        .unwrap_or_default();
+    if rdn_value.trim().is_empty() {
+        return Err(format!(
+            "companion RDN attribute '{}' resolved to an empty value",
+            spec.rdn_attr
+        ));
+    }
+    let dn = format!(
+        "{}={},{}",
+        spec.rdn_attr,
+        rdn_value.trim(),
+        spec.search_base
+    );
+
+    let oc_refs: Vec<&str> = spec.object_classes.iter().map(String::as_str).collect();
+    let full = EditEntry {
+        dn: dn.clone(),
+        attrs: attrs.clone(),
+    };
+    let errors = validate(&full, schema, &oc_refs, &[]);
+    if !errors.is_empty() {
+        return Err(format_validation_errors(&errors));
+    }
+    let ldif = render_add(&dn, &attrs);
+    Ok(CompanionAdd { dn, attrs, ldif })
+}
+
 /// A copy of `attrs` with the password-related attribute values masked, for the
 /// LDIF confirm preview (never show the cleartext or the NT hash). Pure.
 pub fn mask_password_attrs(
@@ -981,5 +1064,86 @@ mod tests {
         assert!(err.contains("Admins"));
         assert!(err.contains("Users"));
         assert!(err.contains("Groups"));
+    }
+
+    fn group_schema() -> SchemaModel {
+        let raw = crate::ldap::worker::RawSubschema {
+            object_classes: vec![
+                "( 2.5.6.0 NAME 'top' ABSTRACT MUST objectClass )".into(),
+                "( 1.3.6.1.1.1.2.2 NAME 'posixGroup' SUP top STRUCTURAL \
+                  MUST ( cn $ gidNumber ) MAY memberUid )".into(),
+            ],
+            attribute_types: vec![
+                "( 2.5.4.3 NAME 'cn' SYNTAX 1.3.6.1.4.1.1466.115.121.1.15 )".into(),
+                "( 1.3.6.1.1.1.1.1 NAME 'gidNumber' SYNTAX 1.3.6.1.4.1.1466.115.121.1.27 SINGLE-VALUE )".into(),
+                "( 1.3.6.1.1.1.1.12 NAME 'memberUid' SYNTAX 1.3.6.1.4.1.1466.115.121.1.15 )".into(),
+            ],
+            ldap_syntaxes: vec![],
+        };
+        SchemaModel::from_raw(&raw)
+    }
+
+    fn companion_spec() -> crate::config::CompanionSpec {
+        let mut attributes = std::collections::BTreeMap::new();
+        attributes.insert("cn".to_string(), "{uid}".to_string());
+        attributes.insert("gidNumber".to_string(), "{gidNumber}".to_string());
+        attributes.insert("memberUid".to_string(), "{uid}".to_string());
+        crate::config::CompanionSpec {
+            object_classes: vec!["posixGroup".into()],
+            rdn_attr: "cn".into(),
+            search_base: "ou=groups,dc=example,dc=org".into(),
+            attributes,
+        }
+    }
+
+    fn primary_attrs_with(uid: &str, gid: Option<&str>) -> BTreeMap<String, Vec<String>> {
+        let mut m: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        m.insert("uid".into(), vec![uid.into()]);
+        if let Some(g) = gid {
+            m.insert("gidNumber".into(), vec![g.into()]);
+        }
+        m
+    }
+
+    #[test]
+    fn plan_companion_composes_dn_attrs_and_objectclass() {
+        let add = plan_companion(
+            &companion_spec(),
+            &primary_attrs_with("alice", Some("10001")),
+            &group_schema(),
+        )
+        .expect("plans");
+        assert_eq!(add.dn, "cn=alice,ou=groups,dc=example,dc=org");
+        assert_eq!(add.attrs.get("cn"), Some(&vec!["alice".to_string()]));
+        assert_eq!(add.attrs.get("gidNumber"), Some(&vec!["10001".to_string()]));
+        assert_eq!(add.attrs.get("memberUid"), Some(&vec!["alice".to_string()]));
+        let oc = add.attrs.get("objectClass").expect("objectClass");
+        assert_eq!(oc[0], "top");
+        assert!(oc.iter().any(|v| v.eq_ignore_ascii_case("posixGroup")));
+        assert!(add.ldif.contains("cn=alice,ou=groups,dc=example,dc=org"));
+    }
+
+    #[test]
+    fn plan_companion_errors_when_rdn_resolves_empty() {
+        // No uid on the primary → cn template resolves empty → RDN empty.
+        let err = plan_companion(
+            &companion_spec(),
+            &primary_attrs_with("", Some("10001")),
+            &group_schema(),
+        )
+        .unwrap_err();
+        assert!(err.to_lowercase().contains("cn") || err.to_lowercase().contains("rdn"));
+    }
+
+    #[test]
+    fn plan_companion_errors_when_must_attr_missing() {
+        // No gidNumber on the primary → posixGroup MUST gidNumber missing → validation error.
+        let err = plan_companion(
+            &companion_spec(),
+            &primary_attrs_with("alice", None),
+            &group_schema(),
+        )
+        .unwrap_err();
+        assert!(err.to_lowercase().contains("gidnumber"));
     }
 }
