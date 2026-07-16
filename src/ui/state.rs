@@ -135,6 +135,9 @@ pub struct UiState {
     /// a live `sambaDomain` LDAP entry). `None` when no Samba domain is configured;
     /// drives `samba_enabled` in the widget resolver so SambaSid widgets activate.
     pub samba_domain: Option<crate::samba::SambaDomainInfo>,
+    /// True when the server advertises RFC 5805 transactions; drives the atomic
+    /// companion-create path (vs. the sequential fallback). Set in `bootstrap`.
+    pub server_supports_txn: bool,
 }
 
 impl UiState {
@@ -194,6 +197,7 @@ impl UiState {
             pending_password: None,
             pending_password_attrs: Vec::new(),
             samba_domain: None,
+            server_supports_txn: false,
         }
     }
 }
@@ -801,6 +805,15 @@ pub(crate) fn bootstrap(config: Config, password: String) -> Result<UiState> {
     };
     let schema = SchemaModel::from_raw(&raw);
 
+    // Tolerant capability probe: a failed/absent root DSE just means "no txn
+    // support" (never fail bootstrap over it).
+    let server_supports_txn = match worker.request(Request::FetchRootDse) {
+        Ok(Response::RootDse {
+            supported_extensions,
+        }) => crate::ldap::worker::txn_supported(&supported_extensions),
+        _ => false,
+    };
+
     let nodes = match worker.request(Request::LoadStructure {
         id: 0,
         base: base_dn.clone(),
@@ -854,6 +867,7 @@ pub(crate) fn bootstrap(config: Config, password: String) -> Result<UiState> {
         pending_password: None,
         pending_password_attrs: Vec::new(),
         samba_domain,
+        server_supports_txn,
     })
 }
 

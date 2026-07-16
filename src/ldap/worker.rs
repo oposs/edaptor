@@ -30,6 +30,16 @@ use crate::form::changeset::ModOp;
 use crate::ldap::result::result_code_message;
 use crate::ldap::tls::build_settings;
 
+/// RFC 5805 transaction extended-operation OIDs.
+pub const TXN_START_OID: &str = "1.3.6.1.1.21.1";
+pub const TXN_END_OID: &str = "1.3.6.1.1.21.3";
+
+/// True iff the server's `supportedExtension` advertises BOTH the Start- and
+/// End-Transaction OIDs (RFC 5805). Pure.
+pub fn txn_supported(exts: &[String]) -> bool {
+    exts.iter().any(|e| e == TXN_START_OID) && exts.iter().any(|e| e == TXN_END_OID)
+}
+
 /// Search scope for a [`Request::Search`]. Mapped to `ldap3::Scope` only inside
 /// the worker (see [`scope_to_ldap3`]) so `ldap3` types do not leak.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -76,6 +86,8 @@ pub struct LdapEntry {
 pub enum Request {
     /// Fetch the raw (unparsed) subschema description strings.
     FetchSubschema,
+    /// Read the root DSE `supportedExtension` list (capability probe).
+    FetchRootDse,
     /// Search the directory. `id` is echoed in the reply for correlation (D4).
     Search {
         /// Caller-assigned correlation id, echoed in the reply.
@@ -157,6 +169,10 @@ pub struct RawSubschema {
 #[derive(Debug, Clone)]
 pub enum Response {
     Subschema(RawSubschema),
+    /// Root DSE `supportedExtension` values (reply to [`Request::FetchRootDse`]).
+    RootDse {
+        supported_extensions: Vec<String>,
+    },
     /// Result of a [`Request::Search`]; `id` echoes the request (D4).
     /// `truncated` is true when the server capped the result set (rc 3/4/11).
     Entries {
@@ -381,6 +397,15 @@ fn worker_loop(conn: &mut LdapConn, config: &Config, rx: Receiver<Job>) {
             Request::FetchSubschema => {
                 let resp = match fetch_subschema(conn, &config.server.base_dn) {
                     Ok(raw) => Response::Subschema(raw),
+                    Err(e) => Response::Error(e.to_string()),
+                };
+                let _ = reply.send(resp);
+            }
+            Request::FetchRootDse => {
+                let resp = match fetch_root_dse(conn) {
+                    Ok(supported_extensions) => Response::RootDse {
+                        supported_extensions,
+                    },
                     Err(e) => Response::Error(e.to_string()),
                 };
                 let _ = reply.send(resp);
@@ -687,6 +712,25 @@ fn fetch_subschema(conn: &mut LdapConn, base_dn: &str) -> Result<RawSubschema> {
     })
 }
 
+/// Read the root DSE (`""`, base scope) and return its `supportedExtension` values.
+fn fetch_root_dse(conn: &mut LdapConn) -> Result<Vec<String>> {
+    let (entries, _res) = conn
+        .search(
+            "",
+            Scope::Base,
+            "(objectClass=*)",
+            vec!["supportedExtension"],
+        )?
+        .success()
+        .context("reading root DSE")?;
+    let exts = entries
+        .into_iter()
+        .map(SearchEntry::construct)
+        .find_map(|e| e.attrs.get("supportedExtension").cloned())
+        .unwrap_or_default();
+    Ok(exts)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -843,6 +887,19 @@ mod tests {
             }
             _ => panic!("expected Replace"),
         }
+    }
+
+    #[test]
+    fn txn_supported_requires_both_oids() {
+        let both = vec![
+            "1.3.6.1.1.21.1".to_string(),
+            "1.3.6.1.1.21.3".to_string(),
+            "1.3.6.1.1.8".to_string(),
+        ];
+        assert!(txn_supported(&both));
+        assert!(!txn_supported(&["1.3.6.1.1.21.1".to_string()]));
+        assert!(!txn_supported(&["1.3.6.1.1.21.3".to_string()]));
+        assert!(!txn_supported(&[]));
     }
 
     #[test]

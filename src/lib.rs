@@ -46,6 +46,7 @@ fn fetch_raw(config: Config, password: String) -> Result<RawSubschema> {
 fn describe_response(resp: &Response) -> &'static str {
     match resp {
         Response::Subschema(_) => "Subschema",
+        Response::RootDse { .. } => "RootDse",
         Response::Entries { .. } => "Entries",
         Response::SearchError { .. } => "SearchError",
         Response::StructureEntries { .. } => "StructureEntries",
