@@ -4,11 +4,18 @@ Carries the **current concern** into the next session. Not a project history —
 that see `git log`, the specs under `docs/superpowers/specs/`, the SDD ledger
 (`.superpowers/sdd/progress.md`), and project memory (`…/memory/MEMORY.md`).
 
-**Date:** 2026-07-15 · **Branch: `feat/usability`** (off `main` @ v1.0.0).
-**Current concern: a batch of usability improvements.** Two are **done, committed,
-`make check` green, and passed a final opus whole-branch review (ready to merge)**;
-three more are **agreed but not yet started**. We keep working on this branch and
-**open a single PR at the end** — do not merge to `main` mid-way.
+**Date:** 2026-07-16 · **Branch: `feat/usability`** (off `main` @ v1.0.0).
+**Current concern: a batch of usability improvements.** Three are **done, committed,
+`make check` green, and reviewed ready to merge**; **item (b)** (companion user-private
+group) is **the last one — now entering its own brainstorm → spec → plan → SDD cycle**.
+We keep working on this branch and **open a single PR at the end** — do not merge to
+`main` mid-way.
+
+**Two interactive manual checks are still unrun** (need a live terminal + demo LDAP;
+they can't be driven headlessly): the **"Create where?"** modal firing when you press
+New *above* a profile's home OU, and **`edaptor tui-create <profile>`** opening the
+right create form / the no-arg chooser fallback. Static review found no correctness
+risk in these paths, but please eyeball them before the PR.
 
 ---
 
@@ -41,6 +48,28 @@ Full range `9c8efcf..HEAD` (10 commits). `make check` green throughout.
      inert (gated on `FormMode::Create` **and** non-empty map — both now tested).
    - Final opus review verdict **READY TO MERGE**; details in the SDD ledger.
 
+3. **Create-usability — `tui-create` launcher + TUI container rule** (item (c); 7 SDD
+   tasks + fmt + mouse-staging fix, range `8bf5d4c..26ae032`). Two parts:
+   - **Container rule.** Pressing New *above* a profile's home OU now pops a
+     **"Create where?"** modal (current branch vs. the profile's `search_base`)
+     instead of silently creating at the wrong location; at/inside the home OU is
+     unambiguous (no prompt). Pure `resolve_create_container` in
+     `src/workflows/create.rs`; `container_chooser` dialog; both `CREATE` arms funnel
+     through `open_create_with_container_rule` in `src/ui/app.rs`.
+   - **`edaptor tui-create [<profile>] [--container <DN>]`.** Launches the TUI straight
+     into a profile's create form, reusing the whole interactive flow. Mechanism: a
+     `StartupAction` on `UiState::pending_startup` (set by `ui::run`), posted once by
+     the pump as `STARTUP`, run in `app::dispatch`. `<profile>` optional (chooser
+     fallback; unknown name errors *pre-launch*); `--container` defaults to
+     `search_base`. Name/container resolved in `main::build_startup_action`.
+   - Spec: `docs/superpowers/specs/2026-07-15-create-usability-cli-container-rule-design.md`
+   - Plan: `docs/superpowers/plans/2026-07-15-create-usability-cli-container-rule.md`
+   - Final opus review **READY TO MERGE** (no Critical/Important); container logic
+     proven consistent with `profiles_for_container`; STARTUP timing safe. A
+     mouse-staging fix (choosers now honour clicks, not just keyboard) shipped as a
+     follow-up. Accepted cosmetic Minors: chooser empty-`search_base` uses a status
+     line not a modal; `container_chooser` fixed width truncates long DNs.
+
 **Also investigated (no code change): Esc closes every modal.** All edaptor modals
 are tvision `Dialog`s, and `Dialog` maps **Esc → CANCEL → end_modal** natively; the
 custom popups delegate their non-nav path to the inner `Dialog`. So Esc already
@@ -50,26 +79,12 @@ resurfaces where Esc does nothing, dig there — the user couldn't reproduce one
 
 ---
 
-## NEXT (agreed with the user, not started) — design on THIS branch
+## NEXT (agreed with the user) — the last item, design on THIS branch
 
-These came from the same usability request. Do each as its own brainstorm → spec →
-plan → SDD cycle. Recommended order: **(c) then (b)**.
+Item (c) is done (see above). Item (b) is the remaining one; do it as its own
+brainstorm → spec → plan → SDD cycle.
 
-### (c) Create-template concept — polish + CLI + the container rule
-Most of it already exists: `New` (the `CREATE` command in `src/ui/app.rs:265`) uses
-the current tree branch as container, filters profiles via
-`create::profiles_for_container` (search_base matches the container at a DN
-boundary — exact, or one is a parent/child of the other), and: **0 → error, 1 →
-open directly, >1 → profile-chooser dialog**. Real gaps to close:
-- **No `edaptor create` CLI subcommand** (only `check`/`schema`/`passwd` exist in
-  `src/main.rs`). The user wants a commandline `create` that asks what to make.
-- **Wrong-container hazard:** if you're *above* a profile's home OU (e.g. at the
-  tree root), the profile is still offered but the object is created at your
-  *current* location, not the profile's `search_base`. The user's instinct: make
-  them navigate to the right OU first (or create at `search_base`). Needs a decided
-  rule — brainstorm it before coding.
-
-### (b) Companion group entry on user create (user private group)
+### (b) Companion group entry on user create (user private group) — IN FLIGHT
 When creating a user that has its own `gidNumber`, also emit a matching `posixGroup`
 in the groups OU (cn = uid, same gidNumber). **Biggest of the three:** today
 `create::plan_create` builds exactly ONE add; this needs a way to *declare* a
