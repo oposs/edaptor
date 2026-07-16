@@ -146,6 +146,23 @@ via       = "member"
 # [profile.widget.myOrderedAttr]
 # kind = "x_ordered"
 
+# Companion entry: `[profile.companion]` declares a second entry eDAPtor creates
+# alongside the primary on New — here, a user-private posixGroup. `attributes`
+# templates resolve against the PRIMARY's final attributes ({next:...} autonumbers
+# are not allowed in a companion); `rdn_attr` must be one of those attribute keys.
+# Created atomically with the primary via LDAP transactions (RFC 5805) when the
+# server supports them, otherwise companion-first with the primary aborted on
+# failure. See docs/configuration/companion.md.
+[profile.companion]
+object_classes = ["posixGroup"]
+rdn_attr       = "cn"
+search_base    = "ou=groups,dc=example,dc=com"
+
+[profile.companion.attributes]
+cn        = "{uid}"        # user-private group: same name as the login
+gidNumber = "{gidNumber}"  # mirrors the user's already-allocated gid
+memberUid = "{uid}"
+
 [[profile]]
 name           = "group"
 object_classes = ["groupOfNames"]
@@ -207,6 +224,11 @@ by name), and a [`[profile.widget.memberOf]`](widgets.md#membership) membership
 binding that overrides the default `readonly` treatment to allow interactive
 group management. See [Entry Profiles](entry-profiles.md) and
 [Widgets](widgets.md).
+
+A [`[profile.companion]`](companion.md) block additionally creates a user-private
+`posixGroup` alongside every new user — `cn` mirrors the user's `uid`, `gidNumber`
+mirrors the user's already-allocated gid, and `memberUid` seeds the user as its
+sole member. See [Companion Entries](companion.md).
 
 ### The `group` profile
 

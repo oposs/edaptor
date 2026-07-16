@@ -8,6 +8,13 @@ All notable changes to eDAPtor are documented here. The format follows
 
 ### New
 
+- **Companion entries on create.** A profile can declare `[profile.companion]` (e.g. a
+  `posixGroup` mirroring a POSIX user); creating through the profile creates both
+  entries — atomically via LDAP transactions (RFC 5805) when the server supports them,
+  otherwise companion-first with the primary aborted on failure. The create confirmation
+  previews both entries. See
+  [Configuration → Companion Entries](https://oposs.github.io/edaptor/configuration/companion.html).
+
 - **Live autofill for templated defaults (create mode).** A `[profile.defaults]`
   template such as `cn = "{givenName} {sn}"` now fills *and keeps updating* the
   target as you type its sources when creating an entry, until you edit the target
