@@ -8,6 +8,14 @@ All notable changes to eDAPtor are documented here. The format follows
 
 ### New
 
+### Changed
+
+### Fixed
+
+## 1.1.0 - 2026-07-16
+
+### New
+
 - **Companion entries on create.** A profile can declare `[profile.companion]` (e.g. a
   `posixGroup` mirroring a POSIX user); creating through the profile creates both
   entries — atomically via LDAP transactions (RFC 5805) when the server supports them,
@@ -26,7 +34,6 @@ All notable changes to eDAPtor are documented here. The format follows
   profile's create form. With no `<profile>` a chooser is shown first; `--container`
   defaults to the profile's `search_base`. An unknown profile name errors before the
   TUI starts.
-
 ### Changed
 
 - **Creating above a profile's home OU now asks where to put the object.** Pressing
