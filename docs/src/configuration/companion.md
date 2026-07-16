@@ -11,7 +11,7 @@ rdn_attr       = "cn"
 search_base    = "ou=groups,dc=example,dc=org"
 
 [profile.companion.attributes]
-cn        = "{cn}"          # templates resolve against the primary's final attributes
+cn        = "{uid}"         # the group is named after the user's login (uid)
 gidNumber = "{gidNumber}"   # mirrors the user's already-allocated gid
 memberUid = "{uid}"
 ```
