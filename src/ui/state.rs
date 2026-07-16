@@ -496,6 +496,22 @@ impl UiState {
                 // A non-final leg of a combined save landed; nothing user-visible yet.
                 out.changed = false;
             }
+            WriteOutcome::NeedFollowupCreate {
+                dn,
+                attrs,
+                companion_dn,
+                quit_after,
+            } => {
+                if let Some(w) = self.worker.as_ref() {
+                    let _ = self.write_flow.submit_followup_create(
+                        w,
+                        &dn,
+                        attrs,
+                        &companion_dn,
+                        quit_after,
+                    );
+                }
+            }
             WriteOutcome::Created { dn, quit_after } => {
                 let ocs = self
                     .edit_form
