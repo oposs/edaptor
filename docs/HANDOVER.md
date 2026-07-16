@@ -5,17 +5,21 @@ that see `git log`, the specs under `docs/superpowers/specs/`, the SDD ledger
 (`.superpowers/sdd/progress.md`), and project memory (`…/memory/MEMORY.md`).
 
 **Date:** 2026-07-16 · **Branch: `feat/usability`** (off `main` @ v1.0.0).
-**Current concern: a batch of usability improvements.** Three are **done, committed,
-`make check` green, and reviewed ready to merge**; **item (b)** (companion user-private
-group) is **the last one — now entering its own brainstorm → spec → plan → SDD cycle**.
-We keep working on this branch and **open a single PR at the end** — do not merge to
-`main` mid-way.
+**Current concern: the usability batch is COMPLETE.** All four items are **done,
+committed, `make check` green, and each passed a final whole-branch/feature review
+(READY TO MERGE)**. Nothing is in flight — the next step is to **open the single
+`feat/usability` PR** (remote `origin` = `git@github.com:oposs/edaptor.git`).
 
-**Two interactive manual checks are still unrun** (need a live terminal + demo LDAP;
-they can't be driven headlessly): the **"Create where?"** modal firing when you press
-New *above* a profile's home OU, and **`edaptor tui-create <profile>`** opening the
-right create form / the no-arg chooser fallback. Static review found no correctness
-risk in these paths, but please eyeball them before the PR.
+**Before the PR, please eyeball these interactive checks** (they need a live terminal
++ demo LDAP and can't be driven headlessly; static review + the live worker tests found
+no correctness risk):
+- item (c): the **"Create where?"** modal firing when you press New *above* a profile's
+  home OU, and **`edaptor tui-create <profile>`** opening the right create form / the
+  no-arg chooser fallback.
+- item (b): creating a user through a companion-declaring profile and confirming the
+  two-stanza preview + that **both** the user and its `posixGroup` land. (The atomic
+  commit *and* rollback are already proven by `tests/live_companion_atomic.rs` against
+  the demo server; this is just the UI-flow eyeball.)
 
 ---
 
@@ -70,6 +74,27 @@ Full range `9c8efcf..HEAD` (10 commits). `make check` green throughout.
      follow-up. Accepted cosmetic Minors: chooser empty-`search_base` uses a status
      line not a modal; `container_chooser` fixed width truncates long DNs.
 
+4. **Companion entry on create — user-private group** (item (b); 7 SDD tasks + a live
+   test + a doc fix, range `45d26ff..06f3941`). A profile can declare
+   `[profile.companion]` (object classes, `rdn_attr`, `search_base`, a templated
+   `attributes` map) and creating through it emits a second entry — e.g. a `posixGroup`
+   mirroring a POSIX user (`cn = {uid}`, same `gidNumber`).
+   - **Atomic via LDAP transactions (RFC 5805).** The worker's `Request::AddAtomic`
+     wraps both Adds in `StartTxn`/`EndTxn` under a `TxnSpec` control when the server
+     advertises txn (detected from the root DSE → `UiState::server_supports_txn`);
+     otherwise a **sequential companion-first fallback** (`CompanionThenPrimary` →
+     `PrimaryAfterCompanion`, orphan-named on primary failure). `do_create` previews both
+     LDIF stanzas and dispatches by capability.
+   - **Architecture:** pure `CompanionSpec` + `validate_companions` (`src/config/mod.rs`);
+     pure `plan_companion` (`src/workflows/create.rs`, reusing `resolve_template`);
+     `AddAtomic` + `txn_supported` + `fetch_root_dse` (`src/ldap/worker.rs`); the two
+     write paths in `src/workflows/write_flow.rs`.
+   - Spec: `docs/superpowers/specs/2026-07-16-companion-entry-on-create-design.md`;
+     Plan: `docs/superpowers/plans/2026-07-16-companion-entry-on-create.md`.
+   - Final opus review **READY TO MERGE** (no Critical/Important). Atomic **commit and
+     rollback** proven live by `tests/live_companion_atomic.rs` against the demo
+     OpenLDAP. Non-blocking follow-ups listed under NEXT.
+
 **Also investigated (no code change): Esc closes every modal.** All edaptor modals
 are tvision `Dialog`s, and `Dialog` maps **Esc → CANCEL → end_modal** natively; the
 custom popups delegate their non-nav path to the inner `Dialog`. So Esc already
@@ -79,18 +104,14 @@ resurfaces where Esc does nothing, dig there — the user couldn't reproduce one
 
 ---
 
-## NEXT (agreed with the user) — the last item, design on THIS branch
+## NEXT
 
-Item (c) is done (see above). Item (b) is the remaining one; do it as its own
-brainstorm → spec → plan → SDD cycle.
-
-### (b) Companion group entry on user create (user private group) — IN FLIGHT
-When creating a user that has its own `gidNumber`, also emit a matching `posixGroup`
-in the groups OU (cn = uid, same gidNumber). **Biggest of the three:** today
-`create::plan_create` builds exactly ONE add; this needs a way to *declare* a
-companion entry in the profile config **and** a multi-add write path (with
-confirm-preview of both stanzas). Look at `src/workflows/save.rs` /
-`write_flow.rs` for how multi-entry writes are already done for membership fan-out.
+Nothing is queued — the batch is done (all four items above are committed and reviewed
+READY TO MERGE). **Open the single `feat/usability` PR** after the interactive eyeball
+checks at the top. Non-blocking follow-ups surfaced by the final reviews (own cycle, not
+this PR): DN-escape the RDN value in `build_add_entry` **and** `plan_companion` together
+(pre-existing, unreachable for uid-keyed entries); `debug_assert!(!entries.is_empty())`
+in `run_add_atomic`; refresh the `do_create` doc-comment for the companion-plan borrow.
 
 ---
 
