@@ -23,6 +23,8 @@ use std::thread::{self, JoinHandle};
 use std::collections::HashSet;
 
 use ldap3::adapters::{Adapter, EntriesOnly, PagedResults};
+use ldap3::controls::{RawControl, TxnSpec};
+use ldap3::exop::{EndTxn, StartTxn, StartTxnResp};
 use ldap3::{LdapConn, Mod, Scope, SearchEntry, SearchOptions, SearchResult};
 
 use crate::config::{AuthMethod, Config};
@@ -133,6 +135,14 @@ pub enum Request {
         dn: String,
         /// Attribute values for the new entry.
         attrs: BTreeMap<String, Vec<String>>,
+    },
+    /// Create several entries in one atomic RFC 5805 transaction. All succeed or the
+    /// transaction is rolled back and nothing is written. `id` echoes in the reply.
+    AddAtomic {
+        /// Correlation id.
+        id: u64,
+        /// (DN, attributes) pairs for every entry to create; the last is the primary.
+        entries: Vec<(String, BTreeMap<String, Vec<String>>)>,
     },
     /// Rename an entry (MODRDN). `id` is echoed in the reply.
     ModRdn {
@@ -449,6 +459,9 @@ fn worker_loop(conn: &mut LdapConn, config: &Config, rx: Receiver<Job>) {
             Request::Add { id, dn, attrs } => {
                 let _ = reply.send(run_add(conn, id, &dn, &attrs));
             }
+            Request::AddAtomic { id, entries } => {
+                let _ = reply.send(run_add_atomic(conn, id, &entries));
+            }
             Request::ModRdn {
                 id,
                 dn,
@@ -527,6 +540,82 @@ fn run_add(
         .map(|(k, vs)| (k.clone(), vs.iter().cloned().collect::<HashSet<String>>()))
         .collect();
     write_response(id, dn, conn.add(dn, entry))
+}
+
+/// Create every entry in `entries` inside one RFC 5805 transaction: StartTxn → each
+/// Add under the transaction control → EndTxn(commit). Any Add failure (or an
+/// EndTxn/commit failure) aborts the transaction and returns [`Response::WriteError`]
+/// with nothing written. On success yields [`Response::WriteOk`] carrying the LAST
+/// entry's DN (the primary, submitted last). Confined to the worker (ldap3-only).
+fn run_add_atomic(
+    conn: &mut LdapConn,
+    id: u64,
+    entries: &[(String, BTreeMap<String, Vec<String>>)],
+) -> Response {
+    // StartTransaction.
+    let txn_id = match conn.extended(StartTxn) {
+        Ok(ex) if ex.1.rc == 0 => ex.0.parse::<StartTxnResp>().txn_id,
+        Ok(ex) => {
+            return Response::WriteError {
+                id,
+                msg: result_code_message(ex.1.rc, &ex.1.text),
+            }
+        }
+        Err(e) => {
+            return Response::WriteError {
+                id,
+                msg: format!("StartTransaction: {e}"),
+            }
+        }
+    };
+
+    let mut last_dn = String::new();
+    for (dn, attrs) in entries {
+        let entry: Vec<(String, HashSet<String>)> = attrs
+            .iter()
+            .map(|(k, vs)| (k.clone(), vs.iter().cloned().collect::<HashSet<String>>()))
+            .collect();
+        let ctrl = RawControl::from(TxnSpec { txn_id: &txn_id });
+        match conn.with_controls(vec![ctrl]).add(dn, entry) {
+            Ok(r) if r.rc == 0 => last_dn = dn.clone(),
+            Ok(r) => {
+                let _ = conn.extended(EndTxn {
+                    txn_id: &txn_id,
+                    commit: false,
+                });
+                return Response::WriteError {
+                    id,
+                    msg: result_code_message(r.rc, &r.text),
+                };
+            }
+            Err(e) => {
+                let _ = conn.extended(EndTxn {
+                    txn_id: &txn_id,
+                    commit: false,
+                });
+                return Response::WriteError {
+                    id,
+                    msg: format!("{e}"),
+                };
+            }
+        }
+    }
+
+    // EndTransaction(commit).
+    match conn.extended(EndTxn {
+        txn_id: &txn_id,
+        commit: true,
+    }) {
+        Ok(ex) if ex.1.rc == 0 => Response::WriteOk { id, dn: last_dn },
+        Ok(ex) => Response::WriteError {
+            id,
+            msg: result_code_message(ex.1.rc, &ex.1.text),
+        },
+        Err(e) => Response::WriteError {
+            id,
+            msg: format!("EndTransaction commit: {e}"),
+        },
+    }
 }
 
 fn run_modrdn(
