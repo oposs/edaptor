@@ -54,6 +54,12 @@ pub struct UiState {
     pub search: String,
     /// The loaded editable form (None until a leaf is read).
     pub edit_form: Option<EditForm>,
+    /// Create-mode live-template latches (attr → latch), built by `open_create`
+    /// from the profile's `[profile.defaults]` templates. Empty in edit mode;
+    /// consulted only while the form is in `Create` mode. See
+    /// `config::defaults::recompute_live`.
+    pub live_templates:
+        std::collections::BTreeMap<String, crate::config::defaults::LiveTemplateState>,
     /// Async write flow (validate/diff/submit/correlate).
     pub write_flow: WriteFlow,
     /// Async autonumber allocation flow (scan + pick next-free).
@@ -105,6 +111,14 @@ pub struct UiState {
     /// Profile chooser → controller: the index the user highlighted when OK was
     /// pressed. Set by `ProfileChooser`; read by `dispatch` to select a profile.
     pub chosen_profile: Option<usize>,
+    /// Container chooser → controller: the row the user highlighted (0 = current
+    /// branch, 1 = the profile's search_base) when OK was pressed. Set by
+    /// `ContainerChooser`; read by `dispatch` in the create container rule.
+    pub chosen_container: Option<usize>,
+    /// One-shot action to run after the TUI starts (set by `tui-create` via
+    /// `ui::run`; `None` for a normal launch). Posted once by the pump as `STARTUP`,
+    /// taken by `dispatch`. See [`crate::ui::StartupAction`].
+    pub pending_startup: Option<crate::ui::StartupAction>,
     /// True when the LDAP connection is encrypted (LDAPS, StartTLS, or ldapi://).
     /// The password widget refuses to operate when this is false.
     pub connection_encrypted: bool,
@@ -121,6 +135,9 @@ pub struct UiState {
     /// a live `sambaDomain` LDAP entry). `None` when no Samba domain is configured;
     /// drives `samba_enabled` in the widget resolver so SambaSid widgets activate.
     pub samba_domain: Option<crate::samba::SambaDomainInfo>,
+    /// True when the server advertises RFC 5805 transactions; drives the atomic
+    /// companion-create path (vs. the sequential fallback). Set in `bootstrap`.
+    pub server_supports_txn: bool,
 }
 
 impl UiState {
@@ -151,6 +168,7 @@ impl UiState {
             current_leaf: None,
             search: String::new(),
             edit_form: None,
+            live_templates: std::collections::BTreeMap::new(),
             write_flow: WriteFlow::new(),
             alloc_flow: AllocFlow::new(),
             search_flow: SearchFlow::new(),
@@ -172,11 +190,14 @@ impl UiState {
             activate_field: None,
             staged_commit: None,
             chosen_profile: None,
+            chosen_container: None,
+            pending_startup: None,
             connection_encrypted: false,
             resolved_widgets: Vec::new(),
             pending_password: None,
             pending_password_attrs: Vec::new(),
             samba_domain: None,
+            server_supports_txn: false,
         }
     }
 }
@@ -474,6 +495,22 @@ impl UiState {
             WriteOutcome::BatchProgress { .. } => {
                 // A non-final leg of a combined save landed; nothing user-visible yet.
                 out.changed = false;
+            }
+            WriteOutcome::NeedFollowupCreate {
+                dn,
+                attrs,
+                companion_dn,
+                quit_after,
+            } => {
+                if let Some(w) = self.worker.as_ref() {
+                    let _ = self.write_flow.submit_followup_create(
+                        w,
+                        &dn,
+                        attrs,
+                        &companion_dn,
+                        quit_after,
+                    );
+                }
             }
             WriteOutcome::Created { dn, quit_after } => {
                 let ocs = self
@@ -784,6 +821,15 @@ pub(crate) fn bootstrap(config: Config, password: String) -> Result<UiState> {
     };
     let schema = SchemaModel::from_raw(&raw);
 
+    // Tolerant capability probe: a failed/absent root DSE just means "no txn
+    // support" (never fail bootstrap over it).
+    let server_supports_txn = match worker.request(Request::FetchRootDse) {
+        Ok(Response::RootDse {
+            supported_extensions,
+        }) => crate::ldap::worker::txn_supported(&supported_extensions),
+        _ => false,
+    };
+
     let nodes = match worker.request(Request::LoadStructure {
         id: 0,
         base: base_dn.clone(),
@@ -808,6 +854,7 @@ pub(crate) fn bootstrap(config: Config, password: String) -> Result<UiState> {
         current_leaf: None,
         search: String::new(),
         edit_form: None,
+        live_templates: std::collections::BTreeMap::new(),
         write_flow: WriteFlow::new(),
         alloc_flow: AllocFlow::new(),
         search_flow: SearchFlow::new(),
@@ -829,11 +876,14 @@ pub(crate) fn bootstrap(config: Config, password: String) -> Result<UiState> {
         activate_field: None,
         staged_commit: None,
         chosen_profile: None,
+        chosen_container: None,
+        pending_startup: None,
         connection_encrypted,
         resolved_widgets,
         pending_password: None,
         pending_password_attrs: Vec::new(),
         samba_domain,
+        server_supports_txn,
     })
 }
 
@@ -883,6 +933,7 @@ mod tests {
             defaults: Default::default(),
             widgets: Default::default(),
             label: None,
+            companion: None,
         };
         let profiles = vec![p.clone()];
         assert!(profile_for(&profiles, &["inetOrgPerson".into(), "top".into()]).is_some());

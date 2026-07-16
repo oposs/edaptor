@@ -59,6 +59,9 @@ label          = "{cn} ({uid})"               # e.g. "Bob Baker (bob)"
 #                          the whole directory (refuses if the scan is truncated
 #                          by a server size limit — bind with a high-limit identity)
 [profile.defaults]
+# In create mode these fill live from givenName/sn until you edit them.
+cn            = "{givenName} {sn}"
+displayName   = "{givenName} {sn}"
 loginShell    = "/bin/bash"
 homeDirectory = "/home/{uid}"
 uidNumber     = "{next:10000-60000}"
@@ -137,6 +140,23 @@ via       = "member"
 # olcGlobal/olcDatabaseConfig entries. Use for your own X-ORDERED attributes.
 # [profile.widget.myOrderedAttr]
 # kind = "x_ordered"
+
+# Companion entry: `[profile.companion]` declares a second entry eDAPtor creates
+# alongside the primary on New — here, a user-private posixGroup. `attributes`
+# templates resolve against the PRIMARY's final attributes ({next:...} autonumbers
+# are not allowed in a companion); `rdn_attr` must be one of those attribute keys.
+# Created atomically with the primary via LDAP transactions (RFC 5805) when the
+# server supports them, otherwise companion-first with the primary aborted on
+# failure. See docs/configuration/companion.md.
+[profile.companion]
+object_classes = ["posixGroup"]
+rdn_attr       = "cn"
+search_base    = "ou=groups,dc=example,dc=com"
+
+[profile.companion.attributes]
+cn        = "{uid}"        # user-private group: same name as the login
+gidNumber = "{gidNumber}"  # mirrors the user's already-allocated gid
+memberUid = "{uid}"
 
 [[profile]]
 name           = "group"

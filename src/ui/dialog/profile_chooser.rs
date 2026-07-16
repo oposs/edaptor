@@ -112,11 +112,12 @@ impl View for ProfileChooser {
             if let Some(list) = self.dlg.child_mut(self.list_id) {
                 list.handle_event(ev, ctx);
             }
-            // Update shared state with the new highlight position.
-            self.stage_index();
         } else {
             self.dlg.handle_event(ev, ctx);
         }
+        // Stage regardless of branch: mouse clicks routed through the else-branch
+        // also move the ListBox highlight and must be reflected in shared state.
+        self.stage_index();
     }
 }
 
@@ -213,6 +214,52 @@ mod tests {
             sh.borrow().chosen_profile,
             Some(1),
             "chosen_profile must be Some(1) after Down"
+        );
+    }
+
+    /// TDD (review follow-up): a mouse click on the second row must stage it,
+    /// not just Up/Down keyboard nav. Before the fix, `handle_event`'s `else`
+    /// branch forwarded the click to `self.dlg` (which moves the `ListBox`
+    /// highlight) but never called `stage_index()`, so `chosen_profile` stayed
+    /// at the `reset_current` default (`Some(0)`).
+    ///
+    /// Coordinates: see the identical reasoning in
+    /// `container_chooser::tests::mouse_click_on_second_row_stages_it_without_nav`
+    /// — the dialog is never inserted into an owning `Group` here, so its
+    /// bounds stay `Rect::new(0, 0, 42, height)` as constructed, and the
+    /// `ListBox` sits at `Rect::new(2, 1, 40, 1 + list_rows)`. A `MouseDown`
+    /// at dialog-local `(3, 2)` becomes list-local `(1, 1)` after
+    /// `Group::deliver` subtracts the list's origin, which
+    /// `list_viewer::handle_event` maps to item index 1 — the second row.
+    #[test]
+    fn mouse_click_on_second_row_stages_it_without_nav() {
+        use tvision_rs::Deferred;
+        let sh = shared();
+        let names = vec!["People".to_string(), "Groups".to_string()];
+        let (mut view, _list_id) = build(names, sh.clone());
+
+        let mut out = std::collections::VecDeque::new();
+        let mut timers = tv::timer::TimerQueue::new();
+        let mut deferred: Vec<Deferred> = Vec::new();
+        let mut ctx = make_ctx(&mut out, &mut timers, &mut deferred);
+        view.reset_current(&mut ctx);
+        assert_eq!(sh.borrow().chosen_profile, Some(0));
+
+        let chooser = view
+            .as_any_mut()
+            .and_then(|a| a.downcast_mut::<ProfileChooser>())
+            .expect("downcast");
+
+        let mut ev = Event::MouseDown(tv::MouseEvent {
+            position: tv::Point::new(3, 2),
+            ..Default::default()
+        });
+        chooser.handle_event(&mut ev, &mut ctx);
+
+        assert_eq!(
+            sh.borrow().chosen_profile,
+            Some(1),
+            "a mouse click on the second row must stage it, matching the moved highlight"
         );
     }
 

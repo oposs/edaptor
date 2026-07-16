@@ -4,7 +4,7 @@
 //! are thin worker wrappers. Mirrors `read_flow` but for writes; the two never
 //! collide because read and write responses are disjoint `Response` variants.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use anyhow::Result;
 
@@ -86,6 +86,21 @@ enum WriteIntent {
         reread_dn: String,
         quit_after: bool,
     },
+    /// Sequential fallback (no server txn): the companion ADD was submitted; on its
+    /// success submit the primary ADD carried here. See [`WriteFlow::submit_create_with_companion`].
+    CompanionThenPrimary {
+        primary_dn: String,
+        primary_attrs: BTreeMap<String, Vec<String>>,
+        quit_after: bool,
+    },
+    /// Sequential fallback: the primary ADD, submitted after the companion succeeded.
+    /// On success → [`WriteOutcome::Created`]; on failure → an error naming the orphaned
+    /// `companion_dn` that was already created.
+    PrimaryAfterCompanion {
+        primary_dn: String,
+        companion_dn: String,
+        quit_after: bool,
+    },
 }
 
 /// The app-facing result of correlating one write response.
@@ -113,6 +128,16 @@ pub enum WriteOutcome {
     /// One non-final leg of a combined membership save landed; the batch is not yet
     /// complete. Non-terminal — no user-visible effect until [`CombinedSaved`].
     BatchProgress { remaining: usize },
+    /// The companion ADD landed; the caller must now submit the primary ADD via
+    /// [`WriteFlow::submit_followup_create`]. Sequential fallback only. `companion_dn`
+    /// is the just-created companion, carried so a later primary failure can name the
+    /// orphan.
+    NeedFollowupCreate {
+        dn: String,
+        attrs: BTreeMap<String, Vec<String>>,
+        companion_dn: String,
+        quit_after: bool,
+    },
 }
 
 /// The masked sentinel set in a password field by `CommitOutcome::StageSecret`.
@@ -394,6 +419,87 @@ impl WriteFlow {
         Ok(())
     }
 
+    /// Atomic path: create `entries` (companion first, primary last) in one RFC 5805
+    /// transaction. `reread_dn` is the primary DN to re-read after success. One
+    /// `WriteOk` → [`WriteOutcome::Created`]; one `WriteError` → [`WriteOutcome::Error`]
+    /// (nothing written).
+    pub fn submit_create_atomic(
+        &mut self,
+        worker: &WorkerHandle,
+        entries: Vec<(String, BTreeMap<String, Vec<String>>)>,
+        reread_dn: &str,
+        quit_after: bool,
+    ) -> Result<()> {
+        let id = self.alloc();
+        worker.submit(Request::AddAtomic { id, entries })?;
+        self.pending.insert(
+            id,
+            WriteIntent::Create {
+                dn: reread_dn.to_string(),
+                quit_after,
+            },
+        );
+        Ok(())
+    }
+
+    /// Sequential fallback: submit the companion ADD first, carrying the primary ADD to
+    /// submit on the companion's success (via [`WriteOutcome::NeedFollowupCreate`] →
+    /// [`submit_followup_create`](Self::submit_followup_create)).
+    pub fn submit_create_with_companion(
+        &mut self,
+        worker: &WorkerHandle,
+        companion_dn: &str,
+        companion_attrs: BTreeMap<String, Vec<String>>,
+        primary_dn: &str,
+        primary_attrs: BTreeMap<String, Vec<String>>,
+        quit_after: bool,
+    ) -> Result<()> {
+        let id = self.alloc();
+        worker.submit(Request::Add {
+            id,
+            dn: companion_dn.to_string(),
+            attrs: companion_attrs,
+        })?;
+        self.pending.insert(
+            id,
+            WriteIntent::CompanionThenPrimary {
+                primary_dn: primary_dn.to_string(),
+                primary_attrs,
+                quit_after,
+            },
+        );
+        Ok(())
+    }
+
+    /// Sequential fallback second phase: submit the primary ADD after the companion
+    /// (`companion_dn`) landed. Tracked as [`WriteIntent::PrimaryAfterCompanion`], so its
+    /// success → [`WriteOutcome::Created`] and its failure → an error naming the orphaned
+    /// companion.
+    pub fn submit_followup_create(
+        &mut self,
+        worker: &WorkerHandle,
+        dn: &str,
+        attrs: BTreeMap<String, Vec<String>>,
+        companion_dn: &str,
+        quit_after: bool,
+    ) -> Result<()> {
+        let id = self.alloc();
+        worker.submit(Request::Add {
+            id,
+            dn: dn.to_string(),
+            attrs,
+        })?;
+        self.pending.insert(
+            id,
+            WriteIntent::PrimaryAfterCompanion {
+                primary_dn: dn.to_string(),
+                companion_dn: companion_dn.to_string(),
+                quit_after,
+            },
+        );
+        Ok(())
+    }
+
     /// Submit a combined membership save: the own-entry MODIFY (when `own_mods` is
     /// non-empty) plus one MODIFY per touched group. All legs are tracked under one
     /// batch so [`on_response`](Self::on_response) can report
@@ -501,7 +607,7 @@ impl WriteFlow {
     /// Correlate one polled [`Response`]. Pure; ignores non-write variants.
     pub fn on_response(&mut self, resp: &Response) -> WriteOutcome {
         match resp {
-            Response::WriteOk { id, .. } => match self.pending.remove(id) {
+            Response::WriteOk { id, dn: resp_dn } => match self.pending.remove(id) {
                 Some(WriteIntent::Save {
                     reread_dn,
                     quit_after,
@@ -521,6 +627,24 @@ impl WriteFlow {
                 Some(WriteIntent::Create { dn, quit_after }) => {
                     WriteOutcome::Created { dn, quit_after }
                 }
+                Some(WriteIntent::CompanionThenPrimary {
+                    primary_dn,
+                    primary_attrs,
+                    quit_after,
+                }) => WriteOutcome::NeedFollowupCreate {
+                    dn: primary_dn,
+                    attrs: primary_attrs,
+                    companion_dn: resp_dn.clone(), // the companion just created
+                    quit_after,
+                },
+                Some(WriteIntent::PrimaryAfterCompanion {
+                    primary_dn,
+                    quit_after,
+                    ..
+                }) => WriteOutcome::Created {
+                    dn: primary_dn,
+                    quit_after,
+                },
                 Some(WriteIntent::CombinedLeg {
                     batch_id,
                     reread_dn,
@@ -558,11 +682,62 @@ impl WriteFlow {
                          review membership before retrying."
                     ))
                 }
+                Some(WriteIntent::PrimaryAfterCompanion { companion_dn, .. }) => {
+                    WriteOutcome::Error(format!(
+                        "The primary entry failed to create ({msg}). Its companion \
+                         {companion_dn} was already created — remove it or retry."
+                    ))
+                }
                 Some(_) => WriteOutcome::Error(msg.clone()),
                 None => WriteOutcome::Ignored,
             },
             _ => WriteOutcome::Ignored,
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn insert_create_intent_for_test(&mut self, id: u64, dn: &str, quit_after: bool) {
+        self.pending.insert(
+            id,
+            WriteIntent::Create {
+                dn: dn.to_string(),
+                quit_after,
+            },
+        );
+    }
+    #[cfg(test)]
+    pub(crate) fn insert_companion_intent_for_test(
+        &mut self,
+        id: u64,
+        primary_dn: &str,
+        primary_attrs: std::collections::BTreeMap<String, Vec<String>>,
+        quit_after: bool,
+    ) {
+        self.pending.insert(
+            id,
+            WriteIntent::CompanionThenPrimary {
+                primary_dn: primary_dn.to_string(),
+                primary_attrs,
+                quit_after,
+            },
+        );
+    }
+    #[cfg(test)]
+    pub(crate) fn insert_primary_after_companion_for_test(
+        &mut self,
+        id: u64,
+        primary_dn: &str,
+        companion_dn: &str,
+        quit_after: bool,
+    ) {
+        self.pending.insert(
+            id,
+            WriteIntent::PrimaryAfterCompanion {
+                primary_dn: primary_dn.to_string(),
+                companion_dn: companion_dn.to_string(),
+                quit_after,
+            },
+        );
     }
 }
 
@@ -573,6 +748,7 @@ mod tests {
     use crate::schema::{FieldKind, SchemaModel};
     use crate::workflows::edit_form::{EditField, EditForm, FormMode};
     use crate::workflows::form_model::WidgetSpec;
+    use std::collections::BTreeMap;
 
     fn schema() -> SchemaModel {
         SchemaModel::from_raw(&RawSubschema {
@@ -1314,5 +1490,86 @@ mod tests {
             WriteOutcome::Ignored
         ));
         assert_eq!(wf.pending.len(), 1);
+    }
+
+    // --- Task 5: atomic create + sequential companion-then-primary fallback ---
+
+    #[test]
+    fn atomic_create_yields_created() {
+        let mut wf = WriteFlow::new();
+        wf.insert_create_intent_for_test(7, "uid=alice,ou=people,dc=x", true);
+        match wf.on_response(&Response::WriteOk {
+            id: 7,
+            dn: "uid=alice,ou=people,dc=x".into(),
+        }) {
+            WriteOutcome::Created { dn, quit_after } => {
+                assert_eq!(dn, "uid=alice,ou=people,dc=x");
+                assert!(quit_after);
+            }
+            other => panic!("expected Created, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn companion_ok_yields_needfollowupcreate() {
+        let mut wf = WriteFlow::new();
+        let mut attrs: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        attrs.insert("uid".into(), vec!["alice".into()]);
+        wf.insert_companion_intent_for_test(3, "uid=alice,ou=people,dc=x", attrs.clone(), false);
+        match wf.on_response(&Response::WriteOk {
+            id: 3,
+            dn: "cn=alice,ou=groups,dc=x".into(),
+        }) {
+            WriteOutcome::NeedFollowupCreate {
+                dn,
+                attrs: got,
+                companion_dn,
+                quit_after,
+            } => {
+                assert_eq!(dn, "uid=alice,ou=people,dc=x");
+                assert_eq!(companion_dn, "cn=alice,ou=groups,dc=x");
+                assert_eq!(got.get("uid"), Some(&vec!["alice".to_string()]));
+                assert!(!quit_after);
+            }
+            other => panic!("expected NeedFollowupCreate, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn companion_error_yields_error_and_no_followup() {
+        let mut wf = WriteFlow::new();
+        let attrs: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        wf.insert_companion_intent_for_test(4, "uid=alice,ou=people,dc=x", attrs, false);
+        match wf.on_response(&Response::WriteError {
+            id: 4,
+            msg: "already exists".into(),
+        }) {
+            WriteOutcome::Error(msg) => assert!(msg.contains("already exists")),
+            other => panic!("expected Error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn primary_after_companion_error_names_orphan() {
+        let mut wf = WriteFlow::new();
+        wf.insert_primary_after_companion_for_test(
+            5,
+            "uid=alice,ou=people,dc=x",
+            "cn=alice,ou=groups,dc=x",
+            false,
+        );
+        match wf.on_response(&Response::WriteError {
+            id: 5,
+            msg: "boom".into(),
+        }) {
+            WriteOutcome::Error(m) => {
+                assert!(
+                    m.contains("cn=alice,ou=groups,dc=x"),
+                    "names the orphan: {m}"
+                );
+                assert!(m.contains("boom"));
+            }
+            other => panic!("expected Error, got {other:?}"),
+        }
     }
 }

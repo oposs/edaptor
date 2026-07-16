@@ -132,6 +132,7 @@ mod tests {
             defaults: Default::default(),
             widgets: Default::default(),
             label: None,
+            companion: None,
         }
     }
 

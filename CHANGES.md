@@ -8,9 +8,37 @@ All notable changes to eDAPtor are documented here. The format follows
 
 ### New
 
+- **Companion entries on create.** A profile can declare `[profile.companion]` (e.g. a
+  `posixGroup` mirroring a POSIX user); creating through the profile creates both
+  entries — atomically via LDAP transactions (RFC 5805) when the server supports them,
+  otherwise companion-first with the primary aborted on failure. The create confirmation
+  previews both entries. See
+  [Configuration → Companion Entries](https://oposs.github.io/edaptor/configuration/companion.html).
+
+- **Live autofill for templated defaults (create mode).** A `[profile.defaults]`
+  template such as `cn = "{givenName} {sn}"` now fills *and keeps updating* the
+  target as you type its sources when creating an entry, until you edit the target
+  yourself (clear it to re-arm). Literals and autonumbers are unchanged; editing
+  existing entries is unaffected. See
+  [Configuration → Defaults](https://oposs.github.io/edaptor/configuration/defaults.html).
+
+- **`edaptor tui-create [<profile>] [--container <DN>]`.** Launch straight into a
+  profile's create form. With no `<profile>` a chooser is shown first; `--container`
+  defaults to the profile's `search_base`. An unknown profile name errors before the
+  TUI starts.
+
 ### Changed
 
+- **Creating above a profile's home OU now asks where to put the object.** Pressing
+  New while standing above a profile's `search_base` prompts "Create where?" —
+  the current branch or the profile's home OU — instead of silently composing the
+  entry at the current (wrong) location.
+
 ### Fixed
+
+- **PgUp/PgDn now page the entry form.** The scrollable form pane moves focus by a
+  full viewport on Page keys (previously only arrow-by-arrow scrolling worked); the
+  tree and leaf list panes already paged.
 
 ## 1.0.0 - 2026-07-08
 

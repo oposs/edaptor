@@ -132,6 +132,7 @@ use std::time::{Duration, Instant};
 fn variant_name(resp: &Response) -> &'static str {
     match resp {
         Response::Subschema(_) => "Subschema",
+        Response::RootDse { .. } => "RootDse",
         Response::Entries { .. } => "Entries",
         Response::SearchError { .. } => "SearchError",
         Response::StructureEntries { .. } => "StructureEntries",

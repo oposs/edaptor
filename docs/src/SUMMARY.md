@@ -14,6 +14,7 @@
 - [Entry Profiles](configuration/entry-profiles.md)
 - [Defaults](configuration/defaults.md)
 - [Widgets](configuration/widgets.md)
+- [Companion Entries](configuration/companion.md)
 - [DIT Tree Labels](configuration/tree-labels.md)
 - [Full Example](configuration/full-example.md)
 

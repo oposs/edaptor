@@ -59,6 +59,89 @@ pub fn plan_create(
     }
 }
 
+/// A planned companion `Add` (see [`plan_companion`]).
+#[derive(Debug)]
+pub struct CompanionAdd {
+    pub dn: String,
+    pub attrs: BTreeMap<String, Vec<String>>,
+    pub ldif: String,
+}
+
+/// Plan the companion entry for a create, resolving its `attributes` templates against
+/// the primary's **final** attributes (`primary_attrs` = the map `plan_create` returns).
+/// Composes `objectClass` (`["top"] + object_classes`, deduped), the DN
+/// (`<rdn_attr>=<resolved rdn>,<search_base>`), and validates against `schema`. Pure.
+/// Errors on an empty RDN, a `{next:…}` template (unsupported), or a schema-validation
+/// failure — surfaced before any write.
+pub fn plan_companion(
+    spec: &crate::config::CompanionSpec,
+    primary_attrs: &BTreeMap<String, Vec<String>>,
+    schema: &SchemaModel,
+) -> Result<CompanionAdd, String> {
+    use crate::config::defaults::{parse_default_value, resolve_template, DefaultValue};
+
+    let mut attrs: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for (attr, tmpl) in &spec.attributes {
+        let resolved: Option<String> = match parse_default_value(tmpl)? {
+            DefaultValue::Literal(s) => {
+                let t = s.trim();
+                (!t.is_empty()).then(|| t.to_string())
+            }
+            DefaultValue::Template(segs) => resolve_template(&segs, primary_attrs),
+            DefaultValue::AutoNumber { .. } => {
+                return Err(format!(
+                "companion attribute '{attr}' uses a {{next:…}} autonumber, which is unsupported"
+            ))
+            }
+        };
+        if let Some(v) = resolved {
+            if !v.is_empty() {
+                attrs.insert(attr.clone(), vec![v]);
+            }
+        }
+    }
+
+    // objectClass: "top" first, then each class, deduped case-insensitively.
+    let mut oc: Vec<String> = vec!["top".to_string()];
+    for c in &spec.object_classes {
+        if !oc.iter().any(|x| x.eq_ignore_ascii_case(c)) {
+            oc.push(c.clone());
+        }
+    }
+    attrs.insert("objectClass".to_string(), oc);
+
+    // RDN from the (already-resolved) rdn attribute.
+    let rdn_value = attrs
+        .iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case(&spec.rdn_attr))
+        .and_then(|(_, v)| v.first().cloned())
+        .unwrap_or_default();
+    if rdn_value.trim().is_empty() {
+        return Err(format!(
+            "companion RDN attribute '{}' resolved to an empty value",
+            spec.rdn_attr
+        ));
+    }
+    let dn = format!(
+        "{}={},{}",
+        spec.rdn_attr,
+        rdn_value.trim(),
+        spec.search_base
+    );
+
+    let oc_refs: Vec<&str> = spec.object_classes.iter().map(String::as_str).collect();
+    let full = EditEntry {
+        dn: dn.clone(),
+        attrs: attrs.clone(),
+    };
+    let errors = validate(&full, schema, &oc_refs, &[]);
+    if !errors.is_empty() {
+        return Err(format_validation_errors(&errors));
+    }
+    let ldif = render_add(&dn, &attrs);
+    Ok(CompanionAdd { dn, attrs, ldif })
+}
+
 /// A copy of `attrs` with the password-related attribute values masked, for the
 /// LDIF confirm preview (never show the cleartext or the NT hash). Pure.
 pub fn mask_password_attrs(
@@ -191,6 +274,71 @@ fn dn_boundary_match(a: &str, b: &str) -> bool {
         return true;
     }
     a.ends_with(&format!(",{b}")) || b.ends_with(&format!(",{a}"))
+}
+
+/// Where a create should land, given the operator's current tree branch and the
+/// chosen profile's `search_base`. Pure. Callers pass DNs already known to be on the
+/// same path (guaranteed by [`profiles_for_container`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CreateContainer {
+    /// Unambiguous — create at this container DN.
+    Unambiguous(String),
+    /// The current branch is an ancestor of the profile's home OU — ask which target.
+    Ask { here: String, home: String },
+}
+
+/// Decide the create container (see [`CreateContainer`]). Rules (case-insensitive,
+/// DN-boundary): equal, or `current` at/inside `search_base` (`search_base` a proper
+/// suffix of `current`) → create at `current`. `current` above `search_base`
+/// (`current` a proper suffix of `search_base`) → ask. Any other relationship (should
+/// not reach here) → create at `current`, never silently relocating. Pure.
+pub fn resolve_create_container(current_branch: &str, search_base: &str) -> CreateContainer {
+    let cur = current_branch.trim();
+    let base = search_base.trim();
+    let cur_l = cur.to_lowercase();
+    let base_l = base.to_lowercase();
+
+    // Equal, or current is at/inside the home OU → create where we stand.
+    if cur_l == base_l || cur_l.ends_with(&format!(",{base_l}")) {
+        return CreateContainer::Unambiguous(cur.to_string());
+    }
+    // Current is an ancestor of the home OU → ambiguous, ask.
+    if !base_l.is_empty() && base_l.ends_with(&format!(",{cur_l}")) {
+        return CreateContainer::Ask {
+            here: cur.to_string(),
+            home: base.to_string(),
+        };
+    }
+    // Not on the same path (unexpected): default to current, never relocate.
+    CreateContainer::Unambiguous(cur.to_string())
+}
+
+/// Resolve the optional `<profile>` argument of `tui-create` against the configured
+/// profiles. `Some(name)` → the matching index (case-insensitive), or an error listing
+/// the valid names when unknown. `None` → `Ok(None)` (the caller shows the chooser).
+/// Pure.
+pub fn resolve_profile_arg(
+    profiles: &[EntryProfile],
+    name: Option<&str>,
+) -> Result<Option<usize>, String> {
+    let Some(name) = name else {
+        return Ok(None);
+    };
+    if let Some(idx) = profiles
+        .iter()
+        .position(|p| p.name.eq_ignore_ascii_case(name))
+    {
+        return Ok(Some(idx));
+    }
+    let valid: Vec<&str> = profiles.iter().map(|p| p.name.as_str()).collect();
+    Err(format!(
+        "unknown profile '{name}'. Configured profiles: {}",
+        if valid.is_empty() {
+            "(none)".to_string()
+        } else {
+            valid.join(", ")
+        }
+    ))
 }
 
 /// Compose the DN and attribute set for a new entry of `profile`'s object class.
@@ -404,6 +552,7 @@ mod tests {
             defaults: Default::default(),
             widgets: Default::default(),
             label: None,
+            companion: None,
         }
     }
 
@@ -526,6 +675,13 @@ mod tests {
     fn prof(base: &str) -> EntryProfile {
         EntryProfile {
             search_base: base.to_string(),
+            ..Default::default()
+        }
+    }
+
+    fn named(name: &str) -> EntryProfile {
+        EntryProfile {
+            name: name.to_string(),
             ..Default::default()
         }
     }
@@ -786,6 +942,7 @@ mod tests {
             defaults: Default::default(),
             widgets: Default::default(),
             label: None,
+            companion: None,
         };
         let (form, autonum) =
             build_create_form(&schema, &profile, 0, "ou=people,dc=example,dc=org");
@@ -837,5 +994,156 @@ mod tests {
         // autonumber is NOT filled here (needs a worker scan); it's surfaced.
         assert_eq!(autonum, vec![("uidNumber".to_string(), 10000, 60000)]);
         assert!(!attrs.contains_key("uidNumber"));
+    }
+
+    #[test]
+    fn resolve_container_equal_is_unambiguous() {
+        let c =
+            resolve_create_container("ou=people,dc=example,dc=org", "ou=people,dc=example,dc=org");
+        assert_eq!(
+            c,
+            CreateContainer::Unambiguous("ou=people,dc=example,dc=org".to_string())
+        );
+    }
+
+    #[test]
+    fn resolve_container_inside_home_is_unambiguous_current() {
+        // Standing INSIDE the home OU (deeper): create where we stand.
+        let c = resolve_create_container(
+            "ou=staff,ou=people,dc=example,dc=org",
+            "ou=people,dc=example,dc=org",
+        );
+        assert_eq!(
+            c,
+            CreateContainer::Unambiguous("ou=staff,ou=people,dc=example,dc=org".to_string())
+        );
+    }
+
+    #[test]
+    fn resolve_container_above_home_asks() {
+        // Standing ABOVE the home OU: ambiguous.
+        let c = resolve_create_container("dc=example,dc=org", "ou=people,dc=example,dc=org");
+        assert_eq!(
+            c,
+            CreateContainer::Ask {
+                here: "dc=example,dc=org".to_string(),
+                home: "ou=people,dc=example,dc=org".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn resolve_container_is_case_insensitive() {
+        let c = resolve_create_container("DC=Example,DC=Org", "ou=people,dc=example,dc=org");
+        assert_eq!(
+            c,
+            CreateContainer::Ask {
+                here: "DC=Example,DC=Org".to_string(),
+                home: "ou=people,dc=example,dc=org".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn resolve_profile_arg_none_yields_none() {
+        let ps = vec![named("Users"), named("Groups")];
+        assert_eq!(resolve_profile_arg(&ps, None), Ok(None));
+    }
+
+    #[test]
+    fn resolve_profile_arg_matches_case_insensitively() {
+        let ps = vec![named("Users"), named("Groups")];
+        assert_eq!(resolve_profile_arg(&ps, Some("users")), Ok(Some(0)));
+        assert_eq!(resolve_profile_arg(&ps, Some("GROUPS")), Ok(Some(1)));
+    }
+
+    #[test]
+    fn resolve_profile_arg_unknown_lists_valid_names() {
+        let ps = vec![named("Users"), named("Groups")];
+        let err = resolve_profile_arg(&ps, Some("Admins")).unwrap_err();
+        assert!(err.contains("Admins"));
+        assert!(err.contains("Users"));
+        assert!(err.contains("Groups"));
+    }
+
+    fn group_schema() -> SchemaModel {
+        let raw = crate::ldap::worker::RawSubschema {
+            object_classes: vec![
+                "( 2.5.6.0 NAME 'top' ABSTRACT MUST objectClass )".into(),
+                "( 1.3.6.1.1.1.2.2 NAME 'posixGroup' SUP top STRUCTURAL \
+                  MUST ( cn $ gidNumber ) MAY memberUid )".into(),
+            ],
+            attribute_types: vec![
+                "( 2.5.4.3 NAME 'cn' SYNTAX 1.3.6.1.4.1.1466.115.121.1.15 )".into(),
+                "( 1.3.6.1.1.1.1.1 NAME 'gidNumber' SYNTAX 1.3.6.1.4.1.1466.115.121.1.27 SINGLE-VALUE )".into(),
+                "( 1.3.6.1.1.1.1.12 NAME 'memberUid' SYNTAX 1.3.6.1.4.1.1466.115.121.1.15 )".into(),
+            ],
+            ldap_syntaxes: vec![],
+        };
+        SchemaModel::from_raw(&raw)
+    }
+
+    fn companion_spec() -> crate::config::CompanionSpec {
+        let mut attributes = std::collections::BTreeMap::new();
+        attributes.insert("cn".to_string(), "{uid}".to_string());
+        attributes.insert("gidNumber".to_string(), "{gidNumber}".to_string());
+        attributes.insert("memberUid".to_string(), "{uid}".to_string());
+        crate::config::CompanionSpec {
+            object_classes: vec!["posixGroup".into()],
+            rdn_attr: "cn".into(),
+            search_base: "ou=groups,dc=example,dc=org".into(),
+            attributes,
+        }
+    }
+
+    fn primary_attrs_with(uid: &str, gid: Option<&str>) -> BTreeMap<String, Vec<String>> {
+        let mut m: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        m.insert("uid".into(), vec![uid.into()]);
+        if let Some(g) = gid {
+            m.insert("gidNumber".into(), vec![g.into()]);
+        }
+        m
+    }
+
+    #[test]
+    fn plan_companion_composes_dn_attrs_and_objectclass() {
+        let add = plan_companion(
+            &companion_spec(),
+            &primary_attrs_with("alice", Some("10001")),
+            &group_schema(),
+        )
+        .expect("plans");
+        assert_eq!(add.dn, "cn=alice,ou=groups,dc=example,dc=org");
+        assert_eq!(add.attrs.get("cn"), Some(&vec!["alice".to_string()]));
+        assert_eq!(add.attrs.get("gidNumber"), Some(&vec!["10001".to_string()]));
+        assert_eq!(add.attrs.get("memberUid"), Some(&vec!["alice".to_string()]));
+        let oc = add.attrs.get("objectClass").expect("objectClass");
+        assert_eq!(oc[0], "top");
+        assert!(oc.iter().any(|v| v.eq_ignore_ascii_case("posixGroup")));
+        assert!(add.ldif.contains("cn=alice,ou=groups,dc=example,dc=org"));
+    }
+
+    #[test]
+    fn plan_companion_errors_when_rdn_resolves_empty() {
+        // No uid on the primary → cn template resolves empty → RDN empty.
+        let err = plan_companion(
+            &companion_spec(),
+            &primary_attrs_with("", Some("10001")),
+            &group_schema(),
+        )
+        .unwrap_err();
+        assert!(err.to_lowercase().contains("cn") || err.to_lowercase().contains("rdn"));
+    }
+
+    #[test]
+    fn plan_companion_errors_when_must_attr_missing() {
+        // No gidNumber on the primary → posixGroup MUST gidNumber missing → validation error.
+        let err = plan_companion(
+            &companion_spec(),
+            &primary_attrs_with("alice", None),
+            &group_schema(),
+        )
+        .unwrap_err();
+        assert!(err.to_lowercase().contains("gidnumber"));
     }
 }

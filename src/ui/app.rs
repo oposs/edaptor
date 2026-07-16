@@ -16,7 +16,9 @@ use crate::ui::panes::{
 use crate::ui::pump::PumpView;
 use crate::ui::state::GuardTarget;
 use crate::ui::widget::{widget_for, Activation};
-use crate::ui::{Shared, ACTIVATE, CREATE, GUARD_NAV, REQUEST_QUIT, SAVE, SHOW_ERROR};
+use crate::ui::StartupAction;
+use crate::ui::{Shared, ACTIVATE, CREATE, GUARD_NAV, REQUEST_QUIT, SAVE, SHOW_ERROR, STARTUP};
+use crate::workflows::create::{resolve_create_container, CreateContainer};
 use crate::workflows::save::PrepareSave;
 
 fn init_status_line(r: Rect) -> Option<Box<dyn View>> {
@@ -277,7 +279,7 @@ pub(crate) fn dispatch(prog: &mut Program, cmd: Command, state: &Shared) {
             [] => {
                 state.borrow_mut().status = "No profile for this container.".into();
             }
-            [only] => open_create(state, *only, &container),
+            [only] => open_create_with_container_rule(prog, state, *only, &container),
             _ => {
                 // >1: run the chooser, then open the chosen profile.
                 let names: Vec<String> = {
@@ -289,7 +291,7 @@ pub(crate) fn dispatch(prog: &mut Program, cmd: Command, state: &Shared) {
                     let chosen = state.borrow_mut().chosen_profile.take();
                     if let Some(rel) = chosen {
                         if let Some(idx) = idxs.get(rel) {
-                            open_create(state, *idx, &container);
+                            open_create_with_container_rule(prog, state, *idx, &container);
                         }
                     }
                 } else {
@@ -302,6 +304,78 @@ pub(crate) fn dispatch(prog: &mut Program, cmd: Command, state: &Shared) {
         if let Some(msg) = msg {
             let (view, ok) = error::build(&msg);
             prog.exec_view_focused(view, ok);
+        }
+    } else if cmd == STARTUP {
+        let action = state.borrow_mut().pending_startup.take();
+        match action {
+            Some(StartupAction::Create {
+                profile_idx,
+                container,
+            }) => {
+                open_create(state, profile_idx, &container);
+            }
+            Some(StartupAction::ChooseThenCreate { container }) => {
+                let names: Vec<String> = state
+                    .borrow()
+                    .profiles
+                    .iter()
+                    .map(|p| p.name.clone())
+                    .collect();
+                if names.is_empty() {
+                    state.borrow_mut().status = "No profiles configured.".into();
+                    return;
+                }
+                let (view, focus) = crate::ui::dialog::profile_chooser::build(names, state.clone());
+                if prog.exec_view_focused(view, focus) == Command::OK {
+                    let chosen = state.borrow_mut().chosen_profile.take();
+                    if let Some(idx) = chosen {
+                        let dn = container
+                            .clone()
+                            .unwrap_or_else(|| state.borrow().profiles[idx].search_base.clone());
+                        if dn.trim().is_empty() {
+                            state.borrow_mut().status =
+                                "Profile has no search_base; pass --container.".into();
+                            return;
+                        }
+                        open_create(state, idx, &dn);
+                    }
+                } else {
+                    state.borrow_mut().chosen_profile = None;
+                }
+            }
+            None => {}
+        }
+    }
+}
+
+/// Resolve the create container for `profile_idx` under `current_branch`, asking via
+/// a modal when the branch sits above the profile's home OU, then open the create
+/// form. Cancelling the container prompt aborts the create.
+fn open_create_with_container_rule(
+    prog: &mut Program,
+    state: &Shared,
+    profile_idx: usize,
+    current_branch: &str,
+) {
+    let search_base = state.borrow().profiles[profile_idx].search_base.clone();
+    match resolve_create_container(current_branch, &search_base) {
+        CreateContainer::Unambiguous(dn) => open_create(state, profile_idx, &dn),
+        CreateContainer::Ask { here, home } => {
+            let (view, focus) = crate::ui::dialog::container_chooser::build(
+                here.clone(),
+                home.clone(),
+                state.clone(),
+            );
+            if prog.exec_view_focused(view, focus) == Command::OK {
+                let choice = state.borrow_mut().chosen_container.take();
+                match choice {
+                    Some(0) => open_create(state, profile_idx, &here),
+                    Some(1) => open_create(state, profile_idx, &home),
+                    _ => {}
+                }
+            } else {
+                state.borrow_mut().chosen_container = None;
+            }
         }
     }
 }
@@ -341,8 +415,14 @@ fn open_create(state: &Shared, profile_idx: usize, container: &str) {
         );
         crate::workflows::widget_bind::apply_widget_bindings(&mut form, &resolver, &ocs);
     }
+    // Build the create-mode live-template latches from the profile's defaults.
+    let live = {
+        let st = state.borrow();
+        crate::config::defaults::live_templates(&st.profiles[profile_idx].defaults)
+    };
     let mut st = state.borrow_mut();
     st.edit_form = Some(form);
+    st.live_templates = live;
     st.form_needs_render = true;
     // Post a background scan for each autonumber field (split-borrow idiom: worker
     // and alloc_flow are borrowed disjointly from st).
@@ -590,7 +670,7 @@ fn do_create(prog: &mut Program, state: &Shared) {
     };
     use crate::workflows::edit_form::FormMode;
     // 1. Compute the plan + extract pending password (borrow drops before exec_view).
-    let (prep, pending, pending_pw_attrs, resolved_widgets) = {
+    let (prep, pending, pending_pw_attrs, resolved_widgets, companion_spec) = {
         let st = state.borrow();
         let Some(form) = st.edit_form.as_ref() else {
             return;
@@ -603,6 +683,7 @@ fn do_create(prog: &mut Program, state: &Shared) {
             return;
         };
         let profile = &st.profiles[*profile_idx];
+        let companion_spec = profile.companion.clone();
         let prep = plan_create(
             st.read_flow.schema(),
             profile,
@@ -612,7 +693,13 @@ fn do_create(prog: &mut Program, state: &Shared) {
         let pending = st.pending_password.clone();
         let pending_pw_attrs = st.pending_password_attrs.clone();
         let resolved_widgets = st.resolved_widgets.clone();
-        (prep, pending, pending_pw_attrs, resolved_widgets)
+        (
+            prep,
+            pending,
+            pending_pw_attrs,
+            resolved_widgets,
+            companion_spec,
+        )
     };
     match prep {
         CreatePrep::Error(msg) => {
@@ -648,17 +735,65 @@ fn do_create(prog: &mut Program, state: &Shared) {
                 strip_sentinel_from_attrs(&mut attrs, &pending_pw_attrs);
             }
             let ldif = masked.unwrap_or(ldif);
-            let (view, save) = crate::ui::dialog::confirm::build(&ldif);
+
+            // Plan the companion (if declared) against the primary's final attrs.
+            let companion = match &companion_spec {
+                Some(spec) => {
+                    let planned = {
+                        let st = state.borrow();
+                        crate::workflows::create::plan_companion(
+                            spec,
+                            &attrs,
+                            st.read_flow.schema(),
+                        )
+                    };
+                    match planned {
+                        Ok(c) => Some(c),
+                        Err(msg) => {
+                            let (view, ok) = crate::ui::dialog::error::build(&msg);
+                            prog.exec_view_focused(view, ok);
+                            return; // companion invalid → abort the whole create
+                        }
+                    }
+                }
+                None => None,
+            };
+
+            // Preview: primary stanza, then the companion stanza when present.
+            let preview = match &companion {
+                Some(c) => format!("# New entry\n{ldif}\n# Companion entry\n{}", c.ldif),
+                None => ldif,
+            };
+            let (view, save) = crate::ui::dialog::confirm::build(&preview);
             if prog.exec_view_focused(view, save) != Command::OK {
                 return; // cancel: keep editing the create form.
             }
             let mut st = state.borrow_mut();
-            st.pending_password = None; // cleartext consumed; clear before worker picks it up
+            st.pending_password = None; // cleartext consumed
+            let supports_txn = st.server_supports_txn;
             let crate::ui::state::UiState {
                 worker, write_flow, ..
             } = &mut *st;
             if let Some(w) = worker.as_ref() {
-                let _ = write_flow.submit_create(w, &dn, attrs, false);
+                match companion {
+                    Some(c) if supports_txn => {
+                        // Atomic: companion first, primary last; re-read the primary.
+                        let _ = write_flow.submit_create_atomic(
+                            w,
+                            vec![(c.dn, c.attrs), (dn.clone(), attrs)],
+                            &dn,
+                            false,
+                        );
+                    }
+                    Some(c) => {
+                        // Sequential fallback: companion first, then primary.
+                        let _ = write_flow
+                            .submit_create_with_companion(w, &c.dn, c.attrs, &dn, attrs, false);
+                    }
+                    None => {
+                        let _ = write_flow.submit_create(w, &dn, attrs, false);
+                    }
+                }
             }
         }
     }

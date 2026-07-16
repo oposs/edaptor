@@ -4,322 +4,150 @@ Carries the **current concern** into the next session. Not a project history —
 that see `git log`, the specs under `docs/superpowers/specs/`, the SDD ledger
 (`.superpowers/sdd/progress.md`), and project memory (`…/memory/MEMORY.md`).
 
-**Date:** 2026-07-06 · **Current concern: a fresh theme + a README demo movie,
-plus a new standalone tool `ansidrama`.** All on branch `feat/shuttle-widget`.
-The theme/form work and the demo are **done and `make check` green but
-UNCOMMITTED**; small follow-ups remain (section C). The older shuttle-buttons work
-(dated 2026-07-03, further down) is **complete**.
+**Date:** 2026-07-16 · **Branch: `feat/usability`** (off `main` @ v1.0.0).
+**Current concern: the usability batch is COMPLETE.** All four items are **done,
+committed, `make check` green, and each passed a final whole-branch/feature review
+(READY TO MERGE)**. Nothing is in flight — the next step is to **open the single
+`feat/usability` PR** (remote `origin` = `git@github.com:oposs/edaptor.git`).
 
-## CURRENT CONCERN (2026-07-06)
-
-### A. UNCOMMITTED edaptor UI work on `feat/shuttle-widget` (`make check` green)
-
-A big set of visual changes, all tested, **not yet committed** (`git status` shows
-them). If the next session is happy, commit in logical chunks. What changed:
-
-- **New light theme** (`src/ui/theme.rs`): replaced Solarized with **white content
-  panes on a white desktop (splitter lines separate panes); the focused pane tinted
-  soft post-it yellow**; fresh-blue accent; red hotkeys; menu/status on light grey.
-  Nine constants → `INK MUTED CANVAS SURFACE ACTIVE INPUT ACCENT STAGED HOTKEY`.
-  Tests rewritten.
-- **Form polish** (`form.rs`, `field_label.rs`, `list_view.rs`, `launch_view.rs`,
-  `value_lines.rs`): value cells are **white wells** on the yellow pane; every value
-  kind fills from the value-column origin with a 1-col content pad (`VALUE_INDENT`)
-  so text lines up; the non-scrolling **`dn` header is a title rule** (double line
-  with the DN punched through) + a **blank breathing row** below it; the **label
-  column gained a 1-col left pad** (`LABEL_LEFT_PAD`) so the longest label no longer
-  touches the divider.
-- **Bugfix** (`list_model.rs`): Backspace on a lone blank inline-list bullet now
-  reverts the field to `<not set>` (was stuck until a char was typed+deleted).
-- `CHANGES.md` + docs touched; `examples/*.toml` and `lookup.rs` had prior edits.
-
-### B. The README demo movie (in `docs/demo/`, UNTRACKED)
-
-- **`docs/demo/edaptor.webp`** — produced by the new `ansidrama` tool (section D).
-  ~960×684, ~38 s, ~460 KB. Tour: intro card → nav to ou=people → Tab to list →
-  **type "johnson" to filter** → Tab to form + scroll → *Group membership* card →
-  readers group → **member shuttle: add 3, grow+shrink the dialog (mouse), click OK**
-  → *Multi-value* card → **description: add alice/bob/carol, reorder via ≡ handle** →
-  **Alt-S save → Enter confirms (writes LDAP)** → closing card.
-- **`docs/demo/tour.toml`** — the ansidrama record script (coords tuned for 120×38).
-- **`docs/demo/reset.sh`** — resets the `readers` group so the tour records
-  deterministically. **Run before AND after each record** (the save writes real LDAP
-  changes). Needs the podman LDAP up.
-- **Re-record:** `bash docs/demo/reset.sh && (cd ../ansidrama && cargo run -q -j4 --
-  record ../edaptor/docs/demo/tour.toml --dump-png ../edaptor/docs/demo/frames) &&
-  bash docs/demo/reset.sh`. Takes ~1.5 min — run it in the BACKGROUND (exceeds the
-  2-min shell limit). View the real animation via
-  `convert edaptor.webp -coalesce out%04d.png` (NOT `webp[N]`, which yields raw diff
-  rectangles that look ghosted).
-
-### C. TODO (small, agreed with the user)
-
-1. **edaptor: Save-confirm dialog** (`src/ui/dialog/confirm.rs`) can grow taller than
-   the screen and clip the changeset. Cap its height to the actual screen height and
-   make the changeset **scroll with a scrollbar** (model on the shuttle's
-   ListBox+ScrollBar, or edaptor's `ScrollGroup`). `confirm::build` needs the screen
-   height plumbed from `app.rs` (`Program`); currently takes only `ldif`.
-2. **demo tweak:** the "scroll the form" step uses 8 Downs but the form is tall
-   enough that the viewport doesn't visibly scroll — bump to ~16 Downs (or
-   `PageDown`) in `tour.toml`.
-3. Optional: embed the webp in edaptor `README.md`; trim the loop (~38 s → ~28 s).
-
-### D. `ansidrama` — the standalone tool (separate repo, COMMITTED)
-
-At **`~/checkouts/ansidrama`** (own git repo, 6 commits, fmt/clippy/tests green).
-A deterministic **terminal-session → animated-WebP** recorder; pure Rust + one
-runtime dep (`tmux`). Subcommands: `encode` (ANSI snapshots / title-cards → WebP —
-the core) and `record` (drive a command in tmux per a scene script; one frame **per
-key / per char / per mouse cell-step**; then encode). Friendly `click/drag/scroll`
-(→ SGR mouse); silent-movie **title cards** (big title + smaller subtitle, double
-frame; `card_font_px`/`card_subtitle_px`); **mouse-pointer overlay** + **block
-text-cursor** (inverse video, from tmux `#{cursor_flag/x/y}`); configurable
-`font_px`/`type_cs`/`move_cs`/`max_fps`. Bundled JetBrains Mono; box/block glyphs
-hand-painted. Generic — edaptor is its first consumer. Not yet on crates.io.
+**Before the PR, please eyeball these interactive checks** (they need a live terminal
++ demo LDAP and can't be driven headlessly; static review + the live worker tests found
+no correctness risk):
+- item (c): the **"Create where?"** modal firing when you press New *above* a profile's
+  home OU, and **`edaptor tui-create <profile>`** opening the right create form / the
+  no-arg chooser fallback.
+- item (b): creating a user through a companion-declaring profile and confirming the
+  two-stanza preview + that **both** the user and its `posixGroup` land. (The atomic
+  commit *and* rollback are already proven by `tests/live_companion_atomic.rs` against
+  the demo server; this is just the UI-flow eyeball.)
 
 ---
 
-## COMPLETED EARLIER (2026-07-03) — Shuttle buttons + resizable dialog *(done, committed)*
+## DONE on this branch (committed, reviewed)
+
+Full range `9c8efcf..HEAD` (10 commits). `make check` green throughout.
+
+1. **PgUp/PgDn page the entry form** (`fix(ui)` `c034768`). The form's `ScrollGroup`
+   only scrolled arrow-by-arrow; the focused `InputLine` ignores Page keys. Now
+   `ScrollGroup::handle_event` intercepts PageUp/PageDown and moves focus one
+   viewport (reusing the scrollbar-drag `focus_target_for_row` logic). Verified the
+   tree/leaf browse lists *already* paged (tvision `ListViewer`/`Outline`).
+
+2. **Live templated defaults — create-mode autofill** (feature, 3 SDD tasks +
+   fmt/test-hardening commits `5c69526`, `689277f`, `c76bfd8`, `585525a`, `582c9b7`,
+   `e609348`). In **create mode only**, a `[profile.defaults]` template such as
+   `cn = "{givenName} {sn}"` fills **and keeps updating** the target as the operator
+   types the sources, until the operator edits the target (clear it to re-arm).
+   - Spec: `docs/superpowers/specs/2026-07-14-live-templated-defaults-design.md`
+   - Plan: `docs/superpowers/plans/2026-07-14-live-templated-defaults.md`
+   - **Architecture:** pure latch/recompute core in `src/config/defaults.rs`
+     (`LiveTemplateState{segs,auto,last_written}`, `live_templates()`,
+     `recompute_live()`); a `live_templates` map on `UiState` built by `open_create`
+     (`src/ui/app.rs`); a create-mode-only hook `FormPane::apply_live_templates`
+     called after `sync_into_form()` in `handle_event` (`src/ui/panes/form.rs`).
+   - Latch rule: `value != last_written ⇒ auto = value.is_empty()`; while auto,
+     `Some(out)` write-if-differs / `None` (source empty) clear-if-nonempty.
+     `last_written` distinguishes our writes from operator edits (proven convergent —
+     no busy-loop). Literals & `{next:MIN-MAX}` autonumbers stay one-shot; edit mode
+     inert (gated on `FormMode::Create` **and** non-empty map — both now tested).
+   - Final opus review verdict **READY TO MERGE**; details in the SDD ledger.
+
+3. **Create-usability — `tui-create` launcher + TUI container rule** (item (c); 7 SDD
+   tasks + fmt + mouse-staging fix, range `8bf5d4c..26ae032`). Two parts:
+   - **Container rule.** Pressing New *above* a profile's home OU now pops a
+     **"Create where?"** modal (current branch vs. the profile's `search_base`)
+     instead of silently creating at the wrong location; at/inside the home OU is
+     unambiguous (no prompt). Pure `resolve_create_container` in
+     `src/workflows/create.rs`; `container_chooser` dialog; both `CREATE` arms funnel
+     through `open_create_with_container_rule` in `src/ui/app.rs`.
+   - **`edaptor tui-create [<profile>] [--container <DN>]`.** Launches the TUI straight
+     into a profile's create form, reusing the whole interactive flow. Mechanism: a
+     `StartupAction` on `UiState::pending_startup` (set by `ui::run`), posted once by
+     the pump as `STARTUP`, run in `app::dispatch`. `<profile>` optional (chooser
+     fallback; unknown name errors *pre-launch*); `--container` defaults to
+     `search_base`. Name/container resolved in `main::build_startup_action`.
+   - Spec: `docs/superpowers/specs/2026-07-15-create-usability-cli-container-rule-design.md`
+   - Plan: `docs/superpowers/plans/2026-07-15-create-usability-cli-container-rule.md`
+   - Final opus review **READY TO MERGE** (no Critical/Important); container logic
+     proven consistent with `profiles_for_container`; STARTUP timing safe. A
+     mouse-staging fix (choosers now honour clicks, not just keyboard) shipped as a
+     follow-up. Accepted cosmetic Minors: chooser empty-`search_base` uses a status
+     line not a modal; `container_chooser` fixed width truncates long DNs.
+
+4. **Companion entry on create — user-private group** (item (b); 7 SDD tasks + a live
+   test + a doc fix, range `45d26ff..06f3941`). A profile can declare
+   `[profile.companion]` (object classes, `rdn_attr`, `search_base`, a templated
+   `attributes` map) and creating through it emits a second entry — e.g. a `posixGroup`
+   mirroring a POSIX user (`cn = {uid}`, same `gidNumber`).
+   - **Atomic via LDAP transactions (RFC 5805).** The worker's `Request::AddAtomic`
+     wraps both Adds in `StartTxn`/`EndTxn` under a `TxnSpec` control when the server
+     advertises txn (detected from the root DSE → `UiState::server_supports_txn`);
+     otherwise a **sequential companion-first fallback** (`CompanionThenPrimary` →
+     `PrimaryAfterCompanion`, orphan-named on primary failure). `do_create` previews both
+     LDIF stanzas and dispatches by capability.
+   - **Architecture:** pure `CompanionSpec` + `validate_companions` (`src/config/mod.rs`);
+     pure `plan_companion` (`src/workflows/create.rs`, reusing `resolve_template`);
+     `AddAtomic` + `txn_supported` + `fetch_root_dse` (`src/ldap/worker.rs`); the two
+     write paths in `src/workflows/write_flow.rs`.
+   - Spec: `docs/superpowers/specs/2026-07-16-companion-entry-on-create-design.md`;
+     Plan: `docs/superpowers/plans/2026-07-16-companion-entry-on-create.md`.
+   - Final opus review **READY TO MERGE** (no Critical/Important). Atomic **commit and
+     rollback** proven live by `tests/live_companion_atomic.rs` against the demo
+     OpenLDAP. Non-blocking follow-ups listed under NEXT.
+
+**Also investigated (no code change): Esc closes every modal.** All edaptor modals
+are tvision `Dialog`s, and `Dialog` maps **Esc → CANCEL → end_modal** natively; the
+custom popups delegate their non-nav path to the inner `Dialog`. So Esc already
+cancels everywhere. Only nuance: in a list with an active type-to-find filter the
+first Esc clears the filter, a second closes (correct). If a specific dialog ever
+resurfaces where Esc does nothing, dig there — the user couldn't reproduce one.
 
 ---
 
-## CURRENT CONCERN — execute the remaining plan steps
+## NEXT
 
-**Plan:** [`docs/superpowers/plans/2026-07-03-shuttle-buttons-resize.md`](superpowers/plans/2026-07-03-shuttle-buttons-resize.md)
-**Spec:** [`docs/superpowers/specs/2026-07-03-shuttle-buttons-resize-design.md`](superpowers/specs/2026-07-03-shuttle-buttons-resize-design.md)
-**SDD ledger (source of truth for progress):** `.superpowers/sdd/progress.md`
-
-We are executing this plan with the **superpowers:subagent-driven-development**
-skill: fresh implementer subagent per task → generate a review package →
-task-reviewer subagent → fix loop → mark complete. Continue that loop.
-
-### What the work delivers (user request, 2026-07-03)
-
-The two picker dialogs embed a shared `Shuttle` two-list transfer widget. The user
-reported: Add/Remove felt reversed between the Object Class and Edit Member dialogs;
-Tab landed on the move buttons; and they wanted wide buttons under each list plus a
-resizable dialog. The plan:
-
-1. **Task 1 (done, commit `3fc128e`, reviewed clean):** dropped the
-   `selected_on_left` flip — both dialogs now render **Available LEFT / Selected
-   RIGHT** (conventional). `Shuttle::new(area, left_title, right_title, find_mode)`
-   — the `selected_on_left` param is gone.
-2. **Task 2 (done, commit `80316ae`, reviewed clean):** extracted geometry into a
-   pure `Shuttle::layout(area) -> ShuttleLayout` (min-size clamp `MIN_W=60`,
-   `MIN_H=20`); replaced the narrow bottom-left buttons with **wide Add spanning the
-   Available (left) column** and **wide Remove spanning the Selected (right)
-   column**; both buttons are **non-selectable** (`options.selectable = false`) so
-   Tab skips them (still fire via click, Alt-A/Alt-R, Insert/Delete/Enter). Both
-   dialogs grew from height **22 → 25**. The Shuttle's group carries
-   `grow_mode.hi_x/hi_y` (inert until Task 4; reviewer flagged the scope but it's
-   plan-mandated and harmless — KEPT).
-3. **Task 3 (done, commit `71a9153`, reviewed clean):** focus-driven graying via
-   `sync_move_commands(ctx)` — Add enabled ⇔ Available list focused, Remove enabled
-   ⇔ Selected list focused; called from `reset_current` and the end of
-   `handle_event`.
-4. **Task 4 (done, commit `fc1ce0e`, `make check` green) — ⚠ NOT PEER-REVIEWED:**
-   resizable dialogs. Hand-written `Shuttle::change_bounds(bounds)` (added to the
-   `#[delegate(... skip(...))]` list) sets the group bounds and repositions every
-   child via `layout(bounds)`; the `grow` window flag is set on both dialogs
-   (auto-enables drag_grow); OK/Cancel anchored bottom-right via `grow_mode`
-   (`lo_x/hi_x/lo_y/hi_y`). All six previously-`#[allow(dead_code)]` ids are now live
-   in `change_bounds`. Used `self.group.state_mut().set_bounds(bounds)` (no fallback
-   needed).
-
-### DO THIS NEXT, in order
-
-1. **Peer-review Task 4** (the SDD gate was skipped only to preserve context here):
-   - `SKILL=~/.claude/plugins/cache/claude-plugins-official/superpowers/6.0.3/skills/subagent-driven-development`
-   - `"$SKILL/scripts/review-package" 71a9153 fc1ce0e` → dispatch a task-reviewer
-     subagent (template: `$SKILL/task-reviewer-prompt.md`) with the printed diff
-     path, the brief `.superpowers/sdd/task-4-brief.md`, and the report
-     `.superpowers/sdd/task-4-report.md`. Fix Critical/Important findings via a fix
-     subagent, then mark Task 4 complete in the ledger.
-2. **Manual resize verification** (Task 4 Step 8 — a human/tmux job the implementer
-   could not do). Drive the real TUI (see the tmux recipe below). Confirm, in **both**
-   the Object Class editor and a membership editor: Available LEFT / Selected RIGHT;
-   Tab cycles the two lists → OK → Cancel and never the move buttons; Add grays
-   unless the Available list is focused and Remove grays unless the Selected list is
-   focused; Add/Remove still fire by click, Alt-A/Alt-R, Insert/Delete/Enter;
-   dragging the lower-right corner (or Shift+Arrow) enlarges the dialog and columns +
-   scrollbars + button rows + OK/Cancel reflow, with shrink stopping at the minimum.
-   **Known limitation to sanity-check (documented in the plan):** the resize cascade
-   calls `change_bounds` without a `Context`, so list scrollbar *page steps* are not
-   refreshed during an interactive resize — cosmetic (PageUp/PageDown distance / thumb
-   size), not a correctness issue. If it looks wrong in practice, the plan's Task 4
-   Step 3 note describes the `on_bounds_changed` follow-up.
-   ⚠ **Membership may not be live-drivable in the demo config** (see the note at the
-   bottom of the old handover history / prior sessions: `memberOf` is
-   overlay-maintained and not a reachable form field). If so, the objectClass editor
-   exercises the identical shared Shuttle/resize code — verify there and note the
-   membership limitation, don't chase a demo profile change unless asked.
-3. **Task 5 — docs/changelog** (`"$SKILL/scripts/task-brief"
-   docs/superpowers/plans/2026-07-03-shuttle-buttons-resize.md 5`): `CHANGES.md`
-   entry, refresh `docs/src/configuration/widgets.md` (column sides + button layout +
-   resizable), verify `README.md` doesn't contradict. Run `make docs`.
-4. **Final whole-branch review** (most capable model) over the merge-base:
-   `"$SKILL/scripts/review-package" $(git merge-base main HEAD) HEAD` → dispatch the
-   final reviewer (`superpowers:requesting-code-review` template). Feed it the Minor
-   roll-up below.
-5. **Finish the branch** via **superpowers:finishing-a-development-branch** (present
-   merge/PR/cleanup options to the user).
-
-### Minor findings roll-up (carry to the final review; none block a task)
-
-- Task 1: `shuttle()` test helper passes `left_title="Active"` / `right_title="Available"` — inverted vs the new semantics (plan-mandated; cosmetic).
-- Task 1: `multi_picker` lost the comment explaining *why* it uses `FindMode::Highlight` (server-backed candidates re-queried on `LIST_FIND_CHANGED`). Restore that rationale when touching `multi_picker` for Task 5 if convenient.
-- Task 3: no unit test for the "neither list focused → both buttons disabled" arm of `sync_move_commands` (behavior is implemented; just uncovered).
+Nothing is queued — the batch is done (all four items above are committed and reviewed
+READY TO MERGE). **Open the single `feat/usability` PR** after the interactive eyeball
+checks at the top. Non-blocking follow-ups surfaced by the final reviews (own cycle, not
+this PR): DN-escape the RDN value in `build_add_entry` **and** `plan_companion` together
+(pre-existing, unreachable for uid-keyed entries); `debug_assert!(!entries.is_empty())`
+in `run_add_atomic`; refresh the `do_create` doc-comment for the companion-plan borrow.
 
 ---
 
-## How the SDD loop works here (so you can resume it)
+## Working agreement / how to resume
 
-- **Ledger first:** `cat .superpowers/sdd/progress.md`. Tasks marked complete are
-  DONE — do **not** re-dispatch them. Resume at the first not-complete task (Task 4
-  review, then Task 5).
-- Per task: `scripts/task-brief PLAN N` → dispatch implementer (template
-  `$SKILL/implementer-prompt.md`) with the brief path + a report path
-  (`.superpowers/sdd/task-N-report.md`) + scene-setting context + global constraints
-  → on DONE, `scripts/review-package BASE HEAD` (BASE = the commit before the task,
-  from the ledger — never `HEAD~1`) → dispatch task-reviewer → fix loop → append one
-  `Task N: complete (commit …, review clean)` line to the ledger.
-- **Model choice:** implementers/reviewers on a mid-tier model (sonnet) have been
-  fine for these mechanical, fully-specified tasks; the **final whole-branch review
-  should use the most capable model**.
-- Scratch lives under `.superpowers/sdd/` (git-ignored: briefs, reports, review
-  diffs, ledger). `git clean -fdx` destroys it — recover the ledger from `git log`.
-
----
-
-## Project state (history is elsewhere)
-
-edaptor is a Rust TUI for administering OpenLDAP: it introspects live schema
-(`cn=subschema`) and generates edit forms from `objectClass` definitions; a TOML
-config declares connection settings plus *entry profiles* and a **widget palette**
-(`[profile.widget.<attr>]` kinds: `choice` / `password` / `picker` / `membership`).
-The UI is **tvision-rs** (`src/ui/`); `edaptor` is the sole binary. The tvision-rs
-UI migration (M1–M5c) is complete and merged to `main`. `Cargo.toml` version
-`0.4.0`.
-
-**tvision-rs is now `0.9`** (not the 0.3 the older handover mentioned — that section
-is stale). The `Shuttle` and both pickers are built against 0.9's three-surface
-focus model and command-set graying.
-
-### The Shuttle and its two consumers
-
-- `src/ui/shuttle.rs` — the generic two-list transfer `View` (domain-free; a
-  `Group` + two lists + two scrollbars + Add/Remove buttons, `#[delegate(to =
-  group, skip(...))]`). Notifies owners by broadcast `CMD_SHUTTLE_CHANGED` (source =
-  its own `ViewId`); the Available list's incremental find broadcasts
-  `Command::LIST_FIND_CHANGED`. `ShuttleRow { key, label, locked }`. Pure move
-  model = `ShuttleModel` (unit-tested without a Dialog).
-- `src/ui/oc_picker.rs` — Object Class editor. Available list uses
-  `FindMode::Filter` (static local set); reacts to `CMD_SHUTTLE_CHANGED` →
-  `refresh_available` + `update_staged`.
-- `src/ui/multi_picker.rs` — Edit Member editor. Available list uses
-  `FindMode::Highlight` (server-backed; re-queries via the async worker on
-  `LIST_FIND_CHANGED`).
-
-### Still-open larger concern (NOT this task): upstream the Shuttle
-
-`src/ui/shuttle.rs` is explicitly built to graduate **upstream to tvision-rs**
-(oetiker's repo). Directive: separate clone, one focused PR; edaptor depends on the
-published crate (git pin only as fallback). When it lands, delete `shuttle.rs` and
-re-point the two consumers. Do this **after** the current buttons/resize branch is
-finished and merged. See project memory `shuttle-widget-incubation`.
-
----
-
-## Build / test / run
-
-**⚠ Cap parallelism at 4 cores** (shared box).
-
-```bash
-make check                                        # fmt + clippy -D warnings + tests — the gate
-cargo test -j4 --lib ui::shuttle ui::oc_picker ui::multi_picker
-cargo clippy -j4 --all-targets -- -D warnings
-make docs                                         # build the mdBook (Task 5)
-
-# Live LDAP demo (podman): ~600 users / ~25 groups, ldap://localhost:1389
-scripts/test-ldap.sh start
-export EDAPTOR_TEST_ADMIN_PW=adminpassword
-cargo run -- --config examples/demo-config.toml
-```
-
-Facade guards (must print nothing — only `src/ui/**` may use tvision_rs):
-```bash
-! grep -rl "use tvision_rs" src | grep -vE "^src/ui/"
-! grep -rl "use ratatui\|use tui_" src
-```
-
-## ⭐ Live-driving the TUI from an agent session (tmux) — for the manual resize check
-
-```bash
-scripts/test-ldap.sh start                       # podman demo server (idempotent)
-cargo build -j4 --bin edaptor
-tmux kill-session -t edtv 2>/dev/null
-tmux new-session -d -s edtv -x 210 -y 50
-tmux send-keys -t edtv 'export EDAPTOR_TEST_ADMIN_PW=adminpassword' Enter
-tmux send-keys -t edtv 'cargo run -j4 --bin edaptor -- --config examples/demo-config.toml' Enter
-sleep 5
-tmux send-keys -t edtv Down; sleep 0.4
-tmux capture-pane -t edtv -p | sed -n '2,40p'    # read the screen
-# Resize the dialog: focus it, then Shift+Arrow grows it (drag_grow). E.g.
-# tmux send-keys -t edtv S-Right S-Down ; capture again to see the reflow.
-tmux kill-session -t edtv                         # clean up (holds an LDAP bind)
-```
-
-Insert `sleep` between keystrokes (async reads land via the 50ms pump). Focus
-probes: `tmux capture-pane -e` renders the focused element bg bright-green
-`(0,170,0)`; `tmux display-message -p '#{cursor_x}'` locates the focused column.
-Prefer edit-then-Discard; do not trigger destructive saves against demo data.
-
----
-
-## Conventions (follow these)
-
-- **Pull first** each session (`git pull --ff-only`); if not a clean fast-forward,
-  stop and surface it. (This branch `feat/shuttle-widget` has no upstream tracking —
-  that is expected; work commits directly on it.)
-- **Facade boundary:** only `src/ui/**` may `use tvision_rs`. Domain layer stays
-  UI-agnostic.
-- **Borrow discipline:** never hold a `RefCell`/`UiState` borrow across
-  `ctx.broadcast`/`ctx.post`/`exec_view`/`worker.submit`/`new_list`/`child_mut`/
-  `set_value`. Collect into locals → drop the borrow → call.
-- **Strict TDD**, atomic commits, crate compiles after every commit, `cargo fmt` +
-  clippy `--all-targets -D warnings` clean before each commit.
+- **Pull first** (`git pull --ff-only`); this repo lands work across machines.
+- **SDD ledger is the source of truth for progress:** `.superpowers/sdd/progress.md`
+  (git-ignored scratch under `.superpowers/sdd/`: briefs, reports, review diffs).
+  The current ledger covers the live-templated-defaults feature (all complete).
+- **SDD scripts:** `SKILL=~/.claude/plugins/cache/claude-plugins-official/superpowers/6.1.1/skills/subagent-driven-development`
+  → `scripts/task-brief PLAN N`, `scripts/review-package BASE HEAD`. Fresh
+  implementer subagent per task → review package → task-reviewer → fix loop → mark
+  complete → final whole-branch review (most capable model).
+- **Build/test (cap parallelism at 4 cores — shared box):**
+  ```bash
+  make check          # fmt + clippy -D warnings + tests — the gate
+  cargo test -j4
+  make docs           # build the mdBook
+  scripts/test-ldap.sh start   # podman demo LDAP (~600 users/~25 groups)
+  export EDAPTOR_TEST_ADMIN_PW=adminpassword
+  cargo run -- --config examples/demo-config.toml
+  ```
 - **Docs one-home:** config detail → mdBook (`docs/src/`); README orientation only;
-  `CHANGES.md` for every user-visible change; process/design → `docs/superpowers/`.
-- **Commit trailer:** `Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>`.
-  Use `git commit -F` (file/heredoc) for messages containing backticks.
+  `CHANGES.md` for every user-visible change (Unreleased section is populated);
+  process/design → `docs/superpowers/`.
+- **Facade boundary:** only `src/ui/**` may `use tvision_rs`.
+- **Commit trailer:** `Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>`.
+- **Finish:** when the batch is done, open **one PR** for `feat/usability` (remote
+  `origin` = `git@github.com:oposs/edaptor.git`).
 
----
+## Project state
 
-## Load-bearing tvision-rs 0.9 facts (so you don't rediscover them)
-
-- **Command-set graying:** `ctx.enable_command(cmd)` / `disable_command(cmd)` push
-  `Deferred::EnableCommand`/`DisableCommand`; the loop flips `COMMAND_SET_CHANGED`
-  on the next idle pump, and each `Button` re-grays itself from
-  `ctx.command_enabled(command)`. This is how Task 3's graying works.
-- **Non-selectable buttons:** `state.options.selectable = false` removes a view from
-  Tab traversal but does NOT disable pre/post-process — so Alt-hotkeys and clicks
-  still fire. (Task 2 uses this for Add/Remove.)
-- **Resize:** setting the dialog `grow` `WindowFlags` auto-enables `drag_grow`
-  (`Window` derives `mode.drag_grow = flags.grow`). The window-resize cascade is
-  `Group::change_bounds` → each child's `calc_bounds` + `change_bounds` — **no
-  `Context`, no `on_bounds_changed`** for children. Per-child `grow_mode`
-  (`lo_x/hi_x/lo_y/hi_y`, `rel`, `fixed`) drives the built-in reflow; a two-column
-  split can't be expressed by simple grow_mode deltas, so the Shuttle overrides
-  `change_bounds` and repositions children explicitly from `layout(bounds)`.
-- **`#[delegate(to = group, skip(...))]`** forwards the `View` impl to the embedded
-  `Group`; hand-written methods go in `skip(...)`. Shuttle now skips
-  `handle_event, as_any_mut, reset_current, value, set_value, set_value_ctx,
-  change_bounds`.
-- **`reset_current` is THE modal-open init hook** (before first draw/event). Seed
-  lists / stage state / set initial focus + command graying there.
-- **Headless view tests:** `Context::new(&mut out, &mut timers, 0, &mut deferred)`
-  with `tv::timer::TimerQueue::new()` and `Vec<tv::Deferred>`. The `shuttle.rs` test
-  module `Harness` is the template (`broadcast_seen`, `command_disabled`).
-- **`WindowFlags`** is re-exported at the crate root: `tv::WindowFlags` (fields
-  `r#move`, `close`, `grow`, `zoom`). `Dialog::set_flags`, `Dialog::child_mut`,
-  `Button::state_mut`, `ViewState::set_bounds` are all public.
+edaptor is a Rust TUI (tvision-rs **0.12**) for administering OpenLDAP: introspects
+live schema (`cn=subschema`), generates edit forms from `objectClass` defs; TOML
+config declares connection + *entry profiles* + a **widget palette**
+(`[profile.widget.<attr>]` kinds: `choice`/`password`/`picker`/`membership`/`lookup`)
+and `[profile.defaults]` (literal / `{attr}` template / `{next:MIN-MAX}` autonumber —
+templates now live in create mode). `Cargo.toml` version **1.0.0**. `edaptor` is the
+sole binary; UI lives in `src/ui/`.

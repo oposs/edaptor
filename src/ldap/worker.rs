@@ -23,12 +23,24 @@ use std::thread::{self, JoinHandle};
 use std::collections::HashSet;
 
 use ldap3::adapters::{Adapter, EntriesOnly, PagedResults};
+use ldap3::controls::{RawControl, TxnSpec};
+use ldap3::exop::{EndTxn, StartTxn, StartTxnResp};
 use ldap3::{LdapConn, Mod, Scope, SearchEntry, SearchOptions, SearchResult};
 
 use crate::config::{AuthMethod, Config};
 use crate::form::changeset::ModOp;
 use crate::ldap::result::result_code_message;
 use crate::ldap::tls::build_settings;
+
+/// RFC 5805 transaction extended-operation OIDs.
+pub const TXN_START_OID: &str = "1.3.6.1.1.21.1";
+pub const TXN_END_OID: &str = "1.3.6.1.1.21.3";
+
+/// True iff the server's `supportedExtension` advertises BOTH the Start- and
+/// End-Transaction OIDs (RFC 5805). Pure.
+pub fn txn_supported(exts: &[String]) -> bool {
+    exts.iter().any(|e| e == TXN_START_OID) && exts.iter().any(|e| e == TXN_END_OID)
+}
 
 /// Search scope for a [`Request::Search`]. Mapped to `ldap3::Scope` only inside
 /// the worker (see [`scope_to_ldap3`]) so `ldap3` types do not leak.
@@ -76,6 +88,8 @@ pub struct LdapEntry {
 pub enum Request {
     /// Fetch the raw (unparsed) subschema description strings.
     FetchSubschema,
+    /// Read the root DSE `supportedExtension` list (capability probe).
+    FetchRootDse,
     /// Search the directory. `id` is echoed in the reply for correlation (D4).
     Search {
         /// Caller-assigned correlation id, echoed in the reply.
@@ -122,6 +136,14 @@ pub enum Request {
         /// Attribute values for the new entry.
         attrs: BTreeMap<String, Vec<String>>,
     },
+    /// Create several entries in one atomic RFC 5805 transaction. All succeed or the
+    /// transaction is rolled back and nothing is written. `id` echoes in the reply.
+    AddAtomic {
+        /// Correlation id.
+        id: u64,
+        /// (DN, attributes) pairs for every entry to create; the last is the primary.
+        entries: Vec<(String, BTreeMap<String, Vec<String>>)>,
+    },
     /// Rename an entry (MODRDN). `id` is echoed in the reply.
     ModRdn {
         /// Correlation id.
@@ -157,6 +179,10 @@ pub struct RawSubschema {
 #[derive(Debug, Clone)]
 pub enum Response {
     Subschema(RawSubschema),
+    /// Root DSE `supportedExtension` values (reply to [`Request::FetchRootDse`]).
+    RootDse {
+        supported_extensions: Vec<String>,
+    },
     /// Result of a [`Request::Search`]; `id` echoes the request (D4).
     /// `truncated` is true when the server capped the result set (rc 3/4/11).
     Entries {
@@ -385,6 +411,15 @@ fn worker_loop(conn: &mut LdapConn, config: &Config, rx: Receiver<Job>) {
                 };
                 let _ = reply.send(resp);
             }
+            Request::FetchRootDse => {
+                let resp = match fetch_root_dse(conn) {
+                    Ok(supported_extensions) => Response::RootDse {
+                        supported_extensions,
+                    },
+                    Err(e) => Response::Error(e.to_string()),
+                };
+                let _ = reply.send(resp);
+            }
             Request::Search {
                 id,
                 base,
@@ -423,6 +458,9 @@ fn worker_loop(conn: &mut LdapConn, config: &Config, rx: Receiver<Job>) {
             }
             Request::Add { id, dn, attrs } => {
                 let _ = reply.send(run_add(conn, id, &dn, &attrs));
+            }
+            Request::AddAtomic { id, entries } => {
+                let _ = reply.send(run_add_atomic(conn, id, &entries));
             }
             Request::ModRdn {
                 id,
@@ -502,6 +540,82 @@ fn run_add(
         .map(|(k, vs)| (k.clone(), vs.iter().cloned().collect::<HashSet<String>>()))
         .collect();
     write_response(id, dn, conn.add(dn, entry))
+}
+
+/// Create every entry in `entries` inside one RFC 5805 transaction: StartTxn → each
+/// Add under the transaction control → EndTxn(commit). Any Add failure (or an
+/// EndTxn/commit failure) aborts the transaction and returns [`Response::WriteError`]
+/// with nothing written. On success yields [`Response::WriteOk`] carrying the LAST
+/// entry's DN (the primary, submitted last). Confined to the worker (ldap3-only).
+fn run_add_atomic(
+    conn: &mut LdapConn,
+    id: u64,
+    entries: &[(String, BTreeMap<String, Vec<String>>)],
+) -> Response {
+    // StartTransaction.
+    let txn_id = match conn.extended(StartTxn) {
+        Ok(ex) if ex.1.rc == 0 => ex.0.parse::<StartTxnResp>().txn_id,
+        Ok(ex) => {
+            return Response::WriteError {
+                id,
+                msg: result_code_message(ex.1.rc, &ex.1.text),
+            }
+        }
+        Err(e) => {
+            return Response::WriteError {
+                id,
+                msg: format!("StartTransaction: {e}"),
+            }
+        }
+    };
+
+    let mut last_dn = String::new();
+    for (dn, attrs) in entries {
+        let entry: Vec<(String, HashSet<String>)> = attrs
+            .iter()
+            .map(|(k, vs)| (k.clone(), vs.iter().cloned().collect::<HashSet<String>>()))
+            .collect();
+        let ctrl = RawControl::from(TxnSpec { txn_id: &txn_id });
+        match conn.with_controls(vec![ctrl]).add(dn, entry) {
+            Ok(r) if r.rc == 0 => last_dn = dn.clone(),
+            Ok(r) => {
+                let _ = conn.extended(EndTxn {
+                    txn_id: &txn_id,
+                    commit: false,
+                });
+                return Response::WriteError {
+                    id,
+                    msg: result_code_message(r.rc, &r.text),
+                };
+            }
+            Err(e) => {
+                let _ = conn.extended(EndTxn {
+                    txn_id: &txn_id,
+                    commit: false,
+                });
+                return Response::WriteError {
+                    id,
+                    msg: format!("{e}"),
+                };
+            }
+        }
+    }
+
+    // EndTransaction(commit).
+    match conn.extended(EndTxn {
+        txn_id: &txn_id,
+        commit: true,
+    }) {
+        Ok(ex) if ex.1.rc == 0 => Response::WriteOk { id, dn: last_dn },
+        Ok(ex) => Response::WriteError {
+            id,
+            msg: result_code_message(ex.1.rc, &ex.1.text),
+        },
+        Err(e) => Response::WriteError {
+            id,
+            msg: format!("EndTransaction commit: {e}"),
+        },
+    }
 }
 
 fn run_modrdn(
@@ -687,6 +801,25 @@ fn fetch_subschema(conn: &mut LdapConn, base_dn: &str) -> Result<RawSubschema> {
     })
 }
 
+/// Read the root DSE (`""`, base scope) and return its `supportedExtension` values.
+fn fetch_root_dse(conn: &mut LdapConn) -> Result<Vec<String>> {
+    let (entries, _res) = conn
+        .search(
+            "",
+            Scope::Base,
+            "(objectClass=*)",
+            vec!["supportedExtension"],
+        )?
+        .success()
+        .context("reading root DSE")?;
+    let exts = entries
+        .into_iter()
+        .map(SearchEntry::construct)
+        .find_map(|e| e.attrs.get("supportedExtension").cloned())
+        .unwrap_or_default();
+    Ok(exts)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -843,6 +976,19 @@ mod tests {
             }
             _ => panic!("expected Replace"),
         }
+    }
+
+    #[test]
+    fn txn_supported_requires_both_oids() {
+        let both = vec![
+            "1.3.6.1.1.21.1".to_string(),
+            "1.3.6.1.1.21.3".to_string(),
+            "1.3.6.1.1.8".to_string(),
+        ];
+        assert!(txn_supported(&both));
+        assert!(!txn_supported(&["1.3.6.1.1.21.1".to_string()]));
+        assert!(!txn_supported(&["1.3.6.1.1.21.3".to_string()]));
+        assert!(!txn_supported(&[]));
     }
 
     #[test]
