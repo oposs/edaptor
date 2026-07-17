@@ -5,7 +5,7 @@
 
 use tvision_rs::{
     delegate, ButtonFlags, ButtonRowAlign, Command, Context, Dialog, Event, FieldValue, InputLine,
-    Key, KeyEvent, Rect, StaticText, View, ViewId,
+    Key, KeyEvent, KeyModifiers, Rect, StaticText, View, ViewId,
 };
 
 use crate::config::widget::WidgetKind;
@@ -93,7 +93,10 @@ pub(crate) struct MaskedInputLine {
 
 impl MaskedInputLine {
     fn new(bounds: Rect) -> Self {
-        let mut inner = InputLine::with_limit(bounds, 1024);
+        // The inner field stores 3-byte bullets, so its byte cap admits ~limit/3
+        // characters; 8 KiB leaves headroom for any realistic passphrase. The
+        // accept-gate in `handle_event` keeps `real` in sync even at the cap.
+        let mut inner = InputLine::with_limit(bounds, 8192);
         inner.set_select_all_on_focus(false);
         MaskedInputLine {
             inner,
@@ -131,6 +134,21 @@ impl MaskedInputLine {
         let mut synth = Event::KeyDown(KeyEvent::from(key));
         self.inner.handle_event(&mut synth, ctx);
     }
+
+    /// Apply a positional edit to `real`, mirroring the inner field's own
+    /// selection semantics: any active selection is drained first, then `op` runs
+    /// with the resulting caret char index and whether a selection was drained
+    /// (so a no-selection delete knows to remove the neighbouring char).
+    fn mutate_real(&mut self, op: impl FnOnce(&mut Vec<char>, usize, bool)) {
+        let sel = self.selection_chars();
+        let caret = sel.map(|(a, _)| a).unwrap_or_else(|| self.caret_char());
+        let mut chars: Vec<char> = self.real.chars().collect();
+        if let Some((a, b)) = sel {
+            chars.drain(a..b);
+        }
+        op(&mut chars, caret, sel.is_some());
+        self.real = chars.into_iter().collect();
+    }
 }
 
 #[delegate(to = inner)]
@@ -140,71 +158,76 @@ impl View for MaskedInputLine {
     }
 
     fn handle_event(&mut self, ev: &mut Event, ctx: &mut Context) {
-        match ev {
-            Event::KeyDown(k) => match k.key {
-                Key::Char(c) => {
-                    // Delete any selection, then insert `c` at the caret — mirroring
-                    // exactly what the inner field will do with the bullet below.
-                    let mut chars: Vec<char> = self.real.chars().collect();
-                    let at = match self.selection_chars() {
-                        Some((a, b)) => {
-                            chars.drain(a..b);
-                            a
-                        }
-                        None => self.caret_char(),
-                    };
-                    let at = at.min(chars.len());
-                    chars.insert(at, c);
-                    self.real = chars.into_iter().collect();
-                    self.feed_inner(Key::Char(BULLET), ctx);
-                    ev.clear();
-                }
-                Key::Backspace => {
-                    let mut chars: Vec<char> = self.real.chars().collect();
-                    match self.selection_chars() {
-                        Some((a, b)) => {
-                            chars.drain(a..b);
-                        }
-                        None => {
-                            let idx = self.caret_char();
-                            if idx > 0 {
-                                chars.remove(idx - 1);
-                            }
-                        }
-                    }
-                    self.real = chars.into_iter().collect();
-                    self.feed_inner(Key::Backspace, ctx);
-                    ev.clear();
-                }
-                Key::Delete => {
-                    let mut chars: Vec<char> = self.real.chars().collect();
-                    match self.selection_chars() {
-                        Some((a, b)) => {
-                            chars.drain(a..b);
-                        }
-                        None => {
-                            let idx = self.caret_char();
-                            if idx < chars.len() {
-                                chars.remove(idx);
-                            }
-                        }
-                    }
-                    self.real = chars.into_iter().collect();
-                    self.feed_inner(Key::Delete, ctx);
-                    ev.clear();
-                }
-                // Navigation / selection / Tab / Enter: operate on the bullet field
-                // (positions stay 1:1 with `real`); Tab & Enter fall through unhandled
-                // so the dialog can move focus / fire the default button.
-                _ => self.inner.handle_event(ev, ctx),
-            },
+        // Extract the key + modifiers up front (all Copy) so the `ev` borrow ends
+        // and the arms below can `ev.clear()` / forward `ev` freely.
+        let (key, ctrl, alt) = match ev {
+            Event::KeyDown(k) => (k.key, k.modifiers.ctrl, k.modifiers.alt),
             // Swallow clipboard commands: cut/paste would desync the mirror and copy
             // would leak the cleartext — a password field exposes none of them.
             Event::Command(cmd)
                 if matches!(*cmd, Command::CUT | Command::COPY | Command::PASTE) =>
             {
                 ev.clear();
+                return;
             }
+            _ => {
+                self.inner.handle_event(ev, ctx);
+                return;
+            }
+        };
+        match key {
+            // Plain printable char (Shift is fine; Ctrl/Alt are not — the inner
+            // field rejects those, so mirroring them would inject a stray char).
+            Key::Char(c) if !ctrl && !alt => {
+                // Capture caret/selection BEFORE feeding the inner field (feeding
+                // moves the caret and clears the selection).
+                let sel = self.selection_chars();
+                let caret = sel.map(|(a, _)| a).unwrap_or_else(|| self.caret_char());
+                let sel_len = sel.map(|(a, b)| b - a).unwrap_or(0);
+                let pre = self.inner.data.chars().count();
+                self.feed_inner(Key::Char(BULLET), ctx);
+                // The inner field deletes any selection, then inserts the bullet
+                // UNLESS its byte cap rejects it. Mirror exactly that: always drain
+                // the selection, insert `c` only when the inner field grew.
+                let accepted = self.inner.data.chars().count() > pre - sel_len;
+                let mut chars: Vec<char> = self.real.chars().collect();
+                if let Some((a, b)) = sel {
+                    chars.drain(a..b);
+                }
+                if accepted {
+                    chars.insert(caret.min(chars.len()), c);
+                }
+                self.real = chars.into_iter().collect();
+                ev.clear();
+            }
+            Key::Backspace if !ctrl && !alt => {
+                self.mutate_real(|chars, caret, had_sel| {
+                    if !had_sel && caret > 0 {
+                        chars.remove(caret - 1);
+                    }
+                });
+                self.feed_inner(Key::Backspace, ctx);
+                ev.clear();
+            }
+            Key::Delete if !ctrl && !alt => {
+                self.mutate_real(|chars, caret, had_sel| {
+                    if !had_sel && caret < chars.len() {
+                        chars.remove(caret);
+                    }
+                });
+                self.feed_inner(Key::Delete, ctx);
+                ev.clear();
+            }
+            // Never enter overwrite mode: the inner field would delete-then-insert,
+            // keeping the bullet count constant while `real` grows — a silent
+            // desync. Swallow Insert so the field stays insert-only.
+            Key::Insert => ev.clear(),
+            // Ctrl/Alt-modified edit keys (shortcuts, word-delete) would desync the
+            // mirror — swallow them rather than half-applying.
+            Key::Char(_) | Key::Backspace | Key::Delete => ev.clear(),
+            // Navigation / selection / Tab / Enter: operate on the bullet field
+            // (positions stay 1:1 with `real`); Tab & Enter fall through unhandled
+            // so the dialog can move focus / fire the default button.
             _ => self.inner.handle_event(ev, ctx),
         }
     }
@@ -290,24 +313,24 @@ impl PasswordDialog {
         }
     }
 
-    /// The cleartext currently held by a masked field.
-    fn real_of(&mut self, id: ViewId) -> String {
+    /// Borrow a child masked field by id (the shared downcast chain).
+    fn masked_mut(&mut self, id: ViewId) -> Option<&mut MaskedInputLine> {
         self.dlg
             .child_mut(id)
             .and_then(|v| v.as_any_mut())
             .and_then(|a| a.downcast_mut::<MaskedInputLine>())
+    }
+
+    /// The cleartext currently held by a masked field.
+    fn real_of(&mut self, id: ViewId) -> String {
+        self.masked_mut(id)
             .map(|m| m.real.clone())
             .unwrap_or_default()
     }
 
     /// Clear a masked field's content.
     fn clear_field(&mut self, id: ViewId) {
-        if let Some(m) = self
-            .dlg
-            .child_mut(id)
-            .and_then(|v| v.as_any_mut())
-            .and_then(|a| a.downcast_mut::<MaskedInputLine>())
-        {
+        if let Some(m) = self.masked_mut(id) {
             m.clear();
         }
     }
@@ -343,6 +366,22 @@ impl View for PasswordDialog {
     }
 
     fn handle_event(&mut self, ev: &mut Event, ctx: &mut Context) {
+        // The masked fields are single-line, so Up/Down would be dead keys. Map
+        // them to Tab / Shift+Tab so arrows move between the fields and buttons,
+        // matching the pre-rewrite dialog where Up/Down switched New/Confirm.
+        if let Event::KeyDown(k) = ev {
+            let as_tab = match k.key {
+                Key::Down => Some(KeyModifiers::default()),
+                Key::Up => Some(KeyModifiers {
+                    shift: true,
+                    ..KeyModifiers::default()
+                }),
+                _ => None,
+            };
+            if let Some(mods) = as_tab {
+                *ev = Event::KeyDown(KeyEvent::new(Key::Tab, mods));
+            }
+        }
         // Native routing: the dialog delivers the event to the focused masked
         // field (which masks its own edits), moves focus on Tab, and fires OK /
         // Cancel. Afterwards, recompute the staged commit from the field mirrors.
@@ -494,6 +533,69 @@ mod tests {
         assert!(m.inner.data.chars().all(|c| c == '\u{2022}'));
         press(&mut m, Key::Backspace, &mut ctx);
         assert_eq!(m.real, "pä");
+    }
+
+    /// A Ctrl/Alt-modified Char (a shortcut delivered as a Char event) must NOT be
+    /// mirrored into the password — the inner field rejects it, so mirroring would
+    /// inject a stray character the operator never typed.
+    #[test]
+    fn masked_field_ignores_modified_chars() {
+        let (mut out, mut timers, mut deferred) = ctx_deps();
+        let mut ctx = Context::new(&mut out, &mut timers, 0, &mut deferred);
+        let mut m = MaskedInputLine::new(Rect::new(0, 0, 40, 1));
+        typ(&mut m, "a", &mut ctx);
+        m.inner.state.state.selected = true;
+        let mut ev = Event::KeyDown(KeyEvent::new(
+            Key::Char('b'),
+            KeyModifiers {
+                ctrl: true,
+                ..KeyModifiers::default()
+            },
+        ));
+        m.handle_event(&mut ev, &mut ctx);
+        assert_eq!(
+            m.real, "a",
+            "ctrl-modified char must not enter the password"
+        );
+        assert_eq!(m.inner.data.chars().count(), 1, "bullets stay in sync");
+    }
+
+    /// The Insert key must not switch the field into overwrite mode — that would
+    /// keep the bullet count constant while `real` grows, desyncing the mirror.
+    #[test]
+    fn masked_field_insert_key_never_overwrites() {
+        let (mut out, mut timers, mut deferred) = ctx_deps();
+        let mut ctx = Context::new(&mut out, &mut timers, 0, &mut deferred);
+        let mut m = MaskedInputLine::new(Rect::new(0, 0, 40, 1));
+        typ(&mut m, "ab", &mut ctx);
+        press(&mut m, Key::Home, &mut ctx);
+        press(&mut m, Key::Insert, &mut ctx); // must be swallowed
+        typ(&mut m, "X", &mut ctx);
+        assert_eq!(m.real, "Xab", "Insert must not engage overwrite mode");
+        assert_eq!(m.inner.data.chars().count(), 3, "bullets track real 1:1");
+    }
+
+    /// `handle_event` maps Up/Down onto Tab / Shift+Tab so the arrows move between
+    /// the fields (the dialog's native focus routing is exercised live — headless
+    /// groups don't deliver keys to a focused child, so this asserts the rewrite).
+    #[test]
+    fn dialog_maps_up_down_to_tab() {
+        let sh = shared_with(true);
+        let schema = make_schema();
+        let ed = test_editor(vec!["userPassword".into()]);
+        let (mut view, _focus) = ed.into_view(&schema, sh.clone());
+        let (mut out, mut timers, mut deferred) = ctx_deps();
+        let mut ctx = Context::new(&mut out, &mut timers, 0, &mut deferred);
+        view.reset_current(&mut ctx);
+
+        // The handler rewrites Down→Tab before delegating, so the event is never
+        // left as Down (it is either consumed as focus movement, or a Tab).
+        let mut down = Event::KeyDown(KeyEvent::from(Key::Down));
+        view.handle_event(&mut down, &mut ctx);
+        assert!(
+            !matches!(down, Event::KeyDown(k) if k.key == Key::Down),
+            "Down must be remapped (to Tab) for field navigation"
+        );
     }
 
     /// Encrypted connection: matching New + Confirm → StageSecret; mismatch → None.
