@@ -12,6 +12,13 @@ All notable changes to eDAPtor are documented here. The format follows
 
 ### Fixed
 
+- **Live-templated defaults now fill multi-valued targets.** A create-mode
+  autofill such as `cn = "{givenName} {sn}"` now works when the target attribute is
+  multi-valued (e.g. `cn`, `sn`), not only single-valued ones (`displayName`).
+  Multi-valued fields render as an inline list editor; the autofill wrote only the
+  underlying model, so the list cell stayed empty and the value was immediately
+  read back as blank — the field looked like it never filled.
+
 - **Set-password dialog rebuilt on real, focusable fields.** The New and Confirm
   fields are now proper focusable inputs with a visible caret and native Tab
   movement between them; typed characters show as bullets (`••••`) with no phantom
