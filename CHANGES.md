@@ -12,6 +12,12 @@ All notable changes to eDAPtor are documented here. The format follows
 
 ### Fixed
 
+- **Create/edit form now honours the profile's `show` order.** The field order in
+  the create and edit forms follows the profile's `show` list (the listed
+  attributes lead, in order, right after `objectClass`), instead of being
+  alphabetical. Previously `show` only reordered the browse view; the form was
+  always alphabetical, so reordering `show` had no effect on it.
+
 ## 1.1.0 - 2026-07-16
 
 ### New

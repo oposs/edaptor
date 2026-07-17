@@ -456,8 +456,10 @@ pub fn build_create_form(
         });
     }
 
-    // Regenerate fields for the seeded objectClass set.
+    // Regenerate fields for the seeded objectClass set, then restore the profile's
+    // preferred field order (`sync_schema_fields` alphabetises within buckets).
     form.sync_schema_fields(schema);
+    crate::workflows::edit_form::reorder_by_show(&mut form, &profile.show);
 
     // Apply static defaults; collect autonumber requests. Work on an attrs map, then
     // write filled values back into the (still-empty) fields.
@@ -670,6 +672,23 @@ mod tests {
         let model = empty_form_for_profile(&schema(), &profile());
         let labels: Vec<&str> = model.fields.iter().map(|f| f.label.as_str()).collect();
         assert_eq!(&labels[..3], &["uid", "cn", "sn"]);
+    }
+
+    #[test]
+    fn build_create_form_orders_fields_by_profile_show() {
+        // The create form's field order must honour the profile's `show` list:
+        // `objectClass` pinned first, then the show-listed attrs in show order.
+        // Regression: `sync_schema_fields` → `order_fields` alphabetises within
+        // buckets and used to overwrite the show order entirely.
+        let (form, _autonum) =
+            build_create_form(&schema(), &profile(), 0, "ou=people,dc=example,dc=org");
+        let labels: Vec<&str> = form.fields.iter().map(|f| f.label.as_str()).collect();
+        assert_eq!(labels[0], "objectClass", "objectClass leads the form");
+        assert_eq!(
+            &labels[1..4],
+            &["uid", "cn", "sn"],
+            "show order preserved after objectClass"
+        );
     }
 
     fn prof(base: &str) -> EntryProfile {

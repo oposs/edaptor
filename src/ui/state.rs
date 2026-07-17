@@ -565,6 +565,7 @@ impl UiState {
         let UiState {
             edit_form,
             read_flow,
+            profiles,
             form_needs_render,
             pending_password,
             pending_password_attrs,
@@ -588,6 +589,15 @@ impl UiState {
                     // the save path.
                     form.object_classes = ocs;
                     form.sync_schema_fields(read_flow.schema());
+                    // In create mode, restore the profile's preferred field order
+                    // (`sync_schema_fields` alphabetises within buckets).
+                    if let crate::workflows::edit_form::FormMode::Create { profile_idx, .. } =
+                        form.mode
+                    {
+                        if let Some(p) = profiles.get(profile_idx) {
+                            crate::workflows::edit_form::reorder_by_show(form, &p.show);
+                        }
+                    }
                 }
             }
             CommitOutcome::StageSecret { attrs, cleartext } => {
