@@ -38,7 +38,7 @@ impl<'a> WidgetResolver<'a> {
         // Layer 1: schema introspection hints (weakest).
         let mut result: Option<WidgetKind> = None;
         if self.schema.is_readonly_attr(attr) {
-            result = Some(WidgetKind::Readonly);
+            result = Some(WidgetKind::Readonly { note: None });
         } else if self.schema.field_kind(attr) == FieldKind::Boolean {
             result = Some(WidgetKind::Choice(ChoiceWidget {
                 select: Cardinality::Single,
@@ -85,7 +85,7 @@ impl<'a> WidgetResolver<'a> {
     /// or when samba is disabled for `SambaSid`.
     fn spec_to_kind(&self, spec: &WidgetSpecCfg, attr: &str) -> Option<WidgetKind> {
         match spec {
-            WidgetSpecCfg::Readonly => Some(WidgetKind::Readonly),
+            WidgetSpecCfg::Readonly => Some(WidgetKind::Readonly { note: None }),
             WidgetSpecCfg::XOrdered => Some(WidgetKind::XOrdered),
             WidgetSpecCfg::SambaSid => {
                 if self.samba_enabled {
@@ -255,7 +255,10 @@ mod tests {
         let widgets = no_widgets();
         let resolver = WidgetResolver::new(&schema, &profiles, &widgets, false);
         let kind = resolver.resolve_kind("opAttr", &["top".into()]);
-        assert!(matches!(kind, Some(WidgetKind::Readonly)), "got {kind:?}");
+        assert!(
+            matches!(kind, Some(WidgetKind::Readonly { .. })),
+            "got {kind:?}"
+        );
     }
 
     #[test]

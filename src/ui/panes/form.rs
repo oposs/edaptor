@@ -184,6 +184,22 @@ fn launch_lines(field: &EditField) -> Vec<String> {
     }
 }
 
+/// The text a `Text`-kind value cell displays: the presented value, or — when the
+/// value is empty and the field is a read-only field carrying a `note` (e.g. a
+/// password-derived Samba hash) — that note, as an affordance. The note is
+/// display-only: read-only fields are `disabled` and skipped by `sync_into_form`,
+/// so it never becomes the field's value.
+fn text_cell_value(field: &EditField) -> String {
+    use crate::config::widget::WidgetKind;
+    let presented = present_field(field);
+    if presented.trim().is_empty() {
+        if let Some(WidgetKind::Readonly { note: Some(n) }) = &field.widget_binding {
+            return n.clone();
+        }
+    }
+    presented
+}
+
 pub(crate) struct FormPane {
     /// Outer container: header row 0 (`dn` label + DN value) + ScrollGroup (1..h).
     group: Group,
@@ -700,7 +716,7 @@ impl FormPane {
                                 // first value for editable free-text fields and keeps
                                 // the read-only presentation (checkbox/binary) for the
                                 // rest — matching the former `widget_for(f).present(f)`.
-                                v.set_value(FieldValue::Text(present_field(field)));
+                                v.set_value(FieldValue::Text(text_cell_value(field)));
                                 v.state_mut().state.disabled = !cell_focusable(field);
                             }
                             ValueKind::Launch => {

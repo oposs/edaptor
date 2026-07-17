@@ -19,6 +19,13 @@ All notable changes to eDAPtor are documented here. The format follows
 
 ### Fixed
 
+- **Derived password fields show an affordance instead of looking empty.** The
+  Samba hashes maintained from the password (`sambaNTPassword`, `sambaPwdLastSet`)
+  are now read-only and display *⟨updated automatically when you set the
+  password⟩* while empty, instead of appearing as blank editable fields. They are
+  written on save when you set the password and become visible once the entry is
+  re-read.
+
 - **Live-templated defaults now fill multi-valued targets.** A create-mode
   autofill such as `cn = "{givenName} {sn}"` now works when the target attribute is
   multi-valued (e.g. `cn`, `sn`), not only single-valued ones (`displayName`).
