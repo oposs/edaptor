@@ -100,3 +100,28 @@ high enough (or unlimited, such as the directory's root DN) to return all
 existing values in one scan. See [`bind_dn`](server-auth.md) under Server &
 Authentication, and [LDAP Constraints](../concepts/ldap-constraints.md) for the
 underlying limit.
+
+## Computed (`{auto:…}`)
+
+The expression `"{auto:NAME}"` fills a field with a value eDAPtor **computes from
+its siblings** once those inputs are available. Unlike a template, it is not a
+simple substitution — the value is derived, and it is filled *asynchronously* on
+create, after the inputs it depends on resolve.
+
+```toml
+[profile.defaults]
+uidNumber = "{next:10000-60000}"
+sambaSID  = "{auto:sambaSID}"
+```
+
+Currently one computed value is supported:
+
+- **`{auto:sambaSID}`** — the entry's `sambaSID`, derived from the sibling
+  `uidNumber` and the configured Samba domain (`domain_sid` +
+  `algorithmic_rid_base`; see [Samba](server-auth.md)). Because `uidNumber` is
+  usually itself an autonumber allocated by a background scan, `sambaSID`
+  populates a moment later, once that number lands.
+
+The field stays editable and (when a Samba domain is configured) still offers the
+manual *Enter-to-generate* action, so you can regenerate or override it by hand.
+Only an **empty** target is auto-filled — a value you type is never overwritten.

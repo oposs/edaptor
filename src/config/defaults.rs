@@ -11,12 +11,27 @@ pub enum Seg {
     Field(String),
 }
 
+/// A value the app computes from sibling fields once their inputs are available,
+/// rather than filling directly at create time. Kept as an enum so the `{auto:…}`
+/// token can grow beyond the single case needed today.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ComputedKind {
+    /// `sambaSID`, derived from the sibling `uidNumber` and the Samba domain SID.
+    SambaSid,
+}
+
 /// A parsed default value.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DefaultValue {
     Literal(String),
     Template(Vec<Seg>),
-    AutoNumber { min: u64, max: u64 },
+    AutoNumber {
+        min: u64,
+        max: u64,
+    },
+    /// `{auto:NAME}` — filled asynchronously once its inputs resolve (see
+    /// [`ComputedKind`]); never filled by the synchronous defaults pass.
+    Computed(ComputedKind),
 }
 
 /// Per-target live-template latch (see the live-templated-defaults spec). `segs`
@@ -65,6 +80,18 @@ pub fn parse_default_value(s: &str) -> Result<DefaultValue, String> {
             return Err(format!("autonumber range '{s}' has MIN > MAX"));
         }
         return Ok(DefaultValue::AutoNumber { min, max });
+    }
+    if let Some(inner) = trimmed
+        .strip_prefix("{auto:")
+        .and_then(|r| r.strip_suffix('}'))
+    {
+        let name = inner.trim();
+        if name.eq_ignore_ascii_case("sambaSID") {
+            return Ok(DefaultValue::Computed(ComputedKind::SambaSid));
+        }
+        return Err(format!(
+            "unknown computed default '{{auto:{name}}}' (supported: sambaSID)"
+        ));
     }
     if !s.contains('{') {
         return Ok(DefaultValue::Literal(s.to_string()));
@@ -191,9 +218,25 @@ pub fn plan_defaults(
                 min: *min,
                 max: *max,
             }),
+            // Computed defaults are filled asynchronously once their inputs resolve
+            // (see `computed_defaults` + the alloc hook), not by this pass.
+            DefaultValue::Computed(_) => {}
         }
     }
     out
+}
+
+/// The profile's `{auto:…}` computed defaults (attr -> kind). These are filled once
+/// their sibling inputs are available (e.g. `sambaSID` after `uidNumber` resolves),
+/// so the controller keeps this map to re-run the compute on each alloc outcome.
+pub fn computed_defaults(d: &ProfileDefaults) -> BTreeMap<String, ComputedKind> {
+    d.entries
+        .iter()
+        .filter_map(|(attr, dv)| match dv {
+            DefaultValue::Computed(k) => Some((attr.clone(), k.clone())),
+            _ => None,
+        })
+        .collect()
 }
 
 /// Build the initial live-template latches from a profile's `[profile.defaults]`:
@@ -270,6 +313,40 @@ pub fn recompute_live(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_auto_samba_sid() {
+        assert_eq!(
+            parse_default_value("{auto:sambaSID}").unwrap(),
+            DefaultValue::Computed(ComputedKind::SambaSid)
+        );
+        // case-insensitive attr name
+        assert_eq!(
+            parse_default_value("{auto:sambasid}").unwrap(),
+            DefaultValue::Computed(ComputedKind::SambaSid)
+        );
+    }
+
+    #[test]
+    fn unknown_auto_token_errors() {
+        assert!(parse_default_value("{auto:nope}").is_err());
+    }
+
+    #[test]
+    fn computed_default_is_not_planned_for_synchronous_fill() {
+        let mut d = ProfileDefaults::default();
+        d.entries.insert(
+            "sambaSID".into(),
+            DefaultValue::Computed(ComputedKind::SambaSid),
+        );
+        let current: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        // plan_defaults yields no Fill/Autonumber for it; computed_defaults surfaces it.
+        assert!(plan_defaults(&d, &current).is_empty());
+        assert_eq!(
+            computed_defaults(&d).get("sambaSID"),
+            Some(&ComputedKind::SambaSid)
+        );
+    }
 
     // Task 2.1 tests — parse_default_value
 

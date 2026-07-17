@@ -93,6 +93,12 @@ pub fn plan_companion(
                 "companion attribute '{attr}' uses a {{next:…}} autonumber, which is unsupported"
             ))
             }
+            DefaultValue::Computed(_) => {
+                return Err(format!(
+                    "companion attribute '{attr}' uses an {{auto:…}} computed default, \
+                     which is unsupported"
+                ))
+            }
         };
         if let Some(v) = resolved {
             if !v.is_empty() {

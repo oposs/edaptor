@@ -8,6 +8,13 @@ All notable changes to eDAPtor are documented here. The format follows
 
 ### New
 
+- **Computed `{auto:sambaSID}` default.** A profile default can now auto-populate
+  `sambaSID` on create — `sambaSID = "{auto:sambaSID}"` in `[profile.defaults]`
+  fills it from the sibling `uidNumber` (and the Samba domain) once the number is
+  allocated, the same way `{next:…}` autonumbers fill. The field stays editable and
+  keeps its manual Enter-to-generate action. See
+  [Configuration → Defaults](https://oposs.github.io/edaptor/configuration/defaults.html).
+
 ### Changed
 
 ### Fixed
