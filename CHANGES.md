@@ -10,10 +10,15 @@ All notable changes to eDAPtor are documented here. The format follows
 
 ### Changed
 
+### Fixed
+
+## 1.2.1 - 2026-07-17
+
+### Changed
+
 - **New-entry create form takes focus.** Creating an entry (Alt-N) now moves the
   keyboard focus straight to the entry editor (the right-hand form pane), so you
   can start filling in fields immediately without Tabbing over from the tree/list.
-
 ### Fixed
 
 - **`{auto:sambaSID}` now resolves the Samba domain on its own.** A profile that
