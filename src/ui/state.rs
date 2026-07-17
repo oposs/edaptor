@@ -86,6 +86,11 @@ pub struct UiState {
     pub status: String,
     /// True when a pane must re-render the form from `edit_form`.
     pub form_needs_render: bool,
+    /// One-shot: a freshly-opened create form wants pane-level focus moved to the
+    /// form pane (panel 3), so the operator can type immediately without Tabbing
+    /// over from the tree/list. The form pane consumes and clears this on its next
+    /// event via [`UiState::take_focus_form_request`].
+    pub focus_form_request: bool,
     /// A dirty-blocked navigation awaiting the guard's decision.
     pub guard_target: Option<GuardTarget>,
     /// Where to navigate after a guard-Save completes: (dn, objectClasses).
@@ -185,6 +190,7 @@ impl UiState {
             read_only: false,
             status: String::new(),
             form_needs_render: false,
+            focus_form_request: false,
             guard_target: None,
             pending_nav: None,
             last_write_error: None,
@@ -351,6 +357,13 @@ impl UiState {
     /// Currently: `sambaSID`, derived from the sibling `uidNumber` and the Samba
     /// domain. Only *empty* targets are filled, so an operator-typed value (or an
     /// earlier compute) is never overwritten. No-op outside create mode.
+    /// Consume the one-shot "focus the form pane" request, returning whether it was
+    /// set. The form pane calls this on each event; a `true` result means it should
+    /// pull pane-level focus to itself (a create form just opened).
+    pub fn take_focus_form_request(&mut self) -> bool {
+        std::mem::take(&mut self.focus_form_request)
+    }
+
     pub fn recompute_computed_defaults(&mut self) {
         use crate::config::defaults::ComputedKind;
         if self.computed_defaults.is_empty() {
@@ -886,9 +899,16 @@ pub(crate) fn bootstrap(config: Config, password: String) -> Result<UiState> {
     let connection_encrypted = config.is_encrypted();
     let samba_from_config = samba_info_from_config(&config);
     let worker = WorkerHandle::spawn(config, password)?;
-    // M5c: prefer a live sambaDomain entry when a sambaSID widget is configured;
-    // fall back to the static config domain_sid (or no samba at all).
-    let samba_domain = if samba_in_use(&resolved_widgets) {
+    // M5c: prefer a live sambaDomain entry when the Samba domain SID is actually
+    // needed — either a `sambaSID` widget OR a `{auto:sambaSID}` computed default
+    // (the computed default derives the SID from the domain too, so it must trigger
+    // discovery just like the widget). Fall back to the static config domain_sid
+    // (or no samba at all).
+    let samba_needed = samba_in_use(&resolved_widgets)
+        || profiles
+            .iter()
+            .any(|p| crate::config::defaults::uses_computed_samba_sid(&p.defaults));
+    let samba_domain = if samba_needed {
         discover_samba_domain(&worker, &base_dn).or(samba_from_config)
     } else {
         samba_from_config
@@ -945,6 +965,7 @@ pub(crate) fn bootstrap(config: Config, password: String) -> Result<UiState> {
         read_only: false,
         status: String::new(),
         form_needs_render: false,
+        focus_form_request: false,
         guard_target: None,
         pending_nav: None,
         last_write_error: None,

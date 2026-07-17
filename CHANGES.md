@@ -10,7 +10,19 @@ All notable changes to eDAPtor are documented here. The format follows
 
 ### Changed
 
+- **New-entry create form takes focus.** Creating an entry (Alt-N) now moves the
+  keyboard focus straight to the entry editor (the right-hand form pane), so you
+  can start filling in fields immediately without Tabbing over from the tree/list.
+
 ### Fixed
+
+- **`{auto:sambaSID}` now resolves the Samba domain on its own.** A profile that
+  uses `sambaSID = "{auto:sambaSID}"` in `[profile.defaults]` without also
+  declaring a `sambaSID` *widget* previously left the field empty, because the
+  Samba domain SID was only ever discovered when a widget was present. The computed
+  default now triggers the same domain discovery (auto-detected from a
+  `sambaDomain` entry, or the static `[samba] domain_sid` fallback), so it fills as
+  documented.
 
 ## 1.2.0 - 2026-07-17
 

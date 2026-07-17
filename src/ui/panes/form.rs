@@ -1209,6 +1209,18 @@ impl View for FormPane {
         }
         let _ = REFRESH; // REFRESH still drives other panes; retained import
 
+        // A freshly-opened create form asked for pane-level focus (Alt-N): pull it
+        // here, AFTER render() has landed internal focus on the first field. The
+        // window→cols-splitter chain is already on this pane's ancestors except the
+        // splitter's current child; `request_focus` walks to the owning splitter and
+        // `focus_child`s this pane, completing the chain so keystrokes land in the
+        // form instead of the tree/list the operator came from.
+        if self.state.borrow_mut().take_focus_form_request() {
+            if let Some(id) = self.group.state().id() {
+                ctx.request_focus(id);
+            }
+        }
+
         // When focus enters the pane (Tab from another pane), the framework
         // select-alls the current field (Turbo Vision focus behaviour), leaving the
         // caret at the end over a highlighted block that the first keystroke would
@@ -1461,6 +1473,68 @@ mod tests {
             pane.scroll_bounds_for_test(),
             Rect::new(0, 2, 80, 20),
             "scroll group must fill remaining width+height (hi_x+hi_y)"
+        );
+    }
+
+    /// A fresh create form (`focus_form_request` set by `open_create`) must pull
+    /// pane-level focus: on its next event the form pane requests focus on itself so
+    /// keystrokes land in panel 3, not the tree/list the operator triggered Alt-N
+    /// from. RED before the fix: no `FocusById` was ever queued.
+    #[test]
+    fn create_form_requests_pane_focus_once() {
+        let (shared, pane) = build_pane_with_form(vec![ef("cn", "", true)]);
+        shared.borrow_mut().focus_form_request = true;
+
+        // Give the pane a real ViewId by inserting it into a parent group (id() is
+        // None before insertion, so request_focus would otherwise no-op).
+        let mut parent = Group::new(Rect::new(0, 0, 80, 20));
+        let pane_id = parent.insert(Box::new(pane));
+
+        let mut out = VecDeque::new();
+        let mut timers = tv::timer::TimerQueue::new();
+
+        // First event: the flag is set → the pane queues FocusById on itself.
+        let mut deferred = Vec::new();
+        {
+            let mut ctx = headless_ctx(&mut out, &mut timers, &mut deferred);
+            let mut ev = Event::Broadcast {
+                command: REFRESH,
+                source: None,
+            };
+            parent
+                .child_mut(pane_id)
+                .unwrap()
+                .handle_event(&mut ev, &mut ctx);
+        }
+        assert!(
+            deferred
+                .iter()
+                .any(|d| matches!(d, tv::Deferred::FocusById(id) if *id == pane_id)),
+            "a fresh create form must queue FocusById on the form pane"
+        );
+        assert!(
+            !shared.borrow().focus_form_request,
+            "the one-shot flag must be consumed"
+        );
+
+        // Second event with the flag cleared: no further focus request.
+        let mut deferred2 = Vec::new();
+        {
+            let mut ctx = headless_ctx(&mut out, &mut timers, &mut deferred2);
+            let mut ev2 = Event::Broadcast {
+                command: REFRESH,
+                source: None,
+            };
+            parent
+                .child_mut(pane_id)
+                .unwrap()
+                .handle_event(&mut ev2, &mut ctx);
+        }
+        assert!(
+            !deferred2
+                .iter()
+                .any(|d| matches!(d, tv::Deferred::FocusById(_))),
+            "focus is requested once, not on every event"
         );
     }
 

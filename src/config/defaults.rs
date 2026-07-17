@@ -239,6 +239,16 @@ pub fn computed_defaults(d: &ProfileDefaults) -> BTreeMap<String, ComputedKind> 
         .collect()
 }
 
+/// Whether this profile declares a `{auto:sambaSID}` computed default. When it
+/// does, the Samba domain SID must be resolved (discovered or configured) for the
+/// compute to succeed — even without a `sambaSID` *widget*. Used at startup to
+/// decide whether to run the domain-discovery search.
+pub fn uses_computed_samba_sid(d: &ProfileDefaults) -> bool {
+    d.entries
+        .values()
+        .any(|dv| matches!(dv, DefaultValue::Computed(ComputedKind::SambaSid)))
+}
+
 /// Build the initial live-template latches from a profile's `[profile.defaults]`:
 /// one entry per Template default (literals and autonumbers are skipped). Each
 /// starts `auto = true`, `last_written = ""`.
@@ -346,6 +356,24 @@ mod tests {
             computed_defaults(&d).get("sambaSID"),
             Some(&ComputedKind::SambaSid)
         );
+    }
+
+    #[test]
+    fn uses_computed_samba_sid_detects_the_auto_default() {
+        let mut with = ProfileDefaults::default();
+        with.entries.insert(
+            "sambaSID".into(),
+            DefaultValue::Computed(ComputedKind::SambaSid),
+        );
+        assert!(uses_computed_samba_sid(&with));
+
+        let mut without = ProfileDefaults::default();
+        without.entries.insert(
+            "uidNumber".into(),
+            DefaultValue::AutoNumber { min: 1, max: 9 },
+        );
+        assert!(!uses_computed_samba_sid(&without));
+        assert!(!uses_computed_samba_sid(&ProfileDefaults::default()));
     }
 
     // Task 2.1 tests — parse_default_value

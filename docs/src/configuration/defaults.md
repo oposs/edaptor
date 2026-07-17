@@ -117,10 +117,15 @@ sambaSID  = "{auto:sambaSID}"
 Currently one computed value is supported:
 
 - **`{auto:sambaSID}`** — the entry's `sambaSID`, derived from the sibling
-  `uidNumber` and the configured Samba domain (`domain_sid` +
-  `algorithmic_rid_base`; see [Samba](server-auth.md)). Because `uidNumber` is
-  usually itself an autonumber allocated by a background scan, `sambaSID`
-  populates a moment later, once that number lands.
+  `uidNumber` and the Samba domain. Because `uidNumber` is usually itself an
+  autonumber allocated by a background scan, `sambaSID` populates a moment later,
+  once that number lands.
+
+  Declaring `{auto:sambaSID}` is enough on its own — you do **not** also need a
+  `sambaSID` widget. At startup eDAPtor resolves the Samba domain by
+  auto-discovering a `sambaDomain` entry under the base DN, falling back to a
+  static `[samba] domain_sid` / `algorithmic_rid_base` in the config (see
+  [Samba](server-auth.md)). If no domain can be resolved, the field is left empty.
 
 The field stays editable and (when a Samba domain is configured) still offers the
 manual *Enter-to-generate* action, so you can regenerate or override it by hand.

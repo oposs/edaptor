@@ -433,6 +433,10 @@ fn open_create(state: &Shared, profile_idx: usize, container: &str) {
     // literal `uidNumber`); autonumber-backed inputs fill later via the alloc hook.
     st.recompute_computed_defaults();
     st.form_needs_render = true;
+    // A fresh create form should take pane-level focus so the operator can type
+    // straight away (Alt-N lands them in panel 3, not the tree/list they came from).
+    // The form pane consumes this flag on its next event.
+    st.focus_form_request = true;
     // Post a background scan for each autonumber field (split-borrow idiom: worker
     // and alloc_flow are borrowed disjointly from st).
     if !autonum.is_empty() {
