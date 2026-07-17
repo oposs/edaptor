@@ -12,6 +12,13 @@ All notable changes to eDAPtor are documented here. The format follows
 
 ### Fixed
 
+- **Set-password dialog rebuilt on real, focusable fields.** The New and Confirm
+  fields are now proper focusable inputs with a visible caret and native Tab
+  movement between them; typed characters show as bullets (`••••`) with no phantom
+  "everything selected" block. Previously the fields were read-only display cells
+  driven by an invisible active-field flag, so Tab looked dead and every keystroke
+  rendered the bullets as a fully-selected block.
+
 - **Create/edit form now honours the profile's `show` order.** The field order in
   the create and edit forms follows the profile's `show` list (the listed
   attributes lead, in order, right after `objectClass`), instead of being
