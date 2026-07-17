@@ -415,14 +415,23 @@ fn open_create(state: &Shared, profile_idx: usize, container: &str) {
         );
         crate::workflows::widget_bind::apply_widget_bindings(&mut form, &resolver, &ocs);
     }
-    // Build the create-mode live-template latches from the profile's defaults.
-    let live = {
+    // Build the create-mode live-template latches + computed-default map from the
+    // profile's defaults.
+    let (live, computed) = {
         let st = state.borrow();
-        crate::config::defaults::live_templates(&st.profiles[profile_idx].defaults)
+        let d = &st.profiles[profile_idx].defaults;
+        (
+            crate::config::defaults::live_templates(d),
+            crate::config::defaults::computed_defaults(d),
+        )
     };
     let mut st = state.borrow_mut();
     st.edit_form = Some(form);
     st.live_templates = live;
+    st.computed_defaults = computed;
+    // Compute any `{auto:…}` default whose inputs are already available (e.g. a
+    // literal `uidNumber`); autonumber-backed inputs fill later via the alloc hook.
+    st.recompute_computed_defaults();
     st.form_needs_render = true;
     // Post a background scan for each autonumber field (split-borrow idiom: worker
     // and alloc_flow are borrowed disjointly from st).

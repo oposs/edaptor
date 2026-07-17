@@ -30,7 +30,11 @@ label          = "{cn} ({uid})"               # e.g. "Bob Baker (bob)"
   distinguished name). For users this is typically `uid`; for groups, `cn`.
 - **`search_base`** — the subtree under which entries of this profile live and
   are searched.
-- **`show`** — the attributes displayed (and editable) for this profile.
+- **`show`** — the attributes displayed (and editable) for this profile, **in
+  this order**. The listed attributes lead the form (right after `objectClass`)
+  in the order given, in the browse view **and** in the create/edit form;
+  everything else follows automatically (mandatory and populated fields first,
+  then the rest, alphabetically).
 - **`search_attrs`** — the attributes a picker's substring search matches
   against when this profile is a candidate. It follows a **fallback chain**: if
   `search_attrs` is omitted, eDAPtor falls back to `show`; if `show` is also

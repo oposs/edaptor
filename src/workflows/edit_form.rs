@@ -264,6 +264,58 @@ pub fn order_fields(form: &mut EditForm) {
     });
 }
 
+/// Stably pull the profile's `show`-listed fields to the front of the form — right
+/// after the pinned `objectClass` — in `show` order, leaving every other field in
+/// its existing (bucketed) relative order. Case-insensitive; each `show` entry
+/// claims at most one field (the first unclaimed match). A no-op when `show` is
+/// empty.
+///
+/// [`order_fields`] alphabetises within buckets and has no notion of the profile's
+/// preferred field order, so it overwrites the `show`-driven order that
+/// `empty_form_for_profile` starts with. Callers apply this AFTER `order_fields`
+/// (create build + objectClass re-sync) so the config's `show` list drives the top
+/// of the form; the bucket logic still governs everything not listed in `show`.
+pub fn reorder_by_show(form: &mut EditForm, show: &[String]) {
+    if show.is_empty() {
+        return;
+    }
+    let mut claimed = vec![false; form.fields.len()];
+    let mut front: Vec<usize> = Vec::new();
+
+    // objectClass stays pinned at the very top (order_fields already put it first).
+    if let Some(pos) = form
+        .fields
+        .iter()
+        .position(|f| f.label.eq_ignore_ascii_case("objectClass"))
+    {
+        claimed[pos] = true;
+        front.push(pos);
+    }
+    // Then the show-listed fields, in show order.
+    for attr in show {
+        if let Some(pos) = form
+            .fields
+            .iter()
+            .position(|f| f.label.eq_ignore_ascii_case(attr))
+            .filter(|&p| !claimed[p])
+        {
+            claimed[pos] = true;
+            front.push(pos);
+        }
+    }
+    // Reassemble: the front fields, then every remaining field in its current order.
+    let mut reordered: Vec<EditField> = Vec::with_capacity(form.fields.len());
+    for &i in &front {
+        reordered.push(form.fields[i].clone());
+    }
+    for (i, f) in form.fields.iter().enumerate() {
+        if !claimed[i] {
+            reordered.push(f.clone());
+        }
+    }
+    form.fields = reordered;
+}
+
 /// True when a field is a free-text editor (not binary / boolean-checkbox).
 fn field_is_editable(f: &FormField) -> bool {
     !matches!(
@@ -485,6 +537,49 @@ mod tests {
         f.fields[0].orphaned = true; // cn orphaned → current_values() == [] → bucket 2
         order_fields(&mut f);
         assert_eq!(f.fields.last().unwrap().label, "cn");
+    }
+
+    #[test]
+    fn reorder_by_show_pulls_show_fields_after_object_class() {
+        let mut f = build_edit_form(&model(), &schema(), false);
+        f.fields
+            .push(EditField::injected("objectClass".into(), true, &schema()));
+        f.fields
+            .push(EditField::injected("description".into(), false, &schema()));
+        let mut gn = EditField::injected("givenName".into(), false, &schema());
+        gn.values = vec!["x".into()];
+        f.fields.push(gn);
+        order_fields(&mut f); // alphabetical buckets, objectClass pinned first
+        reorder_by_show(
+            &mut f,
+            &["givenName".to_string(), "sn".to_string(), "cn".to_string()],
+        );
+        let labels: Vec<&str> = f.fields.iter().map(|x| x.label.as_str()).collect();
+        // objectClass pinned, then show order, then the rest (empty `description`).
+        assert_eq!(
+            labels,
+            vec!["objectClass", "givenName", "sn", "cn", "description"]
+        );
+    }
+
+    #[test]
+    fn reorder_by_show_empty_is_noop() {
+        let mut f = build_edit_form(&model(), &schema(), false);
+        order_fields(&mut f);
+        let before: Vec<String> = f.fields.iter().map(|x| x.label.clone()).collect();
+        reorder_by_show(&mut f, &[]);
+        let after: Vec<String> = f.fields.iter().map(|x| x.label.clone()).collect();
+        assert_eq!(before, after);
+    }
+
+    #[test]
+    fn reorder_by_show_ignores_attrs_not_in_form() {
+        let mut f = build_edit_form(&model(), &schema(), false);
+        order_fields(&mut f);
+        // `mail` isn't a field here; it's silently skipped, `sn` still moves front.
+        reorder_by_show(&mut f, &["mail".to_string(), "sn".to_string()]);
+        let labels: Vec<&str> = f.fields.iter().map(|x| x.label.as_str()).collect();
+        assert_eq!(labels, vec!["sn", "cn"]);
     }
 
     #[test]

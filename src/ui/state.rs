@@ -60,6 +60,11 @@ pub struct UiState {
     /// `config::defaults::recompute_live`.
     pub live_templates:
         std::collections::BTreeMap<String, crate::config::defaults::LiveTemplateState>,
+    /// Create-mode `{auto:…}` computed defaults (attr → kind), built by
+    /// `open_create` from the profile's `[profile.defaults]`. Re-evaluated after
+    /// each autonumber allocation so e.g. `sambaSID` fills once `uidNumber` resolves.
+    pub computed_defaults:
+        std::collections::BTreeMap<String, crate::config::defaults::ComputedKind>,
     /// Async write flow (validate/diff/submit/correlate).
     pub write_flow: WriteFlow,
     /// Async autonumber allocation flow (scan + pick next-free).
@@ -169,6 +174,7 @@ impl UiState {
             search: String::new(),
             edit_form: None,
             live_templates: std::collections::BTreeMap::new(),
+            computed_defaults: std::collections::BTreeMap::new(),
             write_flow: WriteFlow::new(),
             alloc_flow: AllocFlow::new(),
             search_flow: SearchFlow::new(),
@@ -336,6 +342,69 @@ impl UiState {
             }
             AllocOutcome::Ignored => {}
         }
+        // A freshly-allocated number (e.g. `uidNumber`) may be the input a computed
+        // default was waiting on — try to fill `{auto:…}` targets now.
+        self.recompute_computed_defaults();
+    }
+
+    /// Fill any create-mode `{auto:…}` computed default whose inputs are now ready.
+    /// Currently: `sambaSID`, derived from the sibling `uidNumber` and the Samba
+    /// domain. Only *empty* targets are filled, so an operator-typed value (or an
+    /// earlier compute) is never overwritten. No-op outside create mode.
+    pub fn recompute_computed_defaults(&mut self) {
+        use crate::config::defaults::ComputedKind;
+        if self.computed_defaults.is_empty() {
+            return;
+        }
+        let Some(form) = self.edit_form.as_ref() else {
+            return;
+        };
+        if !matches!(
+            form.mode,
+            crate::workflows::edit_form::FormMode::Create { .. }
+        ) {
+            return;
+        }
+        // Compute against the current (immutably-borrowed) form; collect fills.
+        let mut fills: Vec<(String, String)> = Vec::new();
+        for (attr, kind) in &self.computed_defaults {
+            let target_empty = form
+                .fields
+                .iter()
+                .find(|f| f.label.eq_ignore_ascii_case(attr))
+                .map(|f| f.values.iter().all(|s| s.trim().is_empty()));
+            // Skip if the attr isn't on the form or already has a value.
+            if target_empty != Some(true) {
+                continue;
+            }
+            let computed = match kind {
+                ComputedKind::SambaSid => crate::workflows::samba_compute::samba_sid_for_form(
+                    form,
+                    self.samba_domain.as_ref(),
+                )
+                .ok(),
+            };
+            if let Some(v) = computed {
+                if !v.trim().is_empty() {
+                    fills.push((attr.clone(), v));
+                }
+            }
+        }
+        if fills.is_empty() {
+            return;
+        }
+        if let Some(form) = self.edit_form.as_mut() {
+            for (attr, v) in fills {
+                if let Some(f) = form
+                    .fields
+                    .iter_mut()
+                    .find(|f| f.label.eq_ignore_ascii_case(&attr))
+                {
+                    f.values = vec![v];
+                }
+            }
+        }
+        self.form_needs_render = true;
     }
 
     /// Submit a candidate search under `base` for entries of object class `oc`
@@ -565,6 +634,7 @@ impl UiState {
         let UiState {
             edit_form,
             read_flow,
+            profiles,
             form_needs_render,
             pending_password,
             pending_password_attrs,
@@ -588,6 +658,15 @@ impl UiState {
                     // the save path.
                     form.object_classes = ocs;
                     form.sync_schema_fields(read_flow.schema());
+                    // In create mode, restore the profile's preferred field order
+                    // (`sync_schema_fields` alphabetises within buckets).
+                    if let crate::workflows::edit_form::FormMode::Create { profile_idx, .. } =
+                        form.mode
+                    {
+                        if let Some(p) = profiles.get(profile_idx) {
+                            crate::workflows::edit_form::reorder_by_show(form, &p.show);
+                        }
+                    }
                 }
             }
             CommitOutcome::StageSecret { attrs, cleartext } => {
@@ -855,6 +934,7 @@ pub(crate) fn bootstrap(config: Config, password: String) -> Result<UiState> {
         search: String::new(),
         edit_form: None,
         live_templates: std::collections::BTreeMap::new(),
+        computed_defaults: std::collections::BTreeMap::new(),
         write_flow: WriteFlow::new(),
         alloc_flow: AllocFlow::new(),
         search_flow: SearchFlow::new(),
@@ -1222,6 +1302,75 @@ mod tests {
             "Filled should replace the placeholder with the allocated value"
         );
         assert!(st.form_needs_render, "form_needs_render must be set");
+    }
+
+    /// `{auto:sambaSID}`: an empty computed target fills once its input
+    /// (`uidNumber`) resolves via the alloc outcome, but not before.
+    #[test]
+    fn apply_alloc_outcome_fills_computed_samba_sid() {
+        use crate::config::defaults::ComputedKind;
+        use crate::schema::FieldKind;
+        use crate::workflows::alloc_flow::AllocOutcome;
+        use crate::workflows::edit_form::{EditField, EditForm, FormMode};
+        use crate::workflows::form_model::WidgetSpec;
+
+        let schema = SchemaModel::from_raw(&RawSubschema::default());
+        let structure = Structure::build("dc=x", vec![]);
+        let mut st =
+            UiState::new_for_test(structure, schema, "dc=x".into(), Vec::new(), Vec::new());
+        st.samba_domain = Some(crate::samba::SambaDomainInfo {
+            domain_sid: "S-1-5-21-1-2-3".into(),
+            algorithmic_rid_base: 1000,
+        });
+        st.computed_defaults
+            .insert("sambaSID".into(), ComputedKind::SambaSid);
+
+        let mk = |label: &str, vals: Vec<String>| EditField {
+            label: label.into(),
+            must: false,
+            editable: true,
+            multi: false,
+            secret: false,
+            ordered: false,
+            orphaned: false,
+            kind: FieldKind::Text,
+            widget: WidgetSpec::ReadOnlyText,
+            widget_binding: None,
+            values: vals,
+            baseline: vec![],
+        };
+        st.edit_form = Some(EditForm {
+            dn: String::new(),
+            mode: FormMode::Create {
+                profile_idx: 0,
+                container: "ou=people,dc=x".into(),
+            },
+            object_classes: vec![],
+            fields: vec![
+                mk("uidNumber", vec![ALLOC_PLACEHOLDER.to_string()]),
+                mk("sambaSID", vec![]),
+            ],
+        });
+
+        // Before uidNumber resolves: sambaSID stays empty (placeholder isn't numeric).
+        st.recompute_computed_defaults();
+        assert!(st.edit_form.as_ref().unwrap().fields[1]
+            .values
+            .iter()
+            .all(|s| s.trim().is_empty()));
+
+        // uidNumber resolves → sambaSID computed from it.
+        st.apply_alloc_outcome(AllocOutcome::Filled {
+            attr: "uidNumber".into(),
+            value: "1000".into(),
+        });
+        let f = st.edit_form.as_ref().unwrap();
+        assert_eq!(f.fields[0].values, vec!["1000".to_string()]);
+        assert_eq!(
+            f.fields[1].values,
+            vec!["S-1-5-21-1-2-3-3000".to_string()],
+            "sambaSID auto-computed from the resolved uidNumber"
+        );
     }
 
     /// A field holding a user-typed value (NOT the placeholder) must be left

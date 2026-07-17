@@ -32,6 +32,12 @@ Samba credentials in sync in the same atomic change:
 The result is a single password change that updates both the Unix
 (`userPassword`) and Samba (`sambaNTPassword`) credentials together.
 
+Because they are maintained from the password, the derived fields
+(`sambaNTPassword`, `sambaPwdLastSet`) are shown **read-only** in the form. While
+empty they display *⟨updated automatically when you set the password⟩* rather than
+looking like blank fields — their value is written on save and becomes visible
+once the entry is re-read.
+
 ## The `edaptor passwd <user>` CLI
 
 To set a password without entering the TUI, use the `passwd` subcommand. It

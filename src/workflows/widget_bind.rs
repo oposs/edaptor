@@ -2,9 +2,15 @@
 //! fields: set `secret` for password fields and attach `widget_binding` where unset.
 //! Neutral port of `ui::edit_form::inject_resolver_kinds`.
 
+use std::collections::BTreeSet;
+
 use crate::config::resolver::WidgetResolver;
 use crate::config::widget::WidgetKind;
 use crate::workflows::edit_form::EditForm;
+
+/// Affordance shown in place of an empty value for a password-derived field (the
+/// Samba hashes). They are written on save and only become visible on re-read.
+pub const PW_DERIVED_NOTE: &str = "\u{27E8}updated automatically when you set the password\u{27E9}";
 
 /// Apply profile-driven widget bindings to `form`'s fields.
 ///
@@ -21,8 +27,15 @@ pub fn apply_widget_bindings(
     resolver: &WidgetResolver<'_>,
     object_classes: &[String],
 ) {
+    // Attributes maintained by a password widget (the Samba hashes), collected so
+    // the second pass can mark their sibling fields read-only with an affordance.
+    let mut pw_derived: BTreeSet<String> = BTreeSet::new();
+
     for f in &mut form.fields {
         let kind = resolver.resolve_kind(&f.label, object_classes);
+        if let Some(WidgetKind::Password(pw)) = &kind {
+            pw_derived.extend(pw.derived.iter().map(|d| d.to_lowercase()));
+        }
         // Set secret regardless of whether a binding is already present —
         // `tag_widget_fields` may have already attached a Password binding
         // (e.g. via a profile widget list), but `secret` must still be set
@@ -40,6 +53,25 @@ pub fn apply_widget_bindings(
         // X-ORDERED attrs are order-sensitive: drive the dirty check + editor.
         if matches!(f.widget_binding, Some(WidgetKind::XOrdered)) {
             f.ordered = true;
+        }
+    }
+
+    // Second pass: a password-derived field (e.g. `sambaNTPassword`) is written by
+    // the password fold, never edited by hand. Make it read-only and carry the
+    // "updated automatically…" affordance, unless it already resolved to a richer
+    // widget. Skip the password field itself (it drives the derivation).
+    if !pw_derived.is_empty() {
+        for f in &mut form.fields {
+            if !pw_derived.contains(&f.label.to_lowercase()) {
+                continue;
+            }
+            let plain = matches!(f.widget_binding, None | Some(WidgetKind::Readonly { .. }));
+            if plain {
+                f.widget_binding = Some(WidgetKind::Readonly {
+                    note: Some(PW_DERIVED_NOTE.to_string()),
+                });
+                f.editable = false;
+            }
         }
     }
 }
@@ -116,6 +148,68 @@ mod tests {
             "userPassword must have a Password widget binding, got {:?}",
             f.widget_binding
         );
+    }
+
+    /// A password widget's derived attrs (Samba hashes) must be marked read-only
+    /// with the "updated automatically…" note, so the empty field shows an
+    /// affordance instead of looking broken (fix #5).
+    #[test]
+    fn password_derived_fields_become_readonly_with_note() {
+        let mut profile = EntryProfile {
+            name: "user".into(),
+            object_classes: vec!["sambaSamAccount".into()],
+            ..Default::default()
+        };
+        profile.widgets.insert(
+            "userPassword".into(),
+            WidgetSpecCfg::Password { samba: true },
+        );
+        let profiles = vec![profile];
+        let resolved_widgets = resolve_widgets(&profiles).expect("resolve ok");
+        let schema = empty_schema();
+        let resolver = WidgetResolver::new(&schema, &profiles, &resolved_widgets, true);
+
+        let mk = |label: &str| EditField {
+            label: label.into(),
+            must: false,
+            editable: true,
+            multi: false,
+            secret: false,
+            ordered: false,
+            orphaned: false,
+            kind: FieldKind::Text,
+            widget: WidgetSpec::ReadOnlyText,
+            widget_binding: None,
+            values: vec![],
+            baseline: vec![],
+        };
+        let mut form = EditForm {
+            dn: String::new(),
+            mode: FormMode::Edit,
+            object_classes: vec!["sambaSamAccount".into()],
+            fields: vec![mk("userPassword"), mk("sambaNTPassword")],
+        };
+        apply_widget_bindings(&mut form, &resolver, &["sambaSamAccount".into()]);
+
+        let nt = form
+            .fields
+            .iter()
+            .find(|f| f.label == "sambaNTPassword")
+            .unwrap();
+        assert!(!nt.editable, "derived field must be read-only");
+        match &nt.widget_binding {
+            Some(WidgetKind::Readonly { note: Some(n) }) => {
+                assert_eq!(n, PW_DERIVED_NOTE)
+            }
+            other => panic!("expected Readonly with note, got {other:?}"),
+        }
+        // The password field itself is untouched (still a Password widget).
+        let up = form
+            .fields
+            .iter()
+            .find(|f| f.label == "userPassword")
+            .unwrap();
+        assert!(matches!(up.widget_binding, Some(WidgetKind::Password(_))));
     }
 
     /// objectClass must NOT get a `widget_binding` set here — its routing is
@@ -224,7 +318,7 @@ mod tests {
             orphaned: false,
             kind: FieldKind::Text,
             widget: WidgetSpec::ReadOnlyText,
-            widget_binding: Some(WidgetKind::Readonly),
+            widget_binding: Some(WidgetKind::Readonly { note: None }),
             values: vec![],
             baseline: vec![],
         };
@@ -238,7 +332,10 @@ mod tests {
         apply_widget_bindings(&mut form, &resolver, &[]);
 
         assert!(
-            matches!(form.fields[0].widget_binding, Some(WidgetKind::Readonly)),
+            matches!(
+                form.fields[0].widget_binding,
+                Some(WidgetKind::Readonly { .. })
+            ),
             "pre-existing binding must not be overwritten"
         );
     }

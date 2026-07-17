@@ -57,9 +57,14 @@ pub enum WidgetKind {
         min: u64,
         max: u64,
     },
-    /// The attribute is displayed but excluded from the changeset. Used for
-    /// overlay-maintained back-references and NO-USER-MODIFICATION attributes.
-    Readonly,
+    /// The attribute is displayed but not operator-editable. Used for
+    /// NO-USER-MODIFICATION attributes and for values maintained elsewhere (e.g.
+    /// the Samba hashes derived from the password). `note`, when set, is shown in
+    /// place of an empty value as an affordance — these fields are written on save
+    /// and only become visible when the entry is re-read.
+    Readonly {
+        note: Option<String>,
+    },
     /// OpenLDAP X-ORDERED multi-value attribute. The `{n}` ordering prefix is
     /// stripped for display and reconstructed on save.
     XOrdered,
@@ -218,7 +223,7 @@ pub fn resolve_widgets(profiles: &[EntryProfile]) -> Result<Vec<ResolvedWidget>,
                     out.push(ResolvedWidget {
                         owner_object_classes: owner.object_classes.clone(),
                         attr: attr.clone(),
-                        kind: WidgetKind::Readonly,
+                        kind: WidgetKind::Readonly { note: None },
                     });
                     continue;
                 }

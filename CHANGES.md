@@ -8,9 +8,43 @@ All notable changes to eDAPtor are documented here. The format follows
 
 ### New
 
+- **Computed `{auto:sambaSID}` default.** A profile default can now auto-populate
+  `sambaSID` on create — `sambaSID = "{auto:sambaSID}"` in `[profile.defaults]`
+  fills it from the sibling `uidNumber` (and the Samba domain) once the number is
+  allocated, the same way `{next:…}` autonumbers fill. The field stays editable and
+  keeps its manual Enter-to-generate action. See
+  [Configuration → Defaults](https://oposs.github.io/edaptor/configuration/defaults.html).
+
 ### Changed
 
 ### Fixed
+
+- **Derived password fields show an affordance instead of looking empty.** The
+  Samba hashes maintained from the password (`sambaNTPassword`, `sambaPwdLastSet`)
+  are now read-only and display *⟨updated automatically when you set the
+  password⟩* while empty, instead of appearing as blank editable fields. They are
+  written on save when you set the password and become visible once the entry is
+  re-read.
+
+- **Live-templated defaults now fill multi-valued targets.** A create-mode
+  autofill such as `cn = "{givenName} {sn}"` now works when the target attribute is
+  multi-valued (e.g. `cn`, `sn`), not only single-valued ones (`displayName`).
+  Multi-valued fields render as an inline list editor; the autofill wrote only the
+  underlying model, so the list cell stayed empty and the value was immediately
+  read back as blank — the field looked like it never filled.
+
+- **Set-password dialog rebuilt on real, focusable fields.** The New and Confirm
+  fields are now proper focusable inputs with a visible caret and native Tab
+  movement between them; typed characters show as bullets (`••••`) with no phantom
+  "everything selected" block. Previously the fields were read-only display cells
+  driven by an invisible active-field flag, so Tab looked dead and every keystroke
+  rendered the bullets as a fully-selected block.
+
+- **Create/edit form now honours the profile's `show` order.** The field order in
+  the create and edit forms follows the profile's `show` list (the listed
+  attributes lead, in order, right after `objectClass`), instead of being
+  alphabetical. Previously `show` only reordered the browse view; the form was
+  always alphabetical, so reordering `show` had no effect on it.
 
 ## 1.1.0 - 2026-07-16
 

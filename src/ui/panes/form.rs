@@ -184,6 +184,22 @@ fn launch_lines(field: &EditField) -> Vec<String> {
     }
 }
 
+/// The text a `Text`-kind value cell displays: the presented value, or — when the
+/// value is empty and the field is a read-only field carrying a `note` (e.g. a
+/// password-derived Samba hash) — that note, as an affordance. The note is
+/// display-only: read-only fields are `disabled` and skipped by `sync_into_form`,
+/// so it never becomes the field's value.
+fn text_cell_value(field: &EditField) -> String {
+    use crate::config::widget::WidgetKind;
+    let presented = present_field(field);
+    if presented.trim().is_empty() {
+        if let Some(WidgetKind::Readonly { note: Some(n) }) = &field.widget_binding {
+            return n.clone();
+        }
+    }
+    presented
+}
+
 pub(crate) struct FormPane {
     /// Outer container: header row 0 (`dn` label + DN value) + ScrollGroup (1..h).
     group: Group,
@@ -700,7 +716,7 @@ impl FormPane {
                                 // first value for editable free-text fields and keeps
                                 // the read-only presentation (checkbox/binary) for the
                                 // rest — matching the former `widget_for(f).present(f)`.
-                                v.set_value(FieldValue::Text(present_field(field)));
+                                v.set_value(FieldValue::Text(text_cell_value(field)));
                                 v.state_mut().state.disabled = !cell_focusable(field);
                             }
                             ValueKind::Launch => {
@@ -1111,7 +1127,40 @@ impl FormPane {
             out
         };
         for (i, value) in changes {
-            self.set_value_text(i, value);
+            // Route the write by cell kind: a multi-valued target renders as an
+            // inline `ListValueView`, which `set_value_text` (Text-only) cannot
+            // update — the model write would then be clobbered by `sync_into_form`
+            // reading the untouched list back as empty (fix #3: e.g. `cn`, which is
+            // multi-valued in schema, never auto-filled while single-valued
+            // `displayName` did).
+            if matches!(self.kinds.get(i), Some(ValueKind::List { .. })) {
+                let vals = if value.is_empty() {
+                    Vec::new()
+                } else {
+                    vec![value]
+                };
+                self.set_list_value(i, &vals);
+            } else {
+                self.set_value_text(i, value);
+            }
+        }
+    }
+
+    /// Rebuild the inline `ListValueView` for field `i` from `values`. The list
+    /// sibling of [`set_value_text`], used by the live-template hook to push an
+    /// auto-computed value into a multi-valued target cell.
+    fn set_list_value(&mut self, i: usize, values: &[String]) {
+        let Some(&vid) = self.value_ids.get(i) else {
+            return;
+        };
+        if let Some(sg) = self.scroll_mut() {
+            if let Some(lv) = sg
+                .child_mut(vid)
+                .and_then(|v| v.as_any_mut())
+                .and_then(|a| a.downcast_mut::<ListValueView>())
+            {
+                lv.resync(values);
+            }
         }
     }
 }
@@ -2840,6 +2889,71 @@ mod tests {
         let cn = cn.edit_form.as_ref().unwrap();
         let cn = cn.fields.iter().find(|f| f.label == "cn").unwrap();
         assert_eq!(cn.values, vec!["John Doe".to_string()]);
+    }
+
+    #[test]
+    fn create_live_template_fills_multivalued_target() {
+        // Regression (fix #3): a live-templated target that is MULTI-valued renders
+        // as an inline `ListValueView`, not an `InputLine`. The auto-fill must reach
+        // that list cell; otherwise `sync_into_form` reads the untouched (empty) list
+        // back and clobbers the model on the next event pump. `cn` is multi-valued in
+        // real schemas, which is why it never auto-filled while single-valued
+        // `displayName` did.
+        use crate::config::defaults::{live_templates, parse_default_value, ProfileDefaults};
+        let mut cn = ef("cn", "", true);
+        cn.multi = true; // -> ValueKind::List -> ListValueView cell
+        let (shared, mut pane) = build_pane_with_create_form(
+            0,
+            "dc=x",
+            "uid",
+            vec![ef("givenName", "", true), ef("sn", "", true), cn],
+        );
+        {
+            let mut d = ProfileDefaults::default();
+            d.entries.insert(
+                "cn".into(),
+                parse_default_value("{givenName} {sn}").unwrap(),
+            );
+            shared.borrow_mut().live_templates = live_templates(&d);
+        }
+        let mut out = VecDeque::new();
+        let mut timers = tv::timer::TimerQueue::new();
+        let mut deferred = Vec::new();
+        let mut ctx = headless_ctx(&mut out, &mut timers, &mut deferred);
+        let mut refresh = Event::Broadcast {
+            command: REFRESH,
+            source: None,
+        };
+        pane.handle_event(&mut refresh, &mut ctx); // initial render seeds editors
+
+        pane.set_value_text(0, "John".into());
+        pane.set_value_text(1, "Doe".into());
+        let mut tick = Event::Broadcast {
+            command: REFRESH,
+            source: None,
+        };
+        pane.handle_event(&mut tick, &mut ctx);
+
+        // Assert the actual `ListValueView` CELL holds the value — not just the
+        // model. `apply_live_templates` always writes the model, but without
+        // reaching the list cell the display stays empty and `sync_into_form`
+        // reads it back as [] on the next pump (the visible "cn never fills" bug).
+        let cn_idx = 2; // givenName, sn, cn
+        let vids = pane.value_ids.clone();
+        let cell_vals = pane
+            .scroll_mut()
+            .and_then(|sg| {
+                sg.child_mut(vids[cn_idx])
+                    .and_then(|v| v.as_any_mut())
+                    .and_then(|a| a.downcast_mut::<ListValueView>())
+                    .map(|lv| lv.to_values())
+            })
+            .unwrap_or_default();
+        assert_eq!(
+            cell_vals,
+            vec!["John Doe".to_string()],
+            "the list cell (what the user sees) must show the auto-filled value"
+        );
     }
 
     #[test]

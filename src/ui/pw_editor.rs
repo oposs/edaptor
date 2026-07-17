@@ -5,7 +5,7 @@
 
 use tvision_rs::{
     delegate, ButtonFlags, ButtonRowAlign, Command, Context, Dialog, Event, FieldValue, InputLine,
-    Key, Rect, StaticText, View, ViewId,
+    Key, KeyEvent, KeyModifiers, Rect, StaticText, View, ViewId,
 };
 
 use crate::config::widget::WidgetKind;
@@ -71,17 +71,166 @@ impl FieldEditor for PasswordEditor {
             refusal_dialog()
         } else {
             let pd = PasswordDialog::new(self.label, self.attrs, shared);
-            let focus = pd.new_display_id;
+            let focus = pd.new_id;
             (Box::new(pd), focus)
         }
     }
 }
 
-/// A disabled (read-only, skip-focus) `InputLine` for displaying bullet text.
-fn ro_cell(bounds: Rect) -> InputLine {
-    let mut il = InputLine::with_limit(bounds, 1024);
-    il.state.state.disabled = true;
-    il
+/// The character shown in place of every typed password character.
+const BULLET: char = '\u{2022}'; // •
+
+/// A real, focusable `InputLine` that masks its content: the inner field only ever
+/// holds bullets (so its caret/selection/scroll logic works normally and nothing
+/// secret is ever rendered), while `real` mirrors the actual characters 1:1 with
+/// those bullets. Editing keys are mirrored onto `real` from the inner field's
+/// pre-event caret/selection, then a bulletised equivalent is fed to the inner
+/// field. `select_all_on_focus` is off, so focusing the field never selects-all.
+pub(crate) struct MaskedInputLine {
+    inner: InputLine,
+    real: String,
+}
+
+impl MaskedInputLine {
+    fn new(bounds: Rect) -> Self {
+        // The inner field stores 3-byte bullets, so its byte cap admits ~limit/3
+        // characters; 8 KiB leaves headroom for any realistic passphrase. The
+        // accept-gate in `handle_event` keeps `real` in sync even at the cap.
+        let mut inner = InputLine::with_limit(bounds, 8192);
+        inner.set_select_all_on_focus(false);
+        MaskedInputLine {
+            inner,
+            real: String::new(),
+        }
+    }
+
+    /// Clear both the mirror and the visible bullets.
+    fn clear(&mut self) {
+        self.real.clear();
+        self.inner.set_value(FieldValue::Text(String::new()));
+    }
+
+    /// The caret position as a char index into `real` (== bullet index in `inner`).
+    fn caret_char(&self) -> usize {
+        self.inner.data[..self.inner.cur_pos as usize]
+            .chars()
+            .count()
+    }
+
+    /// The active selection as a `[start, end)` char range, or `None` when empty.
+    fn selection_chars(&self) -> Option<(usize, usize)> {
+        let (s, e) = (self.inner.sel_start, self.inner.sel_end);
+        if e > s {
+            let a = self.inner.data[..s as usize].chars().count();
+            let b = self.inner.data[..e as usize].chars().count();
+            Some((a, b))
+        } else {
+            None
+        }
+    }
+
+    /// Feed a synthetic single-key event to the inner (bullet) field.
+    fn feed_inner(&mut self, key: Key, ctx: &mut Context) {
+        let mut synth = Event::KeyDown(KeyEvent::from(key));
+        self.inner.handle_event(&mut synth, ctx);
+    }
+
+    /// Apply a positional edit to `real`, mirroring the inner field's own
+    /// selection semantics: any active selection is drained first, then `op` runs
+    /// with the resulting caret char index and whether a selection was drained
+    /// (so a no-selection delete knows to remove the neighbouring char).
+    fn mutate_real(&mut self, op: impl FnOnce(&mut Vec<char>, usize, bool)) {
+        let sel = self.selection_chars();
+        let caret = sel.map(|(a, _)| a).unwrap_or_else(|| self.caret_char());
+        let mut chars: Vec<char> = self.real.chars().collect();
+        if let Some((a, b)) = sel {
+            chars.drain(a..b);
+        }
+        op(&mut chars, caret, sel.is_some());
+        self.real = chars.into_iter().collect();
+    }
+}
+
+#[delegate(to = inner)]
+impl View for MaskedInputLine {
+    fn as_any_mut(&mut self) -> Option<&mut dyn core::any::Any> {
+        Some(self)
+    }
+
+    fn handle_event(&mut self, ev: &mut Event, ctx: &mut Context) {
+        // Extract the key + modifiers up front (all Copy) so the `ev` borrow ends
+        // and the arms below can `ev.clear()` / forward `ev` freely.
+        let (key, ctrl, alt) = match ev {
+            Event::KeyDown(k) => (k.key, k.modifiers.ctrl, k.modifiers.alt),
+            // Swallow clipboard commands: cut/paste would desync the mirror and copy
+            // would leak the cleartext — a password field exposes none of them.
+            Event::Command(cmd)
+                if matches!(*cmd, Command::CUT | Command::COPY | Command::PASTE) =>
+            {
+                ev.clear();
+                return;
+            }
+            _ => {
+                self.inner.handle_event(ev, ctx);
+                return;
+            }
+        };
+        match key {
+            // Plain printable char (Shift is fine; Ctrl/Alt are not — the inner
+            // field rejects those, so mirroring them would inject a stray char).
+            Key::Char(c) if !ctrl && !alt => {
+                // Capture caret/selection BEFORE feeding the inner field (feeding
+                // moves the caret and clears the selection).
+                let sel = self.selection_chars();
+                let caret = sel.map(|(a, _)| a).unwrap_or_else(|| self.caret_char());
+                let sel_len = sel.map(|(a, b)| b - a).unwrap_or(0);
+                let pre = self.inner.data.chars().count();
+                self.feed_inner(Key::Char(BULLET), ctx);
+                // The inner field deletes any selection, then inserts the bullet
+                // UNLESS its byte cap rejects it. Mirror exactly that: always drain
+                // the selection, insert `c` only when the inner field grew.
+                let accepted = self.inner.data.chars().count() > pre - sel_len;
+                let mut chars: Vec<char> = self.real.chars().collect();
+                if let Some((a, b)) = sel {
+                    chars.drain(a..b);
+                }
+                if accepted {
+                    chars.insert(caret.min(chars.len()), c);
+                }
+                self.real = chars.into_iter().collect();
+                ev.clear();
+            }
+            Key::Backspace if !ctrl && !alt => {
+                self.mutate_real(|chars, caret, had_sel| {
+                    if !had_sel && caret > 0 {
+                        chars.remove(caret - 1);
+                    }
+                });
+                self.feed_inner(Key::Backspace, ctx);
+                ev.clear();
+            }
+            Key::Delete if !ctrl && !alt => {
+                self.mutate_real(|chars, caret, had_sel| {
+                    if !had_sel && caret < chars.len() {
+                        chars.remove(caret);
+                    }
+                });
+                self.feed_inner(Key::Delete, ctx);
+                ev.clear();
+            }
+            // Never enter overwrite mode: the inner field would delete-then-insert,
+            // keeping the bullet count constant while `real` grows — a silent
+            // desync. Swallow Insert so the field stays insert-only.
+            Key::Insert => ev.clear(),
+            // Ctrl/Alt-modified edit keys (shortcuts, word-delete) would desync the
+            // mirror — swallow them rather than half-applying.
+            Key::Char(_) | Key::Backspace | Key::Delete => ev.clear(),
+            // Navigation / selection / Tab / Enter: operate on the bullet field
+            // (positions stay 1:1 with `real`); Tab & Enter fall through unhandled
+            // so the dialog can move focus / fire the default button.
+            _ => self.inner.handle_event(ev, ctx),
+        }
+    }
 }
 
 /// Build the TLS refusal dialog. Returned directly as a `Box<dyn View>`.
@@ -109,15 +258,14 @@ fn refusal_dialog() -> (Box<dyn View>, ViewId) {
     (Box::new(dlg), ids[0])
 }
 
-/// The masked New + Confirm password dialog. Chars go to the active buffer;
-/// display cells show bullets. Staging is updated live on every keystroke.
+/// The masked New + Confirm password dialog. The two fields are real, focusable
+/// [`MaskedInputLine`]s, so Tab/caret/focus all work natively (no phantom
+/// select-all block, no invisible "active field" flag). Staging is recomputed
+/// from the fields' mirrors after every event.
 pub(crate) struct PasswordDialog {
     dlg: Dialog,
-    new_display_id: ViewId,
-    confirm_display_id: ViewId,
-    new_buf: String,
-    confirm_buf: String,
-    active_field: u8, // 0 = new, 1 = confirm
+    new_id: ViewId,
+    confirm_id: ViewId,
     attrs: Vec<String>,
     shared: Shared,
 }
@@ -133,13 +281,13 @@ impl PasswordDialog {
             Rect::new(2, 1, 30, 2),
             "New password:".to_string(),
         )));
-        let new_display_id = dlg.insert_child(Box::new(ro_cell(Rect::new(2, 2, 54, 3))));
+        let new_id = dlg.insert_child(Box::new(MaskedInputLine::new(Rect::new(2, 2, 54, 3))));
 
         dlg.insert_child(Box::new(StaticText::new(
             Rect::new(2, 4, 30, 5),
             "Confirm password:".to_string(),
         )));
-        let confirm_display_id = dlg.insert_child(Box::new(ro_cell(Rect::new(2, 5, 54, 6))));
+        let confirm_id = dlg.insert_child(Box::new(MaskedInputLine::new(Rect::new(2, 5, 54, 6))));
 
         dlg.button_row(
             &[
@@ -158,34 +306,43 @@ impl PasswordDialog {
 
         PasswordDialog {
             dlg,
-            new_display_id,
-            confirm_display_id,
-            new_buf: String::new(),
-            confirm_buf: String::new(),
-            active_field: 0,
+            new_id,
+            confirm_id,
             attrs,
             shared,
         }
     }
 
-    /// Refresh the two bullet-display cells from the current buffers.
-    fn update_display(&mut self) {
-        let new_bullets = "\u{2022}".repeat(self.new_buf.chars().count());
-        let confirm_bullets = "\u{2022}".repeat(self.confirm_buf.chars().count());
-        if let Some(c) = self.dlg.child_mut(self.new_display_id) {
-            c.set_value(FieldValue::Text(new_bullets));
-        }
-        if let Some(c) = self.dlg.child_mut(self.confirm_display_id) {
-            c.set_value(FieldValue::Text(confirm_bullets));
+    /// Borrow a child masked field by id (the shared downcast chain).
+    fn masked_mut(&mut self, id: ViewId) -> Option<&mut MaskedInputLine> {
+        self.dlg
+            .child_mut(id)
+            .and_then(|v| v.as_any_mut())
+            .and_then(|a| a.downcast_mut::<MaskedInputLine>())
+    }
+
+    /// The cleartext currently held by a masked field.
+    fn real_of(&mut self, id: ViewId) -> String {
+        self.masked_mut(id)
+            .map(|m| m.real.clone())
+            .unwrap_or_default()
+    }
+
+    /// Clear a masked field's content.
+    fn clear_field(&mut self, id: ViewId) {
+        if let Some(m) = self.masked_mut(id) {
+            m.clear();
         }
     }
 
     /// Write the prospective commit into shared state. Short borrow, dropped here.
-    fn update_staged(&self) {
-        let outcome = if !self.new_buf.is_empty() && self.new_buf == self.confirm_buf {
+    fn update_staged(&mut self) {
+        let new = self.real_of(self.new_id);
+        let confirm = self.real_of(self.confirm_id);
+        let outcome = if !new.is_empty() && new == confirm {
             Some(CommitOutcome::StageSecret {
                 attrs: self.attrs.clone(),
-                cleartext: self.new_buf.clone(),
+                cleartext: new,
             })
         } else {
             None
@@ -200,54 +357,36 @@ impl View for PasswordDialog {
         Some(self)
     }
 
-    /// Called by `exec_view` before the first draw. Clears buffers + staged.
+    /// Called by `exec_view` before the first draw. Clears both fields + staged.
     fn reset_current(&mut self, ctx: &mut Context) {
         self.dlg.reset_current(ctx);
-        self.new_buf.clear();
-        self.confirm_buf.clear();
-        self.active_field = 0;
-        self.update_display();
+        self.clear_field(self.new_id);
+        self.clear_field(self.confirm_id);
         self.update_staged();
     }
 
     fn handle_event(&mut self, ev: &mut Event, ctx: &mut Context) {
-        let key = match ev {
-            Event::KeyDown(k) => k.key,
-            _ => {
-                self.dlg.handle_event(ev, ctx);
-                return;
-            }
-        };
-
-        match key {
-            Key::Char(c) => {
-                if self.active_field == 0 {
-                    self.new_buf.push(c);
-                } else {
-                    self.confirm_buf.push(c);
-                }
-                self.update_display();
-                self.update_staged();
-                ev.clear();
-            }
-            Key::Backspace => {
-                if self.active_field == 0 {
-                    self.new_buf.pop();
-                } else {
-                    self.confirm_buf.pop();
-                }
-                self.update_display();
-                self.update_staged();
-                ev.clear();
-            }
-            Key::Tab | Key::Down | Key::Up => {
-                self.active_field = 1 - self.active_field;
-                ev.clear();
-            }
-            _ => {
-                self.dlg.handle_event(ev, ctx);
+        // The masked fields are single-line, so Up/Down would be dead keys. Map
+        // them to Tab / Shift+Tab so arrows move between the fields and buttons,
+        // matching the pre-rewrite dialog where Up/Down switched New/Confirm.
+        if let Event::KeyDown(k) = ev {
+            let as_tab = match k.key {
+                Key::Down => Some(KeyModifiers::default()),
+                Key::Up => Some(KeyModifiers {
+                    shift: true,
+                    ..KeyModifiers::default()
+                }),
+                _ => None,
+            };
+            if let Some(mods) = as_tab {
+                *ev = Event::KeyDown(KeyEvent::new(Key::Tab, mods));
             }
         }
+        // Native routing: the dialog delivers the event to the focused masked
+        // field (which masks its own edits), moves focus on Tab, and fires OK /
+        // Cancel. Afterwards, recompute the staged commit from the field mirrors.
+        self.dlg.handle_event(ev, ctx);
+        self.update_staged();
     }
 }
 
@@ -315,8 +454,151 @@ mod tests {
         );
     }
 
-    /// RED→GREEN: Encrypted connection, matching New + Confirm → StageSecret;
-    /// mismatch → None.
+    fn ctx_deps() -> (std::collections::VecDeque<Event>, TimerQueue, Vec<Deferred>) {
+        (
+            std::collections::VecDeque::new(),
+            TimerQueue::new(),
+            Vec::new(),
+        )
+    }
+
+    /// Borrow a dialog's masked field mutably (test-only downcast).
+    fn cell(pd: &mut PasswordDialog, id: ViewId) -> &mut MaskedInputLine {
+        pd.dlg
+            .child_mut(id)
+            .and_then(|v| v.as_any_mut())
+            .and_then(|a| a.downcast_mut::<MaskedInputLine>())
+            .expect("masked cell")
+    }
+
+    /// Type a string into a masked cell (marking it selected so its inner
+    /// InputLine accepts keys, as a real focused child would).
+    fn typ(cell: &mut MaskedInputLine, s: &str, ctx: &mut Context) {
+        cell.inner.state.state.selected = true;
+        for c in s.chars() {
+            let mut ev = Event::KeyDown(KeyEvent::from(Key::Char(c)));
+            cell.handle_event(&mut ev, ctx);
+        }
+    }
+
+    fn press(cell: &mut MaskedInputLine, key: Key, ctx: &mut Context) {
+        cell.inner.state.state.selected = true;
+        let mut ev = Event::KeyDown(KeyEvent::from(key));
+        cell.handle_event(&mut ev, ctx);
+    }
+
+    /// A masked field mirrors typed chars 1:1 while only ever showing bullets, and
+    /// edits (backspace / mid-caret insert / delete) keep the mirror in sync.
+    #[test]
+    fn masked_field_mirrors_real_and_masks_display() {
+        let (mut out, mut timers, mut deferred) = ctx_deps();
+        let mut ctx = Context::new(&mut out, &mut timers, 0, &mut deferred);
+        let mut m = MaskedInputLine::new(Rect::new(0, 0, 40, 1));
+
+        typ(&mut m, "abc", &mut ctx);
+        assert_eq!(m.real, "abc");
+        assert_eq!(
+            m.inner.data, "\u{2022}\u{2022}\u{2022}",
+            "display is all bullets"
+        );
+
+        press(&mut m, Key::Backspace, &mut ctx);
+        assert_eq!(m.real, "ab");
+        assert_eq!(m.inner.data, "\u{2022}\u{2022}");
+
+        // Move caret home, insert 'X' at the front.
+        press(&mut m, Key::Home, &mut ctx);
+        typ(&mut m, "X", &mut ctx);
+        assert_eq!(
+            m.real, "Xab",
+            "mid-caret insert lands at the caret, not the end"
+        );
+
+        // Delete-forward at the front removes 'X'.
+        press(&mut m, Key::Home, &mut ctx);
+        press(&mut m, Key::Delete, &mut ctx);
+        assert_eq!(m.real, "ab");
+    }
+
+    /// Multibyte characters mirror correctly (bullet count == char count, no byte
+    /// desync).
+    #[test]
+    fn masked_field_handles_multibyte() {
+        let (mut out, mut timers, mut deferred) = ctx_deps();
+        let mut ctx = Context::new(&mut out, &mut timers, 0, &mut deferred);
+        let mut m = MaskedInputLine::new(Rect::new(0, 0, 40, 1));
+        typ(&mut m, "pä€", &mut ctx);
+        assert_eq!(m.real, "pä€");
+        assert_eq!(m.inner.data.chars().count(), 3);
+        assert!(m.inner.data.chars().all(|c| c == '\u{2022}'));
+        press(&mut m, Key::Backspace, &mut ctx);
+        assert_eq!(m.real, "pä");
+    }
+
+    /// A Ctrl/Alt-modified Char (a shortcut delivered as a Char event) must NOT be
+    /// mirrored into the password — the inner field rejects it, so mirroring would
+    /// inject a stray character the operator never typed.
+    #[test]
+    fn masked_field_ignores_modified_chars() {
+        let (mut out, mut timers, mut deferred) = ctx_deps();
+        let mut ctx = Context::new(&mut out, &mut timers, 0, &mut deferred);
+        let mut m = MaskedInputLine::new(Rect::new(0, 0, 40, 1));
+        typ(&mut m, "a", &mut ctx);
+        m.inner.state.state.selected = true;
+        let mut ev = Event::KeyDown(KeyEvent::new(
+            Key::Char('b'),
+            KeyModifiers {
+                ctrl: true,
+                ..KeyModifiers::default()
+            },
+        ));
+        m.handle_event(&mut ev, &mut ctx);
+        assert_eq!(
+            m.real, "a",
+            "ctrl-modified char must not enter the password"
+        );
+        assert_eq!(m.inner.data.chars().count(), 1, "bullets stay in sync");
+    }
+
+    /// The Insert key must not switch the field into overwrite mode — that would
+    /// keep the bullet count constant while `real` grows, desyncing the mirror.
+    #[test]
+    fn masked_field_insert_key_never_overwrites() {
+        let (mut out, mut timers, mut deferred) = ctx_deps();
+        let mut ctx = Context::new(&mut out, &mut timers, 0, &mut deferred);
+        let mut m = MaskedInputLine::new(Rect::new(0, 0, 40, 1));
+        typ(&mut m, "ab", &mut ctx);
+        press(&mut m, Key::Home, &mut ctx);
+        press(&mut m, Key::Insert, &mut ctx); // must be swallowed
+        typ(&mut m, "X", &mut ctx);
+        assert_eq!(m.real, "Xab", "Insert must not engage overwrite mode");
+        assert_eq!(m.inner.data.chars().count(), 3, "bullets track real 1:1");
+    }
+
+    /// `handle_event` maps Up/Down onto Tab / Shift+Tab so the arrows move between
+    /// the fields (the dialog's native focus routing is exercised live — headless
+    /// groups don't deliver keys to a focused child, so this asserts the rewrite).
+    #[test]
+    fn dialog_maps_up_down_to_tab() {
+        let sh = shared_with(true);
+        let schema = make_schema();
+        let ed = test_editor(vec!["userPassword".into()]);
+        let (mut view, _focus) = ed.into_view(&schema, sh.clone());
+        let (mut out, mut timers, mut deferred) = ctx_deps();
+        let mut ctx = Context::new(&mut out, &mut timers, 0, &mut deferred);
+        view.reset_current(&mut ctx);
+
+        // The handler rewrites Down→Tab before delegating, so the event is never
+        // left as Down (it is either consumed as focus movement, or a Tab).
+        let mut down = Event::KeyDown(KeyEvent::from(Key::Down));
+        view.handle_event(&mut down, &mut ctx);
+        assert!(
+            !matches!(down, Event::KeyDown(k) if k.key == Key::Down),
+            "Down must be remapped (to Tab) for field navigation"
+        );
+    }
+
+    /// Encrypted connection: matching New + Confirm → StageSecret; mismatch → None.
     #[test]
     fn stages_when_match() {
         let sh = shared_with(true);
@@ -325,37 +607,28 @@ mod tests {
         let ed = test_editor(vec!["userPassword".into()]);
         let (mut view, _focus_id) = ed.into_view(&schema, sh.clone());
 
-        let mut out: std::collections::VecDeque<Event> = std::collections::VecDeque::new();
-        let mut timers = TimerQueue::new();
-        let mut deferred: Vec<Deferred> = Vec::new();
+        let (mut out, mut timers, mut deferred) = ctx_deps();
         let mut ctx = Context::new(&mut out, &mut timers, 0, &mut deferred);
-
         view.reset_current(&mut ctx);
 
-        // Type "abc" into New field (active_field = 0).
-        for c in "abc".chars() {
-            let mut ev = Event::KeyDown(KeyEvent::from(Key::Char(c)));
-            view.handle_event(&mut ev, &mut ctx);
-        }
+        let pd = view
+            .as_any_mut()
+            .and_then(|a| a.downcast_mut::<PasswordDialog>())
+            .expect("PasswordDialog");
+        let (new_id, confirm_id) = (pd.new_id, pd.confirm_id);
 
-        // Confirm is empty → mismatch → None.
+        // New = "abc", Confirm still empty → mismatch → None.
+        typ(cell(pd, new_id), "abc", &mut ctx);
+        pd.update_staged();
         assert!(
             sh.borrow().staged_commit.is_none(),
-            "new typed but confirm empty → mismatch → staged_commit must be None"
+            "new typed but confirm empty → None"
         );
 
-        // Tab to Confirm field (active_field becomes 1).
-        let mut ev = Event::KeyDown(KeyEvent::from(Key::Tab));
-        view.handle_event(&mut ev, &mut ctx);
-
-        // Type "abc" into Confirm field → match.
-        for c in "abc".chars() {
-            let mut ev = Event::KeyDown(KeyEvent::from(Key::Char(c)));
-            view.handle_event(&mut ev, &mut ctx);
-        }
-
-        let staged = sh.borrow().staged_commit.clone();
-        match staged {
+        // Confirm = "abc" → match → StageSecret.
+        typ(cell(pd, confirm_id), "abc", &mut ctx);
+        pd.update_staged();
+        match sh.borrow().staged_commit.clone() {
             Some(CommitOutcome::StageSecret { attrs, cleartext }) => {
                 assert_eq!(attrs, vec!["userPassword".to_string()]);
                 assert_eq!(cleartext, "abc");
@@ -363,23 +636,20 @@ mod tests {
             other => panic!("expected StageSecret on match, got {other:?}"),
         }
 
-        // Mismatch: backspace + different char in Confirm → None.
-        let mut ev = Event::KeyDown(KeyEvent::from(Key::Backspace));
-        view.handle_event(&mut ev, &mut ctx);
-        // confirm = "ab", new = "abc" → mismatch
+        // Backspace confirm → "ab" ≠ "abc" → None.
+        press(cell(pd, confirm_id), Key::Backspace, &mut ctx);
+        pd.update_staged();
         assert!(
             sh.borrow().staged_commit.is_none(),
-            "mismatch (confirm != new) → staged_commit must be None"
+            "mismatch (confirm != new) → None"
         );
 
-        // Restore match by typing 'c' back.
-        let mut ev = Event::KeyDown(KeyEvent::from(Key::Char('c')));
-        view.handle_event(&mut ev, &mut ctx);
-        // confirm = "abc", new = "abc" → match again
-        let staged2 = sh.borrow().staged_commit.clone();
+        // Re-type 'c' → match again.
+        typ(cell(pd, confirm_id), "c", &mut ctx);
+        pd.update_staged();
         assert!(
-            matches!(staged2, Some(CommitOutcome::StageSecret { ref cleartext, .. }) if cleartext == "abc"),
-            "re-match after fix → staged_commit must be Some(StageSecret)"
+            matches!(sh.borrow().staged_commit, Some(CommitOutcome::StageSecret { ref cleartext, .. }) if cleartext == "abc"),
+            "re-match → Some(StageSecret)"
         );
     }
 

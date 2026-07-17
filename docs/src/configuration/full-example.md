@@ -61,16 +61,19 @@ search_attrs   = ["cn", "uid", "mail"]        # picker searches these attributes
 label          = "{cn} ({uid})"               # e.g. "Bob Baker (bob)"
 
 # Defaults fill EMPTY fields on create (operator-entered values are never
-# overwritten). Three value kinds:
+# overwritten). Value kinds:
 #   literal             -> a fixed string
 #   "/home/{uid}"       -> template; {attr} is substituted from another field
 #   "{next:MIN-MAX}"    -> auto-number; the next free value in [MIN,MAX] across
 #                          the whole directory (refuses if the scan is truncated
 #                          by a server size limit — bind with a high-limit identity)
+#   "{auto:sambaSID}"   -> computed; sambaSID derived from uidNumber + the Samba
+#                          domain, filled once uidNumber resolves
 [profile.defaults]
 loginShell    = "/bin/bash"
 homeDirectory = "/home/{uid}"
 uidNumber     = "{next:10000-60000}"
+sambaSID      = "{auto:sambaSID}"
 
 # Widget bindings: `[profile.widget.<attr>]` declares a rich in-line widget for
 # an attribute's field.
