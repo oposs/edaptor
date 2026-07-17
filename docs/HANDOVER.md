@@ -4,150 +4,173 @@ Carries the **current concern** into the next session. Not a project history —
 that see `git log`, the specs under `docs/superpowers/specs/`, the SDD ledger
 (`.superpowers/sdd/progress.md`), and project memory (`…/memory/MEMORY.md`).
 
-**Date:** 2026-07-16 · **Branch: `feat/usability`** (off `main` @ v1.0.0).
-**Current concern: the usability batch is COMPLETE.** All four items are **done,
-committed, `make check` green, and each passed a final whole-branch/feature review
-(READY TO MERGE)**. Nothing is in flight — the next step is to **open the single
-`feat/usability` PR** (remote `origin` = `git@github.com:oposs/edaptor.git`).
+**Date:** 2026-07-17 · **Branch: `feat/inputline-fixes-v1.1.1`** (off `main` @ **v1.1.0**).
+**Current concern: five post-deploy fixes → release `v1.1.1` → redeploy.** These came
+from the user field-testing the **deployed** edaptor (v1.1.0 on the `ds-carbo-feh`
+directory). All five are **agreed and in scope**; root causes are **confirmed** (via a
+live tmux repro — see below). Nothing is implemented yet except the dependency bump.
 
-**Before the PR, please eyeball these interactive checks** (they need a live terminal
-+ demo LDAP and can't be driven headlessly; static review + the live worker tests found
-no correctness risk):
-- item (c): the **"Create where?"** modal firing when you press New *above* a profile's
-  home OU, and **`edaptor tui-create <profile>`** opening the right create form / the
-  no-arg chooser fallback.
-- item (b): creating a user through a companion-declaring profile and confirming the
-  two-stanza preview + that **both** the user and its `posixGroup` land. (The atomic
-  commit *and* rollback are already proven by `tests/live_companion_atomic.rs` against
-  the demo server; this is just the UI-flow eyeball.)
+The branch already has one commit: **`210f2dd` `build: bump tvision-rs to 0.12.1`**
+(the new `InputLine::select_all_on_focus` opt-out; see enablers). `make`-build green.
 
 ---
 
-## DONE on this branch (committed, reviewed)
+## THE FIVE (do all five; then release v1.1.1 + redeploy)
 
-Full range `9c8efcf..HEAD` (10 commits). `make check` green throughout.
+Recommended: the **3 bugs first** (1–3), then the **2 features** (4–5). Bugs → use
+`superpowers:systematic-debugging` (root causes below are Phase-1 done). Features →
+`superpowers:brainstorming` then plan. Verify every one live in the **tmux harness**.
 
-1. **PgUp/PgDn page the entry form** (`fix(ui)` `c034768`). The form's `ScrollGroup`
-   only scrolled arrow-by-arrow; the focused `InputLine` ignores Page keys. Now
-   `ScrollGroup::handle_event` intercepts PageUp/PageDown and moves focus one
-   viewport (reusing the scrollbar-drag `focus_target_for_row` logic). Verified the
-   tree/leaf browse lists *already* paged (tvision `ListViewer`/`Outline`).
+### 1. Form field order ignores `profile.show` 🐛 (the #1 user complaint)
+**Confirmed root cause.** The create/edit **form** order is produced by
+`order_fields()` in `src/workflows/edit_form.rs`: it pins `objectClass`, then buckets
+(0 MUST · 1 populated/secret/widget-bound · 2 empty/orphaned) and sorts **alphabetically
+within each bucket**. It has **no access to `profile.show`**, and `EditForm` does not
+carry it. `build_create_form` → `empty_form_for_profile` *does* order by `show`
+(`create.rs:501`) but then `sync_schema_fields` → `order_fields` **overwrites** it. So
+the form is always alphabetical; `show` only orders the **browse/read view**
+(`read_flow.rs:73`). *(This is why reordering `show` in the deployed config did nothing
+for the create form.)*
+**Fix.** Thread the profile's `show` into `order_fields` (or onto `EditForm`) so
+show-listed fields keep show-order after `objectClass`, with the existing bucket logic
+governing everything else. The user's desired grouping: identity fields
+(`givenName, sn, uid, userPassword`) → autofilled (`gecos, displayName, cn, sambaSID`) →
+other mandatory → the rest.
 
-2. **Live templated defaults — create-mode autofill** (feature, 3 SDD tasks +
-   fmt/test-hardening commits `5c69526`, `689277f`, `c76bfd8`, `585525a`, `582c9b7`,
-   `e609348`). In **create mode only**, a `[profile.defaults]` template such as
-   `cn = "{givenName} {sn}"` fills **and keeps updating** the target as the operator
-   types the sources, until the operator edits the target (clear it to re-arm).
-   - Spec: `docs/superpowers/specs/2026-07-14-live-templated-defaults-design.md`
-   - Plan: `docs/superpowers/plans/2026-07-14-live-templated-defaults.md`
-   - **Architecture:** pure latch/recompute core in `src/config/defaults.rs`
-     (`LiveTemplateState{segs,auto,last_written}`, `live_templates()`,
-     `recompute_live()`); a `live_templates` map on `UiState` built by `open_create`
-     (`src/ui/app.rs`); a create-mode-only hook `FormPane::apply_live_templates`
-     called after `sync_into_form()` in `handle_event` (`src/ui/panes/form.rs`).
-   - Latch rule: `value != last_written ⇒ auto = value.is_empty()`; while auto,
-     `Some(out)` write-if-differs / `None` (source empty) clear-if-nonempty.
-     `last_written` distinguishes our writes from operator edits (proven convergent —
-     no busy-loop). Literals & `{next:MIN-MAX}` autonumbers stay one-shot; edit mode
-     inert (gated on `FormMode::Create` **and** non-empty map — both now tested).
-   - Final opus review verdict **READY TO MERGE**; details in the SDD ledger.
+### 2. Password dialog "badly broken" 🐛
+**Confirmed root cause.** `src/ui/pw_editor.rs` `PasswordDialog` uses **disabled**
+display cells (`ro_cell`, `disabled=true`) + internal `new_buf`/`confirm_buf` + an
+`active_field` flag, with **no visible focus/caret**. Symptoms: Tab flips `active_field`
+invisibly (looks dead; real focus is stuck on OK); every keystroke `set_value()`s a
+disabled cell which renders the bullets as a fully-**selected** block (Turbo Vision
+select-all). Unit tests pass because they drive `handle_event` directly and only assert
+`staged_commit`.
+**Fix.** Rebuild the dialog on **real focusable masked `InputLine`s** with
+`set_select_all_on_focus(false)` (0.12.1) — normal Tab/caret, no phantom select-all.
+Keep the New+Confirm-match → `StageSecret` staging. Samba sync is unchanged (it's applied
+at save via the widget's `samba` flag in `fold_create_password`, not by the dialog).
 
-3. **Create-usability — `tui-create` launcher + TUI container rule** (item (c); 7 SDD
-   tasks + fmt + mouse-staging fix, range `8bf5d4c..26ae032`). Two parts:
-   - **Container rule.** Pressing New *above* a profile's home OU now pops a
-     **"Create where?"** modal (current branch vs. the profile's `search_base`)
-     instead of silently creating at the wrong location; at/inside the home OU is
-     unambiguous (no prompt). Pure `resolve_create_container` in
-     `src/workflows/create.rs`; `container_chooser` dialog; both `CREATE` arms funnel
-     through `open_create_with_container_rule` in `src/ui/app.rs`.
-   - **`edaptor tui-create [<profile>] [--container <DN>]`.** Launches the TUI straight
-     into a profile's create form, reusing the whole interactive flow. Mechanism: a
-     `StartupAction` on `UiState::pending_startup` (set by `ui::run`), posted once by
-     the pump as `STARTUP`, run in `app::dispatch`. `<profile>` optional (chooser
-     fallback; unknown name errors *pre-launch*); `--container` defaults to
-     `search_base`. Name/container resolved in `main::build_startup_action`.
-   - Spec: `docs/superpowers/specs/2026-07-15-create-usability-cli-container-rule-design.md`
-   - Plan: `docs/superpowers/plans/2026-07-15-create-usability-cli-container-rule.md`
-   - Final opus review **READY TO MERGE** (no Critical/Important); container logic
-     proven consistent with `profiles_for_container`; STARTUP timing safe. A
-     mouse-staging fix (choosers now honour clicks, not just keyboard) shipped as a
-     follow-up. Accepted cosmetic Minors: chooser empty-`search_base` uses a status
-     line not a modal; `container_chooser` fixed width truncates long DNs.
+### 3. `cn` autofill lost on cursor-focus 🐛
+**Status.** User confirmed they only **moved the cursor over `cn`** (never typed) and it
+stopped auto-updating — so it is a real bug, NOT the operator-edit latch. `cn` is **not**
+special-cased (identical `{givenName} {sn}` path as `displayName`/`gecos`, with passing
+tests). Prime suspect: the same **select-all-on-focus** + `sync_into_form()` write-back
+on focus change feeding a mangled value into the live-template latch
+(`recompute_live` in `src/config/defaults.rs`; `FormPane::apply_live_templates` in
+`src/ui/panes/form.rs`). **Likely fixed by #2's opt-out**, but **reproduce in tmux first**
+to confirm the mechanism (not yet reproduced live).
 
-4. **Companion entry on create — user-private group** (item (b); 7 SDD tasks + a live
-   test + a doc fix, range `45d26ff..06f3941`). A profile can declare
-   `[profile.companion]` (object classes, `rdn_attr`, `search_base`, a templated
-   `attributes` map) and creating through it emits a second entry — e.g. a `posixGroup`
-   mirroring a POSIX user (`cn = {uid}`, same `gidNumber`).
-   - **Atomic via LDAP transactions (RFC 5805).** The worker's `Request::AddAtomic`
-     wraps both Adds in `StartTxn`/`EndTxn` under a `TxnSpec` control when the server
-     advertises txn (detected from the root DSE → `UiState::server_supports_txn`);
-     otherwise a **sequential companion-first fallback** (`CompanionThenPrimary` →
-     `PrimaryAfterCompanion`, orphan-named on primary failure). `do_create` previews both
-     LDIF stanzas and dispatches by capability.
-   - **Architecture:** pure `CompanionSpec` + `validate_companions` (`src/config/mod.rs`);
-     pure `plan_companion` (`src/workflows/create.rs`, reusing `resolve_template`);
-     `AddAtomic` + `txn_supported` + `fetch_root_dse` (`src/ldap/worker.rs`); the two
-     write paths in `src/workflows/write_flow.rs`.
-   - Spec: `docs/superpowers/specs/2026-07-16-companion-entry-on-create-design.md`;
-     Plan: `docs/superpowers/plans/2026-07-16-companion-entry-on-create.md`.
-   - Final opus review **READY TO MERGE** (no Critical/Important). Atomic **commit and
-     rollback** proven live by `tests/live_companion_atomic.rs` against the demo
-     OpenLDAP. Non-blocking follow-ups listed under NEXT.
+### 4. `{auto:sambaSID}` computed default ✨ (decided syntax)
+Today `sambaSID` is Enter-to-generate (auto-injected `SambaSid` widget; computed as
+`domain_sid-(uidNumber*2 + rid_base)` — see `src/workflows/samba_compute.rs`,
+`samba_sid_for_form`). Add a **computed default** token **`{auto:sambaSID}`** (name
+chosen by the user) so it auto-populates on create like `{next:…}` does. Design it in
+`src/config/defaults.rs` (a new `DefaultValue` variant, e.g. `Computed(kind)`), resolved
+after the sibling `uidNumber` is available. Beware the async ordering (uidNumber is an
+autonumber allocated by a background scan) — the compute must fire once `uidNumber`
+resolves. Consider generalizing (only `sambaSID` needed now; keep the token extensible).
 
-**Also investigated (no code change): Esc closes every modal.** All edaptor modals
-are tvision `Dialog`s, and `Dialog` maps **Esc → CANCEL → end_modal** natively; the
-custom popups delegate their non-nav path to the inner `Dialog`. So Esc already
-cancels everywhere. Only nuance: in a list with an active type-to-find filter the
-first Esc clears the filter, a second closes (correct). If a specific dialog ever
-resurfaces where Esc does nothing, dig there — the user couldn't reproduce one.
+### 5. Placeholder text for derived/readonly fields ✨
+Derived readonly fields (e.g. `sambaNTPassword`) render empty/broken-looking. Show an
+informative affordance like **`⟨updated automatically when you set the password⟩`**.
+(The value *is* written on save — it's just invisible until re-read.) Small UX change in
+the form field rendering / the `readonly` widget presentation.
 
 ---
 
-## NEXT
+## ENABLERS
 
-Nothing is queued — the batch is done (all four items above are committed and reviewed
-READY TO MERGE). **Open the single `feat/usability` PR** after the interactive eyeball
-checks at the top. Non-blocking follow-ups surfaced by the final reviews (own cycle, not
-this PR): DN-escape the RDN value in `build_add_entry` **and** `plan_companion` together
-(pre-existing, unreachable for uid-keyed entries); `debug_assert!(!entries.is_empty())`
-in `run_add_atomic`; refresh the `do_create` doc-comment for the companion-plan borrow.
+### tvision-rs 0.12.1 — `select_all_on_focus` opt-out (shipped)
+Upstreamed this session. `InputLine::select_all_on_focus: bool` (default `true`) +
+`set_select_all_on_focus(bool)`; when `false`, focus **gain** no longer selects-all
+(caret/selection left as-is; typing inserts), focus **loss** still clears. PR
+`oetiker/tvision-rs#18` **merged + released as 0.12.1**; edaptor already bumped
+(`210f2dd`). Local rstv checkout: **`~/checkouts/rstv`** (a.k.a. `../rstv`).
+- Known **pre-existing rstv test flake** (NOT ours): `input_line::tests::ins_toggles_cursor_ins`
+  races the **process-global keymap** (`keymap.rs` `OnceLock<RwLock<Keymap>>`,
+  `set_global`) under parallel tests. A CI re-run goes green. Worth a **separate rstv PR**
+  to serialize keymap-mutating tests — offered, not yet done.
+
+### tmux repro harness (WORKS — use it to reproduce + verify every fix)
+The demo LDAP is driveable headlessly via tmux `send-keys` / `capture-pane`:
+```bash
+scripts/test-ldap.sh start                    # podman demo LDAP on :1389 (~600 users)
+cargo build                                   # debug binary: /home/oetiker/scratch/cargo-target/debug/edaptor
+tmux kill-session -t ed 2>/dev/null; tmux new-session -d -s ed -x 210 -y 52
+tmux send-keys -t ed "EDAPTOR_TEST_ADMIN_PW=adminpassword <bin> --config <cfg>" Enter
+tmux capture-pane -t ed -p                    # dump screen (plain; highlight is colour-only, invisible)
+tmux send-keys -t ed Down Down Down Down      # tree: dc=example → ou=people (4 downs)
+tmux send-keys -t ed M-n                       # Alt-N create (send TWICE — first often eaten by branch-reconcile)
+```
+`capture-pane -p` strips colour so the focus highlight isn't visible — reason about
+position, or use `-e` for escapes. `M-n` = Alt-N.
+**Repro config:** `examples/demo-config.toml` already has the `userPassword` password
+widget (+samba) and the objectClasses. To also repro **#3 (cn)** add
+`cn = "{givenName} {sn}"` (and `displayName`) to its `[profile.defaults]`, and put
+`givenName`/`userPassword`/`sambaSID` in `show`. (This session used such a copy in the
+scratchpad — recreate it; scratchpad is per-session.)
+
+---
+
+## DEPLOYMENT CONTEXT (`ds-carbo-feh`, carbo-link.com directory)
+edaptor v1.1.0 is **deployed and in production** on host **`ds-carbo-feh-adm`** (ssh
+alias; **confirm before every ssh** per user policy). Facts established this session:
+- Ubuntu 26.04, x86_64, glibc 2.43; ssh user `oetiker_adm` (NOT root, **passwordless
+  `sudo` works**). Binaries are **musl-static** (`x86_64-unknown-linux-musl`, built by the
+  GitHub release workflow — download the release asset, don't hand-build).
+- `/usr/local/bin/edaptor` = v1.1.0 (backup `edaptor.bak-2026-07-16`).
+- `/etc/edaptor/ds-carbo-feh.toml` = the **reordered/companion/lookup** config (backup
+  `ds-carbo-feh.toml.bak-2026-07-16`). Its `show` reorder only helps the **browse** view
+  (see #1). ldapi `external` auth; **the directory advertises RFC 5805 txn** (companions
+  are atomic here).
+- **Run edaptor as root** on this host (`sudo edaptor …`): as `oetiker_adm` the ldapi
+  SASL-EXTERNAL bind maps to the unprivileged peercred identity and can't read the base.
+- **Redeploy recipe** (v1.1.1): `gh release download <tag> --pattern '*x86_64-unknown-linux-musl.tar.gz'`
+  → scp to remote `/tmp` → `sudo cp -a` backup + `sudo install -m755/-m644` the new
+  binary/config → verify with `sudo edaptor --config … check`. Include the field-order
+  config once #1 lands (a reordered `show` **does** help once the code respects it).
+
+---
+
+## SHIPPED (v1.1.0 — for reference, all merged to `main`, `git log`)
+The usability batch: **PgUp/PgDn form paging**, **live templated defaults** (create-mode
+autofill), **`tui-create` + the "Create where?" container rule** (item c) + mouse-staging
+fix, **companion entry on create** (item b, RFC 5805 atomic, proven live). PR #2 merged;
+auto-released as **v1.1.0**. Specs/plans under `docs/superpowers/`.
+
+**Non-blocking follow-ups** from the item-b reviews (own cycle, not urgent): DN-escape the
+RDN value in `build_add_entry` **and** `plan_companion` together (pre-existing,
+unreachable for uid-keyed entries); `debug_assert!(!entries.is_empty())` in
+`run_add_atomic`; refresh the `do_create` doc-comment for the companion-plan borrow.
 
 ---
 
 ## Working agreement / how to resume
-
 - **Pull first** (`git pull --ff-only`); this repo lands work across machines.
-- **SDD ledger is the source of truth for progress:** `.superpowers/sdd/progress.md`
-  (git-ignored scratch under `.superpowers/sdd/`: briefs, reports, review diffs).
-  The current ledger covers the live-templated-defaults feature (all complete).
-- **SDD scripts:** `SKILL=~/.claude/plugins/cache/claude-plugins-official/superpowers/6.1.1/skills/subagent-driven-development`
-  → `scripts/task-brief PLAN N`, `scripts/review-package BASE HEAD`. Fresh
-  implementer subagent per task → review package → task-reviewer → fix loop → mark
-  complete → final whole-branch review (most capable model).
-- **Build/test (cap parallelism at 4 cores — shared box):**
+- **Ask before any `ssh`/remote command**; **never** run destructive commands without
+  explicit confirmation (`rm`, `git reset --hard`, etc.).
+- **SDD:** `SKILL=~/.claude/plugins/cache/claude-plugins-official/superpowers/6.1.1/skills/subagent-driven-development`
+  → `scripts/task-brief PLAN N`, `scripts/review-package BASE HEAD`. Fresh implementer
+  subagent per task → review package → task-reviewer → fix loop → final whole-branch
+  review (most capable model). Ledger: `.superpowers/sdd/progress.md`.
+- **Build/test (cap parallelism at 4 cores):**
   ```bash
   make check          # fmt + clippy -D warnings + tests — the gate
-  cargo test -j4
-  make docs           # build the mdBook
-  scripts/test-ldap.sh start   # podman demo LDAP (~600 users/~25 groups)
-  export EDAPTOR_TEST_ADMIN_PW=adminpassword
-  cargo run -- --config examples/demo-config.toml
+  cargo test -j4 ; make docs
+  scripts/test-ldap.sh start ; export EDAPTOR_TEST_ADMIN_PW=adminpassword
   ```
 - **Docs one-home:** config detail → mdBook (`docs/src/`); README orientation only;
-  `CHANGES.md` for every user-visible change (Unreleased section is populated);
-  process/design → `docs/superpowers/`.
-- **Facade boundary:** only `src/ui/**` may `use tvision_rs`.
+  `CHANGES.md` every user-visible change; process/design → `docs/superpowers/`.
+- **Facade boundary:** only `src/ui/**` may `use tvision_rs`; `ldap3` only in `src/ldap/**`.
 - **Commit trailer:** `Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>`.
-- **Finish:** when the batch is done, open **one PR** for `feat/usability` (remote
-  `origin` = `git@github.com:oposs/edaptor.git`).
+- **Finish:** one PR for `feat/inputline-fixes-v1.1.1` (remote `origin` =
+  `git@github.com:oposs/edaptor.git`) → tag `v1.1.1` → redeploy.
 
 ## Project state
-
-edaptor is a Rust TUI (tvision-rs **0.12**) for administering OpenLDAP: introspects
-live schema (`cn=subschema`), generates edit forms from `objectClass` defs; TOML
-config declares connection + *entry profiles* + a **widget palette**
-(`[profile.widget.<attr>]` kinds: `choice`/`password`/`picker`/`membership`/`lookup`)
-and `[profile.defaults]` (literal / `{attr}` template / `{next:MIN-MAX}` autonumber —
-templates now live in create mode). `Cargo.toml` version **1.0.0**. `edaptor` is the
-sole binary; UI lives in `src/ui/`.
+edaptor is a Rust TUI (**tvision-rs 0.12.1**) for administering OpenLDAP: introspects live
+schema, generates edit forms from `objectClass` defs; TOML config declares connection +
+*entry profiles* + a **widget palette** (`[profile.widget.<attr>]` kinds
+`choice`/`password`/`picker`/`membership`/`lookup`/`readonly`/`x_ordered`),
+`[profile.defaults]` (literal / `{attr}` template / `{next:MIN-MAX}` autonumber; live in
+create mode), and `[profile.companion]`. `Cargo.toml` version **1.1.0**. Sole binary
+`edaptor`; UI in `src/ui/`.
