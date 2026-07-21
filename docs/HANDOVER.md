@@ -4,151 +4,139 @@ Carries the **current concern** into the next session. Not a project history —
 that see `git log`, the specs under `docs/superpowers/specs/`, the SDD ledger
 (`.superpowers/sdd/progress.md`), and project memory (`…/memory/MEMORY.md`).
 
-**Date:** 2026-07-17 · **Branch: `feat/inputline-fixes-v1.1.1`** (off `main` @ **v1.1.0**).
-**Current concern: five post-deploy fixes → release `v1.1.1` → redeploy.** These came
-from the user field-testing the **deployed** edaptor (v1.1.0 on the `ds-carbo-feh`
-directory). All five are **agreed and in scope**; root causes are **confirmed** (via a
-live tmux repro — see below). Nothing is implemented yet except the dependency bump.
+**Date:** 2026-07-21 · **Branch: `feat/optimistic-concurrency`** (worktree at
+`/scratch/oetiker/claude-worktrees/edaptor-feat-optimistic-concurrency`, off `main` @
+`5580cf7`). `Cargo.toml` version **1.2.1**.
 
-The branch already has one commit: **`210f2dd` `build: bump tvision-rs to 0.12.1`**
-(the new `InputLine::select_all_on_focus` opt-out; see enablers). `make`-build green.
-
----
-
-## THE FIVE (do all five; then release v1.1.1 + redeploy)
-
-Recommended: the **3 bugs first** (1–3), then the **2 features** (4–5). Bugs → use
-`superpowers:systematic-debugging` (root causes below are Phase-1 done). Features →
-`superpowers:brainstorming` then plan. Verify every one live in the **tmux harness**.
-
-### 1. Form field order ignores `profile.show` 🐛 (the #1 user complaint)
-**Confirmed root cause.** The create/edit **form** order is produced by
-`order_fields()` in `src/workflows/edit_form.rs`: it pins `objectClass`, then buckets
-(0 MUST · 1 populated/secret/widget-bound · 2 empty/orphaned) and sorts **alphabetically
-within each bucket**. It has **no access to `profile.show`**, and `EditForm` does not
-carry it. `build_create_form` → `empty_form_for_profile` *does* order by `show`
-(`create.rs:501`) but then `sync_schema_fields` → `order_fields` **overwrites** it. So
-the form is always alphabetical; `show` only orders the **browse/read view**
-(`read_flow.rs:73`). *(This is why reordering `show` in the deployed config did nothing
-for the create form.)*
-**Fix.** Thread the profile's `show` into `order_fields` (or onto `EditForm`) so
-show-listed fields keep show-order after `objectClass`, with the existing bucket logic
-governing everything else. The user's desired grouping: identity fields
-(`givenName, sn, uid, userPassword`) → autofilled (`gecos, displayName, cn, sambaSID`) →
-other mandatory → the rest.
-
-### 2. Password dialog "badly broken" 🐛
-**Confirmed root cause.** `src/ui/pw_editor.rs` `PasswordDialog` uses **disabled**
-display cells (`ro_cell`, `disabled=true`) + internal `new_buf`/`confirm_buf` + an
-`active_field` flag, with **no visible focus/caret**. Symptoms: Tab flips `active_field`
-invisibly (looks dead; real focus is stuck on OK); every keystroke `set_value()`s a
-disabled cell which renders the bullets as a fully-**selected** block (Turbo Vision
-select-all). Unit tests pass because they drive `handle_event` directly and only assert
-`staged_commit`.
-**Fix.** Rebuild the dialog on **real focusable masked `InputLine`s** with
-`set_select_all_on_focus(false)` (0.12.1) — normal Tab/caret, no phantom select-all.
-Keep the New+Confirm-match → `StageSecret` staging. Samba sync is unchanged (it's applied
-at save via the widget's `samba` flag in `fold_create_password`, not by the dialog).
-
-### 3. `cn` autofill lost on cursor-focus 🐛
-**Status.** User confirmed they only **moved the cursor over `cn`** (never typed) and it
-stopped auto-updating — so it is a real bug, NOT the operator-edit latch. `cn` is **not**
-special-cased (identical `{givenName} {sn}` path as `displayName`/`gecos`, with passing
-tests). Prime suspect: the same **select-all-on-focus** + `sync_into_form()` write-back
-on focus change feeding a mangled value into the live-template latch
-(`recompute_live` in `src/config/defaults.rs`; `FormPane::apply_live_templates` in
-`src/ui/panes/form.rs`). **Likely fixed by #2's opt-out**, but **reproduce in tmux first**
-to confirm the mechanism (not yet reproduced live).
-
-### 4. `{auto:sambaSID}` computed default ✨ (decided syntax)
-Today `sambaSID` is Enter-to-generate (auto-injected `SambaSid` widget; computed as
-`domain_sid-(uidNumber*2 + rid_base)` — see `src/workflows/samba_compute.rs`,
-`samba_sid_for_form`). Add a **computed default** token **`{auto:sambaSID}`** (name
-chosen by the user) so it auto-populates on create like `{next:…}` does. Design it in
-`src/config/defaults.rs` (a new `DefaultValue` variant, e.g. `Computed(kind)`), resolved
-after the sibling `uidNumber` is available. Beware the async ordering (uidNumber is an
-autonumber allocated by a background scan) — the compute must fire once `uidNumber`
-resolves. Consider generalizing (only `sambaSID` needed now; keep the token extensible).
-
-### 5. Placeholder text for derived/readonly fields ✨
-Derived readonly fields (e.g. `sambaNTPassword`) render empty/broken-looking. Show an
-informative affordance like **`⟨updated automatically when you set the password⟩`**.
-(The value *is* written on save — it's just invisible until re-read.) Small UX change in
-the form field rendering / the `readonly` widget presentation.
+**Current concern: the "real-time consistency" overhaul.** edaptor was designed to work
+against live directory reality but had drifted into trusting read-time copies that were
+never re-validated. A nine-cache audit found this; the fix is decomposed into **four
+specs** (umbrella: `docs/superpowers/specs/2026-07-21-realtime-consistency-design.md`).
+**Spec 1 (optimistic concurrency) is CODE-COMPLETE on this branch** and is being
+finished/merged. Specs 2–4 are the remaining work. The whole thing started from a user
+request for **entry deletion** (now Spec 4, shelved until 1–3 land).
 
 ---
 
-## ENABLERS
+## DONE THIS SESSION — Spec 1: optimistic concurrency (merge in progress)
 
-### tvision-rs 0.12.1 — `select_all_on_focus` opt-out (shipped)
-Upstreamed this session. `InputLine::select_all_on_focus: bool` (default `true`) +
-`set_select_all_on_focus(bool)`; when `false`, focus **gain** no longer selects-all
-(caret/selection left as-is; typing inserts), focus **loss** still clears. PR
-`oetiker/tvision-rs#18` **merged + released as 0.12.1**; edaptor already bumped
-(`210f2dd`). Local rstv checkout: **`~/checkouts/rstv`** (a.k.a. `../rstv`).
-- Known **pre-existing rstv test flake** (NOT ours): `input_line::tests::ins_toggles_cursor_ins`
-  races the **process-global keymap** (`keymap.rs` `OnceLock<RwLock<Keymap>>`,
-  `set_global`) under parallel tests. A CI re-run goes green. Worth a **separate rstv PR**
-  to serialize keymap-mutating tests — offered, not yet done.
+Range `5580cf7..b64abea` (11 commits). Built with SDD (9 tasks + 1 final-review fix),
+every task spec+quality reviewed, `make check` green. Plan:
+`docs/superpowers/plans/2026-07-21-optimistic-concurrency.md`. Ledger has the full
+per-task record.
 
-### tmux repro harness (WORKS — use it to reproduce + verify every fix)
-The demo LDAP is driveable headlessly via tmux `send-keys` / `capture-pane`:
-```bash
-scripts/test-ldap.sh start                    # podman demo LDAP on :1389 (~600 users)
-cargo build                                   # debug binary: /home/oetiker/scratch/cargo-target/debug/edaptor
-tmux kill-session -t ed 2>/dev/null; tmux new-session -d -s ed -x 210 -y 52
-tmux send-keys -t ed "EDAPTOR_TEST_ADMIN_PW=adminpassword <bin> --config <cfg>" Enter
-tmux capture-pane -t ed -p                    # dump screen (plain; highlight is colour-only, invisible)
-tmux send-keys -t ed Down Down Down Down      # tree: dc=example → ou=people (4 downs)
-tmux send-keys -t ed M-n                       # Alt-N create (send TWICE — first often eaten by branch-reconcile)
-```
-`capture-pane -p` strips colour so the focus highlight isn't visible — reason about
-position, or use `-e` for escapes. `M-n` = Alt-N.
-**Repro config:** `examples/demo-config.toml` already has the `userPassword` password
-widget (+samba) and the objectClasses. To also repro **#3 (cn)** add
-`cn = "{givenName} {sn}"` (and `displayName`) to its `[profile.defaults]`, and put
-`givenName`/`userPassword`/`sambaSID` in `show`. (This session used such a copy in the
-scratchpad — recreate it; scratchpad is per-session.)
+**What it does.** On read, capture the entry's `entryCSN` (OpenLDAP change-sequence
+number, finer-grained than `modifyTimestamp`) onto `EditForm.baseline_csn`. On MODIFY and
+DELETE, attach a **critical RFC 4528 Assertion** `(entryCSN=<captured>)` + (MODIFY) an
+**RFC 4527 Post-Read** returning the new CSN. The write applies only if unchanged; else
+the server returns **rc 122** → `Response::WriteConflict` → `WriteOutcome::Conflict`.
+
+**Conflict handling.** Re-read the entry; if the other client's changes do **not** overlap
+the attributes we're editing → **rebase and resubmit silently**; if they **do** overlap →
+**prompt** (Reload / Overwrite / Cancel). **No path ever silently overwrites an
+overlapping foreign change** — only an explicit Overwrite adopts the fresh CSN (the
+overlap path keeps the STALE csn so a naive re-save re-prompts). Verified end-to-end by
+the opus whole-branch review.
+
+**Capability fallback.** At connect, probe root DSE `supportedControl` for
+`1.3.6.1.1.12`. Absent → blind-write fallback + **one-time** status-line warning. Gating is
+essential (the assertion is critical → an ungated assertion on a non-supporting server
+fails every write with rc 12). Gated at **every** assertion site (do_save,
+do_combined_save own-leg + group-legs, resubmit_save).
+
+**Key files.** `src/ldap/worker.rs` (assertion/post-read on run_modify/run_delete,
+`assertion_supported`, `WriteConflict`, `WriteOk.new_csn`); `src/workflows/read_flow.rs`
+(request `entryCSN`); `src/workflows/edit_form.rs` (`baseline_csn`);
+`src/workflows/write_flow.rs` (thread csn, `fetch_group_csns`, submit_combined legs,
+Conflict/Error mapping); `src/ui/state.rs` (`resolve_conflict`, `rebase_baselines`,
+`reread_blocking_for_conflict`, `attrs_overlap`, `attrs_changed_since_baseline`, one-time
+warning); `src/ui/app.rs` (do_save/do_combined_save gating, conflict dialog dispatch,
+`force_overwrite`); `src/ui/dialog/conflict.rs` (Reload/Overwrite/Cancel);
+`docs/src/concepts/optimistic-concurrency.md`. Live proof:
+`tests/live_write.rs::modify_with_stale_csn_conflicts`.
+
+### Deferred / tracked (NOT blocking Spec 1 merge)
+- **Full rebase-for-combined-saves.** A conflict on a membership fan-out **group** leg
+  currently aborts the batch and surfaces a clear *"membership changed on the server —
+  reload and retry"* error (non-atomic, mirrors the existing partial-application path).
+  Doing a true own-leg rebase + batch resubmit is a future enhancement; the error is
+  correct and safe for now.
+- **rc-match dedup (Minor).** rc0/122/other is inlined 3× (`write_response`, `run_modify`,
+  `run_delete`) — extract a helper someday.
+- **DELETE assertion is plumbed but has no caller.** `run_delete` supports `assert_csn`
+  but every `Request::Delete` today passes `None` (no interactive delete flow exists yet).
+  **When Spec 4 wires a real delete flow it MUST gate on `assertion_supported` and pass
+  the form's `baseline_csn`.**
+- **MODRDN (rename) legs are not asserted** this round (out of scope for Spec 1).
 
 ---
 
-## DEPLOYMENT CONTEXT (`ds-carbo-feh`, carbo-link.com directory)
-edaptor v1.1.0 is **deployed and in production** on host **`ds-carbo-feh-adm`** (ssh
-alias; **confirm before every ssh** per user policy). Facts established this session:
-- Ubuntu 26.04, x86_64, glibc 2.43; ssh user `oetiker_adm` (NOT root, **passwordless
-  `sudo` works**). Binaries are **musl-static** (`x86_64-unknown-linux-musl`, built by the
-  GitHub release workflow — download the release asset, don't hand-build).
-- `/usr/local/bin/edaptor` = v1.1.0 (backup `edaptor.bak-2026-07-16`).
-- `/etc/edaptor/ds-carbo-feh.toml` = the **reordered/companion/lookup** config (backup
-  `ds-carbo-feh.toml.bak-2026-07-16`). Its `show` reorder only helps the **browse** view
-  (see #1). ldapi `external` auth; **the directory advertises RFC 5805 txn** (companions
-  are atomic here).
-- **Run edaptor as root** on this host (`sudo edaptor …`): as `oetiker_adm` the ldapi
-  SASL-EXTERNAL bind maps to the unprivileged peercred identity and can't read the base.
-- **Redeploy recipe** (v1.1.1): `gh release download <tag> --pattern '*x86_64-unknown-linux-musl.tar.gz'`
-  → scp to remote `/tmp` → `sudo cp -a` backup + `sudo install -m755/-m644` the new
-  binary/config → verify with `sudo edaptor --config … check`. Include the field-order
-  config once #1 lands (a reordered `show` **does** help once the code respects it).
+## NEXT — remaining specs (umbrella: `2026-07-21-realtime-consistency-design.md`)
+
+Do them in order; each is its own spec → plan → SDD cycle.
+
+### Spec 2 — Cache coherence (implements design commitments that were never built)
+The three-pane design (`2026-06-01-three-pane-layout-design.md` §5.9, §7.4) promised an
+**after-write local reflow** and a **manual Refresh**, but neither was wired:
+- **`Structure::add_child` / `Structure::remove`** (`src/workflows/structure.rs:169,190`,
+  doc-commented *"e.g. after a successful create"*) have **no production callers**. The
+  entry list is a pure projection of `UiState::structure`, built once at bootstrap and
+  never mutated — so **a newly created entry does not appear until restart** (the original
+  user bug that kicked this off). Wire `add_child` on `WriteOutcome::Created` (label attrs
+  from the post-read entry Spec 1 already fetches) and `remove` on delete/rename; handle
+  the parent leaf→branch flip for the tree pane.
+- **Manual Refresh action** — make `LoadStructure` callable outside bootstrap (its only
+  caller is `state.rs:~932`) and bind a command; the escape hatch for genuine multi-client
+  structure staleness.
+- **`lookup_cache` invalidation** (`state.rs:~80`) — grep shows only `insert`/`contains_key`,
+  never `remove`/`clear`; it caches negatives too, so a label (incl. after edaptor's OWN
+  rename) stays wrong all session. Clear affected keys on our own writes.
+- Clear `state.search` on create (stale incremental-find query hides the new row); make
+  `current_leaf_row()` find the new entry so the highlight snaps to it.
+
+### Spec 3 — Autonumber allocation via counter entry
+The **one data-corrupting** cache: `open_create` scans for the next free number at
+form-open (`app.rs:~449`, `alloc_flow.rs:~57`) and never re-checks at submit → two admins
+creating in the same window both get the same `uidNumber`. Assertion control on the *new*
+entry can't detect this (different DN). Fix = a **counter entry** allocated by CAS (read N,
+`modify` to N+1 asserting `(value=N)`, retry on rc 122 — the exact primitive Spec 1
+proved). Falls back to the current scan (keep the truncation-refusal guard) when no
+counter entry is configured.
+
+### Spec 4 — Delete entries (the original request; shelved until 1–3 land)
+Spec already drafted: `docs/superpowers/specs/2026-07-20-delete-entries-design.md`.
+Opt-in per profile (`[profile.delete]`), non-recursive (server enforces rc 66), typed
+confirm dialog, removes the companion user-private group (probe: only when it has no other
+members — else "left in place"), strips the user from referencing groups
+(`(|(member=X)(uniqueMember=X)(memberUid=Y))`), **blocks** when the user is the sole member
+of a MUST-membership group (reuses `would_empty`/`last_member_block`). Non-atomic, surfaced
+honestly. Much smaller once Specs 1–2 exist (DELETE assertion + structure reflow already
+there). `Request::Delete`/`run_delete`/rc-66 mapping + `Structure::remove` all exist.
 
 ---
 
-## SHIPPED (v1.1.0 — for reference, all merged to `main`, `git log`)
-The usability batch: **PgUp/PgDn form paging**, **live templated defaults** (create-mode
-autofill), **`tui-create` + the "Create where?" container rule** (item c) + mouse-staging
-fix, **companion entry on create** (item b, RFC 5805 atomic, proven live). PR #2 merged;
-auto-released as **v1.1.0**. Specs/plans under `docs/superpowers/`.
+## OTHER OPEN ITEMS
 
-**Non-blocking follow-ups** from the item-b reviews (own cycle, not urgent): DN-escape the
-RDN value in `build_add_entry` **and** `plan_companion` together (pre-existing,
-unreachable for uid-keyed entries); `debug_assert!(!entries.is_empty())` in
-`run_add_atomic`; refresh the `do_create` doc-comment for the companion-plan borrow.
+### Pre-existing live-test failure (unrelated to Spec 1)
+`tests/live_templates.rs::picker_gidnumber_scalar_store_resolves_group_gidnumber` fails
+against the live demo server — and fails **identically on `main` before this branch**, so
+it is NOT caused by Spec 1. `make check` stays green without a server (it SKIPs). Being
+investigated at handover time; see the ledger / this session's tail for status. Root-cause
+it against `scripts/test-ldap.sh` demo data before trusting it as a gate.
+
+### Enablers already in place
+- The RFC 4528/4527 controls are first-class in **ldap3 0.12.1** (`Assertion`,
+  `PostRead`, `PostReadResp`, `ldap_escape`) — no BER hand-encoding. Critical flag needs
+  the struct-literal route (`Assertion { filter }.critical().into()`, not `::new`).
+- The demo OpenLDAP **advertises** `1.3.6.1.1.12` / `1.3.6.1.1.13.1/.2` and honours the
+  assertion (verified: right csn → rc 0, wrong → rc 122). `entryCSN` present, µs-precision.
 
 ---
 
 ## Working agreement / how to resume
 - **Pull first** (`git pull --ff-only`); this repo lands work across machines.
 - **Ask before any `ssh`/remote command**; **never** run destructive commands without
-  explicit confirmation (`rm`, `git reset --hard`, etc.).
+  explicit confirmation (`rm`, `git reset --hard`, `git push --force`, etc.).
 - **SDD:** `SKILL=~/.claude/plugins/cache/claude-plugins-official/superpowers/6.1.1/skills/subagent-driven-development`
   → `scripts/task-brief PLAN N`, `scripts/review-package BASE HEAD`. Fresh implementer
   subagent per task → review package → task-reviewer → fix loop → final whole-branch
@@ -158,19 +146,28 @@ unreachable for uid-keyed entries); `debug_assert!(!entries.is_empty())` in
   make check          # fmt + clippy -D warnings + tests — the gate
   cargo test -j4 ; make docs
   scripts/test-ldap.sh start ; export EDAPTOR_TEST_ADMIN_PW=adminpassword
+  export EDAPTOR_TEST_LDAP_URI=ldap://localhost:1389   # to run the gated live tests
   ```
+- **tmux harness** (drives the TUI headlessly — used to smoke-test the conflict flow):
+  ```bash
+  tmux new-session -d -s ed -x 200 -y 50
+  tmux send-keys -t ed "EDAPTOR_TEST_ADMIN_PW=adminpassword <bin> --config <cfg>" Enter
+  tmux capture-pane -t ed -p       # -p strips colour (focus highlight invisible); -e keeps escapes
+  ```
+  For a concurrency smoke: open an entry in edaptor, `ldapmodify` the same entry from a
+  shell (the "other client"), then edit + save — a disjoint attr → silent "Saved.", an
+  overlapping attr → the "Entry changed" dialog.
 - **Docs one-home:** config detail → mdBook (`docs/src/`); README orientation only;
   `CHANGES.md` every user-visible change; process/design → `docs/superpowers/`.
 - **Facade boundary:** only `src/ui/**` may `use tvision_rs`; `ldap3` only in `src/ldap/**`.
 - **Commit trailer:** `Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>`.
-- **Finish:** one PR for `feat/inputline-fixes-v1.1.1` (remote `origin` =
-  `git@github.com:oposs/edaptor.git`) → tag `v1.1.1` → redeploy.
+- **Remote:** `origin` = `git@github.com:oposs/edaptor.git`.
 
 ## Project state
 edaptor is a Rust TUI (**tvision-rs 0.12.1**) for administering OpenLDAP: introspects live
 schema, generates edit forms from `objectClass` defs; TOML config declares connection +
 *entry profiles* + a **widget palette** (`[profile.widget.<attr>]` kinds
 `choice`/`password`/`picker`/`membership`/`lookup`/`readonly`/`x_ordered`),
-`[profile.defaults]` (literal / `{attr}` template / `{next:MIN-MAX}` autonumber; live in
-create mode), and `[profile.companion]`. `Cargo.toml` version **1.1.0**. Sole binary
-`edaptor`; UI in `src/ui/`.
+`[profile.defaults]` (literal / `{attr}` template / `{next:MIN-MAX}` autonumber / live in
+create mode), and `[profile.companion]`. Writes now carry optimistic-concurrency
+assertions (Spec 1). Sole binary `edaptor`; UI in `src/ui/`.
