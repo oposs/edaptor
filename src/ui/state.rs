@@ -626,6 +626,7 @@ impl UiState {
         match outcome {
             WriteOutcome::Saved {
                 reread_dn,
+                renamed_from,
                 quit_after,
             } => {
                 self.status = "Saved.".to_string();
@@ -633,18 +634,16 @@ impl UiState {
                 // rename), and the cache stores negatives too — drop it wholesale and
                 // let the visible fields re-resolve lazily.
                 self.lookup_cache.clear();
-                // A rename (MODRDN) echoes a DIFFERENT dn than the form was loaded
-                // with: drop the pre-rename node here; the re-read upserts the new one.
-                if let Some(old) = self.current_leaf.clone() {
-                    if !old.eq_ignore_ascii_case(&reread_dn) {
-                        // A rename can move a CONTAINER too (the ‹self› row opens the
-                        // container's own entry), and `remove` only reports the
-                        // parent's branch->leaf flip — not that a branch label moved.
-                        // A rebuild is idempotent, so ask for one on every rename.
-                        self.structure.remove(&old);
-                        self.tree_dirty = true;
-                        self.list_dirty = true;
-                    }
+                // A rename (MODRDN) invalidates the node under the OLD dn. The signal
+                // travels with the write itself: deriving it from `current_leaf` would
+                // misfire when the operator navigates away while a save is in flight,
+                // deleting a live node. A rebuild is idempotent, so a rename always
+                // asks for one — `Structure::remove` only reports the parent's
+                // branch->leaf flip, not that a container's label moved in the tree.
+                if let Some(old) = renamed_from {
+                    self.structure.remove(&old);
+                    self.tree_dirty = true;
+                    self.list_dirty = true;
                 }
                 if quit_after {
                     out.quit = true;
@@ -669,10 +668,13 @@ impl UiState {
             WriteOutcome::NeedFollowupModify {
                 dn,
                 mods,
+                renamed_from,
                 quit_after,
             } => {
                 if let Some(w) = self.worker.as_ref() {
-                    let _ = self.write_flow.submit_followup(w, &dn, mods, quit_after);
+                    let _ = self
+                        .write_flow
+                        .submit_followup(w, &dn, mods, renamed_from, quit_after);
                 }
             }
             WriteOutcome::Error(msg) => {
@@ -2276,6 +2278,7 @@ mod tests {
 
         st.apply_write_outcome(WriteOutcome::Saved {
             reread_dn: "uid=new,ou=p,dc=x".into(),
+            renamed_from: Some("uid=old,ou=p,dc=x".into()),
             quit_after: false,
         });
 
@@ -2284,6 +2287,7 @@ mod tests {
             "the pre-rename node must be removed"
         );
         assert!(st.list_dirty);
+        assert!(st.tree_dirty, "a rename must trigger a tree rebuild too");
     }
 
     #[test]
@@ -2303,10 +2307,49 @@ mod tests {
 
         st.apply_write_outcome(WriteOutcome::Saved {
             reread_dn: "uid=a,ou=p,dc=x".into(),
+            renamed_from: None,
             quit_after: false,
         });
 
         assert!(st.structure.get("uid=a,ou=p,dc=x").is_some());
+    }
+
+    /// Regression for the race in commit `dcfdab5`'s rename detection: navigating
+    /// away from entry A to entry B while A's save is still in flight, then a
+    /// belated `Saved { reread_dn: A }` landing, must NOT delete A. The old code
+    /// inferred a rename from `current_leaf != reread_dn` — which is exactly the
+    /// state left behind by navigation, not a rename. The fix carries the rename
+    /// signal explicitly via `renamed_from`, so a plain (non-renaming) save's
+    /// outcome leaves the saved node alone regardless of what `current_leaf` is.
+    #[test]
+    fn navigating_away_during_a_save_does_not_delete_the_saved_node() {
+        let structure = Structure::build(
+            "dc=x",
+            vec![
+                si("dc=x", None),
+                si("ou=p,dc=x", None),
+                si("uid=a,ou=p,dc=x", Some("A")),
+                si("uid=b,ou=p,dc=x", Some("B")),
+            ],
+        );
+        let schema = SchemaModel::from_raw(&RawSubschema::default());
+        let mut st =
+            UiState::new_for_test(structure, schema, "dc=x".into(), Vec::new(), Vec::new());
+        // The user saved A, then navigated to B (e.g. discarded A's now-dirty
+        // form) before A's WriteOk came back.
+        st.current_leaf = Some("uid=b,ou=p,dc=x".into());
+
+        st.apply_write_outcome(WriteOutcome::Saved {
+            reread_dn: "uid=a,ou=p,dc=x".into(),
+            renamed_from: None,
+            quit_after: false,
+        });
+
+        assert!(
+            st.structure.get("uid=a,ou=p,dc=x").is_some(),
+            "a plain save's late response must not delete the saved node just \
+             because current_leaf moved on"
+        );
     }
 
     #[test]
@@ -2325,6 +2368,7 @@ mod tests {
 
         st.apply_write_outcome(WriteOutcome::Saved {
             reread_dn: "uid=a,dc=x".into(),
+            renamed_from: None,
             quit_after: false,
         });
 
@@ -2459,6 +2503,7 @@ mod write_routing_tests {
         let mut st = empty_state();
         let res = st.apply_write_outcome(WriteOutcome::Saved {
             reread_dn: "cn=a,dc=x".into(),
+            renamed_from: None,
             quit_after: false,
         });
         assert!(res.changed);
@@ -2471,6 +2516,7 @@ mod write_routing_tests {
         let mut st = empty_state();
         let res = st.apply_write_outcome(WriteOutcome::Saved {
             reread_dn: "x".into(),
+            renamed_from: None,
             quit_after: true,
         });
         assert!(res.quit);

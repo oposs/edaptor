@@ -306,10 +306,11 @@ fn edit_persists_and_rename_via_write_flow() {
         WriteOutcome::NeedFollowupModify {
             dn,
             mods,
+            renamed_from,
             quit_after,
         } => {
             // Rename + then_mods: submit the followup modify.
-            wf2.submit_followup(&worker, &dn, mods, quit_after)
+            wf2.submit_followup(&worker, &dn, mods, renamed_from, quit_after)
                 .expect("submit WriteFlow followup modify");
             let followup_resp = poll_any_write(&worker, Duration::from_secs(10));
             match wf2.on_response(
