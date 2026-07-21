@@ -164,25 +164,56 @@ impl Structure {
             .collect()
     }
 
-    /// Add a child node (e.g. after a successful create). Returns true if the
-    /// parent changed leaf→branch (a reflow the UI must reflect).
-    pub fn add_child(&mut self, parent_dn: &str, child: StructureInput) -> bool {
-        let was_branch = self.get(parent_dn).map(|n| n.is_branch()).unwrap_or(false);
-        let node = StructureNode {
-            dn: child.dn.clone(),
-            label: label_for(&child),
-            object_classes: child.object_classes.clone(),
-            attrs: child.attrs.clone(),
-            children: Vec::new(),
+    /// Insert or update the node for `input.dn`, preserving any children the node
+    /// already has, and link it under its parent when that parent is a known node.
+    ///
+    /// This is the single production mutation point for the structure: it is fed by
+    /// every entry read (navigation and post-write re-read alike), so a create, a
+    /// rename's new DN, and a label-changing edit all reflow through one path. An
+    /// entry whose parent lies outside the loaded base is inserted but stays
+    /// unlinked — hence invisible — exactly as [`Structure::build`] treats it.
+    ///
+    /// Returns `true` when the **tree pane** must rebuild: either the parent flipped
+    /// leaf→branch, or an existing branch's attributes changed (the tree renders
+    /// branch labels from `attrs`).
+    pub fn upsert(&mut self, input: StructureInput) -> bool {
+        let dn = input.dn.clone();
+        let parent = parent_of(&dn).map(str::to_string);
+        let parent_was_branch = parent
+            .as_ref()
+            .and_then(|p| self.nodes.get(p))
+            .map(|n| n.is_branch())
+            .unwrap_or(false);
+
+        // Preserve the existing subtree links; note whether this node is itself a
+        // branch whose rendered attributes change.
+        let (children, was_branch, attrs_changed) = match self.nodes.get(&dn) {
+            Some(n) => (n.children.clone(), n.is_branch(), n.attrs != input.attrs),
+            None => (Vec::new(), false, false),
         };
-        self.nodes.insert(child.dn.clone(), node);
-        if let Some(p) = self.nodes.get_mut(parent_dn) {
-            if !p.children.iter().any(|c| c.eq_ignore_ascii_case(&child.dn)) {
-                p.children.push(child.dn);
+
+        self.nodes.insert(
+            dn.clone(),
+            StructureNode {
+                dn: dn.clone(),
+                label: label_for(&input),
+                object_classes: input.object_classes,
+                attrs: input.attrs,
+                children,
+            },
+        );
+        if let Some(p) = parent.as_ref().and_then(|p| self.nodes.get_mut(p)) {
+            if !p.children.iter().any(|c| c.eq_ignore_ascii_case(&dn)) {
+                p.children.push(dn.clone());
             }
         }
-        let is_branch = self.get(parent_dn).map(|n| n.is_branch()).unwrap_or(false);
-        !was_branch && is_branch
+
+        let parent_is_branch = parent
+            .as_ref()
+            .and_then(|p| self.nodes.get(p))
+            .map(|n| n.is_branch())
+            .unwrap_or(false);
+        (!parent_was_branch && parent_is_branch) || (was_branch && attrs_changed)
     }
 
     /// Remove a node (e.g. after delete). Returns true if its parent changed
@@ -319,15 +350,102 @@ mod tests {
     }
 
     #[test]
-    fn promote_marks_parent_as_branch_on_first_child() {
+    fn upsert_preserves_existing_children() {
+        // Upserting a CONTAINER must never orphan its subtree.
         let mut s = fixture();
-        // ou=empty is a leaf; add a child under it.
-        let changed = s.add_child(
-            "ou=empty,dc=example,dc=org",
-            input("cn=x,ou=empty,dc=example,dc=org", Some("X"), None),
+        let changed = s.upsert(input("ou=users,dc=example,dc=org", Some("Users"), None));
+        assert!(
+            !changed,
+            "updating an existing branch's label is not a flip"
         );
-        assert!(changed, "leaf->branch is a reflow");
+        let node = s.get("ou=users,dc=example,dc=org").unwrap();
+        assert_eq!(node.label, "Users", "label refreshed from the new input");
+        assert_eq!(
+            node.children,
+            vec!["uid=jane,ou=users,dc=example,dc=org".to_string()],
+            "children survive the upsert"
+        );
+    }
+
+    #[test]
+    fn upsert_links_new_node_under_known_parent() {
+        let mut s = fixture();
+        let changed = s.upsert(input(
+            "uid=bob,ou=users,dc=example,dc=org",
+            Some("Bob"),
+            None,
+        ));
+        assert!(!changed, "parent was already a branch — no tree flip");
+        let leaves: Vec<&str> = s
+            .leaves_of("ou=users,dc=example,dc=org")
+            .iter()
+            .map(|n| n.dn.as_str())
+            .collect();
+        assert!(leaves.contains(&"uid=bob,ou=users,dc=example,dc=org"));
+    }
+
+    #[test]
+    fn upsert_promoting_parent_leaf_to_branch_returns_true() {
+        let mut s = fixture();
+        // ou=empty has no children yet: the first child flips it leaf->branch.
+        let changed = s.upsert(input("cn=x,ou=empty,dc=example,dc=org", Some("X"), None));
+        assert!(changed, "leaf->branch flip must request a tree rebuild");
         assert!(s.get("ou=empty,dc=example,dc=org").unwrap().is_branch());
+    }
+
+    #[test]
+    fn upsert_changing_a_branch_attr_returns_true() {
+        // The tree pane renders branch labels from `attrs`, so an attr change on a
+        // BRANCH must request a rebuild.
+        let mut s = fixture();
+        let mut inp = input("ou=users,dc=example,dc=org", None, None);
+        inp.attrs
+            .insert("description".to_string(), vec!["Staff".to_string()]);
+        assert!(s.upsert(inp), "branch attrs changed → rebuild");
+    }
+
+    #[test]
+    fn upsert_unchanged_leaf_returns_false() {
+        let mut s = fixture();
+        assert!(
+            !s.upsert(input(
+                "uid=jane,ou=users,dc=example,dc=org",
+                Some("Jane Doe"),
+                None
+            )),
+            "re-upserting an unchanged leaf is not a tree change"
+        );
+    }
+
+    #[test]
+    fn upsert_with_unknown_parent_inserts_unlinked() {
+        // An entry outside the loaded base: inserted, but not reachable as a leaf.
+        let mut s = fixture();
+        s.upsert(input(
+            "uid=zoe,ou=other,dc=elsewhere,dc=org",
+            Some("Zoe"),
+            None,
+        ));
+        assert!(s.get("uid=zoe,ou=other,dc=elsewhere,dc=org").is_some());
+        assert!(s.leaves_of("ou=other,dc=elsewhere,dc=org").is_empty());
+    }
+
+    #[test]
+    fn rename_modelled_as_remove_then_upsert_leaves_no_stale_node() {
+        let mut s = fixture();
+        s.remove("uid=jane,ou=users,dc=example,dc=org");
+        s.upsert(input(
+            "uid=jane2,ou=users,dc=example,dc=org",
+            Some("Jane Doe"),
+            None,
+        ));
+        assert!(s.get("uid=jane,ou=users,dc=example,dc=org").is_none());
+        let leaves: Vec<&str> = s
+            .leaves_of("ou=users,dc=example,dc=org")
+            .iter()
+            .map(|n| n.dn.as_str())
+            .collect();
+        assert_eq!(leaves, vec!["uid=jane2,ou=users,dc=example,dc=org"]);
     }
 
     #[test]
