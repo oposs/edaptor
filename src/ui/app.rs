@@ -300,6 +300,34 @@ pub(crate) fn dispatch(prog: &mut Program, cmd: Command, state: &Shared) {
             }
         }
     } else if cmd == SHOW_ERROR {
+        // A concurrent-modification prompt takes precedence over a plain write error.
+        // Borrow discipline: `take()` returns an owned `ConflictPrompt`, so no
+        // `Ref`/`RefMut` is held across `exec_view_focused`.
+        let conflict = state.borrow_mut().last_conflict.take();
+        if let Some(c) = conflict {
+            let (view, focus) = crate::ui::dialog::conflict::build(&c.text);
+            let answer = prog.exec_view_focused(view, focus);
+            if answer == crate::ui::dialog::conflict::OVERWRITE {
+                // Force our version: adopt the fresh CSN learned on re-read, then
+                // re-run the ordinary save path (which now asserts the current
+                // version, so the write is accepted and our values win).
+                force_overwrite(prog, state, c.quit_after, c.fresh_csn);
+            } else if answer == Command::CANCEL {
+                // Reload: discard our edits and re-read the entry fresh.
+                let ocs = state
+                    .borrow()
+                    .edit_form
+                    .as_ref()
+                    .map(|f| f.object_classes.clone())
+                    .unwrap_or_default();
+                let mut st = state.borrow_mut();
+                st.edit_form = None;
+                st.reread_public(&c.dn, &ocs);
+            }
+            // else (keep editing): leave the form as-is; the old CSN stays asserted
+            // so the next plain save conflicts again rather than clobbering.
+            return;
+        }
         let msg = state.borrow_mut().last_write_error.take();
         if let Some(msg) = msg {
             let (view, ok) = error::build(&msg);
@@ -540,6 +568,15 @@ fn do_save(
                 let assert_csn = if st.assertion_supported {
                     st.edit_form.as_ref().and_then(|f| f.baseline_csn.clone())
                 } else {
+                    // Blind path: warn once per session that concurrent edits by
+                    // another client may be silently lost (no optimistic-concurrency
+                    // protection available on this server).
+                    if !st.concurrency_warned {
+                        st.status = "Server does not support optimistic concurrency; \
+                                     concurrent edits may be lost."
+                            .to_string();
+                        st.concurrency_warned = true;
+                    }
                     None
                 };
                 let crate::ui::state::UiState {
@@ -554,6 +591,32 @@ fn do_save(
             SaveOutcome::Submitted
         }
     }
+}
+
+/// Force our version onto the server after an overlapping concurrent modification.
+///
+/// The operator chose "Overwrite" in the conflict dialog: adopt the fresh
+/// `entryCSN` learned during the re-read (so the assertion now matches the current
+/// server version) and re-run the ordinary save path. `do_save` re-prepares, shows
+/// the LDIF confirmation once more, and submits — keeping our values, which now win
+/// over the other client's change to the conflicting attribute(s).
+///
+/// Borrow discipline: the CSN adoption takes a short-lived `borrow_mut` that drops
+/// before `do_save` is called; `do_save` itself plans under a borrow, drops it
+/// before any `exec_view_focused`, and re-borrows to submit.
+fn force_overwrite(
+    prog: &mut Program,
+    state: &Shared,
+    quit_after: bool,
+    fresh_csn: Option<String>,
+) {
+    {
+        let mut st = state.borrow_mut();
+        if let Some(f) = st.edit_form.as_mut() {
+            f.baseline_csn = fresh_csn;
+        }
+    }
+    let _ = do_save(prog, state, None, quit_after);
 }
 
 /// True when the form has a fan-out (membership) field whose current value set

@@ -8,6 +8,16 @@ All notable changes to eDAPtor are documented here. The format follows
 
 ### New
 
+- **Concurrent-edit protection (optimistic concurrency).** When two people edit the
+  same entry, eDAPtor no longer lets the second save silently overwrite the first.
+  A save now asserts the version the entry had when you opened it; if it changed
+  underneath you, eDAPtor re-reads the entry and either **rebases silently** (when
+  the other change touched different attributes than yours) or, when your edits
+  overlap theirs, opens an **"Entry changed"** dialog offering *Reload* (discard your
+  edits and re-read), *Overwrite* (force your version), or *Cancel* (keep editing).
+  Against a server that does not advertise the assertion control, a one-time notice
+  warns that concurrent edits may be lost.
+
 ### Changed
 
 ### Fixed
