@@ -688,19 +688,27 @@ fn do_combined_save(
             // M5c: live, schema-gated group-member fetch (blocking) so last-member
             // pre-validation runs client-side. Only MUST-membership groups are
             // populated; MAY groups (e.g. posixGroup memberUid) are exempt.
-            let group_members = {
+            // Alongside it, a per-group entryCSN pre-read (Task 8) so each fan-out
+            // leg's MODIFY can assert its group's CSN — a concurrent membership
+            // change on that group then surfaces as a Conflict leg instead of a
+            // raw LDAP error.
+            let (group_members, group_csns) = {
                 // Safe to hold this read borrow across the blocking worker.request: it's a
                 // synchronous channel round-trip in dispatch (no event-loop pump → no reentrant borrow).
                 let st = state.borrow();
                 match (st.worker.as_ref(), st.edit_form.as_ref()) {
-                    (Some(w), Some(_)) => {
+                    (Some(w), Some(_)) => (
                         crate::workflows::write_flow::fetch_group_members_for_must(
                             w,
                             st.read_flow.schema(),
                             &combined.fanout,
-                        )
-                    }
-                    _ => std::collections::HashMap::new(),
+                        ),
+                        crate::workflows::write_flow::fetch_group_csns(w, &combined.fanout),
+                    ),
+                    _ => (
+                        std::collections::HashMap::new(),
+                        std::collections::HashMap::new(),
+                    ),
                 }
             };
             // Refuse BEFORE showing the confirm if a removal would empty a MUST group.
@@ -730,7 +738,14 @@ fn do_combined_save(
                     worker, write_flow, ..
                 } = &mut *st;
                 worker.as_ref().map(|w| {
-                    write_flow.submit_combined(w, combined, &group_members, &reread_dn, quit_after)
+                    write_flow.submit_combined(
+                        w,
+                        combined,
+                        &group_members,
+                        &group_csns,
+                        &reread_dn,
+                        quit_after,
+                    )
                 })
             };
             match submit_result {

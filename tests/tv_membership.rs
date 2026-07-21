@@ -420,8 +420,16 @@ fn combined_membership_save_round_trips_via_write_flow() {
 
     let mut wf = WriteFlow::new();
     let group_members = std::collections::HashMap::new(); // best-effort (server backstop)
-    wf.submit_combined(&worker, combined, &group_members, USER_DN, false)
-        .expect("submit_combined add must not abort");
+    let group_csns = std::collections::HashMap::new(); // no assertion in this test
+    wf.submit_combined(
+        &worker,
+        combined,
+        &group_members,
+        &group_csns,
+        USER_DN,
+        false,
+    )
+    .expect("submit_combined add must not abort");
     match pump_combined(&mut wf, &worker) {
         WriteOutcome::CombinedSaved { reread_dn, .. } => {
             assert_eq!(reread_dn, USER_DN, "reread_dn must be the user DN");
@@ -472,8 +480,15 @@ fn combined_membership_save_round_trips_via_write_flow() {
     );
 
     let mut wf2 = WriteFlow::new();
-    wf2.submit_combined(&worker, combined2, &group_members, USER_DN, false)
-        .expect("submit_combined remove must not abort");
+    wf2.submit_combined(
+        &worker,
+        combined2,
+        &group_members,
+        &group_csns,
+        USER_DN,
+        false,
+    )
+    .expect("submit_combined remove must not abort");
     match pump_combined(&mut wf2, &worker) {
         WriteOutcome::CombinedSaved { .. } => {}
         other => panic!("expected CombinedSaved after remove, got {other:?}"),

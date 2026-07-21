@@ -64,6 +64,49 @@ pub fn fetch_group_members_for_must(
     map
 }
 
+/// Blocking, per-group `entryCSN` pre-read for [`WriteFlow::submit_combined`]'s
+/// membership fan-out legs. For every distinct group DN in `fanout`, do a
+/// Base-scoped search for `entryCSN` (operational — must be requested
+/// explicitly, unlike `fetch_group_members_for_must`'s regular attrs) so that
+/// leg's `Request::Modify` can assert it. Best-effort and separate from the
+/// MUST-check fetch: a failed/empty fetch just leaves the group out of the map,
+/// so that leg's `assert_csn` becomes `None` (a blind write) rather than
+/// blocking the batch — the server remains the backstop.
+pub fn fetch_group_csns(
+    worker: &WorkerHandle,
+    fanout: &[(String, ModOp)],
+) -> std::collections::HashMap<String, String> {
+    let mut map = std::collections::HashMap::new();
+    for (group_dn, _) in fanout {
+        if map.contains_key(group_dn) {
+            continue;
+        }
+        let resp = worker.request(Request::Search {
+            id: 0,
+            base: group_dn.clone(),
+            scope: SearchScope::Base,
+            filter: "(objectClass=*)".to_string(),
+            attrs: vec!["entryCSN".to_string()],
+            size_limit: Some(1),
+        });
+        let Ok(Response::Entries { entries, .. }) = resp else {
+            continue;
+        };
+        let Some(entry) = entries.first() else {
+            continue;
+        };
+        let csn = entry
+            .attrs
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case("entryCSN"))
+            .and_then(|(_, v)| v.first().cloned());
+        if let Some(csn) = csn {
+            map.insert(group_dn.clone(), csn);
+        }
+    }
+    map
+}
+
 /// What a pending write means once its `WriteOk` arrives.
 #[derive(Debug, Clone)]
 enum WriteIntent {
@@ -522,11 +565,20 @@ impl WriteFlow {
     /// so we do not block on data we were not given).
     ///
     /// `batch_id` is the first leg's allocated id — deterministic, no clock/random.
+    ///
+    /// **Group CSN assertion:** each per-group `Request::Modify` asserts
+    /// `group_csns.get(&group_dn)` (from [`fetch_group_csns`]) so a concurrent
+    /// membership change on that group surfaces as a [`WriteOutcome::Conflict`]
+    /// leg instead of a raw LDAP error. A group
+    /// missing from the map submits blind (`assert_csn: None`). The own-entry
+    /// leg is unrelated to `group_csns` and unchanged by this (still a blind
+    /// write here).
     pub fn submit_combined(
         &mut self,
         worker: &WorkerHandle,
         combined: CombinedSave,
         group_members: &std::collections::HashMap<String, Vec<String>>,
+        group_csns: &std::collections::HashMap<String, String>,
         reread_dn: &str,
         quit_after: bool,
     ) -> std::result::Result<(), String> {
@@ -546,12 +598,15 @@ impl WriteFlow {
         }
 
         // 2. Assemble the legs: own entry first (if any own changes), then groups.
-        let mut legs: Vec<(String, Vec<ModOp>)> = Vec::new();
+        //    Each group leg's assert_csn comes from `group_csns`; the own-entry
+        //    leg is out of scope here (unchanged: blind write).
+        let mut legs: Vec<(String, Vec<ModOp>, Option<String>)> = Vec::new();
         if !own_mods.is_empty() {
-            legs.push((own_dn, own_mods));
+            legs.push((own_dn, own_mods, None));
         }
         for (group_dn, op) in fanout {
-            legs.push((group_dn, vec![op]));
+            let assert_csn = group_csns.get(&group_dn).cloned();
+            legs.push((group_dn, vec![op], assert_csn));
         }
         // Nothing to do (no own changes, no membership changes): a no-op success.
         if legs.is_empty() {
@@ -561,21 +616,21 @@ impl WriteFlow {
         // 3. Allocate ids; the first leg id is the deterministic batch id. Register
         //    the batch BEFORE submitting so a response can never underflow the count.
         let count = legs.len();
-        let leg_ids: Vec<(u64, String, Vec<ModOp>)> = legs
+        let leg_ids: Vec<(u64, String, Vec<ModOp>, Option<String>)> = legs
             .into_iter()
-            .map(|(dn, changes)| (self.alloc(), dn, changes))
+            .map(|(dn, changes, assert_csn)| (self.alloc(), dn, changes, assert_csn))
             .collect();
         let batch_id = leg_ids[0].0;
         self.batches.insert(batch_id, count);
 
         // 4. Submit every leg, recording its intent under the shared batch.
-        for (id, dn, changes) in leg_ids {
+        for (id, dn, changes, assert_csn) in leg_ids {
             worker
                 .submit(Request::Modify {
                     id,
                     dn,
                     changes,
-                    assert_csn: None,
+                    assert_csn,
                 })
                 .map_err(|e| e.to_string())?;
             self.pending.insert(
@@ -1293,8 +1348,15 @@ mod tests {
             ],
         );
 
-        wf.submit_combined(&worker, combined, &members, "uid=ann,ou=people,dc=x", false)
-            .expect("valid combined save submits");
+        wf.submit_combined(
+            &worker,
+            combined,
+            &members,
+            &HashMap::new(),
+            "uid=ann,ou=people,dc=x",
+            false,
+        )
+        .expect("valid combined save submits");
 
         // Drain the recorded requests: three Modifys with distinct ids.
         let mut ids = Vec::new();
@@ -1320,6 +1382,62 @@ mod tests {
         assert_eq!(*wf.batches.values().next().unwrap(), 3);
     }
 
+    /// Each group leg's `Request::Modify` carries that group's `entryCSN` from
+    /// `group_csns`; a group missing from the map gets `assert_csn: None` (blind
+    /// write, server remains the backstop).
+    #[test]
+    fn combined_legs_carry_group_csn() {
+        let mut wf = WriteFlow::new();
+        let (worker, rx) = WorkerHandle::recording();
+        let combined = combined_with(
+            vec![ModOp::Replace {
+                attr: "description".into(),
+                values: vec!["new".into()],
+            }],
+            vec![add_op("cn=staff,dc=example,dc=org")],
+        );
+        let members: HashMap<String, Vec<String>> = HashMap::new();
+        let mut csns = std::collections::HashMap::new();
+        csns.insert(
+            "cn=staff,dc=example,dc=org".to_string(),
+            "G-CSN-1".to_string(),
+        );
+
+        wf.submit_combined(
+            &worker,
+            combined,
+            &members,
+            &csns,
+            "uid=ann,ou=people,dc=x",
+            false,
+        )
+        .expect("valid combined save submits");
+
+        let mut own_csn = None;
+        let mut group_csn = None;
+        while let Ok((req, _)) = rx.try_recv() {
+            match req {
+                Request::Modify { dn, assert_csn, .. } if dn == "cn=staff,dc=example,dc=org" => {
+                    group_csn = Some(assert_csn)
+                }
+                Request::Modify { dn, assert_csn, .. } if dn == "uid=ann,ou=people,dc=x" => {
+                    own_csn = Some(assert_csn)
+                }
+                other => panic!("unexpected leg: {other:?}"),
+            }
+        }
+        assert_eq!(
+            group_csn,
+            Some(Some("G-CSN-1".to_string())),
+            "group leg asserts its entryCSN"
+        );
+        assert_eq!(
+            own_csn,
+            Some(None),
+            "own-entry leg is out of scope for this task (unchanged: blind write)"
+        );
+    }
+
     /// A Delete that would empty a groupOfNames aborts with Err and submits NOTHING.
     #[test]
     fn submit_combined_last_member_aborts_with_nothing_submitted() {
@@ -1343,7 +1461,14 @@ mod tests {
         );
 
         let err = wf
-            .submit_combined(&worker, combined, &members, "uid=ann,ou=people,dc=x", false)
+            .submit_combined(
+                &worker,
+                combined,
+                &members,
+                &HashMap::new(),
+                "uid=ann,ou=people,dc=x",
+                false,
+            )
             .expect_err("last-member removal must abort");
         assert!(
             err.contains("cn=g1,ou=groups,dc=x"),
@@ -1508,6 +1633,75 @@ mod tests {
         );
 
         drop(worker); // closes rx so the responder thread exits
+        let _ = responder.join();
+    }
+
+    /// `fetch_group_csns` requests `entryCSN` explicitly (operational attr) and
+    /// maps each group DN to the CSN returned; a group whose search comes back
+    /// empty is simply absent from the map (best-effort, server is the backstop).
+    #[test]
+    fn fetch_group_csns_reads_entry_csn_per_group() {
+        use crate::ldap::worker::{LdapEntry, Response, SearchScope};
+        use std::collections::BTreeMap;
+
+        let (worker, rx) = WorkerHandle::recording();
+        let responder = std::thread::spawn(move || {
+            while let Ok((req, reply)) = rx.recv() {
+                let crate::ldap::worker::Request::Search {
+                    base, scope, attrs, ..
+                } = req
+                else {
+                    continue;
+                };
+                assert!(matches!(scope, SearchScope::Base));
+                assert_eq!(attrs, vec!["entryCSN".to_string()]);
+                if base.starts_with("cn=admins") {
+                    let mut attrs = BTreeMap::new();
+                    attrs.insert("entryCSN".to_string(), vec!["CSN-ADMINS".to_string()]);
+                    let _ = reply.send(Response::Entries {
+                        id: 0,
+                        entries: vec![LdapEntry {
+                            dn: base.clone(),
+                            attrs,
+                            bin_attrs: BTreeMap::new(),
+                        }],
+                        truncated: false,
+                    });
+                } else {
+                    // cn=gone: empty result → left out of the map.
+                    let _ = reply.send(Response::Entries {
+                        id: 0,
+                        entries: vec![],
+                        truncated: false,
+                    });
+                }
+            }
+        });
+
+        let fanout = vec![
+            (
+                "cn=admins,ou=groups".to_string(),
+                ModOp::Add {
+                    attr: "member".into(),
+                    values: vec!["uid=ann,ou=people".into()],
+                },
+            ),
+            (
+                "cn=gone,ou=groups".to_string(),
+                ModOp::Add {
+                    attr: "member".into(),
+                    values: vec!["uid=ann,ou=people".into()],
+                },
+            ),
+        ];
+        let map = fetch_group_csns(&worker, &fanout);
+        assert_eq!(
+            map.get("cn=admins,ou=groups"),
+            Some(&"CSN-ADMINS".to_string())
+        );
+        assert!(!map.contains_key("cn=gone,ou=groups"));
+
+        drop(worker);
         let _ = responder.join();
     }
 
