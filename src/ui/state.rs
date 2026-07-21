@@ -14,9 +14,7 @@ use crate::workflows::pick_state::Candidate;
 use crate::workflows::read_flow::ReadFlow;
 use crate::workflows::resolve_flow::{LookupKey, ResolveFlow, ResolveOutcome};
 use crate::workflows::search_flow::{SearchFlow, SearchOutcome};
-use crate::workflows::structure::Structure;
-#[cfg(test)]
-use crate::workflows::structure::StructureInput;
+use crate::workflows::structure::{Structure, StructureInput};
 use crate::workflows::write_flow::{WriteFlow, WriteOutcome, STAGED_PASSWORD_SENTINEL};
 
 /// Placeholder text set in autonumber fields while the background scan is pending.
@@ -113,6 +111,9 @@ pub struct UiState {
     pub profiles: Vec<EntryProfile>,
     pub label_rules: Vec<LabelRule>,
     pub tree_rules: Vec<CompiledTreeRule>,
+    /// The attribute names the label/tree templates reference — what the eager
+    /// scan fetches, and what a per-entry read projects onto its structure node.
+    pub scan_attrs: Vec<String>,
     /// DFS pre-order index → branch DN, matching `Outline`'s `foc` numbering.
     pub branch_dns: Vec<String>,
     pub current_branch: Option<String>,
@@ -164,6 +165,9 @@ pub struct UiState {
     /// Last async write error, surfaced by the dispatch closure's Error dialog.
     pub last_write_error: Option<String>,
     pub list_dirty: bool,
+    /// True when the DIT tree pane must rebuild its node set (a branch appeared,
+    /// disappeared, or changed its rendered label). The tree pane clears it.
+    pub tree_dirty: bool,
     /// Pane → controller: the leaf a selector pane wants shown (dn + objectClasses).
     /// Set when the highlight moves; consumed by [`reconcile_selection`]. The panes
     /// never load or guard themselves — they only record this intent.
@@ -248,6 +252,7 @@ impl UiState {
             profiles: Vec::new(),
             label_rules,
             tree_rules,
+            scan_attrs: Vec::new(),
             branch_dns: Vec::new(),
             current_branch: None,
             current_leaf: None,
@@ -270,6 +275,7 @@ impl UiState {
             pending_nav: None,
             last_write_error: None,
             list_dirty: false,
+            tree_dirty: false,
             requested_leaf: None,
             set_leaf_row: None,
             requested_branch: None,
@@ -318,7 +324,12 @@ impl UiState {
                     model,
                     object_classes,
                     baseline_csn,
+                    dn,
+                    attrs,
                 } => {
+                    // Refresh this entry's structure node from the live read before
+                    // installing the form, so the list/tree agree with what is shown.
+                    self.upsert_from_read(&dn, &attrs);
                     let mut form = build_edit_form(&model, self.read_flow.schema(), self.read_only);
                     form.object_classes = object_classes;
                     form.baseline_csn = baseline_csn;
@@ -1090,6 +1101,61 @@ impl UiState {
             .position(|(_l, dn)| dn == cur)
             .map(|i| i as i32)
     }
+
+    /// Refresh the structure node for a freshly-read entry.
+    ///
+    /// Projects the raw attributes onto the label/tree template attributes
+    /// (`scan_attrs`) plus `objectClass`, so a node never carries the entry's whole
+    /// attribute set, then upserts it. Marks the leaf list dirty and — when the
+    /// upsert reports a branch-level change — the tree too. When the refreshed entry
+    /// is the one on screen, the leaf highlight is snapped to its row, which is what
+    /// makes a newly created entry both appear AND become selected.
+    ///
+    /// Called for every entry read: navigation clicks and post-write re-reads alike,
+    /// so any entry the operator visits self-heals from live data.
+    pub(crate) fn upsert_from_read(
+        &mut self,
+        dn: &str,
+        attrs: &std::collections::BTreeMap<String, Vec<String>>,
+    ) {
+        let first = |name: &str| {
+            attrs
+                .iter()
+                .find(|(k, _)| k.eq_ignore_ascii_case(name))
+                .and_then(|(_, v)| v.first().cloned())
+        };
+        let mut kept: std::collections::BTreeMap<String, Vec<String>> =
+            std::collections::BTreeMap::new();
+        for want in &self.scan_attrs {
+            if let Some((k, v)) = attrs.iter().find(|(k, _)| k.eq_ignore_ascii_case(want)) {
+                kept.insert(k.clone(), v.clone());
+            }
+        }
+        let object_classes = attrs
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case("objectClass"))
+            .map(|(_, v)| v.clone())
+            .unwrap_or_default();
+        let input = StructureInput {
+            dn: dn.to_string(),
+            cn: first("cn"),
+            description: first("description"),
+            object_classes,
+            attrs: kept,
+        };
+        if self.structure.upsert(input) {
+            self.tree_dirty = true;
+        }
+        self.list_dirty = true;
+        if self
+            .current_leaf
+            .as_deref()
+            .map(|c| c.eq_ignore_ascii_case(dn))
+            .unwrap_or(false)
+        {
+            self.set_leaf_row = self.current_leaf_row();
+        }
+    }
 }
 
 /// Derive a `SambaDomainInfo` from the config `[samba]` table.
@@ -1208,7 +1274,7 @@ pub(crate) fn bootstrap(config: Config, password: String) -> Result<UiState> {
         id: 0,
         base: base_dn.clone(),
         page_size: 500,
-        attrs: scan_attrs,
+        attrs: scan_attrs.clone(),
     })? {
         Response::StructureEntries { nodes, .. } => nodes,
         other => return Err(anyhow!("LoadStructure: unexpected {other:?}")),
@@ -1223,6 +1289,7 @@ pub(crate) fn bootstrap(config: Config, password: String) -> Result<UiState> {
         profiles,
         label_rules,
         tree_rules,
+        scan_attrs: scan_attrs.clone(),
         branch_dns: Vec::new(),
         current_branch: None,
         current_leaf: None,
@@ -1245,6 +1312,7 @@ pub(crate) fn bootstrap(config: Config, password: String) -> Result<UiState> {
         pending_nav: None,
         last_write_error: None,
         list_dirty: false,
+        tree_dirty: false,
         requested_leaf: None,
         set_leaf_row: None,
         requested_branch: None,
@@ -2113,6 +2181,57 @@ mod tests {
         };
         st.pump_responses_for_test(&[resp]);
         assert_eq!(st.lookup_cache.get(&key), Some(&Some("staff".to_string())));
+    }
+
+    #[test]
+    fn upsert_from_read_projects_scan_attrs_and_marks_dirty() {
+        let structure = Structure::build("dc=x", vec![si("dc=x", None), si("ou=p,dc=x", None)]);
+        let schema = SchemaModel::from_raw(&RawSubschema::default());
+        let mut st =
+            UiState::new_for_test(structure, schema, "dc=x".into(), Vec::new(), Vec::new());
+        st.scan_attrs = vec!["cn".to_string()];
+        let mut attrs: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        attrs.insert("cn".to_string(), vec!["Bob".to_string()]);
+        attrs.insert("objectClass".to_string(), vec!["person".to_string()]);
+        // `sn` is NOT in scan_attrs and must not be stored on the node.
+        attrs.insert("sn".to_string(), vec!["Baker".to_string()]);
+
+        st.upsert_from_read("uid=bob,ou=p,dc=x", &attrs);
+
+        let node = st
+            .structure
+            .get("uid=bob,ou=p,dc=x")
+            .expect("node inserted");
+        assert_eq!(node.label, "Bob", "label rendered from cn");
+        assert_eq!(node.object_classes, vec!["person".to_string()]);
+        assert!(node.attrs.contains_key("cn"));
+        assert!(
+            !node.attrs.contains_key("sn"),
+            "only scan_attrs are projected onto the node"
+        );
+        assert!(st.list_dirty, "the leaf list must rebuild");
+        assert!(
+            st.tree_dirty,
+            "ou=p flipped leaf->branch, so the tree must rebuild too"
+        );
+    }
+
+    #[test]
+    fn upsert_from_read_snaps_the_highlight_to_the_shown_entry() {
+        let structure = Structure::build("dc=x", vec![si("dc=x", None), si("ou=p,dc=x", None)]);
+        let schema = SchemaModel::from_raw(&RawSubschema::default());
+        let mut st =
+            UiState::new_for_test(structure, schema, "dc=x".into(), Vec::new(), Vec::new());
+        st.scan_attrs = vec!["cn".to_string()];
+        st.current_branch = Some("ou=p,dc=x".into());
+        st.current_leaf = Some("uid=bob,ou=p,dc=x".into());
+        let mut attrs: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        attrs.insert("cn".to_string(), vec!["Bob".to_string()]);
+
+        st.upsert_from_read("uid=bob,ou=p,dc=x", &attrs);
+
+        // Rows are [‹self› ou=p, Bob] → the new entry is row 1.
+        assert_eq!(st.set_leaf_row, Some(1));
     }
 }
 
