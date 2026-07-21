@@ -533,11 +533,20 @@ fn do_save(
                 st.pending_nav = nav;
                 st.guard_target = None;
                 st.pending_password = None; // cleartext consumed; clear before worker picks it up
+
+                // Assert the baseline entryCSN so a stale write is rejected (rc 122)
+                // rather than silently clobbering a concurrent change — but only
+                // when the server actually supports the assertion control.
+                let assert_csn = if st.assertion_supported {
+                    st.edit_form.as_ref().and_then(|f| f.baseline_csn.clone())
+                } else {
+                    None
+                };
                 let crate::ui::state::UiState {
                     worker, write_flow, ..
                 } = &mut *st;
                 if let Some(w) = worker.as_ref() {
-                    let _ = write_flow.submit(w, plan, &dn, quit_after);
+                    let _ = write_flow.submit(w, plan, &dn, assert_csn, quit_after);
                 } else {
                     return SaveOutcome::NotSubmitted;
                 }

@@ -96,6 +96,7 @@ pub struct LdapEntry {
 }
 
 /// A request to the worker. Each is paired with a reply `Sender` in the channel.
+#[derive(Debug)]
 pub enum Request {
     /// Fetch the raw (unparsed) subschema description strings.
     FetchSubschema,

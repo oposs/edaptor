@@ -604,6 +604,16 @@ impl UiState {
                     );
                 }
             }
+            // TODO(Task 7): replace this placeholder with the rebase/prompt flow —
+            // re-read `dn`, diff against the in-flight edits, and let the user
+            // decide whether to rebase or discard. For now, surface it exactly
+            // like a plain write error so the build stays exhaustive.
+            WriteOutcome::Conflict { dn, .. } => {
+                self.last_write_error = Some(format!(
+                    "Save conflict: {dn} was modified by someone else since it was read."
+                ));
+                out.error = true;
+            }
             WriteOutcome::Created { dn, quit_after } => {
                 let ocs = self
                     .edit_form

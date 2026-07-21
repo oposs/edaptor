@@ -239,7 +239,7 @@ fn edit_persists_and_rename_via_write_flow() {
         other => panic!("expected Ready for description change, got {other:?}"),
     };
 
-    wf.submit(&worker, plan, &dn1, false)
+    wf.submit(&worker, plan, &dn1, None, false)
         .expect("submit WriteFlow modify");
 
     let write_resp = poll_any_write(&worker, Duration::from_secs(10));
@@ -290,7 +290,7 @@ fn edit_persists_and_rename_via_write_flow() {
         other => panic!("expected Ready for rename, got {other:?}"),
     };
 
-    wf2.submit(&worker, plan2, &dn1, false)
+    wf2.submit(&worker, plan2, &dn1, None, false)
         .expect("submit WriteFlow rename");
 
     let rename_resp = poll_any_write(&worker, Duration::from_secs(10));

@@ -138,6 +138,9 @@ pub enum WriteOutcome {
         companion_dn: String,
         quit_after: bool,
     },
+    /// A MODIFY/DELETE was refused because the entry changed since it was read
+    /// (rc 122). The caller must re-read `dn` and decide rebase-vs-prompt.
+    Conflict { dn: String, quit_after: bool },
 }
 
 /// The masked sentinel set in a password field by `CommitOutcome::StageSecret`.
@@ -334,6 +337,7 @@ impl WriteFlow {
         worker: &WorkerHandle,
         plan: SavePlan,
         old_dn: &str,
+        assert_csn: Option<String>,
         quit_after: bool,
     ) -> Result<()> {
         match plan {
@@ -344,7 +348,7 @@ impl WriteFlow {
                     id,
                     dn: old_dn.to_string(),
                     changes: mods,
-                    assert_csn: None,
+                    assert_csn,
                 })?;
                 self.pending.insert(
                     id,
@@ -615,7 +619,9 @@ impl WriteFlow {
     pub fn on_response(&mut self, resp: &Response) -> WriteOutcome {
         match resp {
             Response::WriteOk {
-                id, dn: resp_dn, ..
+                id,
+                dn: resp_dn,
+                new_csn: _,
             } => match self.pending.remove(id) {
                 Some(WriteIntent::Save {
                     reread_dn,
@@ -679,6 +685,24 @@ impl WriteFlow {
                 },
                 None => WriteOutcome::Ignored,
             },
+            Response::WriteConflict { id, dn } => match self.pending.remove(id) {
+                Some(WriteIntent::Save { quit_after, .. }) => WriteOutcome::Conflict {
+                    dn: dn.clone(),
+                    quit_after,
+                },
+                Some(WriteIntent::CombinedLeg { batch_id, .. }) => {
+                    self.batches.remove(&batch_id);
+                    WriteOutcome::Conflict {
+                        dn: dn.clone(),
+                        quit_after: false,
+                    }
+                }
+                Some(_) => WriteOutcome::Conflict {
+                    dn: dn.clone(),
+                    quit_after: false,
+                },
+                None => WriteOutcome::Ignored,
+            },
             Response::WriteError { id, msg } => match self.pending.remove(id) {
                 // A combined leg failed: abort the batch (drop its counter so any
                 // sibling WriteOks become Ignored) and surface that the membership
@@ -704,6 +728,22 @@ impl WriteFlow {
         }
     }
 
+    #[cfg(test)]
+    pub(crate) fn insert_save_intent_for_test(
+        &mut self,
+        reread_dn: String,
+        quit_after: bool,
+    ) -> u64 {
+        let id = self.alloc();
+        self.pending.insert(
+            id,
+            WriteIntent::Save {
+                reread_dn,
+                quit_after,
+            },
+        );
+        id
+    }
     #[cfg(test)]
     pub(crate) fn insert_create_intent_for_test(&mut self, id: u64, dn: &str, quit_after: bool) {
         self.pending.insert(
@@ -1590,5 +1630,41 @@ mod tests {
             }
             other => panic!("expected Error, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn save_submit_carries_assert_csn() {
+        let (worker, rx) = WorkerHandle::recording();
+        let mut wf = WriteFlow::new();
+        let plan = SavePlan::Modify(vec![ModOp::Replace {
+            attr: "description".to_string(),
+            values: vec!["x".to_string()],
+        }]);
+        wf.submit(
+            &worker,
+            plan,
+            "cn=a,dc=example,dc=org",
+            Some("CSN-123".to_string()),
+            false,
+        )
+        .unwrap();
+        let (req, _tx) = rx.recv().unwrap();
+        match req {
+            Request::Modify { assert_csn, .. } => {
+                assert_eq!(assert_csn.as_deref(), Some("CSN-123"));
+            }
+            other => panic!("expected Modify, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn write_conflict_maps_to_conflict_outcome() {
+        let mut wf = WriteFlow::new();
+        let id = wf.insert_save_intent_for_test("cn=a,dc=example,dc=org".to_string(), false);
+        let out = wf.on_response(&Response::WriteConflict {
+            id,
+            dn: "cn=a,dc=example,dc=org".to_string(),
+        });
+        assert!(matches!(out, WriteOutcome::Conflict { .. }));
     }
 }
