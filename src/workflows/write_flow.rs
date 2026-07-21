@@ -749,21 +749,40 @@ impl WriteFlow {
                 None => WriteOutcome::Ignored,
             },
             Response::WriteConflict { id, dn } => match self.pending.remove(id) {
+                // A plain single-entry save (or a rename's final leg) conflicted:
+                // the working own-entry rebase/prompt path in `src/ui/state.rs`
+                // (`resolve_conflict` et al.) re-reads `dn` — which IS the entry the
+                // edit form is for — and handles it correctly.
                 Some(WriteIntent::Save { quit_after, .. }) => WriteOutcome::Conflict {
                     dn: dn.clone(),
                     quit_after,
                 },
+                // A combined-save leg conflicted (rc 122): `dn` is THAT LEG's dn,
+                // which for a group leg is a GROUP dn, not the user entry the edit
+                // form is for. Routing this through the single-entry Conflict path
+                // would re-read the group and diff it against the user form —
+                // garbling the overlap prompt and possibly adopting the group's CSN
+                // into the user form. Instead, mirror the CombinedLeg case in the
+                // WriteError arm below: abort the batch (so sibling legs' later
+                // responses become Ignored) and surface a reload-and-retry error.
+                // Rebasing just the own leg and resubmitting the batch is a
+                // deliberately deferred enhancement.
                 Some(WriteIntent::CombinedLeg { batch_id, .. }) => {
                     self.batches.remove(&batch_id);
-                    WriteOutcome::Conflict {
-                        dn: dn.clone(),
-                        quit_after: false,
-                    }
+                    WriteOutcome::Error(format!(
+                        "Membership change refused: {dn} was changed by another client \
+                         during this save. Because the save is non-atomic, other \
+                         membership changes in the same save may already have been \
+                         applied — reload the entry and review membership before \
+                         retrying."
+                    ))
                 }
-                Some(_) => WriteOutcome::Conflict {
-                    dn: dn.clone(),
-                    quit_after: false,
-                },
+                // Any other intent (rename, create, ...) reaching a conflict is
+                // unexpected — no own-entry rebase path applies to it. Surface a
+                // safe error rather than misrouting into the own-entry Conflict path.
+                Some(_) => WriteOutcome::Error(format!(
+                    "Write refused: {dn} was changed since it was read. Reload and retry."
+                )),
                 None => WriteOutcome::Ignored,
             },
             Response::WriteError { id, msg } => match self.pending.remove(id) {
@@ -1916,5 +1935,72 @@ mod tests {
             dn: "cn=a,dc=example,dc=org".to_string(),
         });
         assert!(matches!(out, WriteOutcome::Conflict { .. }));
+    }
+
+    /// A `WriteConflict` on a combined-save leg must NOT be routed through the
+    /// single-entry `Conflict` path (the leg's dn may be a group, not the user
+    /// entry the edit form is for). It aborts the batch and surfaces a
+    /// reload-and-retry `Error`, mirroring the `WriteError` CombinedLeg case. A
+    /// sibling leg's later response must then be `Ignored` (batch already gone).
+    #[test]
+    fn combined_leg_conflict_aborts_batch_and_reports_error() {
+        let mut wf = WriteFlow::new();
+        let batch_id = 3000;
+        wf.batches.insert(batch_id, 2);
+        for id in [3000u64, 3001] {
+            wf.pending.insert(
+                id,
+                WriteIntent::CombinedLeg {
+                    batch_id,
+                    reread_dn: "uid=ann,ou=people,dc=x".into(),
+                    quit_after: false,
+                },
+            );
+        }
+        match wf.on_response(&Response::WriteConflict {
+            id: 3000,
+            dn: "cn=g1,ou=groups,dc=x".into(),
+        }) {
+            WriteOutcome::Error(m) => {
+                assert!(
+                    m.contains("cn=g1,ou=groups,dc=x"),
+                    "names the conflicting leg's dn: {m}"
+                );
+                assert!(
+                    m.to_lowercase().contains("reload"),
+                    "tells the user to reload and retry: {m}"
+                );
+            }
+            other => panic!("expected Error, got {other:?}"),
+        }
+        assert!(wf.batches.is_empty(), "batch aborted on leg conflict");
+        // A sibling leg's late success must NOT complete the (gone) batch.
+        match wf.on_response(&Response::WriteOk {
+            id: 3001,
+            dn: "uid=ann,ou=people,dc=x".into(),
+            new_csn: None,
+        }) {
+            WriteOutcome::Ignored => {}
+            other => panic!("expected Ignored after batch abort, got {other:?}"),
+        }
+        assert!(wf.pending.is_empty());
+    }
+
+    /// A `WriteConflict` on a genuine single-entry `Save` intent still yields
+    /// `Conflict` — unchanged by the CombinedLeg fix above.
+    #[test]
+    fn save_conflict_still_yields_conflict_outcome() {
+        let mut wf = WriteFlow::new();
+        let id = wf.insert_save_intent_for_test("cn=a,dc=example,dc=org".to_string(), true);
+        match wf.on_response(&Response::WriteConflict {
+            id,
+            dn: "cn=a,dc=example,dc=org".to_string(),
+        }) {
+            WriteOutcome::Conflict { dn, quit_after } => {
+                assert_eq!(dn, "cn=a,dc=example,dc=org");
+                assert!(quit_after);
+            }
+            other => panic!("expected Conflict, got {other:?}"),
+        }
     }
 }
