@@ -12,6 +12,7 @@
 pub fn result_code_message(rc: u32, text: &str) -> String {
     let base = match rc {
         0 => "Success",
+        12 => "Server does not support a required control",
         16 => "No such attribute",
         19 => "Constraint violation",
         20 => "Attribute or value already exists",
@@ -21,6 +22,7 @@ pub fn result_code_message(rc: u32, text: &str) -> String {
         65 => "Object class violation",
         66 => "Operation not allowed on non-leaf entry (it still has children)",
         68 => "Entry already exists",
+        122 => "Entry was modified by someone else since you loaded it",
         _ => {
             if text.is_empty() {
                 return format!("LDAP error {rc}");
@@ -78,5 +80,20 @@ mod tests {
             "LDAP error 123: weird failure"
         );
         assert_eq!(result_code_message(123, ""), "LDAP error 123");
+    }
+
+    #[test]
+    fn maps_assertion_failed() {
+        let m = result_code_message(122, "assertion failed");
+        assert!(m.starts_with("Entry was modified by someone else"), "m={m}");
+    }
+
+    #[test]
+    fn maps_unavailable_critical_extension() {
+        let m = result_code_message(12, "");
+        assert!(
+            m.starts_with("Server does not support a required control"),
+            "m={m}"
+        );
     }
 }
