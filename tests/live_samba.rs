@@ -164,6 +164,7 @@ fn synced_password_unix_round_trip() {
             id: 20,
             dn: dn.clone(),
             changes: samba_mods,
+            assert_csn: None,
         })
         .expect("submit samba modify");
     let samba_present = match poll_for_id(&worker, 20, Duration::from_secs(10)) {
@@ -191,6 +192,7 @@ fn synced_password_unix_round_trip() {
                 id: 21,
                 dn: dn.clone(),
                 changes: unix_mods,
+                assert_csn: None,
             })
             .expect("submit unix modify");
         match poll_for_id(&worker, 21, Duration::from_secs(10)) {

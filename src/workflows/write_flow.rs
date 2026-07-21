@@ -344,6 +344,7 @@ impl WriteFlow {
                     id,
                     dn: old_dn.to_string(),
                     changes: mods,
+                    assert_csn: None,
                 })?;
                 self.pending.insert(
                     id,
@@ -566,7 +567,12 @@ impl WriteFlow {
         // 4. Submit every leg, recording its intent under the shared batch.
         for (id, dn, changes) in leg_ids {
             worker
-                .submit(Request::Modify { id, dn, changes })
+                .submit(Request::Modify {
+                    id,
+                    dn,
+                    changes,
+                    assert_csn: None,
+                })
                 .map_err(|e| e.to_string())?;
             self.pending.insert(
                 id,
@@ -593,6 +599,7 @@ impl WriteFlow {
             id,
             dn: dn.to_string(),
             changes: mods,
+            assert_csn: None,
         })?;
         self.pending.insert(
             id,
@@ -607,7 +614,9 @@ impl WriteFlow {
     /// Correlate one polled [`Response`]. Pure; ignores non-write variants.
     pub fn on_response(&mut self, resp: &Response) -> WriteOutcome {
         match resp {
-            Response::WriteOk { id, dn: resp_dn } => match self.pending.remove(id) {
+            Response::WriteOk {
+                id, dn: resp_dn, ..
+            } => match self.pending.remove(id) {
                 Some(WriteIntent::Save {
                     reread_dn,
                     quit_after,
@@ -948,6 +957,7 @@ mod tests {
         match wf.on_response(&Response::WriteOk {
             id: 7,
             dn: "cn=Bob,dc=x".into(),
+            new_csn: None,
         }) {
             WriteOutcome::Saved {
                 reread_dn,
@@ -978,6 +988,7 @@ mod tests {
         match wf.on_response(&Response::WriteOk {
             id: 3,
             dn: "cn=New,dc=x".into(),
+            new_csn: None,
         }) {
             WriteOutcome::NeedFollowupModify {
                 dn,
@@ -1026,6 +1037,7 @@ mod tests {
         match wf.on_response(&Response::WriteOk {
             id: 42,
             dn: "uid=bob,ou=people,dc=example,dc=org".into(),
+            new_csn: None,
         }) {
             WriteOutcome::Created { dn, quit_after } => {
                 assert_eq!(dn, "uid=bob,ou=people,dc=example,dc=org");
@@ -1323,6 +1335,7 @@ mod tests {
         match wf.on_response(&Response::WriteOk {
             id: 1000,
             dn: "uid=ann,ou=people,dc=x".into(),
+            new_csn: None,
         }) {
             WriteOutcome::BatchProgress { remaining } => assert_eq!(remaining, 1),
             other => panic!("expected BatchProgress, got {other:?}"),
@@ -1331,6 +1344,7 @@ mod tests {
         match wf.on_response(&Response::WriteOk {
             id: 1001,
             dn: "cn=g1,ou=groups,dc=x".into(),
+            new_csn: None,
         }) {
             WriteOutcome::CombinedSaved {
                 reread_dn,
@@ -1383,6 +1397,7 @@ mod tests {
         match wf.on_response(&Response::WriteOk {
             id: 2001,
             dn: "cn=g1,ou=groups,dc=x".into(),
+            new_csn: None,
         }) {
             WriteOutcome::Ignored => {}
             other => panic!("expected Ignored after batch abort, got {other:?}"),
@@ -1503,6 +1518,7 @@ mod tests {
         match wf.on_response(&Response::WriteOk {
             id: 7,
             dn: "uid=alice,ou=people,dc=x".into(),
+            new_csn: None,
         }) {
             WriteOutcome::Created { dn, quit_after } => {
                 assert_eq!(dn, "uid=alice,ou=people,dc=x");
@@ -1521,6 +1537,7 @@ mod tests {
         match wf.on_response(&Response::WriteOk {
             id: 3,
             dn: "cn=alice,ou=groups,dc=x".into(),
+            new_csn: None,
         }) {
             WriteOutcome::NeedFollowupCreate {
                 dn,

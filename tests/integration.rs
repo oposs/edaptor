@@ -138,6 +138,7 @@ fn variant_name(resp: &Response) -> &'static str {
         Response::StructureEntries { .. } => "StructureEntries",
         Response::StructureError { .. } => "StructureError",
         Response::WriteOk { .. } => "WriteOk",
+        Response::WriteConflict { .. } => "WriteConflict",
         Response::WriteError { .. } => "WriteError",
         Response::Done => "Done",
         Response::Error(_) => "Error",
