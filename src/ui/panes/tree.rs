@@ -6,7 +6,7 @@ use tvision_rs::{
 
 use crate::config::tree_label::{eval_tree_label, fit_label};
 use crate::ui::state::UiState;
-use crate::ui::Shared;
+use crate::ui::{Shared, REFRESH};
 
 /// Build a tvision `Node` tree and a parallel DFS pre-order DN index from the
 /// structure's branch hierarchy. Only branches (nodes with ≥1 child) appear;
@@ -205,6 +205,35 @@ impl TreePane {
         ctx.request_set_visible(self.v_bar, show);
     }
 
+    /// Rebuild the outline's node set from the current structure.
+    ///
+    /// Called when `tree_dirty` is set — a branch appeared, disappeared, or changed
+    /// its rendered label. The highlight is restored **by DN**, never by row index:
+    /// a rebuild shifts every index below the change. `last_sel` is resynced so the
+    /// restored position is not reported back as a fresh user navigation.
+    fn rebuild(&mut self, ctx: &mut Context) {
+        let width = (self.group.state().get_extent().b.x).max(4) as usize;
+        let (root, dns, selected) = {
+            let st = self.state.borrow();
+            let (root, dns) = build_branch_nodes(&st, width);
+            (root, dns, st.current_branch.clone())
+        };
+        let row = selected
+            .and_then(|dn| dns.iter().position(|d| d.eq_ignore_ascii_case(&dn)))
+            .map(|i| i as i32);
+        self.state.borrow_mut().branch_dns = dns;
+        if let Some(outline) = self.outline_mut() {
+            outline.root = root;
+            tv::widgets::outline::ov_update(outline, ctx);
+        }
+        if let Some(row) = row {
+            if let Some(outline) = self.outline_mut() {
+                tv::widgets::outline::adjust_focus(outline, row, ctx);
+            }
+            self.last_sel = row;
+        }
+    }
+
     /// Test seam: directly set the outline's focused row (bypasses `set_value_ctx`
     /// which is a no-op on `Outline` since it does not override `set_value`).
     #[cfg(test)]
@@ -228,6 +257,16 @@ impl View for TreePane {
         if super::wheel_misses_pane(self.group.state(), ev) {
             return;
         }
+        // A structure change (create, rename, delete, refresh) marked the tree stale:
+        // rebuild before this event is processed, so the DFS index the selection
+        // logic below reads is the current one.
+        let needs_rebuild = matches!(ev, Event::Broadcast { command, .. } if *command == REFRESH)
+            && self.state.borrow().tree_dirty;
+        if needs_rebuild {
+            self.rebuild(ctx);
+            self.state.borrow_mut().tree_dirty = false;
+        }
+
         // Controller → pane: snap the selection back (guard "Stay") before reporting.
         let snap = self.state.borrow_mut().set_tree_row.take();
         if let Some(row) = snap {
@@ -265,7 +304,6 @@ mod tests {
     use crate::config::TreeConfig;
     use crate::ldap::worker::RawSubschema;
     use crate::schema::SchemaModel;
-    use crate::ui::REFRESH;
     use crate::workflows::structure::{Structure, StructureInput};
     use std::collections::BTreeMap;
 
@@ -471,6 +509,70 @@ mod tests {
         assert_eq!(
             st.current_branch, None,
             "pure selector: never switches current_branch inline"
+        );
+    }
+
+    /// A structure change that promotes a leaf to a branch must reach the outline:
+    /// on REFRESH with `tree_dirty` set the pane rebuilds its node set, refreshes
+    /// `branch_dns`, and keeps the highlight on the same DN (row indices shift).
+    #[test]
+    fn refresh_with_tree_dirty_rebuilds_and_keeps_the_selected_dn() {
+        let inputs = vec![
+            si("dc=x"),
+            si("ou=a,dc=x"),
+            si("ou=b,dc=x"),
+            si("cn=1,ou=b,dc=x"),
+        ];
+        let structure = Structure::build("dc=x", inputs);
+        let schema = SchemaModel::from_raw(&RawSubschema::default());
+        let mut st = UiState::new_for_test(
+            structure,
+            schema,
+            "dc=x".into(),
+            Vec::new(),
+            compile_tree_rules(&TreeConfig::default()),
+        );
+        let (root, dns) = build_branch_nodes(&st, 40);
+        // Only dc=x and ou=b are branches at build time; ou=a is a childless leaf.
+        assert_eq!(dns, vec!["dc=x".to_string(), "ou=b,dc=x".to_string()]);
+        st.branch_dns = dns;
+        st.current_branch = Some("ou=b,dc=x".into());
+        let shared: std::rc::Rc<std::cell::RefCell<UiState>> =
+            std::rc::Rc::new(std::cell::RefCell::new(st));
+        let mut pane = TreePane::new(Rect::new(0, 0, 30, 10), root, shared.clone());
+
+        // A new entry lands under ou=a → it becomes a branch → the tree must change.
+        {
+            let mut st = shared.borrow_mut();
+            st.structure.upsert(si("cn=2,ou=a,dc=x"));
+            st.tree_dirty = true;
+        }
+
+        let mut out = std::collections::VecDeque::new();
+        let mut timers = tv::timer::TimerQueue::new();
+        let mut deferred: Vec<tv::Deferred> = Vec::new();
+        let mut ctx = Context::new(&mut out, &mut timers, 0, &mut deferred);
+        let mut ev = Event::Broadcast {
+            command: REFRESH,
+            source: None,
+        };
+        pane.handle_event(&mut ev, &mut ctx);
+
+        let st = shared.borrow();
+        assert_eq!(
+            st.branch_dns,
+            vec![
+                "dc=x".to_string(),
+                "ou=a,dc=x".to_string(),
+                "ou=b,dc=x".to_string()
+            ],
+            "the promoted container must appear in the DFS index"
+        );
+        assert!(!st.tree_dirty, "the pane clears the flag it consumed");
+        assert_eq!(
+            st.requested_branch.as_deref(),
+            None,
+            "restoring the highlight by DN must not look like a user navigation"
         );
     }
 }
