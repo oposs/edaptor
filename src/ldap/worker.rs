@@ -177,6 +177,9 @@ pub enum Request {
         id: u64,
         /// DN to delete.
         dn: String,
+        /// When set, assert `(entryCSN=<this>)` (RFC 4528, critical) so the delete
+        /// applies only if the entry is unchanged since it was read. `None` = blind.
+        assert_csn: Option<String>,
     },
     /// Unbind and stop the worker thread.
     Shutdown,
@@ -512,8 +515,8 @@ fn worker_loop(conn: &mut LdapConn, config: &Config, rx: Receiver<Job>) {
                     new_superior.as_deref(),
                 ));
             }
-            Request::Delete { id, dn } => {
-                let _ = reply.send(run_delete(conn, id, &dn));
+            Request::Delete { id, dn, assert_csn } => {
+                let _ = reply.send(run_delete(conn, id, &dn, assert_csn.as_deref()));
             }
             Request::Shutdown => {
                 let _ = conn.unbind();
@@ -732,8 +735,31 @@ fn run_modrdn(
     )
 }
 
-fn run_delete(conn: &mut LdapConn, id: u64, dn: &str) -> Response {
-    write_response(id, dn, None, conn.delete(dn))
+fn run_delete(conn: &mut LdapConn, id: u64, dn: &str, assert_csn: Option<&str>) -> Response {
+    let Some(csn) = assert_csn else {
+        return write_response(id, dn, None, conn.delete(dn));
+    };
+    let filter = format!("(entryCSN={})", ldap3::ldap_escape(csn));
+    let ctrl: RawControl = Assertion { filter }.critical().into();
+    match conn.with_controls(vec![ctrl]).delete(dn) {
+        Ok(r) if r.rc == 0 => Response::WriteOk {
+            id,
+            dn: dn.to_string(),
+            new_csn: None,
+        },
+        Ok(r) if r.rc == 122 => Response::WriteConflict {
+            id,
+            dn: dn.to_string(),
+        },
+        Ok(r) => Response::WriteError {
+            id,
+            msg: result_code_message(r.rc, &r.text),
+        },
+        Err(e) => Response::WriteError {
+            id,
+            msg: format!("{e}"),
+        },
+    }
 }
 
 /// True for the LDAP result codes that mean "the server capped the result set"

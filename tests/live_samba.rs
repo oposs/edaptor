@@ -131,6 +131,7 @@ fn synced_password_unix_round_trip() {
     let _ = worker.submit(Request::Delete {
         id: 1,
         dn: dn.clone(),
+        assert_csn: None,
     });
     let _ = poll_for_id(&worker, 1, Duration::from_secs(5));
 
@@ -261,6 +262,7 @@ fn synced_password_unix_round_trip() {
         .submit(Request::Delete {
             id: 99,
             dn: dn.clone(),
+            assert_csn: None,
         })
         .expect("submit cleanup delete");
     match poll_for_id(&worker, 99, Duration::from_secs(10)) {

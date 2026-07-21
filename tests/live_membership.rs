@@ -105,6 +105,7 @@ fn cleanup(worker: &WorkerHandle, id: u64, dn: &str) {
     let _ = worker.submit(Request::Delete {
         id,
         dn: dn.to_string(),
+        assert_csn: None,
     });
     let _ = poll_for_id(worker, id, Duration::from_secs(5));
 }

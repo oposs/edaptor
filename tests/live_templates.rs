@@ -150,6 +150,7 @@ fn create_time_password_unix_round_trip() {
     let _ = worker.submit(Request::Delete {
         id: 1,
         dn: dn.clone(),
+        assert_csn: None,
     });
     let _ = poll_for_id(&worker, 1, Duration::from_secs(5));
 
@@ -210,6 +211,7 @@ fn create_time_password_unix_round_trip() {
         .submit(Request::Delete {
             id: 99,
             dn: dn.clone(),
+            assert_csn: None,
         })
         .expect("submit cleanup delete");
     match poll_for_id(&worker, 99, Duration::from_secs(10)) {
@@ -267,6 +269,7 @@ fn autonumber_allocation_and_multi_oc_create() {
         let _ = worker.submit(Request::Delete {
             id,
             dn: (*dn).clone(),
+            assert_csn: None,
         });
         let _ = poll_for_id(&worker, id, Duration::from_secs(5));
     }
@@ -378,6 +381,7 @@ fn autonumber_allocation_and_multi_oc_create() {
             .submit(Request::Delete {
                 id,
                 dn: (*dn).clone(),
+                assert_csn: None,
             })
             .expect("submit cleanup delete");
         match poll_for_id(&worker, id, Duration::from_secs(10)) {
@@ -412,6 +416,7 @@ fn lookup_pick_value_yields_gidnumber() {
     let _ = worker.submit(Request::Delete {
         id: 300,
         dn: dn.clone(),
+        assert_csn: None,
     });
     let _ = poll_for_id(&worker, 300, Duration::from_secs(5));
 
@@ -478,6 +483,7 @@ fn lookup_pick_value_yields_gidnumber() {
         .submit(Request::Delete {
             id: 390,
             dn: dn.clone(),
+            assert_csn: None,
         })
         .expect("submit cleanup delete");
     match poll_for_id(&worker, 390, Duration::from_secs(10)) {
@@ -495,6 +501,7 @@ fn cleanup_entry(worker: &WorkerHandle, id: u64, dn: &str) {
     let _ = worker.submit(Request::Delete {
         id,
         dn: dn.to_string(),
+        assert_csn: None,
     });
     let _ = poll_for_id(worker, id, Duration::from_secs(5));
 }

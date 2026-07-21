@@ -158,7 +158,11 @@ fn edit_persists_and_rename_via_write_flow() {
     // Idempotent cleanup from any prior aborted run.
     // -----------------------------------------------------------------------
     for (id, d) in [(1u64, &dn1), (2u64, &dn2)] {
-        let _ = worker.submit(Request::Delete { id, dn: d.clone() });
+        let _ = worker.submit(Request::Delete {
+            id,
+            dn: d.clone(),
+            assert_csn: None,
+        });
         let _ = poll_for_id(&worker, id, Duration::from_secs(5));
     }
 
@@ -339,6 +343,7 @@ fn edit_persists_and_rename_via_write_flow() {
         .submit(Request::Delete {
             id: 40,
             dn: dn2.clone(),
+            assert_csn: None,
         })
         .expect("submit DELETE");
     match poll_for_id(&worker, 40, Duration::from_secs(10)) {

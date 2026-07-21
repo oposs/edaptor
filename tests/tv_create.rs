@@ -54,6 +54,7 @@ impl Drop for EntryCleanup<'_> {
         let _ = self.worker.submit(Request::Delete {
             id: 99,
             dn: std::mem::take(&mut self.dn),
+            assert_csn: None,
         });
     }
 }
@@ -178,6 +179,7 @@ fn create_entry_via_neutral_create_path() {
     let _ = worker.submit(Request::Delete {
         id: 1,
         dn: test_dn.clone(),
+        assert_csn: None,
     });
     let _ = poll_for_id(&worker, 1, Duration::from_secs(5));
 

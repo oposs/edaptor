@@ -191,6 +191,7 @@ impl Cleanup<'_> {
         let _ = self.worker.submit(Request::Delete {
             id,
             dn: dn.to_string(),
+            assert_csn: None,
         });
         let _ = poll_for_id(self.worker, id, Duration::from_secs(5));
     }
@@ -312,6 +313,7 @@ fn combined_membership_save_round_trips_via_write_flow() {
         let _ = worker.submit(Request::Delete {
             id,
             dn: dn.to_string(),
+            assert_csn: None,
         });
         let _ = poll_for_id(&worker, id, Duration::from_secs(5));
     }
@@ -370,6 +372,7 @@ fn combined_membership_save_round_trips_via_write_flow() {
                 let _ = worker.submit(Request::Delete {
                     id: 21,
                     dn: USER_DN.to_string(),
+                    assert_csn: None,
                 });
                 let _ = poll_for_id(&worker, 21, Duration::from_secs(5));
                 panic!("ADD group failed: {}", describe(&other));
@@ -522,6 +525,7 @@ fn last_member_removal_blocked_client_side() {
         let _ = worker.submit(Request::Delete {
             id: 1,
             dn: SOLE_GROUP_DN.to_string(),
+            assert_csn: None,
         });
         let _ = poll_for_id(&worker, 1, Duration::from_secs(5));
     }

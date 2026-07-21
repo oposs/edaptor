@@ -134,7 +134,11 @@ fn add_modify_modrdn_delete_round_trip() {
 
     // Idempotent cleanup from any prior aborted run.
     for (id, d) in [(1u64, &dn), (2u64, &dn2)] {
-        let _ = worker.submit(Request::Delete { id, dn: d.clone() });
+        let _ = worker.submit(Request::Delete {
+            id,
+            dn: d.clone(),
+            assert_csn: None,
+        });
         let _ = poll_for_id(&worker, id, Duration::from_secs(5));
     }
 
@@ -228,6 +232,7 @@ fn add_modify_modrdn_delete_round_trip() {
         .submit(Request::Delete {
             id: 40,
             dn: dn2.clone(),
+            assert_csn: None,
         })
         .expect("submit delete");
     match poll_for_id(&worker, 40, Duration::from_secs(10)) {
@@ -257,6 +262,7 @@ fn delete_non_leaf_reports_human_error() {
         .submit(Request::Delete {
             id: 50,
             dn: "ou=users,dc=example,dc=org".to_string(),
+            assert_csn: None,
         })
         .expect("submit delete");
     match poll_for_id(&worker, 50, Duration::from_secs(10)) {
@@ -338,6 +344,7 @@ fn modify_with_stale_csn_conflicts() {
     let _ = worker.submit(Request::Delete {
         id: 100,
         dn: dn.clone(),
+        assert_csn: None,
     });
     let _ = poll_for_id(&worker, 100, Duration::from_secs(5));
 
@@ -424,6 +431,7 @@ fn modify_with_stale_csn_conflicts() {
         .submit(Request::Delete {
             id: 140,
             dn: dn.clone(),
+            assert_csn: None,
         })
         .expect("submit cleanup delete");
     let _ = poll_for_id(&worker, 140, Duration::from_secs(10));
