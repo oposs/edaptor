@@ -230,8 +230,12 @@ impl TreePane {
             if let Some(outline) = self.outline_mut() {
                 tv::widgets::outline::adjust_focus(outline, row, ctx);
             }
-            self.last_sel = row;
         }
+        // Resync to the row the outline actually holds now — the DN we restored, or
+        // whatever `ov_update` clamped to when that DN is gone from the rebuilt index.
+        // Without this, a vanished branch leaves `last_sel` stale and the next event
+        // reports a branch the operator never selected (pure-selector violation).
+        self.last_sel = self.outline_mut().map(|o| o.ov().foc).unwrap_or(-1);
     }
 
     /// Test seam: directly set the outline's focused row (bypasses `set_value_ctx`
@@ -515,6 +519,11 @@ mod tests {
     /// A structure change that promotes a leaf to a branch must reach the outline:
     /// on REFRESH with `tree_dirty` set the pane rebuilds its node set, refreshes
     /// `branch_dns`, and keeps the highlight on the same DN (row indices shift).
+    ///
+    /// The selected DN (`ou=b,dc=x`) is placed in the MIDDLE of the rebuilt DFS
+    /// index (`ou=c,dc=x` follows it) — not the last row — so this only passes if
+    /// the highlight is genuinely restored by DN; an "always clamp to the last
+    /// row" bug would fail it.
     #[test]
     fn refresh_with_tree_dirty_rebuilds_and_keeps_the_selected_dn() {
         let inputs = vec![
@@ -522,6 +531,8 @@ mod tests {
             si("ou=a,dc=x"),
             si("ou=b,dc=x"),
             si("cn=1,ou=b,dc=x"),
+            si("ou=c,dc=x"),
+            si("cn=1,ou=c,dc=x"),
         ];
         let structure = Structure::build("dc=x", inputs);
         let schema = SchemaModel::from_raw(&RawSubschema::default());
@@ -533,8 +544,15 @@ mod tests {
             compile_tree_rules(&TreeConfig::default()),
         );
         let (root, dns) = build_branch_nodes(&st, 40);
-        // Only dc=x and ou=b are branches at build time; ou=a is a childless leaf.
-        assert_eq!(dns, vec!["dc=x".to_string(), "ou=b,dc=x".to_string()]);
+        // dc=x, ou=b and ou=c are branches at build time; ou=a is a childless leaf.
+        assert_eq!(
+            dns,
+            vec![
+                "dc=x".to_string(),
+                "ou=b,dc=x".to_string(),
+                "ou=c,dc=x".to_string()
+            ]
+        );
         st.branch_dns = dns;
         st.current_branch = Some("ou=b,dc=x".into());
         let shared: std::rc::Rc<std::cell::RefCell<UiState>> =
@@ -564,15 +582,97 @@ mod tests {
             vec![
                 "dc=x".to_string(),
                 "ou=a,dc=x".to_string(),
-                "ou=b,dc=x".to_string()
+                "ou=b,dc=x".to_string(),
+                "ou=c,dc=x".to_string(),
             ],
-            "the promoted container must appear in the DFS index"
+            "the promoted container must appear in the DFS index, ou=b in the middle"
         );
         assert!(!st.tree_dirty, "the pane clears the flag it consumed");
         assert_eq!(
             st.requested_branch.as_deref(),
             None,
             "restoring the highlight by DN must not look like a user navigation"
+        );
+    }
+
+    /// Finding 1 regression: when the previously selected branch vanishes from the
+    /// rebuilt index entirely (not just shifts row), tvision's `ov_update` still
+    /// re-clamps `foc` internally (via `adjust_focus`). The pane must resync
+    /// `last_sel` to that clamped value unconditionally — otherwise the next
+    /// selection check sees `sel != last_sel` and reports a branch the operator
+    /// never selected, violating the pure-selector contract.
+    #[test]
+    fn rebuild_with_a_vanished_branch_does_not_report_a_navigation() {
+        let inputs = vec![
+            si("dc=x"),
+            si("ou=a,dc=x"),
+            si("cn=1,ou=a,dc=x"),
+            si("ou=b,dc=x"),
+            si("cn=1,ou=b,dc=x"),
+            si("ou=c,dc=x"),
+            si("cn=1,ou=c,dc=x"),
+        ];
+        let structure = Structure::build("dc=x", inputs);
+        let schema = SchemaModel::from_raw(&RawSubschema::default());
+        let mut st = UiState::new_for_test(
+            structure,
+            schema,
+            "dc=x".into(),
+            Vec::new(),
+            compile_tree_rules(&TreeConfig::default()),
+        );
+        let (root, dns) = build_branch_nodes(&st, 40);
+        assert_eq!(
+            dns,
+            vec![
+                "dc=x".to_string(),
+                "ou=a,dc=x".to_string(),
+                "ou=b,dc=x".to_string(),
+                "ou=c,dc=x".to_string(),
+            ]
+        );
+        st.branch_dns = dns;
+        st.current_branch = Some("ou=c,dc=x".into());
+        let shared: std::rc::Rc<std::cell::RefCell<UiState>> =
+            std::rc::Rc::new(std::cell::RefCell::new(st));
+        let mut pane = TreePane::new(Rect::new(0, 0, 30, 10), root, shared.clone());
+
+        let mut out = std::collections::VecDeque::new();
+        let mut timers = tv::timer::TimerQueue::new();
+        let mut deferred: Vec<tv::Deferred> = Vec::new();
+        let mut ctx = Context::new(&mut out, &mut timers, 0, &mut deferred);
+        // Select row 3 (ou=c,dc=x) as the operator's current highlight.
+        pane.select_row_for_test(3, &mut ctx);
+
+        // ou=b and ou=c both lose their only child → both drop out of the rebuilt
+        // index, leaving [dc=x, ou=a,dc=x].
+        {
+            let mut st = shared.borrow_mut();
+            st.structure.remove("cn=1,ou=b,dc=x");
+            st.structure.remove("cn=1,ou=c,dc=x");
+            st.tree_dirty = true;
+        }
+
+        let mut ev = Event::Broadcast {
+            command: REFRESH,
+            source: None,
+        };
+        pane.handle_event(&mut ev, &mut ctx);
+
+        let st = shared.borrow();
+        assert_eq!(
+            st.branch_dns,
+            vec!["dc=x".to_string(), "ou=a,dc=x".to_string()],
+            "ou=b and ou=c must have dropped out of the rebuilt index"
+        );
+        assert_eq!(
+            st.requested_branch, None,
+            "a vanished branch's clamped focus must not be reported as a navigation"
+        );
+        assert_eq!(
+            st.current_branch.as_deref(),
+            Some("ou=c,dc=x"),
+            "the pane must never mutate current_branch itself"
         );
     }
 }
