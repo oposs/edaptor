@@ -22,6 +22,12 @@ All notable changes to eDAPtor are documented here. The format follows
 
 ### Fixed
 
+- **Form no longer scrambles or re-orders after a save.** Saving an entry used to
+  re-render the form with field labels and values misaligned and drop the profile
+  `show` ordering (the form only realigned when you navigated to another entry and
+  back). The re-read after a save now keeps the entry's field order, and the form
+  pane realigns its cells whenever the field order changes.
+
 ## 1.2.1 - 2026-07-17
 
 ### Changed
