@@ -629,6 +629,23 @@ impl UiState {
                 quit_after,
             } => {
                 self.status = "Saved.".to_string();
+                // Our own write may have changed any label we cached (including via a
+                // rename), and the cache stores negatives too — drop it wholesale and
+                // let the visible fields re-resolve lazily.
+                self.lookup_cache.clear();
+                // A rename (MODRDN) echoes a DIFFERENT dn than the form was loaded
+                // with: drop the pre-rename node here; the re-read upserts the new one.
+                if let Some(old) = self.current_leaf.clone() {
+                    if !old.eq_ignore_ascii_case(&reread_dn) {
+                        // A rename can move a CONTAINER too (the ‹self› row opens the
+                        // container's own entry), and `remove` only reports the
+                        // parent's branch->leaf flip — not that a branch label moved.
+                        // A rebuild is idempotent, so ask for one on every rename.
+                        self.structure.remove(&old);
+                        self.tree_dirty = true;
+                        self.list_dirty = true;
+                    }
+                }
                 if quit_after {
                     out.quit = true;
                     return out;
@@ -670,6 +687,7 @@ impl UiState {
                 // A combined membership save completed; treat exactly like Saved:
                 // re-read the user entry (or navigate to a pending guard target).
                 self.status = "Saved.".to_string();
+                self.lookup_cache.clear();
                 if quit_after {
                     out.quit = true;
                     return out;
@@ -718,6 +736,10 @@ impl UiState {
                     .as_ref()
                     .map(|f| f.object_classes.clone())
                     .unwrap_or_default();
+                // A leftover incremental-find query would hide the new row; the
+                // cached labels may be stale for the same reason as on Saved.
+                self.search.clear();
+                self.lookup_cache.clear();
                 self.current_leaf = Some(dn.clone());
                 self.list_dirty = true;
                 self.edit_form = None; // re-read reloads it in Edit mode
@@ -2232,6 +2254,104 @@ mod tests {
 
         // Rows are [‹self› ou=p, Bob] → the new entry is row 1.
         assert_eq!(st.set_leaf_row, Some(1));
+    }
+
+    #[test]
+    fn saved_under_a_new_dn_drops_the_stale_node() {
+        // A rename (MODRDN) makes the server echo a different DN than the form was
+        // loaded with; the old node must not linger in the entry list.
+        let structure = Structure::build(
+            "dc=x",
+            vec![
+                si("dc=x", None),
+                si("ou=p,dc=x", None),
+                si("uid=old,ou=p,dc=x", Some("Old")),
+            ],
+        );
+        let schema = SchemaModel::from_raw(&RawSubschema::default());
+        let mut st =
+            UiState::new_for_test(structure, schema, "dc=x".into(), Vec::new(), Vec::new());
+        st.current_branch = Some("ou=p,dc=x".into());
+        st.current_leaf = Some("uid=old,ou=p,dc=x".into());
+
+        st.apply_write_outcome(WriteOutcome::Saved {
+            reread_dn: "uid=new,ou=p,dc=x".into(),
+            quit_after: false,
+        });
+
+        assert!(
+            st.structure.get("uid=old,ou=p,dc=x").is_none(),
+            "the pre-rename node must be removed"
+        );
+        assert!(st.list_dirty);
+    }
+
+    #[test]
+    fn saved_under_the_same_dn_keeps_the_node() {
+        let structure = Structure::build(
+            "dc=x",
+            vec![
+                si("dc=x", None),
+                si("ou=p,dc=x", None),
+                si("uid=a,ou=p,dc=x", Some("A")),
+            ],
+        );
+        let schema = SchemaModel::from_raw(&RawSubschema::default());
+        let mut st =
+            UiState::new_for_test(structure, schema, "dc=x".into(), Vec::new(), Vec::new());
+        st.current_leaf = Some("uid=a,ou=p,dc=x".into());
+
+        st.apply_write_outcome(WriteOutcome::Saved {
+            reread_dn: "uid=a,ou=p,dc=x".into(),
+            quit_after: false,
+        });
+
+        assert!(st.structure.get("uid=a,ou=p,dc=x").is_some());
+    }
+
+    #[test]
+    fn a_write_clears_the_lookup_cache() {
+        use crate::workflows::resolve_flow::LookupKey;
+        let structure = Structure::build("dc=x", vec![si("dc=x", None)]);
+        let schema = SchemaModel::from_raw(&RawSubschema::default());
+        let mut st =
+            UiState::new_for_test(structure, schema, "dc=x".into(), Vec::new(), Vec::new());
+        let key = LookupKey {
+            scope_id: "dc=x|posixGroup|gidNumber".into(),
+            value: "5000".into(),
+        };
+        st.lookup_cache.insert(key.clone(), Some("staff".into()));
+        st.current_leaf = Some("uid=a,dc=x".into());
+
+        st.apply_write_outcome(WriteOutcome::Saved {
+            reread_dn: "uid=a,dc=x".into(),
+            quit_after: false,
+        });
+
+        assert!(
+            st.lookup_cache.is_empty(),
+            "our own write may have changed any label — drop the whole cache"
+        );
+    }
+
+    #[test]
+    fn created_clears_a_stale_find_query() {
+        let structure = Structure::build("dc=x", vec![si("dc=x", None), si("ou=p,dc=x", None)]);
+        let schema = SchemaModel::from_raw(&RawSubschema::default());
+        let mut st =
+            UiState::new_for_test(structure, schema, "dc=x".into(), Vec::new(), Vec::new());
+        st.current_branch = Some("ou=p,dc=x".into());
+        st.search = "zzz".into();
+
+        st.apply_write_outcome(WriteOutcome::Created {
+            dn: "uid=bob,ou=p,dc=x".into(),
+            quit_after: false,
+        });
+
+        assert!(
+            st.search.is_empty(),
+            "a stale query must not hide the entry just created"
+        );
     }
 }
 
