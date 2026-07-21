@@ -176,7 +176,11 @@ set is truncated the dialog title reports that the list shows the first
 
 ### 5. Refresh and cache invalidation
 
-`UiAction::Refresh` gets a producer in key dispatch (Alt+R) and a handler:
+Alt+R becomes a real action. The `UiAction::Refresh` variant that documents it
+today lives in a vocabulary (`src/app.rs`) with **no producers and no
+consumers** — the app's real mechanism is a `tv::Command` posted from the menu
+and handled in `ui::app::dispatch`. So this adds a `RELOAD` command plus a File
+menu entry and **deletes** the dead enum rather than wiring it. The handler:
 
 1. Blocking `Request::LoadStructure` (the bootstrap path, `worker.request`),
    requesting `scan_attrs`.
@@ -230,7 +234,8 @@ and re-resolution is lazy, asynchronous and limited to fields on screen.
   registered in `SUMMARY.md`.
 - `CHANGES.md`: entries for the create/rename visibility fix, server-backed
   incremental find, Alt+R, and lookup-cache invalidation.
-- Help context (`help_ctx.rs`) lists Alt+R.
+- Alt+R is discoverable through its File-menu entry (`help_ctx.rs` holds
+  field-level hints only, so it is not the right home for a global key).
 
 ## Risks
 
