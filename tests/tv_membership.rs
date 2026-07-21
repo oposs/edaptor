@@ -191,6 +191,7 @@ impl Cleanup<'_> {
         let _ = self.worker.submit(Request::Delete {
             id,
             dn: dn.to_string(),
+            assert_csn: None,
         });
         let _ = poll_for_id(self.worker, id, Duration::from_secs(5));
     }
@@ -287,6 +288,7 @@ fn user_form(selected_groups: Vec<&str>, baseline_groups: Vec<&str>) -> EditForm
             plain_field("sn", "User", true, false),
             memberof_field(selected_groups, baseline_groups),
         ],
+        baseline_csn: None,
     }
 }
 
@@ -311,6 +313,7 @@ fn combined_membership_save_round_trips_via_write_flow() {
         let _ = worker.submit(Request::Delete {
             id,
             dn: dn.to_string(),
+            assert_csn: None,
         });
         let _ = poll_for_id(&worker, id, Duration::from_secs(5));
     }
@@ -369,6 +372,7 @@ fn combined_membership_save_round_trips_via_write_flow() {
                 let _ = worker.submit(Request::Delete {
                     id: 21,
                     dn: USER_DN.to_string(),
+                    assert_csn: None,
                 });
                 let _ = poll_for_id(&worker, 21, Duration::from_secs(5));
                 panic!("ADD group failed: {}", describe(&other));
@@ -416,8 +420,17 @@ fn combined_membership_save_round_trips_via_write_flow() {
 
     let mut wf = WriteFlow::new();
     let group_members = std::collections::HashMap::new(); // best-effort (server backstop)
-    wf.submit_combined(&worker, combined, &group_members, USER_DN, false)
-        .expect("submit_combined add must not abort");
+    let group_csns = std::collections::HashMap::new(); // no assertion in this test
+    wf.submit_combined(
+        &worker,
+        combined,
+        &group_members,
+        &group_csns,
+        None, // own_mods is empty here, so this is unused
+        USER_DN,
+        false,
+    )
+    .expect("submit_combined add must not abort");
     match pump_combined(&mut wf, &worker) {
         WriteOutcome::CombinedSaved { reread_dn, .. } => {
             assert_eq!(reread_dn, USER_DN, "reread_dn must be the user DN");
@@ -468,8 +481,16 @@ fn combined_membership_save_round_trips_via_write_flow() {
     );
 
     let mut wf2 = WriteFlow::new();
-    wf2.submit_combined(&worker, combined2, &group_members, USER_DN, false)
-        .expect("submit_combined remove must not abort");
+    wf2.submit_combined(
+        &worker,
+        combined2,
+        &group_members,
+        &group_csns,
+        None, // own_mods is empty here, so this is unused
+        USER_DN,
+        false,
+    )
+    .expect("submit_combined remove must not abort");
     match pump_combined(&mut wf2, &worker) {
         WriteOutcome::CombinedSaved { .. } => {}
         other => panic!("expected CombinedSaved after remove, got {other:?}"),
@@ -521,6 +542,7 @@ fn last_member_removal_blocked_client_side() {
         let _ = worker.submit(Request::Delete {
             id: 1,
             dn: SOLE_GROUP_DN.to_string(),
+            assert_csn: None,
         });
         let _ = poll_for_id(&worker, 1, Duration::from_secs(5));
     }

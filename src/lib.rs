@@ -52,6 +52,7 @@ fn describe_response(resp: &Response) -> &'static str {
         Response::StructureEntries { .. } => "StructureEntries",
         Response::StructureError { .. } => "StructureError",
         Response::WriteOk { .. } => "WriteOk",
+        Response::WriteConflict { .. } => "WriteConflict",
         Response::WriteError { .. } => "WriteError",
         Response::Done => "Done",
         Response::Error(_) => "Error",
@@ -266,6 +267,7 @@ pub fn run_passwd(
         id: 2,
         dn: target_dn.to_string(),
         changes: mods,
+        assert_csn: None,
     })? {
         Response::WriteOk { .. } => {}
         Response::WriteError { msg, .. } => return Err(anyhow!(msg)),

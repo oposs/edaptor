@@ -300,6 +300,34 @@ pub(crate) fn dispatch(prog: &mut Program, cmd: Command, state: &Shared) {
             }
         }
     } else if cmd == SHOW_ERROR {
+        // A concurrent-modification prompt takes precedence over a plain write error.
+        // Borrow discipline: `take()` returns an owned `ConflictPrompt`, so no
+        // `Ref`/`RefMut` is held across `exec_view_focused`.
+        let conflict = state.borrow_mut().last_conflict.take();
+        if let Some(c) = conflict {
+            let (view, focus) = crate::ui::dialog::conflict::build(&c.text);
+            let answer = prog.exec_view_focused(view, focus);
+            if answer == crate::ui::dialog::conflict::OVERWRITE {
+                // Force our version: adopt the fresh CSN learned on re-read, then
+                // re-run the ordinary save path (which now asserts the current
+                // version, so the write is accepted and our values win).
+                force_overwrite(prog, state, c.quit_after, c.fresh_csn);
+            } else if answer == Command::CANCEL {
+                // Reload: discard our edits and re-read the entry fresh.
+                let ocs = state
+                    .borrow()
+                    .edit_form
+                    .as_ref()
+                    .map(|f| f.object_classes.clone())
+                    .unwrap_or_default();
+                let mut st = state.borrow_mut();
+                st.edit_form = None;
+                st.reread_public(&c.dn, &ocs);
+            }
+            // else (keep editing): leave the form as-is; the old CSN stays asserted
+            // so the next plain save conflicts again rather than clobbering.
+            return;
+        }
         let msg = state.borrow_mut().last_write_error.take();
         if let Some(msg) = msg {
             let (view, ok) = error::build(&msg);
@@ -533,11 +561,29 @@ fn do_save(
                 st.pending_nav = nav;
                 st.guard_target = None;
                 st.pending_password = None; // cleartext consumed; clear before worker picks it up
+
+                // Assert the baseline entryCSN so a stale write is rejected (rc 122)
+                // rather than silently clobbering a concurrent change — but only
+                // when the server actually supports the assertion control.
+                let assert_csn = if st.assertion_supported {
+                    st.edit_form.as_ref().and_then(|f| f.baseline_csn.clone())
+                } else {
+                    // Blind path: warn once per session that concurrent edits by
+                    // another client may be silently lost (no optimistic-concurrency
+                    // protection available on this server).
+                    if !st.concurrency_warned {
+                        st.status = "Server does not support optimistic concurrency; \
+                                     concurrent edits may be lost."
+                            .to_string();
+                        st.concurrency_warned = true;
+                    }
+                    None
+                };
                 let crate::ui::state::UiState {
                     worker, write_flow, ..
                 } = &mut *st;
                 if let Some(w) = worker.as_ref() {
-                    let _ = write_flow.submit(w, plan, &dn, quit_after);
+                    let _ = write_flow.submit(w, plan, &dn, assert_csn, quit_after);
                 } else {
                     return SaveOutcome::NotSubmitted;
                 }
@@ -545,6 +591,32 @@ fn do_save(
             SaveOutcome::Submitted
         }
     }
+}
+
+/// Force our version onto the server after an overlapping concurrent modification.
+///
+/// The operator chose "Overwrite" in the conflict dialog: adopt the fresh
+/// `entryCSN` learned during the re-read (so the assertion now matches the current
+/// server version) and re-run the ordinary save path. `do_save` re-prepares, shows
+/// the LDIF confirmation once more, and submits — keeping our values, which now win
+/// over the other client's change to the conflicting attribute(s).
+///
+/// Borrow discipline: the CSN adoption takes a short-lived `borrow_mut` that drops
+/// before `do_save` is called; `do_save` itself plans under a borrow, drops it
+/// before any `exec_view_focused`, and re-borrows to submit.
+fn force_overwrite(
+    prog: &mut Program,
+    state: &Shared,
+    quit_after: bool,
+    fresh_csn: Option<String>,
+) {
+    {
+        let mut st = state.borrow_mut();
+        if let Some(f) = st.edit_form.as_mut() {
+            f.baseline_csn = fresh_csn;
+        }
+    }
+    let _ = do_save(prog, state, None, quit_after);
 }
 
 /// True when the form has a fan-out (membership) field whose current value set
@@ -616,19 +688,47 @@ fn do_combined_save(
             // M5c: live, schema-gated group-member fetch (blocking) so last-member
             // pre-validation runs client-side. Only MUST-membership groups are
             // populated; MAY groups (e.g. posixGroup memberUid) are exempt.
-            let group_members = {
+            // Alongside it, a per-group entryCSN pre-read (Task 8) so each fan-out
+            // leg's MODIFY can assert its group's CSN — a concurrent membership
+            // change on that group then surfaces as a Conflict leg instead of a
+            // raw LDAP error. Both the group CSNs and the own-entry CSN are gated
+            // on `st.assertion_supported`, mirroring the plain-save idiom at
+            // `do_save` (~line 568): a server that exposes a readable `entryCSN`
+            // but does not advertise the RFC 4528 Assertion control would reject
+            // a critical assertion with rc 12 (unavailableCriticalExtension), so
+            // every leg must stay blind (`assert_csn: None`) on such servers.
+            let (group_members, group_csns, own_assert_csn) = {
                 // Safe to hold this read borrow across the blocking worker.request: it's a
                 // synchronous channel round-trip in dispatch (no event-loop pump → no reentrant borrow).
                 let st = state.borrow();
+                let assertion_supported = st.assertion_supported;
                 match (st.worker.as_ref(), st.edit_form.as_ref()) {
-                    (Some(w), Some(_)) => {
-                        crate::workflows::write_flow::fetch_group_members_for_must(
-                            w,
-                            st.read_flow.schema(),
-                            &combined.fanout,
+                    (Some(w), Some(form)) => {
+                        let group_csns = if assertion_supported {
+                            crate::workflows::write_flow::fetch_group_csns(w, &combined.fanout)
+                        } else {
+                            std::collections::HashMap::new()
+                        };
+                        let own_assert_csn = if assertion_supported {
+                            form.baseline_csn.clone()
+                        } else {
+                            None
+                        };
+                        (
+                            crate::workflows::write_flow::fetch_group_members_for_must(
+                                w,
+                                st.read_flow.schema(),
+                                &combined.fanout,
+                            ),
+                            group_csns,
+                            own_assert_csn,
                         )
                     }
-                    _ => std::collections::HashMap::new(),
+                    _ => (
+                        std::collections::HashMap::new(),
+                        std::collections::HashMap::new(),
+                        None,
+                    ),
                 }
             };
             // Refuse BEFORE showing the confirm if a removal would empty a MUST group.
@@ -658,7 +758,15 @@ fn do_combined_save(
                     worker, write_flow, ..
                 } = &mut *st;
                 worker.as_ref().map(|w| {
-                    write_flow.submit_combined(w, combined, &group_members, &reread_dn, quit_after)
+                    write_flow.submit_combined(
+                        w,
+                        combined,
+                        &group_members,
+                        &group_csns,
+                        own_assert_csn,
+                        &reread_dn,
+                        quit_after,
+                    )
                 })
             };
             match submit_result {

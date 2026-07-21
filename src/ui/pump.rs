@@ -324,6 +324,7 @@ mod tests {
             mode: FormMode::Edit,
             object_classes: vec!["top".into()],
             fields: vec![field],
+            baseline_csn: None,
         });
 
         state.current_leaf = Some("cn=old,dc=x".into());

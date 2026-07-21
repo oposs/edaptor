@@ -105,6 +105,7 @@ fn cleanup(worker: &WorkerHandle, id: u64, dn: &str) {
     let _ = worker.submit(Request::Delete {
         id,
         dn: dn.to_string(),
+        assert_csn: None,
     });
     let _ = poll_for_id(worker, id, Duration::from_secs(5));
 }
@@ -234,6 +235,7 @@ fn forward_member_edit_round_trips() {
                 attr: "member".to_string(),
                 values: vec![USER_A_DN.to_string(), USER_B_DN.to_string()],
             }],
+            assert_csn: None,
         })
         .expect("submit modify group member");
     match poll_for_id(&worker, 40, Duration::from_secs(10)) {
@@ -388,6 +390,7 @@ fn reverse_memberof_edit_writes_group_member() {
                 attr: "member".to_string(),
                 values: vec![REV_USER_A_DN.to_string()],
             }],
+            assert_csn: None,
         })
         .expect("submit Add member fan-out modify");
     match poll_for_id(&worker, 40, Duration::from_secs(10)) {
@@ -496,6 +499,7 @@ fn removing_last_member_is_rejected_by_server() {
                 attr: "member".to_string(),
                 values: vec![LAST_USER_A_DN.to_string()],
             }],
+            assert_csn: None,
         })
         .expect("submit Delete last member modify");
     let resp = poll_for_id(&worker, 30, Duration::from_secs(10));

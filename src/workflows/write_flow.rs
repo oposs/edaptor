@@ -64,6 +64,49 @@ pub fn fetch_group_members_for_must(
     map
 }
 
+/// Blocking, per-group `entryCSN` pre-read for [`WriteFlow::submit_combined`]'s
+/// membership fan-out legs. For every distinct group DN in `fanout`, do a
+/// Base-scoped search for `entryCSN` (operational — must be requested
+/// explicitly, unlike `fetch_group_members_for_must`'s regular attrs) so that
+/// leg's `Request::Modify` can assert it. Best-effort and separate from the
+/// MUST-check fetch: a failed/empty fetch just leaves the group out of the map,
+/// so that leg's `assert_csn` becomes `None` (a blind write) rather than
+/// blocking the batch — the server remains the backstop.
+pub fn fetch_group_csns(
+    worker: &WorkerHandle,
+    fanout: &[(String, ModOp)],
+) -> std::collections::HashMap<String, String> {
+    let mut map = std::collections::HashMap::new();
+    for (group_dn, _) in fanout {
+        if map.contains_key(group_dn) {
+            continue;
+        }
+        let resp = worker.request(Request::Search {
+            id: 0,
+            base: group_dn.clone(),
+            scope: SearchScope::Base,
+            filter: "(objectClass=*)".to_string(),
+            attrs: vec!["entryCSN".to_string()],
+            size_limit: Some(1),
+        });
+        let Ok(Response::Entries { entries, .. }) = resp else {
+            continue;
+        };
+        let Some(entry) = entries.first() else {
+            continue;
+        };
+        let csn = entry
+            .attrs
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case("entryCSN"))
+            .and_then(|(_, v)| v.first().cloned());
+        if let Some(csn) = csn {
+            map.insert(group_dn.clone(), csn);
+        }
+    }
+    map
+}
+
 /// What a pending write means once its `WriteOk` arrives.
 #[derive(Debug, Clone)]
 enum WriteIntent {
@@ -138,6 +181,9 @@ pub enum WriteOutcome {
         companion_dn: String,
         quit_after: bool,
     },
+    /// A MODIFY/DELETE was refused because the entry changed since it was read
+    /// (rc 122). The caller must re-read `dn` and decide rebase-vs-prompt.
+    Conflict { dn: String, quit_after: bool },
 }
 
 /// The masked sentinel set in a password field by `CommitOutcome::StageSecret`.
@@ -334,6 +380,7 @@ impl WriteFlow {
         worker: &WorkerHandle,
         plan: SavePlan,
         old_dn: &str,
+        assert_csn: Option<String>,
         quit_after: bool,
     ) -> Result<()> {
         match plan {
@@ -344,6 +391,7 @@ impl WriteFlow {
                     id,
                     dn: old_dn.to_string(),
                     changes: mods,
+                    assert_csn,
                 })?;
                 self.pending.insert(
                     id,
@@ -517,11 +565,28 @@ impl WriteFlow {
     /// so we do not block on data we were not given).
     ///
     /// `batch_id` is the first leg's allocated id — deterministic, no clock/random.
+    ///
+    /// **Group CSN assertion:** each per-group `Request::Modify` asserts
+    /// `group_csns.get(&group_dn)` (from [`fetch_group_csns`]) so a concurrent
+    /// membership change on that group surfaces as a [`WriteOutcome::Conflict`]
+    /// leg instead of a raw LDAP error. A group
+    /// missing from the map submits blind (`assert_csn: None`).
+    ///
+    /// **Own-entry CSN assertion:** the own-entry leg (when `own_mods` is
+    /// non-empty) asserts `own_assert_csn` — the caller's job to populate with
+    /// the form's `baseline_csn` (mirroring the plain-save path), or `None` for
+    /// a blind write. This function does not itself decide whether assertion is
+    /// supported by the server; both `own_assert_csn` and `group_csns` are
+    /// expected to already be gated (e.g. on `assertion_supported`) by the
+    /// caller — see `do_combined_save` in `src/ui/app.rs`.
+    #[allow(clippy::too_many_arguments)]
     pub fn submit_combined(
         &mut self,
         worker: &WorkerHandle,
         combined: CombinedSave,
         group_members: &std::collections::HashMap<String, Vec<String>>,
+        group_csns: &std::collections::HashMap<String, String>,
+        own_assert_csn: Option<String>,
         reread_dn: &str,
         quit_after: bool,
     ) -> std::result::Result<(), String> {
@@ -541,12 +606,15 @@ impl WriteFlow {
         }
 
         // 2. Assemble the legs: own entry first (if any own changes), then groups.
-        let mut legs: Vec<(String, Vec<ModOp>)> = Vec::new();
+        //    The own-entry leg's assert_csn is the caller-supplied
+        //    `own_assert_csn`; each group leg's comes from `group_csns`.
+        let mut legs: Vec<(String, Vec<ModOp>, Option<String>)> = Vec::new();
         if !own_mods.is_empty() {
-            legs.push((own_dn, own_mods));
+            legs.push((own_dn, own_mods, own_assert_csn));
         }
         for (group_dn, op) in fanout {
-            legs.push((group_dn, vec![op]));
+            let assert_csn = group_csns.get(&group_dn).cloned();
+            legs.push((group_dn, vec![op], assert_csn));
         }
         // Nothing to do (no own changes, no membership changes): a no-op success.
         if legs.is_empty() {
@@ -556,17 +624,22 @@ impl WriteFlow {
         // 3. Allocate ids; the first leg id is the deterministic batch id. Register
         //    the batch BEFORE submitting so a response can never underflow the count.
         let count = legs.len();
-        let leg_ids: Vec<(u64, String, Vec<ModOp>)> = legs
+        let leg_ids: Vec<(u64, String, Vec<ModOp>, Option<String>)> = legs
             .into_iter()
-            .map(|(dn, changes)| (self.alloc(), dn, changes))
+            .map(|(dn, changes, assert_csn)| (self.alloc(), dn, changes, assert_csn))
             .collect();
         let batch_id = leg_ids[0].0;
         self.batches.insert(batch_id, count);
 
         // 4. Submit every leg, recording its intent under the shared batch.
-        for (id, dn, changes) in leg_ids {
+        for (id, dn, changes, assert_csn) in leg_ids {
             worker
-                .submit(Request::Modify { id, dn, changes })
+                .submit(Request::Modify {
+                    id,
+                    dn,
+                    changes,
+                    assert_csn,
+                })
                 .map_err(|e| e.to_string())?;
             self.pending.insert(
                 id,
@@ -593,6 +666,7 @@ impl WriteFlow {
             id,
             dn: dn.to_string(),
             changes: mods,
+            assert_csn: None,
         })?;
         self.pending.insert(
             id,
@@ -607,7 +681,11 @@ impl WriteFlow {
     /// Correlate one polled [`Response`]. Pure; ignores non-write variants.
     pub fn on_response(&mut self, resp: &Response) -> WriteOutcome {
         match resp {
-            Response::WriteOk { id, dn: resp_dn } => match self.pending.remove(id) {
+            Response::WriteOk {
+                id,
+                dn: resp_dn,
+                new_csn: _,
+            } => match self.pending.remove(id) {
                 Some(WriteIntent::Save {
                     reread_dn,
                     quit_after,
@@ -670,6 +748,43 @@ impl WriteFlow {
                 },
                 None => WriteOutcome::Ignored,
             },
+            Response::WriteConflict { id, dn } => match self.pending.remove(id) {
+                // A plain single-entry save (or a rename's final leg) conflicted:
+                // the working own-entry rebase/prompt path in `src/ui/state.rs`
+                // (`resolve_conflict` et al.) re-reads `dn` — which IS the entry the
+                // edit form is for — and handles it correctly.
+                Some(WriteIntent::Save { quit_after, .. }) => WriteOutcome::Conflict {
+                    dn: dn.clone(),
+                    quit_after,
+                },
+                // A combined-save leg conflicted (rc 122): `dn` is THAT LEG's dn,
+                // which for a group leg is a GROUP dn, not the user entry the edit
+                // form is for. Routing this through the single-entry Conflict path
+                // would re-read the group and diff it against the user form —
+                // garbling the overlap prompt and possibly adopting the group's CSN
+                // into the user form. Instead, mirror the CombinedLeg case in the
+                // WriteError arm below: abort the batch (so sibling legs' later
+                // responses become Ignored) and surface a reload-and-retry error.
+                // Rebasing just the own leg and resubmitting the batch is a
+                // deliberately deferred enhancement.
+                Some(WriteIntent::CombinedLeg { batch_id, .. }) => {
+                    self.batches.remove(&batch_id);
+                    WriteOutcome::Error(format!(
+                        "Membership change refused: {dn} was changed by another client \
+                         during this save. Because the save is non-atomic, other \
+                         membership changes in the same save may already have been \
+                         applied — reload the entry and review membership before \
+                         retrying."
+                    ))
+                }
+                // Any other intent (rename, create, ...) reaching a conflict is
+                // unexpected — no own-entry rebase path applies to it. Surface a
+                // safe error rather than misrouting into the own-entry Conflict path.
+                Some(_) => WriteOutcome::Error(format!(
+                    "Write refused: {dn} was changed since it was read. Reload and retry."
+                )),
+                None => WriteOutcome::Ignored,
+            },
             Response::WriteError { id, msg } => match self.pending.remove(id) {
                 // A combined leg failed: abort the batch (drop its counter so any
                 // sibling WriteOks become Ignored) and surface that the membership
@@ -695,6 +810,22 @@ impl WriteFlow {
         }
     }
 
+    #[cfg(test)]
+    pub(crate) fn insert_save_intent_for_test(
+        &mut self,
+        reread_dn: String,
+        quit_after: bool,
+    ) -> u64 {
+        let id = self.alloc();
+        self.pending.insert(
+            id,
+            WriteIntent::Save {
+                reread_dn,
+                quit_after,
+            },
+        );
+        id
+    }
     #[cfg(test)]
     pub(crate) fn insert_create_intent_for_test(&mut self, id: u64, dn: &str, quit_after: bool) {
         self.pending.insert(
@@ -788,6 +919,7 @@ mod tests {
             mode: FormMode::Edit,
             object_classes: vec!["top".into(), "person".into()],
             fields,
+            baseline_csn: None,
         }
     }
 
@@ -947,6 +1079,7 @@ mod tests {
         match wf.on_response(&Response::WriteOk {
             id: 7,
             dn: "cn=Bob,dc=x".into(),
+            new_csn: None,
         }) {
             WriteOutcome::Saved {
                 reread_dn,
@@ -977,6 +1110,7 @@ mod tests {
         match wf.on_response(&Response::WriteOk {
             id: 3,
             dn: "cn=New,dc=x".into(),
+            new_csn: None,
         }) {
             WriteOutcome::NeedFollowupModify {
                 dn,
@@ -1025,6 +1159,7 @@ mod tests {
         match wf.on_response(&Response::WriteOk {
             id: 42,
             dn: "uid=bob,ou=people,dc=example,dc=org".into(),
+            new_csn: None,
         }) {
             WriteOutcome::Created { dn, quit_after } => {
                 assert_eq!(dn, "uid=bob,ou=people,dc=example,dc=org");
@@ -1134,6 +1269,7 @@ mod tests {
             mode: FormMode::Edit,
             object_classes: vec!["top".into()], // no inetOrgPerson → no widget match
             fields: vec![oc_top, field("cn", "Alice", "Alice"), sn_changed, pw_field],
+            baseline_csn: None,
         };
 
         // Widget requires inetOrgPerson; form has only "top" → no match.
@@ -1239,8 +1375,16 @@ mod tests {
             ],
         );
 
-        wf.submit_combined(&worker, combined, &members, "uid=ann,ou=people,dc=x", false)
-            .expect("valid combined save submits");
+        wf.submit_combined(
+            &worker,
+            combined,
+            &members,
+            &HashMap::new(),
+            None,
+            "uid=ann,ou=people,dc=x",
+            false,
+        )
+        .expect("valid combined save submits");
 
         // Drain the recorded requests: three Modifys with distinct ids.
         let mut ids = Vec::new();
@@ -1266,6 +1410,108 @@ mod tests {
         assert_eq!(*wf.batches.values().next().unwrap(), 3);
     }
 
+    /// Each group leg's `Request::Modify` carries that group's `entryCSN` from
+    /// `group_csns`; a group missing from the map gets `assert_csn: None` (blind
+    /// write, server remains the backstop). The own-entry leg carries whatever
+    /// `own_assert_csn` the caller passed (the UI gates this on
+    /// `assertion_supported` before calling; `submit_combined` itself just
+    /// threads it through).
+    #[test]
+    fn combined_legs_carry_group_csn() {
+        let mut wf = WriteFlow::new();
+        let (worker, rx) = WorkerHandle::recording();
+        let combined = combined_with(
+            vec![ModOp::Replace {
+                attr: "description".into(),
+                values: vec!["new".into()],
+            }],
+            vec![add_op("cn=staff,dc=example,dc=org")],
+        );
+        let members: HashMap<String, Vec<String>> = HashMap::new();
+        let mut csns = std::collections::HashMap::new();
+        csns.insert(
+            "cn=staff,dc=example,dc=org".to_string(),
+            "G-CSN-1".to_string(),
+        );
+
+        wf.submit_combined(
+            &worker,
+            combined,
+            &members,
+            &csns,
+            Some("OWN-CSN-1".to_string()),
+            "uid=ann,ou=people,dc=x",
+            false,
+        )
+        .expect("valid combined save submits");
+
+        let mut own_csn = None;
+        let mut group_csn = None;
+        while let Ok((req, _)) = rx.try_recv() {
+            match req {
+                Request::Modify { dn, assert_csn, .. } if dn == "cn=staff,dc=example,dc=org" => {
+                    group_csn = Some(assert_csn)
+                }
+                Request::Modify { dn, assert_csn, .. } if dn == "uid=ann,ou=people,dc=x" => {
+                    own_csn = Some(assert_csn)
+                }
+                other => panic!("unexpected leg: {other:?}"),
+            }
+        }
+        assert_eq!(
+            group_csn,
+            Some(Some("G-CSN-1".to_string())),
+            "group leg asserts its entryCSN"
+        );
+        assert_eq!(
+            own_csn,
+            Some(Some("OWN-CSN-1".to_string())),
+            "own-entry leg asserts the caller-supplied CSN when assertion is supported"
+        );
+    }
+
+    /// When the caller passes `own_assert_csn: None` (assertion unsupported, or no
+    /// baseline CSN available), the own-entry leg is a blind write — mirrors the
+    /// plain-save gating idiom in `do_save` (`src/ui/app.rs`).
+    #[test]
+    fn combined_own_leg_blind_when_no_own_csn() {
+        let mut wf = WriteFlow::new();
+        let (worker, rx) = WorkerHandle::recording();
+        let combined = combined_with(
+            vec![ModOp::Replace {
+                attr: "description".into(),
+                values: vec!["new".into()],
+            }],
+            vec![add_op("cn=staff,dc=example,dc=org")],
+        );
+        let members: HashMap<String, Vec<String>> = HashMap::new();
+
+        wf.submit_combined(
+            &worker,
+            combined,
+            &members,
+            &HashMap::new(),
+            None,
+            "uid=ann,ou=people,dc=x",
+            false,
+        )
+        .expect("valid combined save submits");
+
+        let mut own_csn = None;
+        while let Ok((req, _)) = rx.try_recv() {
+            if let Request::Modify { dn, assert_csn, .. } = req {
+                if dn == "uid=ann,ou=people,dc=x" {
+                    own_csn = Some(assert_csn);
+                }
+            }
+        }
+        assert_eq!(
+            own_csn,
+            Some(None),
+            "own-entry leg is blind when own_assert_csn is None"
+        );
+    }
+
     /// A Delete that would empty a groupOfNames aborts with Err and submits NOTHING.
     #[test]
     fn submit_combined_last_member_aborts_with_nothing_submitted() {
@@ -1289,7 +1535,15 @@ mod tests {
         );
 
         let err = wf
-            .submit_combined(&worker, combined, &members, "uid=ann,ou=people,dc=x", false)
+            .submit_combined(
+                &worker,
+                combined,
+                &members,
+                &HashMap::new(),
+                None,
+                "uid=ann,ou=people,dc=x",
+                false,
+            )
             .expect_err("last-member removal must abort");
         assert!(
             err.contains("cn=g1,ou=groups,dc=x"),
@@ -1321,6 +1575,7 @@ mod tests {
         match wf.on_response(&Response::WriteOk {
             id: 1000,
             dn: "uid=ann,ou=people,dc=x".into(),
+            new_csn: None,
         }) {
             WriteOutcome::BatchProgress { remaining } => assert_eq!(remaining, 1),
             other => panic!("expected BatchProgress, got {other:?}"),
@@ -1329,6 +1584,7 @@ mod tests {
         match wf.on_response(&Response::WriteOk {
             id: 1001,
             dn: "cn=g1,ou=groups,dc=x".into(),
+            new_csn: None,
         }) {
             WriteOutcome::CombinedSaved {
                 reread_dn,
@@ -1381,6 +1637,7 @@ mod tests {
         match wf.on_response(&Response::WriteOk {
             id: 2001,
             dn: "cn=g1,ou=groups,dc=x".into(),
+            new_csn: None,
         }) {
             WriteOutcome::Ignored => {}
             other => panic!("expected Ignored after batch abort, got {other:?}"),
@@ -1454,6 +1711,75 @@ mod tests {
         let _ = responder.join();
     }
 
+    /// `fetch_group_csns` requests `entryCSN` explicitly (operational attr) and
+    /// maps each group DN to the CSN returned; a group whose search comes back
+    /// empty is simply absent from the map (best-effort, server is the backstop).
+    #[test]
+    fn fetch_group_csns_reads_entry_csn_per_group() {
+        use crate::ldap::worker::{LdapEntry, Response, SearchScope};
+        use std::collections::BTreeMap;
+
+        let (worker, rx) = WorkerHandle::recording();
+        let responder = std::thread::spawn(move || {
+            while let Ok((req, reply)) = rx.recv() {
+                let crate::ldap::worker::Request::Search {
+                    base, scope, attrs, ..
+                } = req
+                else {
+                    continue;
+                };
+                assert!(matches!(scope, SearchScope::Base));
+                assert_eq!(attrs, vec!["entryCSN".to_string()]);
+                if base.starts_with("cn=admins") {
+                    let mut attrs = BTreeMap::new();
+                    attrs.insert("entryCSN".to_string(), vec!["CSN-ADMINS".to_string()]);
+                    let _ = reply.send(Response::Entries {
+                        id: 0,
+                        entries: vec![LdapEntry {
+                            dn: base.clone(),
+                            attrs,
+                            bin_attrs: BTreeMap::new(),
+                        }],
+                        truncated: false,
+                    });
+                } else {
+                    // cn=gone: empty result → left out of the map.
+                    let _ = reply.send(Response::Entries {
+                        id: 0,
+                        entries: vec![],
+                        truncated: false,
+                    });
+                }
+            }
+        });
+
+        let fanout = vec![
+            (
+                "cn=admins,ou=groups".to_string(),
+                ModOp::Add {
+                    attr: "member".into(),
+                    values: vec!["uid=ann,ou=people".into()],
+                },
+            ),
+            (
+                "cn=gone,ou=groups".to_string(),
+                ModOp::Add {
+                    attr: "member".into(),
+                    values: vec!["uid=ann,ou=people".into()],
+                },
+            ),
+        ];
+        let map = fetch_group_csns(&worker, &fanout);
+        assert_eq!(
+            map.get("cn=admins,ou=groups"),
+            Some(&"CSN-ADMINS".to_string())
+        );
+        assert!(!map.contains_key("cn=gone,ou=groups"));
+
+        drop(worker);
+        let _ = responder.join();
+    }
+
     fn group_schema_for_write_flow() -> SchemaModel {
         use crate::ldap::worker::RawSubschema;
         SchemaModel::from_raw(&RawSubschema {
@@ -1501,6 +1827,7 @@ mod tests {
         match wf.on_response(&Response::WriteOk {
             id: 7,
             dn: "uid=alice,ou=people,dc=x".into(),
+            new_csn: None,
         }) {
             WriteOutcome::Created { dn, quit_after } => {
                 assert_eq!(dn, "uid=alice,ou=people,dc=x");
@@ -1519,6 +1846,7 @@ mod tests {
         match wf.on_response(&Response::WriteOk {
             id: 3,
             dn: "cn=alice,ou=groups,dc=x".into(),
+            new_csn: None,
         }) {
             WriteOutcome::NeedFollowupCreate {
                 dn,
@@ -1570,6 +1898,109 @@ mod tests {
                 assert!(m.contains("boom"));
             }
             other => panic!("expected Error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn save_submit_carries_assert_csn() {
+        let (worker, rx) = WorkerHandle::recording();
+        let mut wf = WriteFlow::new();
+        let plan = SavePlan::Modify(vec![ModOp::Replace {
+            attr: "description".to_string(),
+            values: vec!["x".to_string()],
+        }]);
+        wf.submit(
+            &worker,
+            plan,
+            "cn=a,dc=example,dc=org",
+            Some("CSN-123".to_string()),
+            false,
+        )
+        .unwrap();
+        let (req, _tx) = rx.recv().unwrap();
+        match req {
+            Request::Modify { assert_csn, .. } => {
+                assert_eq!(assert_csn.as_deref(), Some("CSN-123"));
+            }
+            other => panic!("expected Modify, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn write_conflict_maps_to_conflict_outcome() {
+        let mut wf = WriteFlow::new();
+        let id = wf.insert_save_intent_for_test("cn=a,dc=example,dc=org".to_string(), false);
+        let out = wf.on_response(&Response::WriteConflict {
+            id,
+            dn: "cn=a,dc=example,dc=org".to_string(),
+        });
+        assert!(matches!(out, WriteOutcome::Conflict { .. }));
+    }
+
+    /// A `WriteConflict` on a combined-save leg must NOT be routed through the
+    /// single-entry `Conflict` path (the leg's dn may be a group, not the user
+    /// entry the edit form is for). It aborts the batch and surfaces a
+    /// reload-and-retry `Error`, mirroring the `WriteError` CombinedLeg case. A
+    /// sibling leg's later response must then be `Ignored` (batch already gone).
+    #[test]
+    fn combined_leg_conflict_aborts_batch_and_reports_error() {
+        let mut wf = WriteFlow::new();
+        let batch_id = 3000;
+        wf.batches.insert(batch_id, 2);
+        for id in [3000u64, 3001] {
+            wf.pending.insert(
+                id,
+                WriteIntent::CombinedLeg {
+                    batch_id,
+                    reread_dn: "uid=ann,ou=people,dc=x".into(),
+                    quit_after: false,
+                },
+            );
+        }
+        match wf.on_response(&Response::WriteConflict {
+            id: 3000,
+            dn: "cn=g1,ou=groups,dc=x".into(),
+        }) {
+            WriteOutcome::Error(m) => {
+                assert!(
+                    m.contains("cn=g1,ou=groups,dc=x"),
+                    "names the conflicting leg's dn: {m}"
+                );
+                assert!(
+                    m.to_lowercase().contains("reload"),
+                    "tells the user to reload and retry: {m}"
+                );
+            }
+            other => panic!("expected Error, got {other:?}"),
+        }
+        assert!(wf.batches.is_empty(), "batch aborted on leg conflict");
+        // A sibling leg's late success must NOT complete the (gone) batch.
+        match wf.on_response(&Response::WriteOk {
+            id: 3001,
+            dn: "uid=ann,ou=people,dc=x".into(),
+            new_csn: None,
+        }) {
+            WriteOutcome::Ignored => {}
+            other => panic!("expected Ignored after batch abort, got {other:?}"),
+        }
+        assert!(wf.pending.is_empty());
+    }
+
+    /// A `WriteConflict` on a genuine single-entry `Save` intent still yields
+    /// `Conflict` — unchanged by the CombinedLeg fix above.
+    #[test]
+    fn save_conflict_still_yields_conflict_outcome() {
+        let mut wf = WriteFlow::new();
+        let id = wf.insert_save_intent_for_test("cn=a,dc=example,dc=org".to_string(), true);
+        match wf.on_response(&Response::WriteConflict {
+            id,
+            dn: "cn=a,dc=example,dc=org".to_string(),
+        }) {
+            WriteOutcome::Conflict { dn, quit_after } => {
+                assert_eq!(dn, "cn=a,dc=example,dc=org");
+                assert!(quit_after);
+            }
+            other => panic!("expected Conflict, got {other:?}"),
         }
     }
 }

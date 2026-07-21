@@ -50,6 +50,7 @@ fn poll_for_id(worker: &WorkerHandle, want_id: u64, timeout: Duration) -> Option
                 Response::Entries { id, .. }
                 | Response::SearchError { id, .. }
                 | Response::WriteOk { id, .. }
+                | Response::WriteConflict { id, .. }
                 | Response::WriteError { id, .. }
                     if *id == want_id =>
                 {
@@ -81,9 +82,32 @@ fn read_entry(worker: &WorkerHandle, dn: &str, id: u64) -> Option<BTreeMap<Strin
     }
 }
 
+/// Read the entry's `entryCSN` (a server-maintained operational attribute, not
+/// returned by a plain `"*"` search — it must be requested by name).
+fn read_entry_csn(worker: &WorkerHandle, dn: &str, id: u64) -> Option<String> {
+    worker
+        .submit(Request::Search {
+            id,
+            base: dn.to_string(),
+            scope: SearchScope::Base,
+            filter: "(objectClass=*)".to_string(),
+            attrs: vec!["entryCSN".to_string()],
+            size_limit: None,
+        })
+        .expect("submit entryCSN search");
+    match poll_for_id(worker, id, Duration::from_secs(10)) {
+        Some(Response::Entries { entries, .. }) => entries
+            .into_iter()
+            .next()
+            .and_then(|e| e.attrs.get("entryCSN").and_then(|v| v.first().cloned())),
+        _ => None,
+    }
+}
+
 fn describe(resp: &Option<Response>) -> String {
     match resp {
         Some(Response::WriteOk { dn, .. }) => format!("WriteOk({dn})"),
+        Some(Response::WriteConflict { dn, .. }) => format!("WriteConflict({dn})"),
         Some(Response::WriteError { msg, .. }) => format!("WriteError({msg})"),
         Some(Response::Entries { entries, .. }) => format!("Entries({})", entries.len()),
         Some(Response::SearchError { msg, .. }) => format!("SearchError({msg})"),
@@ -110,7 +134,11 @@ fn add_modify_modrdn_delete_round_trip() {
 
     // Idempotent cleanup from any prior aborted run.
     for (id, d) in [(1u64, &dn), (2u64, &dn2)] {
-        let _ = worker.submit(Request::Delete { id, dn: d.clone() });
+        let _ = worker.submit(Request::Delete {
+            id,
+            dn: d.clone(),
+            assert_csn: None,
+        });
         let _ = poll_for_id(&worker, id, Duration::from_secs(5));
     }
 
@@ -162,6 +190,7 @@ fn add_modify_modrdn_delete_round_trip() {
             id: 20,
             dn: dn.clone(),
             changes: mods,
+            assert_csn: None,
         })
         .expect("submit modify");
     match poll_for_id(&worker, 20, Duration::from_secs(10)) {
@@ -203,6 +232,7 @@ fn add_modify_modrdn_delete_round_trip() {
         .submit(Request::Delete {
             id: 40,
             dn: dn2.clone(),
+            assert_csn: None,
         })
         .expect("submit delete");
     match poll_for_id(&worker, 40, Duration::from_secs(10)) {
@@ -232,6 +262,7 @@ fn delete_non_leaf_reports_human_error() {
         .submit(Request::Delete {
             id: 50,
             dn: "ou=users,dc=example,dc=org".to_string(),
+            assert_csn: None,
         })
         .expect("submit delete");
     match poll_for_id(&worker, 50, Duration::from_secs(10)) {
@@ -288,4 +319,120 @@ fn discovers_samba_domain_sid() {
         }
         other => panic!("expected Entries, got {}", describe(&other)),
     }
+}
+
+/// Optimistic concurrency: a MODIFY carrying a stale `assert_csn` must be refused
+/// with `Response::WriteConflict` (RFC 4528 Assertion control, rc 122), and a
+/// MODIFY carrying the current CSN must succeed and hand back a fresh `new_csn`
+/// via the RFC 4527 Post-Read control.
+#[test]
+fn modify_with_stale_csn_conflicts() {
+    let uri = match std::env::var("EDAPTOR_TEST_LDAP_URI") {
+        Ok(uri) => uri,
+        Err(_) => {
+            eprintln!("SKIP modify_with_stale_csn_conflicts: EDAPTOR_TEST_LDAP_URI unset");
+            return;
+        }
+    };
+    let (config, password) = test_config(uri);
+    let worker = WorkerHandle::spawn(config, password).expect("spawn worker");
+
+    let container = "ou=users,dc=example,dc=org";
+    let dn = format!("cn=edaptor-csn-it,{container}");
+
+    // Idempotent cleanup from any prior aborted run.
+    let _ = worker.submit(Request::Delete {
+        id: 100,
+        dn: dn.clone(),
+        assert_csn: None,
+    });
+    let _ = poll_for_id(&worker, 100, Duration::from_secs(5));
+
+    // --- ADD a scratch entry ---
+    let mut attrs = BTreeMap::new();
+    attrs.insert(
+        "objectClass".to_string(),
+        vec!["top".to_string(), "inetOrgPerson".to_string()],
+    );
+    attrs.insert("cn".to_string(), vec!["edaptor-csn-it".to_string()]);
+    attrs.insert("sn".to_string(), vec!["CSN-IT".to_string()]);
+    worker
+        .submit(Request::Add {
+            id: 110,
+            dn: dn.clone(),
+            attrs,
+        })
+        .expect("submit add");
+    match poll_for_id(&worker, 110, Duration::from_secs(10)) {
+        Some(Response::WriteOk { .. }) => {}
+        other => panic!("ADD failed: {}", describe(&other)),
+    }
+
+    // --- Read the entry's current entryCSN ---
+    let current_csn = read_entry_csn(&worker, &dn, 111)
+        .expect("entry should carry entryCSN (server-maintained operational attr)");
+
+    // --- MODIFY with a deliberately wrong assert_csn: expect WriteConflict ---
+    let mods = vec![edaptor::form::changeset::ModOp::Replace {
+        attr: "description".to_string(),
+        values: vec!["should not apply".to_string()],
+    }];
+    worker
+        .submit(Request::Modify {
+            id: 120,
+            dn: dn.clone(),
+            changes: mods,
+            assert_csn: Some("19700101000000.000000Z#000000#000#000000".to_string()),
+        })
+        .expect("submit modify with stale csn");
+    match poll_for_id(&worker, 120, Duration::from_secs(10)) {
+        Some(Response::WriteConflict { .. }) => {}
+        other => panic!(
+            "expected WriteConflict for stale assert_csn, got {}",
+            describe(&other)
+        ),
+    }
+
+    // Cross-check: the description must NOT have been applied.
+    let unchanged = read_entry(&worker, &dn, 121).expect("entry still exists after conflict");
+    assert!(
+        !unchanged.contains_key("description"),
+        "conflicting write must not have applied"
+    );
+
+    // --- MODIFY again with the correct current CSN: expect WriteOk + new_csn ---
+    let mods = vec![edaptor::form::changeset::ModOp::Replace {
+        attr: "description".to_string(),
+        values: vec!["hello from edaptor csn test".to_string()],
+    }];
+    worker
+        .submit(Request::Modify {
+            id: 130,
+            dn: dn.clone(),
+            changes: mods,
+            assert_csn: Some(current_csn),
+        })
+        .expect("submit modify with current csn");
+    match poll_for_id(&worker, 130, Duration::from_secs(10)) {
+        Some(Response::WriteOk { new_csn, .. }) => {
+            assert!(
+                new_csn.is_some(),
+                "expected a fresh entryCSN from the Post-Read control"
+            );
+        }
+        other => panic!(
+            "expected WriteOk with new_csn for the correct assert_csn, got {}",
+            describe(&other)
+        ),
+    }
+
+    // --- Cleanup ---
+    worker
+        .submit(Request::Delete {
+            id: 140,
+            dn: dn.clone(),
+            assert_csn: None,
+        })
+        .expect("submit cleanup delete");
+    let _ = poll_for_id(&worker, 140, Duration::from_secs(10));
 }

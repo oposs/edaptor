@@ -24,6 +24,9 @@ pub enum ReadOutcome {
         model: FormModel,
         /// The entry's objectClass values.
         object_classes: Vec<String>,
+        /// The entry's `entryCSN` at read time (version token for optimistic
+        /// concurrency). `None` if the server did not return it.
+        baseline_csn: Option<String>,
     },
     /// A user-facing error string to surface (e.g. via an `Overlay::Error`).
     Error(String),
@@ -67,7 +70,7 @@ impl ReadFlow {
             base: dn.to_string(),
             scope: SearchScope::Base,
             filter: "(objectClass=*)".to_string(),
-            attrs: vec!["*".to_string()],
+            attrs: vec!["*".to_string(), "entryCSN".to_string()],
             size_limit: None,
         })?;
         let show = profile.map(|p| p.show.clone()).unwrap_or_default();
@@ -90,6 +93,7 @@ impl ReadFlow {
                 ReadOutcome::Form {
                     model: self.form_for(entry, &show),
                     object_classes: object_classes_of(entry),
+                    baseline_csn: entry_csn_of(entry),
                 }
             }
             Response::SearchError { id, msg } => {
@@ -128,6 +132,15 @@ fn object_classes_of(entry: &LdapEntry) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// Extract an entry's `entryCSN` (case-insensitive attribute lookup).
+fn entry_csn_of(entry: &LdapEntry) -> Option<String> {
+    entry
+        .attrs
+        .iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case("entryCSN"))
+        .and_then(|(_, v)| v.first().cloned())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -158,10 +171,34 @@ mod tests {
         );
         attrs.insert("cn".to_string(), vec!["Alice".to_string()]);
         attrs.insert("sn".to_string(), vec!["Adams".to_string()]);
+        attrs.insert(
+            "entryCSN".to_string(),
+            vec!["20260717071723.439475Z#000000#000#000000".to_string()],
+        );
         LdapEntry {
             dn: "cn=Alice,dc=example,dc=org".to_string(),
             attrs,
             bin_attrs: BTreeMap::new(),
+        }
+    }
+
+    #[test]
+    fn form_carries_entry_csn() {
+        let mut flow = ReadFlow::new(schema());
+        flow.pending.insert(7, vec![]);
+        let resp = Response::Entries {
+            id: 7,
+            entries: vec![entry()],
+            truncated: false,
+        };
+        match flow.on_response(&resp) {
+            ReadOutcome::Form { baseline_csn, .. } => {
+                assert_eq!(
+                    baseline_csn.as_deref(),
+                    Some("20260717071723.439475Z#000000#000#000000")
+                );
+            }
+            _ => panic!("expected a form"),
         }
     }
 
@@ -191,11 +228,16 @@ mod tests {
             ReadOutcome::Form {
                 model,
                 object_classes,
+                baseline_csn,
             } => {
                 assert_eq!(model.title, "cn=Alice,dc=example,dc=org");
                 assert_eq!(model.fields[0].label, "cn"); // profile_show first
                 assert!(model.fields.iter().any(|f| f.label == "sn" && f.is_must));
                 assert!(object_classes.iter().any(|o| o == "person"));
+                assert_eq!(
+                    baseline_csn.as_deref(),
+                    Some("20260717071723.439475Z#000000#000#000000")
+                );
             }
             _ => panic!("expected a form"),
         }

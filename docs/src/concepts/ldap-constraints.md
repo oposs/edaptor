@@ -60,7 +60,10 @@ the natural future upgrade for live tree updates — but that is **deferred**.
 
 **Consequence:** eDAPtor does not assume the view is live. It refreshes on
 demand (Alt+R) and re-reads automatically after each write, so what you see stays
-consistent with what you just changed.
+consistent with what you just changed. Because the view can still be stale
+between refreshes, a save can no longer assume the entry on the server matches
+what you last read — see [Optimistic Concurrency](optimistic-concurrency.md)
+for how eDAPtor detects and resolves that.
 
 ```mermaid
 flowchart TD

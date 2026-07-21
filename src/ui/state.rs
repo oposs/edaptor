@@ -37,6 +37,72 @@ pub struct PumpResult {
     pub error: bool,
 }
 
+/// A pending concurrent-modification prompt, stashed by [`UiState::resolve_conflict`]
+/// when a re-read shows the other client's change overlaps our edit. Drained by the
+/// dispatch layer, which opens the Reload/Overwrite/Cancel dialog.
+#[derive(Debug, Clone)]
+pub struct ConflictPrompt {
+    /// The entry's DN (for the Reload re-read and the Overwrite resubmit).
+    pub dn: String,
+    /// The dialog body naming the conflicting attribute(s).
+    pub text: String,
+    /// Whether the original save was a save-and-quit (deferred until the write lands).
+    pub quit_after: bool,
+    /// The entry's fresh `entryCSN` learned on re-read; adopted only if the operator
+    /// chooses Overwrite (never before — a premature adopt would let the next plain
+    /// save silently clobber the other client's change).
+    pub fresh_csn: Option<String>,
+}
+
+/// The result of a conflict re-read: (fresh per-attribute values, the attribute
+/// names that changed since our baseline = the other client's edits, the fresh
+/// `entryCSN`).
+type ConflictReread = (
+    std::collections::BTreeMap<String, Vec<String>>,
+    Vec<String>,
+    Option<String>,
+);
+
+/// True if any attribute name appears in both sets (case-insensitive). Used to
+/// decide whether a concurrent modification can be silently rebased (disjoint)
+/// or must be surfaced to the operator (overlap).
+pub fn attrs_overlap(ours: &[&str], theirs: &[&str]) -> bool {
+    ours.iter()
+        .any(|a| theirs.iter().any(|b| a.eq_ignore_ascii_case(b)))
+}
+
+/// Rebase a form onto the server's fresh state after a disjoint concurrent change.
+///
+/// For each field, adopt the server's fresh value as the new `baseline`. For fields
+/// the operator did NOT edit, also adopt the fresh value into `values` — this folds
+/// in the other client's disjoint change so the resubmit does not revert it. Fields
+/// the operator DID edit keep their edited `values` (in the disjoint case the fresh
+/// value equals the old baseline, so the baseline overwrite is a no-op there), so
+/// only the operator's edits still diff. `entryCSN` is skipped (it is not a field).
+fn rebase_baselines(form: &mut EditForm, fresh: &std::collections::BTreeMap<String, Vec<String>>) {
+    let dirty: std::collections::HashSet<String> = form
+        .dirty_labels()
+        .iter()
+        .map(|l| l.to_ascii_lowercase())
+        .collect();
+    for f in form.fields.iter_mut() {
+        if f.label.eq_ignore_ascii_case("entryCSN") {
+            continue;
+        }
+        let fresh_vals = fresh
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case(&f.label))
+            .map(|(_, v)| v.clone())
+            .unwrap_or_default();
+        if dirty.contains(&f.label.to_ascii_lowercase()) {
+            f.baseline = fresh_vals; // keep the operator's edited `values`
+        } else {
+            f.values = fresh_vals.clone();
+            f.baseline = fresh_vals;
+        }
+    }
+}
+
 /// Everything the panes read/write, behind a single RefCell.
 pub struct UiState {
     /// `None` only in headless unit tests.
@@ -148,6 +214,15 @@ pub struct UiState {
     /// True when the server advertises RFC 5805 transactions; drives the atomic
     /// companion-create path (vs. the sequential fallback). Set in `bootstrap`.
     pub server_supports_txn: bool,
+    /// Whether the server advertises the RFC 4528 Assertion control. When false,
+    /// writes fall back to blind (no optimistic-concurrency protection).
+    pub assertion_supported: bool,
+    /// Set once the first blind (unprotected) write has warned the operator, so
+    /// the "concurrent edits may be lost" notice is shown only once per session.
+    pub concurrency_warned: bool,
+    /// A pending concurrent-modification prompt (overlap case), surfaced by the
+    /// dispatch layer as the Reload/Overwrite/Cancel dialog. See [`ConflictPrompt`].
+    pub last_conflict: Option<ConflictPrompt>,
 }
 
 impl UiState {
@@ -210,6 +285,9 @@ impl UiState {
             pending_password_attrs: Vec::new(),
             samba_domain: None,
             server_supports_txn: false,
+            assertion_supported: false,
+            concurrency_warned: false,
+            last_conflict: None,
         }
     }
 }
@@ -239,9 +317,11 @@ impl UiState {
                 ReadOutcome::Form {
                     model,
                     object_classes,
+                    baseline_csn,
                 } => {
                     let mut form = build_edit_form(&model, self.read_flow.schema(), self.read_only);
                     form.object_classes = object_classes;
+                    form.baseline_csn = baseline_csn;
                     {
                         // Build a resolver from &self fields (disjoint from the local
                         // `form`); apply profile-driven bindings before installing.
@@ -543,7 +623,19 @@ impl UiState {
                     return out;
                 }
                 // Navigate to the guard's target if one is pending, else re-read.
-                let (dn, profile_ocs) = self.pending_nav.take().unwrap_or((reread_dn, Vec::new()));
+                // The plain-save fallback must carry the entry's REAL objectClasses
+                // (from the just-saved form, still installed here) so the reread
+                // resolves the same profile — and thus the same `show` field order —
+                // as the original load. Passing empty ocs would pick no profile and
+                // re-order the form (show-front block lost), desyncing the pane's
+                // cached labels from the fresh values.
+                let fallback_ocs = self
+                    .edit_form
+                    .as_ref()
+                    .map(|f| f.object_classes.clone())
+                    .unwrap_or_default();
+                let (dn, profile_ocs) =
+                    self.pending_nav.take().unwrap_or((reread_dn, fallback_ocs));
                 self.reread(&dn, &profile_ocs);
             }
             WriteOutcome::NeedFollowupModify {
@@ -571,7 +663,15 @@ impl UiState {
                     out.quit = true;
                     return out;
                 }
-                let (dn, profile_ocs) = self.pending_nav.take().unwrap_or((reread_dn, Vec::new()));
+                // Same as `Saved`: carry the real objectClasses so the reread keeps
+                // the original profile/`show` field order (see the note above).
+                let fallback_ocs = self
+                    .edit_form
+                    .as_ref()
+                    .map(|f| f.object_classes.clone())
+                    .unwrap_or_default();
+                let (dn, profile_ocs) =
+                    self.pending_nav.take().unwrap_or((reread_dn, fallback_ocs));
                 self.reread(&dn, &profile_ocs);
             }
             WriteOutcome::BatchProgress { .. } => {
@@ -593,6 +693,13 @@ impl UiState {
                         quit_after,
                     );
                 }
+            }
+            // Concurrent modification (rc 122): the assertion failed because the
+            // entry changed on the server since we read it. Re-read it fresh, then
+            // rebase silently (disjoint change) or stash a prompt (overlap).
+            WriteOutcome::Conflict { dn, quit_after } => {
+                let reread = self.reread_blocking_for_conflict(&dn);
+                return self.resolve_conflict(dn, quit_after, reread);
             }
             WriteOutcome::Created { dn, quit_after } => {
                 let ocs = self
@@ -635,6 +742,170 @@ impl UiState {
             if read_flow.request_entry(w, dn, profile).is_ok() {
                 *current_leaf = Some(dn.to_string());
             }
+        }
+    }
+
+    /// The attribute names this save is writing — the labels of every dirty field.
+    /// Delegates to [`EditForm::dirty_labels`]; empty when no form is loaded.
+    pub fn attrs_in_flight(&self) -> Vec<String> {
+        self.edit_form
+            .as_ref()
+            .map(|f| f.dirty_labels())
+            .unwrap_or_default()
+    }
+
+    /// Synchronous base-scope re-read of `dn` requesting `*` + `entryCSN`, used on a
+    /// write conflict to learn (fresh per-attribute values, the attribute names that
+    /// differ from the form's stored baseline = the other client's changes, the
+    /// fresh `entryCSN`). `None` when there is no worker or the read fails/returns
+    /// nothing. Uses the blocking `worker.request` path (like
+    /// `fetch_group_members_for_must`).
+    fn reread_blocking_for_conflict(&self, dn: &str) -> Option<ConflictReread> {
+        let worker = self.worker.as_ref()?;
+        let resp = worker
+            .request(Request::Search {
+                id: 0,
+                base: dn.to_string(),
+                scope: SearchScope::Base,
+                filter: "(objectClass=*)".to_string(),
+                attrs: vec!["*".to_string(), "entryCSN".to_string()],
+                size_limit: Some(1),
+            })
+            .ok()?;
+        let Response::Entries { entries, .. } = resp else {
+            return None;
+        };
+        let entry = entries.into_iter().next()?;
+        let fresh_values = entry.attrs;
+        let fresh_csn = fresh_values
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case("entryCSN"))
+            .and_then(|(_, v)| v.first().cloned());
+        let changed = self.attrs_changed_since_baseline(&fresh_values);
+        Some((fresh_values, changed, fresh_csn))
+    }
+
+    /// The form-field labels whose fresh server value differs from the form's stored
+    /// baseline — i.e. what the other client changed since we read the entry.
+    /// `entryCSN` is excluded (it always changes). Compares set-wise via
+    /// `value_set_eq`, matching the dirty check's semantics.
+    fn attrs_changed_since_baseline(
+        &self,
+        fresh: &std::collections::BTreeMap<String, Vec<String>>,
+    ) -> Vec<String> {
+        let Some(form) = self.edit_form.as_ref() else {
+            return Vec::new();
+        };
+        form.fields
+            .iter()
+            .filter(|f| !f.label.eq_ignore_ascii_case("entryCSN"))
+            .filter_map(|f| {
+                let fresh_vals = fresh
+                    .iter()
+                    .find(|(k, _)| k.eq_ignore_ascii_case(&f.label))
+                    .map(|(_, v)| v.clone())
+                    .unwrap_or_default();
+                if crate::workflows::edit_form::value_set_eq(&fresh_vals, &f.baseline) {
+                    None
+                } else {
+                    Some(f.label.clone())
+                }
+            })
+            .collect()
+    }
+
+    /// Decide a concurrent modification given the (optional) re-read result. Pure
+    /// enough to unit-test: pass a synthetic `reread`.
+    ///
+    /// - `None` re-read → surface a plain write error.
+    /// - disjoint (our dirty fields vs their changed attrs do not overlap) → adopt
+    ///   the fresh CSN, rebase baselines, and resubmit silently.
+    /// - overlap → stash a [`ConflictPrompt`] for the dispatch layer.
+    fn resolve_conflict(
+        &mut self,
+        dn: String,
+        quit_after: bool,
+        reread: Option<ConflictReread>,
+    ) -> PumpResult {
+        let mut out = PumpResult {
+            changed: true,
+            ..Default::default()
+        };
+        match reread {
+            Some((fresh_values, changed_attrs, fresh_csn)) => {
+                let ours = self.attrs_in_flight();
+                let ours_refs: Vec<&str> = ours.iter().map(String::as_str).collect();
+                let theirs_refs: Vec<&str> = changed_attrs.iter().map(String::as_str).collect();
+                if !attrs_overlap(&ours_refs, &theirs_refs) {
+                    // Disjoint → rebase silently: adopt the fresh CSN, fold the other
+                    // client's changes into untouched fields, and resubmit our edit.
+                    if let Some(f) = self.edit_form.as_mut() {
+                        f.baseline_csn = fresh_csn;
+                        rebase_baselines(f, &fresh_values);
+                    }
+                    self.resubmit_save(quit_after);
+                } else {
+                    self.last_conflict = Some(ConflictPrompt {
+                        dn,
+                        text: format!(
+                            "This entry was changed by someone else since you opened \
+                             it.\n\nConflicting attribute(s): {}.\n\nReload to discard \
+                             your edits, Overwrite to force your version, or Cancel to \
+                             keep editing.",
+                            changed_attrs.join(", ")
+                        ),
+                        quit_after,
+                        fresh_csn,
+                    });
+                    out.error = true;
+                }
+            }
+            None => {
+                self.last_write_error = Some(
+                    "Entry changed on the server and could not be re-read. Reload before \
+                     retrying."
+                        .to_string(),
+                );
+                out.error = true;
+            }
+        }
+        out
+    }
+
+    /// Re-run the save prepare + submit against the current (rebased) form, silently
+    /// (no confirmation dialog — the operator already confirmed this save once, and
+    /// the disjoint rebase changed nothing they need to re-approve). Asserts the
+    /// form's current `baseline_csn` when the server supports it. No-op without a
+    /// worker or a ready plan.
+    fn resubmit_save(&mut self, quit_after: bool) {
+        let plan_dn = {
+            let Some(form) = self.edit_form.as_ref() else {
+                return;
+            };
+            let prepared = self.write_flow.prepare(
+                form,
+                self.read_flow.schema(),
+                self.pending_password.as_deref(),
+                &self.resolved_widgets,
+            );
+            match prepared {
+                crate::workflows::save::PrepareSave::Ready { plan, dn, .. } => Some((plan, dn)),
+                _ => None,
+            }
+        };
+        let Some((plan, dn)) = plan_dn else {
+            return;
+        };
+        let assert_csn = if self.assertion_supported {
+            self.edit_form.as_ref().and_then(|f| f.baseline_csn.clone())
+        } else {
+            None
+        };
+        let Self {
+            worker, write_flow, ..
+        } = self;
+        if let Some(w) = worker.as_ref() {
+            let _ = write_flow.submit(w, plan, &dn, assert_csn, quit_after);
         }
     }
 
@@ -920,13 +1191,17 @@ pub(crate) fn bootstrap(config: Config, password: String) -> Result<UiState> {
     };
     let schema = SchemaModel::from_raw(&raw);
 
-    // Tolerant capability probe: a failed/absent root DSE just means "no txn
-    // support" (never fail bootstrap over it).
-    let server_supports_txn = match worker.request(Request::FetchRootDse) {
+    // Tolerant capability probe: a failed/absent root DSE just means "no
+    // support" for txn / assertion (never fail bootstrap over it).
+    let (server_supports_txn, assertion_supported) = match worker.request(Request::FetchRootDse) {
         Ok(Response::RootDse {
             supported_extensions,
-        }) => crate::ldap::worker::txn_supported(&supported_extensions),
-        _ => false,
+            supported_controls,
+        }) => (
+            crate::ldap::worker::txn_supported(&supported_extensions),
+            crate::ldap::worker::assertion_supported(&supported_controls),
+        ),
+        _ => (false, false),
     };
 
     let nodes = match worker.request(Request::LoadStructure {
@@ -985,6 +1260,9 @@ pub(crate) fn bootstrap(config: Config, password: String) -> Result<UiState> {
         pending_password_attrs: Vec::new(),
         samba_domain,
         server_supports_txn,
+        assertion_supported,
+        concurrency_warned: false,
+        last_conflict: None,
     })
 }
 
@@ -1112,6 +1390,7 @@ mod tests {
             mode: FormMode::Edit,
             object_classes: vec!["top".into()],
             fields: vec![oc_field],
+            baseline_csn: None,
         });
 
         // Commit "top, person": objectClass values updated, fields injected, render flagged.
@@ -1179,6 +1458,7 @@ mod tests {
             mode: FormMode::Edit,
             object_classes: vec!["top".into()],
             fields: vec![plain_field],
+            baseline_csn: None,
         });
 
         st.apply_commit(0, CommitOutcome::SetValues(vec!["newval".into()]));
@@ -1248,6 +1528,7 @@ mod tests {
                 mk("uidNumber", None, vec!["1000".into()]),
                 mk("sambaSID", Some(WidgetKind::SambaSid), vec![]),
             ],
+            baseline_csn: None,
         });
 
         // Ok branch: compute (helper) + apply_commit, as the dispatch does.
@@ -1308,6 +1589,7 @@ mod tests {
             },
             object_classes: vec![],
             fields: vec![uid_field],
+            baseline_csn: None,
         });
         st.form_needs_render = false;
 
@@ -1371,6 +1653,7 @@ mod tests {
                 mk("uidNumber", vec![ALLOC_PLACEHOLDER.to_string()]),
                 mk("sambaSID", vec![]),
             ],
+            baseline_csn: None,
         });
 
         // Before uidNumber resolves: sambaSID stays empty (placeholder isn't numeric).
@@ -1432,6 +1715,7 @@ mod tests {
             },
             object_classes: vec![],
             fields: vec![uid_field],
+            baseline_csn: None,
         });
         st.form_needs_render = false;
 
@@ -1486,6 +1770,7 @@ mod tests {
             mode: FormMode::Edit,
             object_classes: vec!["inetOrgPerson".into()],
             fields: vec![pw_field],
+            baseline_csn: None,
         });
         st.form_needs_render = false;
 
@@ -1702,6 +1987,7 @@ mod tests {
                 make_placeholder_field("uidNumber"),
                 make_placeholder_field("gidNumber"),
             ],
+            baseline_csn: None,
         });
         st.form_needs_render = false;
 
@@ -1870,6 +2156,7 @@ mod write_routing_tests {
             mode: FormMode::Edit,
             object_classes: vec!["top".into()],
             fields: vec![field],
+            baseline_csn: None,
         }
     }
 
@@ -1985,6 +2272,7 @@ mod write_routing_tests {
                 values: vec!["bob".into()],
                 baseline: vec![],
             }],
+            baseline_csn: None,
         });
         let r = st.apply_write_outcome(WriteOutcome::Created {
             dn: "uid=bob,ou=people,dc=example,dc=org".into(),
@@ -2056,5 +2344,145 @@ mod write_routing_tests {
             Some("ou=p,dc=x"),
             "stays until guarded"
         );
+    }
+
+    // --- Task 7: concurrent-modification (rebase-or-prompt) ---
+
+    #[test]
+    fn conflict_overlap_detection() {
+        // attrs we are writing vs attrs changed by the other client.
+        let ours = ["description", "telephoneNumber"];
+        let theirs_disjoint = ["mail"];
+        let theirs_overlap = ["telephoneNumber"];
+        assert!(!crate::ui::state::attrs_overlap(&ours, &theirs_disjoint));
+        assert!(crate::ui::state::attrs_overlap(&ours, &theirs_overlap));
+        // Case-insensitive: LDAP attribute names are not case-sensitive.
+        assert!(crate::ui::state::attrs_overlap(
+            &["Description"],
+            &["description"]
+        ));
+    }
+
+    #[test]
+    fn attrs_in_flight_lists_only_dirty_field_labels() {
+        let mut st = empty_state();
+        st.edit_form = Some(form_with_dirty(true)); // single "cn" field, edited
+        assert_eq!(st.attrs_in_flight(), vec!["cn".to_string()]);
+        st.edit_form = Some(form_with_dirty(false)); // unchanged
+        assert!(st.attrs_in_flight().is_empty());
+    }
+
+    /// A two-field form: `cn` edited (dirty), `description` untouched.
+    fn form_cn_dirty_desc_clean() -> crate::workflows::edit_form::EditForm {
+        use crate::schema::FieldKind;
+        use crate::workflows::edit_form::{EditField, EditForm, FormMode};
+        use crate::workflows::form_model::WidgetSpec;
+        let mk = |label: &str, val: &str, base: &str| EditField {
+            label: label.into(),
+            must: false,
+            editable: true,
+            multi: false,
+            secret: false,
+            ordered: false,
+            orphaned: false,
+            kind: FieldKind::Text,
+            widget: WidgetSpec::ReadOnlyText,
+            widget_binding: None,
+            values: vec![val.into()],
+            baseline: vec![base.into()],
+        };
+        EditForm {
+            dn: "cn=a,dc=x".into(),
+            mode: FormMode::Edit,
+            object_classes: vec!["top".into()],
+            // cn: edited (base -> newcn); description: unchanged (still "olddesc")
+            fields: vec![
+                mk("cn", "newcn", "base"),
+                mk("description", "olddesc", "olddesc"),
+            ],
+            baseline_csn: Some("csn-1".into()),
+        }
+    }
+
+    #[test]
+    fn conflict_overlap_stashes_prompt_without_resubmit() {
+        // The other client changed `cn` — which we are ALSO editing → overlap.
+        let mut st = empty_state();
+        st.assertion_supported = true;
+        st.edit_form = Some(form_cn_dirty_desc_clean());
+        let mut fresh: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        fresh.insert("cn".into(), vec!["theircn".into()]); // they changed cn
+        fresh.insert("description".into(), vec!["olddesc".into()]); // unchanged
+        fresh.insert("entryCSN".into(), vec!["csn-2".into()]);
+        // changed-since-baseline = [cn]
+        let changed = vec!["cn".to_string()];
+        let out = st.resolve_conflict(
+            "cn=a,dc=x".into(),
+            false,
+            Some((fresh, changed, Some("csn-2".into()))),
+        );
+        assert!(out.error, "overlap surfaces via the error/conflict channel");
+        let c = st
+            .last_conflict
+            .take()
+            .expect("overlap must stash a prompt");
+        assert_eq!(c.dn, "cn=a,dc=x");
+        assert_eq!(c.fresh_csn.as_deref(), Some("csn-2"));
+        assert!(c.text.contains("cn"), "prompt names the conflicting attr");
+    }
+
+    #[test]
+    fn conflict_disjoint_rebases_without_prompt() {
+        // The other client changed `description` — which we did NOT edit → disjoint.
+        let mut st = empty_state();
+        st.assertion_supported = true;
+        st.edit_form = Some(form_cn_dirty_desc_clean());
+        let mut fresh: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        fresh.insert("cn".into(), vec!["base".into()]); // unchanged from our baseline
+        fresh.insert("description".into(), vec!["theirdesc".into()]); // they changed it
+        fresh.insert("entryCSN".into(), vec!["csn-2".into()]);
+        let changed = vec!["description".to_string()];
+        let out = st.resolve_conflict(
+            "cn=a,dc=x".into(),
+            false,
+            Some((fresh, changed, Some("csn-2".into()))),
+        );
+        assert!(!out.error, "disjoint rebase does not surface an error");
+        assert!(st.last_conflict.is_none(), "disjoint must not prompt");
+        let form = st.edit_form.as_ref().unwrap();
+        assert_eq!(
+            form.baseline_csn.as_deref(),
+            Some("csn-2"),
+            "disjoint rebase adopts the fresh CSN"
+        );
+        // Their disjoint change was adopted into the untouched `description` field so
+        // a resubmit will not revert it; our `cn` edit is preserved.
+        let desc = form
+            .fields
+            .iter()
+            .find(|f| f.label == "description")
+            .unwrap();
+        assert_eq!(desc.values, vec!["theirdesc".to_string()]);
+        assert_eq!(desc.baseline, vec!["theirdesc".to_string()]);
+        let cn = form.fields.iter().find(|f| f.label == "cn").unwrap();
+        assert_eq!(cn.values, vec!["newcn".to_string()], "our edit survives");
+    }
+
+    #[test]
+    fn conflict_reread_failure_surfaces_write_error() {
+        // worker: None → reread yields None → fall back to a plain write error.
+        let mut st = empty_state();
+        st.edit_form = Some(form_cn_dirty_desc_clean());
+        let out = st.apply_write_outcome(WriteOutcome::Conflict {
+            dn: "cn=a,dc=x".into(),
+            quit_after: false,
+        });
+        assert!(out.error);
+        assert!(st.last_conflict.is_none());
+        assert!(st
+            .last_write_error
+            .as_deref()
+            .unwrap()
+            .contains("could not be re-read"));
     }
 }

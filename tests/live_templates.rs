@@ -21,7 +21,7 @@
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
-use edaptor::config::relation::{PickerBinding, StoreKey};
+use edaptor::config::relation::{LookupBinding, PickerBinding, StoreKey};
 use edaptor::config::widget::{resolve_widgets, WidgetKind};
 use edaptor::config::{
     AuthConfig, AuthMethod, Config, EntryProfile, PasswordSource, ServerConfig, TlsConfig,
@@ -42,6 +42,21 @@ fn picker_binding_for(profiles: &[EntryProfile], attr: &str) -> PickerBinding {
             _ => None,
         })
         .unwrap_or_else(|| panic!("{attr} picker must be resolved from demo config"))
+}
+
+/// Resolve the `[profile.widget.<attr>]` lookup binding for `attr` (the scalar
+/// friendly-name popup, `WidgetKind::Lookup`). `gidNumber` migrated from a picker
+/// to a lookup widget when the lookup widget shipped, so scalar-store assertions
+/// go through this rather than [`picker_binding_for`].
+fn lookup_binding_for(profiles: &[EntryProfile], attr: &str) -> LookupBinding {
+    let widgets = resolve_widgets(profiles).expect("demo-config widgets resolve");
+    widgets
+        .into_iter()
+        .find_map(|w| match w.kind {
+            WidgetKind::Lookup(b) if b.attr.eq_ignore_ascii_case(attr) => Some(b),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("{attr} lookup must be resolved from demo config"))
 }
 
 /// Admin config + bind password for the test directory.
@@ -150,6 +165,7 @@ fn create_time_password_unix_round_trip() {
     let _ = worker.submit(Request::Delete {
         id: 1,
         dn: dn.clone(),
+        assert_csn: None,
     });
     let _ = poll_for_id(&worker, 1, Duration::from_secs(5));
 
@@ -210,6 +226,7 @@ fn create_time_password_unix_round_trip() {
         .submit(Request::Delete {
             id: 99,
             dn: dn.clone(),
+            assert_csn: None,
         })
         .expect("submit cleanup delete");
     match poll_for_id(&worker, 99, Duration::from_secs(10)) {
@@ -267,6 +284,7 @@ fn autonumber_allocation_and_multi_oc_create() {
         let _ = worker.submit(Request::Delete {
             id,
             dn: (*dn).clone(),
+            assert_csn: None,
         });
         let _ = poll_for_id(&worker, id, Duration::from_secs(5));
     }
@@ -378,6 +396,7 @@ fn autonumber_allocation_and_multi_oc_create() {
             .submit(Request::Delete {
                 id,
                 dn: (*dn).clone(),
+                assert_csn: None,
             })
             .expect("submit cleanup delete");
         match poll_for_id(&worker, id, Duration::from_secs(10)) {
@@ -412,6 +431,7 @@ fn lookup_pick_value_yields_gidnumber() {
     let _ = worker.submit(Request::Delete {
         id: 300,
         dn: dn.clone(),
+        assert_csn: None,
     });
     let _ = poll_for_id(&worker, 300, Duration::from_secs(5));
 
@@ -478,6 +498,7 @@ fn lookup_pick_value_yields_gidnumber() {
         .submit(Request::Delete {
             id: 390,
             dn: dn.clone(),
+            assert_csn: None,
         })
         .expect("submit cleanup delete");
     match poll_for_id(&worker, 390, Duration::from_secs(10)) {
@@ -495,6 +516,7 @@ fn cleanup_entry(worker: &WorkerHandle, id: u64, dn: &str) {
     let _ = worker.submit(Request::Delete {
         id,
         dn: dn.to_string(),
+        assert_csn: None,
     });
     let _ = poll_for_id(worker, id, Duration::from_secs(5));
 }
@@ -588,13 +610,14 @@ fn picker_member_candidate_search_yields_user_dns() {
 /// searches `ou=groups` for posixGroup entries and commits their `gidNumber`
 /// scalar — not their DN. Asserts: hits are non-empty; `pick_value(&attrs,
 /// "gidNumber")` yields Some(numeric string) that parses as an integer.
+/// (`gidNumber` is a `lookup` widget in the demo config, not a picker.)
 #[test]
-fn picker_gidnumber_scalar_store_resolves_group_gidnumber() {
+fn lookup_gidnumber_scalar_store_resolves_group_gidnumber() {
     let uri = match std::env::var("EDAPTOR_TEST_LDAP_URI") {
         Ok(u) => u,
         Err(_) => {
             eprintln!(
-                "SKIP picker_gidnumber_scalar_store_resolves_group_gidnumber: set EDAPTOR_TEST_LDAP_URI to run"
+                "SKIP lookup_gidnumber_scalar_store_resolves_group_gidnumber: set EDAPTOR_TEST_LDAP_URI to run"
             );
             return;
         }
@@ -606,21 +629,17 @@ fn picker_gidnumber_scalar_store_resolves_group_gidnumber() {
     let cfg: edaptor::config::Config = toml::from_str(include_str!("../examples/demo-config.toml"))
         .expect("demo-config.toml parses");
 
-    let binding = picker_binding_for(&cfg.profiles, "gidNumber");
+    let binding = lookup_binding_for(&cfg.profiles, "gidNumber");
     let binding = &binding;
 
-    // Confirm the store key is a scalar attribute, not a DN.
+    // Confirm the store is the gidNumber scalar attribute, not a DN. The lookup
+    // widget stores the candidate's `gidNumber` value directly (a plain String).
     assert_eq!(
-        binding.store,
-        StoreKey::Attr("gidNumber".to_string()),
+        binding.store, "gidNumber",
         "gidNumber binding must store the gidNumber scalar attribute"
     );
 
-    // Determine the store attribute name for the search attrs list.
-    let store_attr = match &binding.store {
-        StoreKey::Attr(a) => a.clone(),
-        StoreKey::Dn => panic!("expected scalar store"),
-    };
+    let store_attr = binding.store.clone();
 
     let filter = build_member_filter(
         &binding.scope.object_classes,

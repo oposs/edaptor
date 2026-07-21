@@ -94,6 +94,9 @@ pub struct EditForm {
     pub mode: FormMode,
     pub object_classes: Vec<String>,
     pub fields: Vec<EditField>,
+    /// `entryCSN` at load time — the version asserted on save. `None` disables
+    /// optimistic concurrency for this form (create mode, or server without it).
+    pub baseline_csn: Option<String>,
 }
 
 impl EditForm {
@@ -116,14 +119,19 @@ impl EditForm {
     /// moment the form syncs, even with no edit. Stripping both sides compares the
     /// meaningful sequence (content + order); a genuine reorder still changes it.
     pub fn is_dirty(&self) -> bool {
-        self.fields.iter().any(|f| {
-            let current = f.current_values();
-            if f.ordered {
-                strip_ordering_seq(&current) != strip_ordering_seq(&f.baseline)
-            } else {
-                !value_set_eq(&current, &f.baseline)
-            }
-        })
+        self.fields.iter().any(field_is_dirty)
+    }
+
+    /// The labels of every field whose current value differs from its baseline —
+    /// i.e. the attributes this save is actually writing. Same per-field comparison
+    /// as [`is_dirty`](Self::is_dirty); used by the concurrency layer to decide
+    /// whether a server-side change overlaps our edit.
+    pub fn dirty_labels(&self) -> Vec<String> {
+        self.fields
+            .iter()
+            .filter(|f| field_is_dirty(f))
+            .map(|f| f.label.clone())
+            .collect()
     }
 
     /// A pure [`EditEntry`] of every field's current values, keyed by label.
@@ -213,6 +221,18 @@ impl EditForm {
             .filter(|f| fanout_attr_of(f).is_some())
             .map(|f| f.label.clone())
             .collect()
+    }
+}
+
+/// One field's dirty test: current values vs baseline, order-sensitive only for
+/// `ordered` fields (with `{n}` prefixes stripped). Shared by
+/// [`EditForm::is_dirty`] and [`EditForm::dirty_labels`].
+fn field_is_dirty(f: &EditField) -> bool {
+    let current = f.current_values();
+    if f.ordered {
+        strip_ordering_seq(&current) != strip_ordering_seq(&f.baseline)
+    } else {
+        !value_set_eq(&current, &f.baseline)
     }
 }
 
@@ -378,6 +398,7 @@ pub fn build_edit_form(model: &FormModel, schema: &SchemaModel, read_only: bool)
         mode: FormMode::Edit,
         object_classes: Vec::new(),
         fields,
+        baseline_csn: None,
     }
 }
 
@@ -642,6 +663,7 @@ mod tests {
             mode: FormMode::Edit,
             object_classes: ocs.iter().map(|s| s.to_string()).collect(),
             fields: vec![oc_field],
+            baseline_csn: None,
         }
     }
 

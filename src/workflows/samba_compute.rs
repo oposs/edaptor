@@ -54,6 +54,7 @@ mod tests {
             mode: FormMode::Edit,
             object_classes: vec![],
             fields: fields.iter().map(|(l, v)| field(l, v)).collect(),
+            baseline_csn: None,
         }
     }
 

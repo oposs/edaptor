@@ -7,6 +7,7 @@
 // warnings (each is referenced from the smoke tests below).
 pub mod config_picker;
 pub mod confirm;
+pub mod conflict;
 pub mod container_chooser;
 pub mod error;
 pub mod guard;
@@ -63,6 +64,11 @@ mod tests {
     #[test]
     fn error_builds_without_panic() {
         let _v = error::build("LDAP error: insufficient access");
+    }
+
+    #[test]
+    fn conflict_builds_without_panic() {
+        let _v = conflict::build("Conflicting attribute(s): description.");
     }
 
     #[test]

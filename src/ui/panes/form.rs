@@ -225,6 +225,13 @@ pub(crate) struct FormPane {
     block_heights: Vec<i32>,
     /// DN of the entry whose cells are currently built; `None` before first render.
     built_dn: Option<String>,
+    /// Raw field labels (in order) the cells were last built from. A reorder of
+    /// the same fields under the same DN and count — e.g. a re-read that resolves a
+    /// different profile/`show` order — leaves `built_dn` and the field count
+    /// unchanged, so without this the cached label/kind vectors would be painted
+    /// against freshly-ordered values, misaligning every row. Rebuild whenever the
+    /// label sequence changes.
+    built_labels: Vec<String>,
     /// Width of the label column at the last rebuild (fit to the longest label).
     label_w: i32,
     /// Inner content width at the last rebuild; a change (splitter drag) triggers
@@ -281,6 +288,7 @@ impl FormPane {
             kinds: Vec::new(),
             block_heights: Vec::new(),
             built_dn: None,
+            built_labels: Vec::new(),
             label_w: LABEL_MIN,
             built_w: 0,
             was_focused: false,
@@ -560,34 +568,40 @@ impl FormPane {
     /// Repaint header + all cell texts from `edit_form`; rebuild cells first if
     /// the shown entry changed (different `dn`).
     fn render(&mut self, ctx: &mut Context) {
-        let (cur_dn, field_count) = {
+        let (cur_dn, cur_labels) = {
             let st = self.state.borrow();
             match st.edit_form.as_ref() {
-                Some(f) => (Some(f.dn.clone()), f.fields.len()),
-                None => (None, 0),
+                Some(f) => (
+                    Some(f.dn.clone()),
+                    f.fields.iter().map(|fld| fld.label.clone()).collect(),
+                ),
+                None => (None, Vec::<String>::new()),
             }
         };
-        // Rebuild cells when the entry changes (different dn) OR the field set
-        // changes size OR the pane was resized. Adding/removing an objectClass
-        // regenerates the MUST/MAY fields on the SAME entry, growing or shrinking
-        // the field list while the dn is unchanged; without the count check the
-        // cell vectors go stale and `focusable_value_ids` would index past
-        // `value_ids`. A width change (splitter drag) reflows the value editors to
-        // fill the new width.
+        // Rebuild cells when the entry changes (different dn) OR the field-label
+        // sequence changes. The label-sequence check covers three cases on the SAME
+        // dn: adding/removing an objectClass grows/shrinks the MUST/MAY field list
+        // (without which the cell vectors go stale and `focusable_value_ids` would
+        // index past `value_ids`); and a same-count RE-ORDER (e.g. a re-read that
+        // resolves a different profile/`show` order), which a bare count check would
+        // miss — leaving the cached label/kind vectors painted against freshly
+        // ordered values. A width change (splitter drag) reflows the value editors
+        // to fill the new width.
         let inner_w = self.scroll_mut().map(|sg| sg.inner_width()).unwrap_or(0);
-        let dn_or_count_changed = cur_dn != self.built_dn || field_count != self.value_ids.len();
+        let fields_changed = cur_dn != self.built_dn || cur_labels != self.built_labels;
         // A width-only reflow keeps the same field focused; an entry/field-set
         // change lands focus on the first field (a fresh form). Capture the
         // focused field index up front so a width reflow can restore it after the
         // cell vectors are rebuilt under new ids.
-        let keep_focus_idx = if dn_or_count_changed {
+        let keep_focus_idx = if fields_changed {
             None
         } else {
             self.focused_field_idx()
         };
-        if dn_or_count_changed || inner_w != self.built_w {
+        if fields_changed || inner_w != self.built_w {
             self.rebuild_cells(ctx);
             self.built_dn = cur_dn;
+            self.built_labels = cur_labels;
         }
 
         // Clone the fields so per-kind formatting runs outside the state borrow.
@@ -1381,6 +1395,7 @@ mod tests {
             },
             object_classes: vec![],
             fields,
+            baseline_csn: None,
         });
         st.form_needs_render = true;
         let shared: Shared = Rc::new(RefCell::new(st));
@@ -1401,6 +1416,7 @@ mod tests {
             mode: FormMode::Edit,
             object_classes: vec![],
             fields,
+            baseline_csn: None,
         });
         st.form_needs_render = true;
         let shared: Shared = Rc::new(RefCell::new(st));
@@ -1436,6 +1452,7 @@ mod tests {
             mode: FormMode::Edit,
             object_classes: vec![],
             fields: vec![ef("cn", "a", true), ef("creatorsName", "admin", false)],
+            baseline_csn: None,
         });
         st.form_needs_render = true;
         Rc::new(RefCell::new(st))
@@ -1556,6 +1573,7 @@ mod tests {
             mode: FormMode::Edit,
             object_classes: vec![],
             fields: vec![cn, ef("gidNumber", "1001", true), ef("sn", "Bar", true)],
+            baseline_csn: None,
         });
         st.form_needs_render = true;
         let shared: Shared = Rc::new(RefCell::new(st));
@@ -1634,6 +1652,7 @@ mod tests {
             mode: FormMode::Edit,
             object_classes: vec![],
             fields: vec![ef("gidNumber", "1001", true), ef("sn", "Bar", true)],
+            baseline_csn: None,
         });
         st.form_needs_render = true;
         let shared: Shared = Rc::new(RefCell::new(st));
@@ -1702,6 +1721,7 @@ mod tests {
             mode: FormMode::Edit,
             object_classes: vec![],
             fields: vec![ef("cn", "a", true), ef("sn", "B", true)],
+            baseline_csn: None,
         });
         st.form_needs_render = true;
         let shared: Shared = Rc::new(RefCell::new(st));
@@ -1761,6 +1781,7 @@ mod tests {
             mode: FormMode::Edit,
             object_classes: vec![],
             fields,
+            baseline_csn: None,
         });
         st.form_needs_render = true;
         let shared: Shared = Rc::new(RefCell::new(st));
@@ -2009,6 +2030,7 @@ mod tests {
             mode: FormMode::Edit,
             object_classes: vec![],
             fields: vec![ef("cn", "hello", true), ef("sn", "world", true)],
+            baseline_csn: None,
         });
         st.form_needs_render = true;
         let shared: Shared = Rc::new(RefCell::new(st));
@@ -2296,6 +2318,7 @@ mod tests {
                 ef("sn", "b", true),
                 ef("mail", "c", true),
             ],
+            baseline_csn: None,
         });
         st.form_needs_render = true;
         let shared: Shared = Rc::new(RefCell::new(st));

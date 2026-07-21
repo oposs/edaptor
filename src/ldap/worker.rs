@@ -23,7 +23,9 @@ use std::thread::{self, JoinHandle};
 use std::collections::HashSet;
 
 use ldap3::adapters::{Adapter, EntriesOnly, PagedResults};
-use ldap3::controls::{RawControl, TxnSpec};
+use ldap3::controls::{
+    Assertion, Control, ControlType, MakeCritical, PostRead, PostReadResp, RawControl, TxnSpec,
+};
 use ldap3::exop::{EndTxn, StartTxn, StartTxnResp};
 use ldap3::{LdapConn, Mod, Scope, SearchEntry, SearchOptions, SearchResult};
 
@@ -40,6 +42,15 @@ pub const TXN_END_OID: &str = "1.3.6.1.1.21.3";
 /// End-Transaction OIDs (RFC 5805). Pure.
 pub fn txn_supported(exts: &[String]) -> bool {
     exts.iter().any(|e| e == TXN_START_OID) && exts.iter().any(|e| e == TXN_END_OID)
+}
+
+/// RFC 4528 Assertion control OID.
+pub const ASSERTION_CONTROL_OID: &str = "1.3.6.1.1.12";
+
+/// True iff the server's `supportedControl` advertises the RFC 4528 Assertion
+/// control — the prerequisite for optimistic-concurrency writes. Pure.
+pub fn assertion_supported(controls: &[String]) -> bool {
+    controls.iter().any(|c| c == ASSERTION_CONTROL_OID)
 }
 
 /// Search scope for a [`Request::Search`]. Mapped to `ldap3::Scope` only inside
@@ -85,6 +96,7 @@ pub struct LdapEntry {
 }
 
 /// A request to the worker. Each is paired with a reply `Sender` in the channel.
+#[derive(Debug)]
 pub enum Request {
     /// Fetch the raw (unparsed) subschema description strings.
     FetchSubschema,
@@ -126,6 +138,9 @@ pub enum Request {
         dn: String,
         /// The attribute modifications (pure domain type from `form::changeset`).
         changes: Vec<ModOp>,
+        /// When set, assert `(entryCSN=<this>)` (RFC 4528, critical) so the write
+        /// applies only if the entry is unchanged since it was read. `None` = blind.
+        assert_csn: Option<String>,
     },
     /// Add a new entry. `id` is echoed in the reply.
     Add {
@@ -163,6 +178,9 @@ pub enum Request {
         id: u64,
         /// DN to delete.
         dn: String,
+        /// When set, assert `(entryCSN=<this>)` (RFC 4528, critical) so the delete
+        /// applies only if the entry is unchanged since it was read. `None` = blind.
+        assert_csn: Option<String>,
     },
     /// Unbind and stop the worker thread.
     Shutdown,
@@ -179,9 +197,11 @@ pub struct RawSubschema {
 #[derive(Debug, Clone)]
 pub enum Response {
     Subschema(RawSubschema),
-    /// Root DSE `supportedExtension` values (reply to [`Request::FetchRootDse`]).
+    /// Root DSE `supportedExtension` + `supportedControl` values (reply to
+    /// [`Request::FetchRootDse`]).
     RootDse {
         supported_extensions: Vec<String>,
+        supported_controls: Vec<String>,
     },
     /// Result of a [`Request::Search`]; `id` echoes the request (D4).
     /// `truncated` is true when the server capped the result set (rc 3/4/11).
@@ -219,6 +239,18 @@ pub enum Response {
         /// Correlation id.
         id: u64,
         /// The affected DN (post-rename DN for ModRdn is computed by the caller).
+        dn: String,
+        /// The entry's new `entryCSN` from the Post-Read control, when requested
+        /// and returned. Refreshes the edit-form baseline without a re-read.
+        new_csn: Option<String>,
+    },
+    /// A write refused because the asserted `entryCSN` no longer matched (rc 122):
+    /// the entry changed since it was read. Distinct from `WriteError` so the flow
+    /// can trigger the rebase-or-prompt path. `id` echoes the request.
+    WriteConflict {
+        /// Correlation id.
+        id: u64,
+        /// The affected DN (for the re-read).
         dn: String,
     },
     /// A failed write; `id` echoes the request. `msg` is already human-mapped
@@ -413,8 +445,9 @@ fn worker_loop(conn: &mut LdapConn, config: &Config, rx: Receiver<Job>) {
             }
             Request::FetchRootDse => {
                 let resp = match fetch_root_dse(conn) {
-                    Ok(supported_extensions) => Response::RootDse {
+                    Ok((supported_extensions, supported_controls)) => Response::RootDse {
                         supported_extensions,
+                        supported_controls,
                     },
                     Err(e) => Response::Error(e.to_string()),
                 };
@@ -453,8 +486,13 @@ fn worker_loop(conn: &mut LdapConn, config: &Config, rx: Receiver<Job>) {
                 };
                 let _ = reply.send(resp);
             }
-            Request::Modify { id, dn, changes } => {
-                let _ = reply.send(run_modify(conn, id, &dn, &changes));
+            Request::Modify {
+                id,
+                dn,
+                changes,
+                assert_csn,
+            } => {
+                let _ = reply.send(run_modify(conn, id, &dn, &changes, assert_csn.as_deref()));
             }
             Request::Add { id, dn, attrs } => {
                 let _ = reply.send(run_add(conn, id, &dn, &attrs));
@@ -478,8 +516,8 @@ fn worker_loop(conn: &mut LdapConn, config: &Config, rx: Receiver<Job>) {
                     new_superior.as_deref(),
                 ));
             }
-            Request::Delete { id, dn } => {
-                let _ = reply.send(run_delete(conn, id, &dn));
+            Request::Delete { id, dn, assert_csn } => {
+                let _ = reply.send(run_delete(conn, id, &dn, assert_csn.as_deref()));
             }
             Request::Shutdown => {
                 let _ = conn.unbind();
@@ -505,11 +543,22 @@ fn mod_op_to_ldap3(op: &ModOp) -> Mod<String> {
 }
 
 /// Turn an ldap3 write call's `Result<LdapResult>` into a [`Response`]: a zero
-/// result code is `WriteOk`; a non-zero code or transport error is `WriteError`
-/// with the human-mapped message (spec §10).
-fn write_response(id: u64, dn: &str, res: ldap3::result::Result<ldap3::LdapResult>) -> Response {
+/// result code is `WriteOk`; rc 122 (assertion failed) is `WriteConflict`; any
+/// other non-zero code or transport error is `WriteError` with the human-mapped
+/// message (spec §10).
+fn write_response(
+    id: u64,
+    dn: &str,
+    new_csn: Option<String>,
+    res: ldap3::result::Result<ldap3::LdapResult>,
+) -> Response {
     match res {
         Ok(r) if r.rc == 0 => Response::WriteOk {
+            id,
+            dn: dn.to_string(),
+            new_csn,
+        },
+        Ok(r) if r.rc == 122 => Response::WriteConflict {
             id,
             dn: dn.to_string(),
         },
@@ -524,9 +573,58 @@ fn write_response(id: u64, dn: &str, res: ldap3::result::Result<ldap3::LdapResul
     }
 }
 
-fn run_modify(conn: &mut LdapConn, id: u64, dn: &str, changes: &[ModOp]) -> Response {
+/// Pull the `entryCSN` from a write result's Post-Read response control, if the
+/// server returned one. ldap3 parses control values; we only read the string.
+fn post_read_csn(ctrls: &[Control]) -> Option<String> {
+    for c in ctrls {
+        if let Control(Some(ControlType::PostReadResp), raw) = c {
+            if raw.val.is_some() {
+                let resp: PostReadResp = raw.parse();
+                if let Some(v) = resp.attrs.get("entryCSN").and_then(|v| v.first()) {
+                    return Some(v.clone());
+                }
+            }
+        }
+    }
+    None
+}
+
+fn run_modify(
+    conn: &mut LdapConn,
+    id: u64,
+    dn: &str,
+    changes: &[ModOp],
+    assert_csn: Option<&str>,
+) -> Response {
     let mods: Vec<Mod<String>> = changes.iter().map(mod_op_to_ldap3).collect();
-    write_response(id, dn, conn.modify(dn, mods))
+    let Some(csn) = assert_csn else {
+        // Blind path (server lacks the control, or no baseline CSN): unchanged.
+        return write_response(id, dn, None, conn.modify(dn, mods));
+    };
+    let filter = format!("(entryCSN={})", ldap3::ldap_escape(csn));
+    let ctrls: Vec<RawControl> = vec![
+        Assertion { filter }.critical().into(),
+        PostRead::new(vec!["entryCSN"]),
+    ];
+    match conn.with_controls(ctrls).modify(dn, mods) {
+        Ok(r) if r.rc == 0 => Response::WriteOk {
+            id,
+            dn: dn.to_string(),
+            new_csn: post_read_csn(&r.ctrls),
+        },
+        Ok(r) if r.rc == 122 => Response::WriteConflict {
+            id,
+            dn: dn.to_string(),
+        },
+        Ok(r) => Response::WriteError {
+            id,
+            msg: result_code_message(r.rc, &r.text),
+        },
+        Err(e) => Response::WriteError {
+            id,
+            msg: format!("{e}"),
+        },
+    }
 }
 
 fn run_add(
@@ -539,7 +637,7 @@ fn run_add(
         .iter()
         .map(|(k, vs)| (k.clone(), vs.iter().cloned().collect::<HashSet<String>>()))
         .collect();
-    write_response(id, dn, conn.add(dn, entry))
+    write_response(id, dn, None, conn.add(dn, entry))
 }
 
 /// Create every entry in `entries` inside one RFC 5805 transaction: StartTxn → each
@@ -606,7 +704,11 @@ fn run_add_atomic(
         txn_id: &txn_id,
         commit: true,
     }) {
-        Ok(ex) if ex.1.rc == 0 => Response::WriteOk { id, dn: last_dn },
+        Ok(ex) if ex.1.rc == 0 => Response::WriteOk {
+            id,
+            dn: last_dn,
+            new_csn: None,
+        },
         Ok(ex) => Response::WriteError {
             id,
             msg: result_code_message(ex.1.rc, &ex.1.text),
@@ -626,11 +728,39 @@ fn run_modrdn(
     delete_old: bool,
     new_superior: Option<&str>,
 ) -> Response {
-    write_response(id, dn, conn.modifydn(dn, new_rdn, delete_old, new_superior))
+    write_response(
+        id,
+        dn,
+        None,
+        conn.modifydn(dn, new_rdn, delete_old, new_superior),
+    )
 }
 
-fn run_delete(conn: &mut LdapConn, id: u64, dn: &str) -> Response {
-    write_response(id, dn, conn.delete(dn))
+fn run_delete(conn: &mut LdapConn, id: u64, dn: &str, assert_csn: Option<&str>) -> Response {
+    let Some(csn) = assert_csn else {
+        return write_response(id, dn, None, conn.delete(dn));
+    };
+    let filter = format!("(entryCSN={})", ldap3::ldap_escape(csn));
+    let ctrl: RawControl = Assertion { filter }.critical().into();
+    match conn.with_controls(vec![ctrl]).delete(dn) {
+        Ok(r) if r.rc == 0 => Response::WriteOk {
+            id,
+            dn: dn.to_string(),
+            new_csn: None,
+        },
+        Ok(r) if r.rc == 122 => Response::WriteConflict {
+            id,
+            dn: dn.to_string(),
+        },
+        Ok(r) => Response::WriteError {
+            id,
+            msg: result_code_message(r.rc, &r.text),
+        },
+        Err(e) => Response::WriteError {
+            id,
+            msg: format!("{e}"),
+        },
+    }
 }
 
 /// True for the LDAP result codes that mean "the server capped the result set"
@@ -801,23 +931,27 @@ fn fetch_subschema(conn: &mut LdapConn, base_dn: &str) -> Result<RawSubschema> {
     })
 }
 
-/// Read the root DSE (`""`, base scope) and return its `supportedExtension` values.
-fn fetch_root_dse(conn: &mut LdapConn) -> Result<Vec<String>> {
+/// Read the root DSE (`""`, base scope) and return `(supportedExtension,
+/// supportedControl)` values.
+fn fetch_root_dse(conn: &mut LdapConn) -> Result<(Vec<String>, Vec<String>)> {
     let (entries, _res) = conn
         .search(
             "",
             Scope::Base,
             "(objectClass=*)",
-            vec!["supportedExtension"],
+            vec!["supportedExtension", "supportedControl"],
         )?
         .success()
         .context("reading root DSE")?;
-    let exts = entries
-        .into_iter()
-        .map(SearchEntry::construct)
-        .find_map(|e| e.attrs.get("supportedExtension").cloned())
+    let entry = entries.into_iter().map(SearchEntry::construct).next();
+    let exts = entry
+        .as_ref()
+        .and_then(|e| e.attrs.get("supportedExtension").cloned())
         .unwrap_or_default();
-    Ok(exts)
+    let ctrls = entry
+        .and_then(|e| e.attrs.get("supportedControl").cloned())
+        .unwrap_or_default();
+    Ok((exts, ctrls))
 }
 
 #[cfg(test)]
@@ -925,10 +1059,11 @@ mod tests {
             .send(Response::WriteOk {
                 id: 9,
                 dn: "cn=x,dc=example,dc=org".to_string(),
+                new_csn: None,
             })
             .unwrap();
         match handle.poll() {
-            Some(Response::WriteOk { id, dn }) => {
+            Some(Response::WriteOk { id, dn, .. }) => {
                 assert_eq!(id, 9);
                 assert_eq!(dn, "cn=x,dc=example,dc=org");
             }
@@ -939,11 +1074,19 @@ mod tests {
 
     #[test]
     fn write_response_maps_codes() {
-        // rc 0 -> WriteOk; non-zero -> WriteError with the human message.
-        let ok = write_response(1, "cn=a,dc=x", Ok(make_result(0, "")));
+        // rc 0 -> WriteOk; rc 122 -> WriteConflict; other non-zero -> WriteError.
+        let ok = write_response(1, "cn=a,dc=x", None, Ok(make_result(0, "")));
         assert!(matches!(ok, Response::WriteOk { id: 1, .. }));
 
-        let err = write_response(2, "cn=a,dc=x", Ok(make_result(32, "no such object")));
+        let conflict = write_response(
+            3,
+            "cn=a,dc=x",
+            None,
+            Ok(make_result(122, "assertion failed")),
+        );
+        assert!(matches!(conflict, Response::WriteConflict { id: 3, .. }));
+
+        let err = write_response(2, "cn=a,dc=x", None, Ok(make_result(32, "no such object")));
         match err {
             Response::WriteError { id, msg } => {
                 assert_eq!(id, 2);
@@ -951,6 +1094,12 @@ mod tests {
             }
             _ => panic!("expected WriteError"),
         }
+    }
+
+    #[test]
+    fn post_read_csn_extracts_entry_csn() {
+        // No controls -> None.
+        assert_eq!(post_read_csn(&[]), None);
     }
 
     fn make_result(rc: u32, text: &str) -> ldap3::LdapResult {
@@ -989,6 +1138,16 @@ mod tests {
         assert!(!txn_supported(&["1.3.6.1.1.21.1".to_string()]));
         assert!(!txn_supported(&["1.3.6.1.1.21.3".to_string()]));
         assert!(!txn_supported(&[]));
+    }
+
+    #[test]
+    fn assertion_control_detected() {
+        // RFC 4528 Assertion control OID.
+        let with = vec!["1.3.6.1.1.12".to_string(), "1.2.3".to_string()];
+        let without = vec!["1.2.3".to_string()];
+        assert!(assertion_supported(&with));
+        assert!(!assertion_supported(&without));
+        assert!(!assertion_supported(&[]));
     }
 
     #[test]
