@@ -2314,13 +2314,14 @@ mod tests {
         assert!(st.structure.get("uid=a,ou=p,dc=x").is_some());
     }
 
-    /// Regression for the race in commit `dcfdab5`'s rename detection: navigating
-    /// away from entry A to entry B while A's save is still in flight, then a
-    /// belated `Saved { reread_dn: A }` landing, must NOT delete A. The old code
-    /// inferred a rename from `current_leaf != reread_dn` — which is exactly the
-    /// state left behind by navigation, not a rename. The fix carries the rename
-    /// signal explicitly via `renamed_from`, so a plain (non-renaming) save's
-    /// outcome leaves the saved node alone regardless of what `current_leaf` is.
+    /// Regression for the race in commit `dcfdab5`'s rename detection.
+    /// The buggy code inferred a rename from `current_leaf != reread_dn`. When the
+    /// operator navigated away from A to B while A's save was in flight, the
+    /// delayed save response left `current_leaf = B` but `reread_dn = A`, triggering
+    /// the false-rename check. The buggy code then deleted the node named by
+    /// `current_leaf` (B), not the saved entry (A). The fix carries the rename
+    /// signal explicitly via `renamed_from: Option<String>`, so a plain
+    /// (non-renaming) save never deletes any node regardless of `current_leaf`.
     #[test]
     fn navigating_away_during_a_save_does_not_delete_the_saved_node() {
         let structure = Structure::build(
@@ -2336,7 +2337,9 @@ mod tests {
         let mut st =
             UiState::new_for_test(structure, schema, "dc=x".into(), Vec::new(), Vec::new());
         // The user saved A, then navigated to B (e.g. discarded A's now-dirty
-        // form) before A's WriteOk came back.
+        // form) before A's WriteOk came back. This leaves:
+        // - current_leaf = B (where the operator is now)
+        // - a Saved outcome for A in flight
         st.current_leaf = Some("uid=b,ou=p,dc=x".into());
 
         st.apply_write_outcome(WriteOutcome::Saved {
@@ -2345,10 +2348,19 @@ mod tests {
             quit_after: false,
         });
 
+        // Assert that B (the entry the operator navigated to) still exists.
+        // This is the node the buggy code would have incorrectly deleted,
+        // because it mistook the current_leaf/reread_dn mismatch for a rename.
+        assert!(
+            st.structure.get("uid=b,ou=p,dc=x").is_some(),
+            "navigating away does not delete the live entry; the buggy code would \
+             have deleted current_leaf when comparing current_leaf != reread_dn"
+        );
+        // Also assert that A (the saved entry) still exists (a non-rename save
+        // deletes nothing).
         assert!(
             st.structure.get("uid=a,ou=p,dc=x").is_some(),
-            "a plain save's late response must not delete the saved node just \
-             because current_leaf moved on"
+            "a plain save never deletes the saved node"
         );
     }
 
