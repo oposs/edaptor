@@ -578,29 +578,27 @@ impl FormPane {
                 None => (None, Vec::<String>::new()),
             }
         };
-        // Rebuild cells when the entry changes (different dn) OR the field set
-        // changes size OR the pane was resized. Adding/removing an objectClass
-        // regenerates the MUST/MAY fields on the SAME entry, growing or shrinking
-        // the field list while the dn is unchanged; without the count check the
-        // cell vectors go stale and `focusable_value_ids` would index past
-        // `value_ids`. A width change (splitter drag) reflows the value editors to
-        // fill the new width.
+        // Rebuild cells when the entry changes (different dn) OR the field-label
+        // sequence changes. The label-sequence check covers three cases on the SAME
+        // dn: adding/removing an objectClass grows/shrinks the MUST/MAY field list
+        // (without which the cell vectors go stale and `focusable_value_ids` would
+        // index past `value_ids`); and a same-count RE-ORDER (e.g. a re-read that
+        // resolves a different profile/`show` order), which a bare count check would
+        // miss — leaving the cached label/kind vectors painted against freshly
+        // ordered values. A width change (splitter drag) reflows the value editors
+        // to fill the new width.
         let inner_w = self.scroll_mut().map(|sg| sg.inner_width()).unwrap_or(0);
-        // Rebuild on a DN change OR any change to the field-label sequence (which
-        // subsumes a count change AND a same-count reorder). Comparing the label
-        // sequence — not just the count — is what keeps the cached label/kind
-        // vectors aligned with the freshly-ordered field values.
-        let dn_or_count_changed = cur_dn != self.built_dn || cur_labels != self.built_labels;
+        let fields_changed = cur_dn != self.built_dn || cur_labels != self.built_labels;
         // A width-only reflow keeps the same field focused; an entry/field-set
         // change lands focus on the first field (a fresh form). Capture the
         // focused field index up front so a width reflow can restore it after the
         // cell vectors are rebuilt under new ids.
-        let keep_focus_idx = if dn_or_count_changed {
+        let keep_focus_idx = if fields_changed {
             None
         } else {
             self.focused_field_idx()
         };
-        if dn_or_count_changed || inner_w != self.built_w {
+        if fields_changed || inner_w != self.built_w {
             self.rebuild_cells(ctx);
             self.built_dn = cur_dn;
             self.built_labels = cur_labels;
