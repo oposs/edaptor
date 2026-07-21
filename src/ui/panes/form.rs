@@ -225,6 +225,13 @@ pub(crate) struct FormPane {
     block_heights: Vec<i32>,
     /// DN of the entry whose cells are currently built; `None` before first render.
     built_dn: Option<String>,
+    /// Raw field labels (in order) the cells were last built from. A reorder of
+    /// the same fields under the same DN and count — e.g. a re-read that resolves a
+    /// different profile/`show` order — leaves `built_dn` and the field count
+    /// unchanged, so without this the cached label/kind vectors would be painted
+    /// against freshly-ordered values, misaligning every row. Rebuild whenever the
+    /// label sequence changes.
+    built_labels: Vec<String>,
     /// Width of the label column at the last rebuild (fit to the longest label).
     label_w: i32,
     /// Inner content width at the last rebuild; a change (splitter drag) triggers
@@ -281,6 +288,7 @@ impl FormPane {
             kinds: Vec::new(),
             block_heights: Vec::new(),
             built_dn: None,
+            built_labels: Vec::new(),
             label_w: LABEL_MIN,
             built_w: 0,
             was_focused: false,
@@ -560,11 +568,14 @@ impl FormPane {
     /// Repaint header + all cell texts from `edit_form`; rebuild cells first if
     /// the shown entry changed (different `dn`).
     fn render(&mut self, ctx: &mut Context) {
-        let (cur_dn, field_count) = {
+        let (cur_dn, cur_labels) = {
             let st = self.state.borrow();
             match st.edit_form.as_ref() {
-                Some(f) => (Some(f.dn.clone()), f.fields.len()),
-                None => (None, 0),
+                Some(f) => (
+                    Some(f.dn.clone()),
+                    f.fields.iter().map(|fld| fld.label.clone()).collect(),
+                ),
+                None => (None, Vec::<String>::new()),
             }
         };
         // Rebuild cells when the entry changes (different dn) OR the field set
@@ -575,7 +586,11 @@ impl FormPane {
         // `value_ids`. A width change (splitter drag) reflows the value editors to
         // fill the new width.
         let inner_w = self.scroll_mut().map(|sg| sg.inner_width()).unwrap_or(0);
-        let dn_or_count_changed = cur_dn != self.built_dn || field_count != self.value_ids.len();
+        // Rebuild on a DN change OR any change to the field-label sequence (which
+        // subsumes a count change AND a same-count reorder). Comparing the label
+        // sequence — not just the count — is what keeps the cached label/kind
+        // vectors aligned with the freshly-ordered field values.
+        let dn_or_count_changed = cur_dn != self.built_dn || cur_labels != self.built_labels;
         // A width-only reflow keeps the same field focused; an entry/field-set
         // change lands focus on the first field (a fresh form). Capture the
         // focused field index up front so a width reflow can restore it after the
@@ -588,6 +603,7 @@ impl FormPane {
         if dn_or_count_changed || inner_w != self.built_w {
             self.rebuild_cells(ctx);
             self.built_dn = cur_dn;
+            self.built_labels = cur_labels;
         }
 
         // Clone the fields so per-kind formatting runs outside the state borrow.

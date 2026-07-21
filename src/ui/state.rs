@@ -623,7 +623,19 @@ impl UiState {
                     return out;
                 }
                 // Navigate to the guard's target if one is pending, else re-read.
-                let (dn, profile_ocs) = self.pending_nav.take().unwrap_or((reread_dn, Vec::new()));
+                // The plain-save fallback must carry the entry's REAL objectClasses
+                // (from the just-saved form, still installed here) so the reread
+                // resolves the same profile — and thus the same `show` field order —
+                // as the original load. Passing empty ocs would pick no profile and
+                // re-order the form (show-front block lost), desyncing the pane's
+                // cached labels from the fresh values.
+                let fallback_ocs = self
+                    .edit_form
+                    .as_ref()
+                    .map(|f| f.object_classes.clone())
+                    .unwrap_or_default();
+                let (dn, profile_ocs) =
+                    self.pending_nav.take().unwrap_or((reread_dn, fallback_ocs));
                 self.reread(&dn, &profile_ocs);
             }
             WriteOutcome::NeedFollowupModify {
@@ -651,7 +663,15 @@ impl UiState {
                     out.quit = true;
                     return out;
                 }
-                let (dn, profile_ocs) = self.pending_nav.take().unwrap_or((reread_dn, Vec::new()));
+                // Same as `Saved`: carry the real objectClasses so the reread keeps
+                // the original profile/`show` field order (see the note above).
+                let fallback_ocs = self
+                    .edit_form
+                    .as_ref()
+                    .map(|f| f.object_classes.clone())
+                    .unwrap_or_default();
+                let (dn, profile_ocs) =
+                    self.pending_nav.take().unwrap_or((reread_dn, fallback_ocs));
                 self.reread(&dn, &profile_ocs);
             }
             WriteOutcome::BatchProgress { .. } => {
