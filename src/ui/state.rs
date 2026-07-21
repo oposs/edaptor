@@ -148,6 +148,12 @@ pub struct UiState {
     /// True when the server advertises RFC 5805 transactions; drives the atomic
     /// companion-create path (vs. the sequential fallback). Set in `bootstrap`.
     pub server_supports_txn: bool,
+    /// Whether the server advertises the RFC 4528 Assertion control. When false,
+    /// writes fall back to blind (no optimistic-concurrency protection).
+    pub assertion_supported: bool,
+    /// Set once the first blind (unprotected) write has warned the operator, so
+    /// the "concurrent edits may be lost" notice is shown only once per session.
+    pub concurrency_warned: bool,
 }
 
 impl UiState {
@@ -210,6 +216,8 @@ impl UiState {
             pending_password_attrs: Vec::new(),
             samba_domain: None,
             server_supports_txn: false,
+            assertion_supported: false,
+            concurrency_warned: false,
         }
     }
 }
@@ -920,13 +928,17 @@ pub(crate) fn bootstrap(config: Config, password: String) -> Result<UiState> {
     };
     let schema = SchemaModel::from_raw(&raw);
 
-    // Tolerant capability probe: a failed/absent root DSE just means "no txn
-    // support" (never fail bootstrap over it).
-    let server_supports_txn = match worker.request(Request::FetchRootDse) {
+    // Tolerant capability probe: a failed/absent root DSE just means "no
+    // support" for txn / assertion (never fail bootstrap over it).
+    let (server_supports_txn, assertion_supported) = match worker.request(Request::FetchRootDse) {
         Ok(Response::RootDse {
             supported_extensions,
-        }) => crate::ldap::worker::txn_supported(&supported_extensions),
-        _ => false,
+            supported_controls,
+        }) => (
+            crate::ldap::worker::txn_supported(&supported_extensions),
+            crate::ldap::worker::assertion_supported(&supported_controls),
+        ),
+        _ => (false, false),
     };
 
     let nodes = match worker.request(Request::LoadStructure {
@@ -985,6 +997,8 @@ pub(crate) fn bootstrap(config: Config, password: String) -> Result<UiState> {
         pending_password_attrs: Vec::new(),
         samba_domain,
         server_supports_txn,
+        assertion_supported,
+        concurrency_warned: false,
     })
 }
 

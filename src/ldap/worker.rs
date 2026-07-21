@@ -42,6 +42,15 @@ pub fn txn_supported(exts: &[String]) -> bool {
     exts.iter().any(|e| e == TXN_START_OID) && exts.iter().any(|e| e == TXN_END_OID)
 }
 
+/// RFC 4528 Assertion control OID.
+pub const ASSERTION_CONTROL_OID: &str = "1.3.6.1.1.12";
+
+/// True iff the server's `supportedControl` advertises the RFC 4528 Assertion
+/// control — the prerequisite for optimistic-concurrency writes. Pure.
+pub fn assertion_supported(controls: &[String]) -> bool {
+    controls.iter().any(|c| c == ASSERTION_CONTROL_OID)
+}
+
 /// Search scope for a [`Request::Search`]. Mapped to `ldap3::Scope` only inside
 /// the worker (see [`scope_to_ldap3`]) so `ldap3` types do not leak.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -179,9 +188,11 @@ pub struct RawSubschema {
 #[derive(Debug, Clone)]
 pub enum Response {
     Subschema(RawSubschema),
-    /// Root DSE `supportedExtension` values (reply to [`Request::FetchRootDse`]).
+    /// Root DSE `supportedExtension` + `supportedControl` values (reply to
+    /// [`Request::FetchRootDse`]).
     RootDse {
         supported_extensions: Vec<String>,
+        supported_controls: Vec<String>,
     },
     /// Result of a [`Request::Search`]; `id` echoes the request (D4).
     /// `truncated` is true when the server capped the result set (rc 3/4/11).
@@ -413,8 +424,9 @@ fn worker_loop(conn: &mut LdapConn, config: &Config, rx: Receiver<Job>) {
             }
             Request::FetchRootDse => {
                 let resp = match fetch_root_dse(conn) {
-                    Ok(supported_extensions) => Response::RootDse {
+                    Ok((supported_extensions, supported_controls)) => Response::RootDse {
                         supported_extensions,
+                        supported_controls,
                     },
                     Err(e) => Response::Error(e.to_string()),
                 };
@@ -801,23 +813,27 @@ fn fetch_subschema(conn: &mut LdapConn, base_dn: &str) -> Result<RawSubschema> {
     })
 }
 
-/// Read the root DSE (`""`, base scope) and return its `supportedExtension` values.
-fn fetch_root_dse(conn: &mut LdapConn) -> Result<Vec<String>> {
+/// Read the root DSE (`""`, base scope) and return `(supportedExtension,
+/// supportedControl)` values.
+fn fetch_root_dse(conn: &mut LdapConn) -> Result<(Vec<String>, Vec<String>)> {
     let (entries, _res) = conn
         .search(
             "",
             Scope::Base,
             "(objectClass=*)",
-            vec!["supportedExtension"],
+            vec!["supportedExtension", "supportedControl"],
         )?
         .success()
         .context("reading root DSE")?;
-    let exts = entries
-        .into_iter()
-        .map(SearchEntry::construct)
-        .find_map(|e| e.attrs.get("supportedExtension").cloned())
+    let entry = entries.into_iter().map(SearchEntry::construct).next();
+    let exts = entry
+        .as_ref()
+        .and_then(|e| e.attrs.get("supportedExtension").cloned())
         .unwrap_or_default();
-    Ok(exts)
+    let ctrls = entry
+        .and_then(|e| e.attrs.get("supportedControl").cloned())
+        .unwrap_or_default();
+    Ok((exts, ctrls))
 }
 
 #[cfg(test)]
@@ -989,6 +1005,16 @@ mod tests {
         assert!(!txn_supported(&["1.3.6.1.1.21.1".to_string()]));
         assert!(!txn_supported(&["1.3.6.1.1.21.3".to_string()]));
         assert!(!txn_supported(&[]));
+    }
+
+    #[test]
+    fn assertion_control_detected() {
+        // RFC 4528 Assertion control OID.
+        let with = vec!["1.3.6.1.1.12".to_string(), "1.2.3".to_string()];
+        let without = vec!["1.2.3".to_string()];
+        assert!(assertion_supported(&with));
+        assert!(!assertion_supported(&without));
+        assert!(!assertion_supported(&[]));
     }
 
     #[test]
