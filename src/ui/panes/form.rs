@@ -1381,6 +1381,7 @@ mod tests {
             },
             object_classes: vec![],
             fields,
+            baseline_csn: None,
         });
         st.form_needs_render = true;
         let shared: Shared = Rc::new(RefCell::new(st));
@@ -1401,6 +1402,7 @@ mod tests {
             mode: FormMode::Edit,
             object_classes: vec![],
             fields,
+            baseline_csn: None,
         });
         st.form_needs_render = true;
         let shared: Shared = Rc::new(RefCell::new(st));
@@ -1436,6 +1438,7 @@ mod tests {
             mode: FormMode::Edit,
             object_classes: vec![],
             fields: vec![ef("cn", "a", true), ef("creatorsName", "admin", false)],
+            baseline_csn: None,
         });
         st.form_needs_render = true;
         Rc::new(RefCell::new(st))
@@ -1556,6 +1559,7 @@ mod tests {
             mode: FormMode::Edit,
             object_classes: vec![],
             fields: vec![cn, ef("gidNumber", "1001", true), ef("sn", "Bar", true)],
+            baseline_csn: None,
         });
         st.form_needs_render = true;
         let shared: Shared = Rc::new(RefCell::new(st));
@@ -1634,6 +1638,7 @@ mod tests {
             mode: FormMode::Edit,
             object_classes: vec![],
             fields: vec![ef("gidNumber", "1001", true), ef("sn", "Bar", true)],
+            baseline_csn: None,
         });
         st.form_needs_render = true;
         let shared: Shared = Rc::new(RefCell::new(st));
@@ -1702,6 +1707,7 @@ mod tests {
             mode: FormMode::Edit,
             object_classes: vec![],
             fields: vec![ef("cn", "a", true), ef("sn", "B", true)],
+            baseline_csn: None,
         });
         st.form_needs_render = true;
         let shared: Shared = Rc::new(RefCell::new(st));
@@ -1761,6 +1767,7 @@ mod tests {
             mode: FormMode::Edit,
             object_classes: vec![],
             fields,
+            baseline_csn: None,
         });
         st.form_needs_render = true;
         let shared: Shared = Rc::new(RefCell::new(st));
@@ -2009,6 +2016,7 @@ mod tests {
             mode: FormMode::Edit,
             object_classes: vec![],
             fields: vec![ef("cn", "hello", true), ef("sn", "world", true)],
+            baseline_csn: None,
         });
         st.form_needs_render = true;
         let shared: Shared = Rc::new(RefCell::new(st));
@@ -2296,6 +2304,7 @@ mod tests {
                 ef("sn", "b", true),
                 ef("mail", "c", true),
             ],
+            baseline_csn: None,
         });
         st.form_needs_render = true;
         let shared: Shared = Rc::new(RefCell::new(st));

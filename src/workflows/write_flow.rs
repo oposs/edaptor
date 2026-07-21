@@ -788,6 +788,7 @@ mod tests {
             mode: FormMode::Edit,
             object_classes: vec!["top".into(), "person".into()],
             fields,
+            baseline_csn: None,
         }
     }
 
@@ -1134,6 +1135,7 @@ mod tests {
             mode: FormMode::Edit,
             object_classes: vec!["top".into()], // no inetOrgPerson → no widget match
             fields: vec![oc_top, field("cn", "Alice", "Alice"), sn_changed, pw_field],
+            baseline_csn: None,
         };
 
         // Widget requires inetOrgPerson; form has only "top" → no match.

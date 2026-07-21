@@ -94,6 +94,9 @@ pub struct EditForm {
     pub mode: FormMode,
     pub object_classes: Vec<String>,
     pub fields: Vec<EditField>,
+    /// `entryCSN` at load time — the version asserted on save. `None` disables
+    /// optimistic concurrency for this form (create mode, or server without it).
+    pub baseline_csn: Option<String>,
 }
 
 impl EditForm {
@@ -378,6 +381,7 @@ pub fn build_edit_form(model: &FormModel, schema: &SchemaModel, read_only: bool)
         mode: FormMode::Edit,
         object_classes: Vec::new(),
         fields,
+        baseline_csn: None,
     }
 }
 
@@ -642,6 +646,7 @@ mod tests {
             mode: FormMode::Edit,
             object_classes: ocs.iter().map(|s| s.to_string()).collect(),
             fields: vec![oc_field],
+            baseline_csn: None,
         }
     }
 

@@ -136,6 +136,7 @@ mod tests {
             mode: FormMode::Edit,
             object_classes: vec!["inetOrgPerson".into()],
             fields: vec![up_field],
+            baseline_csn: None,
         };
 
         let object_classes = vec!["inetOrgPerson".into()];
@@ -188,6 +189,7 @@ mod tests {
             mode: FormMode::Edit,
             object_classes: vec!["sambaSamAccount".into()],
             fields: vec![mk("userPassword"), mk("sambaNTPassword")],
+            baseline_csn: None,
         };
         apply_widget_bindings(&mut form, &resolver, &["sambaSamAccount".into()]);
 
@@ -240,6 +242,7 @@ mod tests {
             mode: FormMode::Edit,
             object_classes: vec!["inetOrgPerson".into()],
             fields: vec![oc_field],
+            baseline_csn: None,
         };
 
         apply_widget_bindings(&mut form, &resolver, &["inetOrgPerson".into()]);
@@ -287,6 +290,7 @@ mod tests {
             mode: FormMode::Edit,
             object_classes: vec!["posixGroup".into()],
             fields: vec![member_field],
+            baseline_csn: None,
         };
 
         apply_widget_bindings(&mut form, &resolver, &["posixGroup".to_string()]);
@@ -327,6 +331,7 @@ mod tests {
             mode: FormMode::Edit,
             object_classes: vec![],
             fields: vec![field],
+            baseline_csn: None,
         };
 
         apply_widget_bindings(&mut form, &resolver, &[]);

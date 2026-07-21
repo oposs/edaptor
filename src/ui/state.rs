@@ -247,9 +247,11 @@ impl UiState {
                 ReadOutcome::Form {
                     model,
                     object_classes,
+                    baseline_csn,
                 } => {
                     let mut form = build_edit_form(&model, self.read_flow.schema(), self.read_only);
                     form.object_classes = object_classes;
+                    form.baseline_csn = baseline_csn;
                     {
                         // Build a resolver from &self fields (disjoint from the local
                         // `form`); apply profile-driven bindings before installing.
@@ -1126,6 +1128,7 @@ mod tests {
             mode: FormMode::Edit,
             object_classes: vec!["top".into()],
             fields: vec![oc_field],
+            baseline_csn: None,
         });
 
         // Commit "top, person": objectClass values updated, fields injected, render flagged.
@@ -1193,6 +1196,7 @@ mod tests {
             mode: FormMode::Edit,
             object_classes: vec!["top".into()],
             fields: vec![plain_field],
+            baseline_csn: None,
         });
 
         st.apply_commit(0, CommitOutcome::SetValues(vec!["newval".into()]));
@@ -1262,6 +1266,7 @@ mod tests {
                 mk("uidNumber", None, vec!["1000".into()]),
                 mk("sambaSID", Some(WidgetKind::SambaSid), vec![]),
             ],
+            baseline_csn: None,
         });
 
         // Ok branch: compute (helper) + apply_commit, as the dispatch does.
@@ -1322,6 +1327,7 @@ mod tests {
             },
             object_classes: vec![],
             fields: vec![uid_field],
+            baseline_csn: None,
         });
         st.form_needs_render = false;
 
@@ -1385,6 +1391,7 @@ mod tests {
                 mk("uidNumber", vec![ALLOC_PLACEHOLDER.to_string()]),
                 mk("sambaSID", vec![]),
             ],
+            baseline_csn: None,
         });
 
         // Before uidNumber resolves: sambaSID stays empty (placeholder isn't numeric).
@@ -1446,6 +1453,7 @@ mod tests {
             },
             object_classes: vec![],
             fields: vec![uid_field],
+            baseline_csn: None,
         });
         st.form_needs_render = false;
 
@@ -1500,6 +1508,7 @@ mod tests {
             mode: FormMode::Edit,
             object_classes: vec!["inetOrgPerson".into()],
             fields: vec![pw_field],
+            baseline_csn: None,
         });
         st.form_needs_render = false;
 
@@ -1716,6 +1725,7 @@ mod tests {
                 make_placeholder_field("uidNumber"),
                 make_placeholder_field("gidNumber"),
             ],
+            baseline_csn: None,
         });
         st.form_needs_render = false;
 
@@ -1884,6 +1894,7 @@ mod write_routing_tests {
             mode: FormMode::Edit,
             object_classes: vec!["top".into()],
             fields: vec![field],
+            baseline_csn: None,
         }
     }
 
@@ -1999,6 +2010,7 @@ mod write_routing_tests {
                 values: vec!["bob".into()],
                 baseline: vec![],
             }],
+            baseline_csn: None,
         });
         let r = st.apply_write_outcome(WriteOutcome::Created {
             dn: "uid=bob,ou=people,dc=example,dc=org".into(),

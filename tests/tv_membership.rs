@@ -287,6 +287,7 @@ fn user_form(selected_groups: Vec<&str>, baseline_groups: Vec<&str>) -> EditForm
             plain_field("sn", "User", true, false),
             memberof_field(selected_groups, baseline_groups),
         ],
+        baseline_csn: None,
     }
 }
 

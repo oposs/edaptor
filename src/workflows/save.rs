@@ -779,6 +779,7 @@ mod tests {
                 plain_field("description", vec!["new desc"], vec!["old desc"]),
                 memberof_field(vec!["cn=g2,ou=groups,dc=x"], vec!["cn=g1,ou=groups,dc=x"]),
             ],
+            baseline_csn: None,
         }
     }
 
@@ -792,6 +793,7 @@ mod tests {
                 plain_field("uid", vec!["bob"], vec!["ann"]),
                 memberof_field(vec!["cn=g2,ou=groups,dc=x"], vec!["cn=g1,ou=groups,dc=x"]),
             ],
+            baseline_csn: None,
         }
     }
 
@@ -892,6 +894,7 @@ mod tests {
                 // Fan-out: g1 → g2.
                 memberof_field(vec!["cn=g2,ou=groups,dc=x"], vec!["cn=g1,ou=groups,dc=x"]),
             ],
+            baseline_csn: None,
         }
     }
 
