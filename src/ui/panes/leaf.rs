@@ -1,6 +1,9 @@
 //! Leaf list pane: a `ListBox` of the current branch's leaves with the list's
 //! own incremental find (`FindMode::Highlight`) — type while it is focused to
-//! filter and highlight, no separate search box.
+//! filter and highlight, no separate search box. While a query is active, the
+//! rows come from a live one-level search under the branch (see
+//! `UiState::set_leaf_search`), not from the cached projection — an entry
+//! another client just created is findable without a restart.
 
 use tvision_rs::{
     self as tv, delegate, Context, Event, FieldValue, FindMode, Group, Key, ListBox, ListViewer,
@@ -260,11 +263,12 @@ impl View for LeafPane {
         self.group.handle_event(ev, ctx);
 
         // A find-query edit (the list broadcasts LIST_FIND_CHANGED on change):
-        // mirror the query into shared state and recompute the rows. `Highlight`
-        // mode does not self-filter — the pane supplies the already-filtered rows
-        // (`leaf_rows()` narrows by `state.search`), keeping the list index aligned
-        // 1:1 with `leaf_rows()` so the selection→DN mapping stays correct, while
-        // the list highlights the matched substring.
+        // submit it to shared state, which answers from the directory (or falls
+        // back to the cached projection while the search is in flight) and
+        // recomputes the rows. `Highlight` mode does not self-filter — the pane
+        // supplies the already-filtered rows (`leaf_rows()`), keeping the list
+        // index aligned 1:1 with `leaf_rows()` so the selection→DN mapping stays
+        // correct, while the list highlights the matched substring.
         let cur = self
             .group
             .child_mut(self.list_id)
@@ -274,7 +278,10 @@ impl View for LeafPane {
             .unwrap_or_default();
         if cur != self.last_search {
             self.last_search = cur.clone();
-            self.state.borrow_mut().search = cur;
+            // Answer the find from the directory (superseding any in-flight one),
+            // never from the cached projection: an entry another client created must
+            // be findable without a restart.
+            self.state.borrow_mut().set_leaf_search(cur);
             self.repopulate(ctx);
         }
 

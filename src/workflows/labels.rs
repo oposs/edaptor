@@ -112,6 +112,43 @@ pub(crate) fn compute_rows(
     rows
 }
 
+/// Rows for a live find: the container's ‹self› row (filtered by `search`, exactly
+/// as [`compute_rows`] does) followed by the given `dns` rendered through the label
+/// rules and sorted by label.
+///
+/// DNs the model does not know, and DNs that are branches (pane 2 lists leaves),
+/// are skipped — a one-level search returns containers too.
+pub(crate) fn compute_rows_for_dns(
+    structure: &Structure,
+    branch: &str,
+    search: &str,
+    rules: &[LabelRule],
+    dns: &[String],
+) -> Vec<(String, String)> {
+    let mut rows = Vec::new();
+    let q = search.to_lowercase();
+    if let Some(node) = structure.get(branch) {
+        let self_label = format!("‹self› {}", node.label);
+        if q.is_empty() || self_label.to_lowercase().contains(&q) {
+            rows.push((self_label, branch.to_string()));
+        }
+    }
+    let mut hits: Vec<(String, String)> = dns
+        .iter()
+        .filter_map(|dn| structure.get(dn))
+        .filter(|n| !n.is_branch())
+        .map(|n| {
+            (
+                render_node_label(rules, &n.object_classes, &n.attrs, &n.label),
+                n.dn.clone(),
+            )
+        })
+        .collect();
+    hits.sort_by_key(|a| a.0.to_lowercase());
+    rows.extend(hits);
+    rows
+}
+
 /// Map the worker's raw structure rows into the pure model's input rows. Pure.
 pub(crate) fn structure_inputs(nodes: Vec<StructureNodeRaw>) -> Vec<StructureInput> {
     nodes
@@ -327,5 +364,34 @@ mod tests {
         // everything out, leaving zero rows (the "No match" case).
         let miss = compute_rows(&s, "ou=users,dc=example,dc=org", "zzz", &rules);
         assert_eq!(miss.len(), 0, "no rows survive");
+    }
+
+    #[test]
+    fn compute_rows_for_dns_renders_the_given_dns_and_keeps_the_self_row() {
+        let s = structure();
+        let rules = vec![LabelRule {
+            object_classes: vec!["inetOrgPerson".into()],
+            template: crate::config::label::parse_label_template("{cn} ({uid})"),
+        }];
+        let dns = vec!["uid=jane,ou=users,dc=example,dc=org".to_string()];
+        let rows = compute_rows_for_dns(&s, "ou=users,dc=example,dc=org", "jane", &rules, &dns);
+        // The ‹self› row is filtered by the query exactly as in compute_rows: it
+        // does not contain "jane", so only the live hit survives.
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].0, "Jane (jane)");
+        assert_eq!(rows[0].1, "uid=jane,ou=users,dc=example,dc=org");
+    }
+
+    #[test]
+    fn compute_rows_for_dns_skips_branches_and_unknown_dns() {
+        let s = structure();
+        let dns = vec![
+            "ou=users,dc=example,dc=org".to_string(), // a branch: pane 2 shows leaves
+            "uid=ghost,ou=users,dc=example,dc=org".to_string(), // not in the model
+        ];
+        let rows = compute_rows_for_dns(&s, "dc=example,dc=org", "", &[], &dns);
+        // Only the ‹self› row for the container remains.
+        assert_eq!(rows.len(), 1);
+        assert!(rows[0].0.starts_with("‹self›"));
     }
 }

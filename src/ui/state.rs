@@ -10,6 +10,7 @@ use crate::schema::SchemaModel;
 use crate::workflows::alloc_flow::{AllocFlow, AllocOutcome};
 use crate::workflows::edit_form::{build_edit_form, EditForm};
 use crate::workflows::labels::LabelRule;
+use crate::workflows::leaf_search::{LeafSearchFlow, LeafSearchOutcome};
 use crate::workflows::pick_state::Candidate;
 use crate::workflows::read_flow::ReadFlow;
 use crate::workflows::resolve_flow::{LookupKey, ResolveFlow, ResolveOutcome};
@@ -119,6 +120,13 @@ pub struct UiState {
     pub current_branch: Option<String>,
     pub current_leaf: Option<String>,
     pub search: String,
+    /// Live one-level find backing the entry list (supersedes on every keystroke).
+    pub leaf_search: LeafSearchFlow,
+    /// DNs returned by the newest find, or `None` when no find is active / none has
+    /// landed yet. `leaf_rows` falls back to filtering the cached projection then.
+    pub leaf_search_rows: Option<Vec<String>>,
+    /// True when the newest find hit `LEAF_SEARCH_CAP`.
+    pub leaf_search_truncated: bool,
     /// The loaded editable form (None until a leaf is read).
     pub edit_form: Option<EditForm>,
     /// Create-mode live-template latches (attr → latch), built by `open_create`
@@ -257,6 +265,9 @@ impl UiState {
             current_branch: None,
             current_leaf: None,
             search: String::new(),
+            leaf_search: LeafSearchFlow::new(),
+            leaf_search_rows: None,
+            leaf_search_truncated: false,
             edit_form: None,
             live_templates: std::collections::BTreeMap::new(),
             computed_defaults: std::collections::BTreeMap::new(),
@@ -365,6 +376,13 @@ impl UiState {
             if !matches!(alloc_out, AllocOutcome::Ignored) {
                 self.apply_alloc_outcome(alloc_out);
                 out.changed = true;
+            }
+            // Entry-list find: Entries/SearchError with leaf-search ids (5_000_000+).
+            let l_out = self.leaf_search.on_response(resp);
+            if !matches!(l_out, LeafSearchOutcome::Ignored) {
+                self.apply_leaf_search_outcome(l_out);
+                out.changed = true;
+                continue;
             }
             // Candidate search: Entries/SearchError with search-range IDs (3_000_000+).
             let s_out = self.search_flow.on_response(resp);
@@ -1097,21 +1115,104 @@ impl UiState {
         self.current_branch = Some(dn);
         self.list_dirty = true;
         self.search = String::new();
+        // Another container's live hits must not leak into this one.
+        self.leaf_search_rows = None;
+        self.leaf_search_truncated = false;
+    }
+
+    /// The entry list's find changed: mirror the query and answer it from the
+    /// directory. An empty query drops the live rows and returns pane 2 to the
+    /// container listing; a non-empty one submits a fresh one-level search whose
+    /// predecessor (if any) is superseded. No-op without a worker or a branch.
+    pub fn set_leaf_search(&mut self, query: String) {
+        self.search = query;
+        self.list_dirty = true;
+        if self.search.is_empty() {
+            self.leaf_search_rows = None;
+            self.leaf_search_truncated = false;
+            return;
+        }
+        let Some(branch) = self.current_branch.clone() else {
+            return;
+        };
+        let filter_attrs = crate::workflows::labels::label_rule_attrs(&self.label_rules);
+        let Self {
+            worker,
+            leaf_search,
+            scan_attrs,
+            search,
+            ..
+        } = self;
+        if let Some(w) = worker.as_ref() {
+            let _ = leaf_search.request(w, &branch, search, &filter_attrs, scan_attrs);
+        }
+    }
+
+    /// Apply one non-ignored find outcome.
+    ///
+    /// `Results`: upsert every hit into the structure (so entries other clients
+    /// created become permanent local nodes, not transient rows), then keep their
+    /// DNs as the list's row source. `Failed`: surface the error and drop back to
+    /// the cached projection so the pane is never blank over a transient failure.
+    pub fn apply_leaf_search_outcome(&mut self, out: LeafSearchOutcome) {
+        match out {
+            LeafSearchOutcome::Results { entries, truncated } => {
+                let mut dns = Vec::with_capacity(entries.len());
+                for e in &entries {
+                    self.upsert_from_read(&e.dn, &e.attrs);
+                    dns.push(e.dn.clone());
+                }
+                self.leaf_search_rows = Some(dns);
+                self.leaf_search_truncated = truncated;
+                if truncated {
+                    self.status = format!(
+                        "Showing the first {} matches — narrow the search.",
+                        crate::workflows::leaf_search::LEAF_SEARCH_CAP
+                    );
+                }
+                self.list_dirty = true;
+            }
+            LeafSearchOutcome::Failed(msg) => {
+                self.status = format!("Search failed: {msg}");
+                self.leaf_search_rows = None;
+                self.leaf_search_truncated = false;
+                self.list_dirty = true;
+            }
+            LeafSearchOutcome::Ignored => {}
+        }
     }
 }
 
 impl UiState {
-    /// (label, dn) rows for the current branch, filtered by `search`, using the
-    /// configured column-2 label rules. Empty when no branch is selected.
+    /// (label, dn) rows for the current branch, using the configured column-2 label
+    /// rules. Empty when no branch is selected.
+    ///
+    /// | State | Source |
+    /// |---|---|
+    /// | no query | the structure projection |
+    /// | query + live results | those results, rendered and sorted by label |
+    /// | query, none landed yet or the find failed | the cached projection, filtered |
+    ///
+    /// This is the single row source for the pane: the list's selection index maps
+    /// 1:1 onto it, so the selection→DN mapping stays correct in every state.
     pub fn leaf_rows(&self) -> Vec<(String, String)> {
-        match &self.current_branch {
-            Some(b) => crate::workflows::labels::compute_rows(
+        let Some(branch) = self.current_branch.as_deref() else {
+            return Vec::new();
+        };
+        match (self.search.is_empty(), self.leaf_search_rows.as_deref()) {
+            (false, Some(dns)) => crate::workflows::labels::compute_rows_for_dns(
                 &self.structure,
-                b,
+                branch,
+                &self.search,
+                &self.label_rules,
+                dns,
+            ),
+            _ => crate::workflows::labels::compute_rows(
+                &self.structure,
+                branch,
                 &self.search,
                 &self.label_rules,
             ),
-            None => Vec::new(),
         }
     }
 
@@ -1318,6 +1419,9 @@ pub(crate) fn bootstrap(config: Config, password: String) -> Result<UiState> {
         current_branch: None,
         current_leaf: None,
         search: String::new(),
+        leaf_search: LeafSearchFlow::new(),
+        leaf_search_rows: None,
+        leaf_search_truncated: false,
         edit_form: None,
         live_templates: std::collections::BTreeMap::new(),
         computed_defaults: std::collections::BTreeMap::new(),
@@ -2408,6 +2512,78 @@ mod tests {
             st.search.is_empty(),
             "a stale query must not hide the entry just created"
         );
+    }
+
+    #[test]
+    fn leaf_rows_uses_live_results_when_a_query_is_active() {
+        let structure = Structure::build(
+            "dc=x",
+            vec![
+                si("dc=x", None),
+                si("ou=p,dc=x", None),
+                si("uid=a,ou=p,dc=x", Some("A")),
+            ],
+        );
+        let schema = SchemaModel::from_raw(&RawSubschema::default());
+        let mut st =
+            UiState::new_for_test(structure, schema, "dc=x".into(), Vec::new(), Vec::new());
+        st.current_branch = Some("ou=p,dc=x".into());
+
+        // No query → the structure projection.
+        assert_eq!(st.leaf_rows().len(), 2, "‹self› + uid=a");
+
+        // Query with live results in hand → the live rows.
+        st.scan_attrs = vec!["cn".to_string()];
+        let mut attrs: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        attrs.insert("cn".to_string(), vec!["Bee".to_string()]);
+        st.upsert_from_read("uid=b,ou=p,dc=x", &attrs);
+        st.search = "bee".into();
+        st.leaf_search_rows = Some(vec!["uid=b,ou=p,dc=x".to_string()]);
+        let rows = st.leaf_rows();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].1, "uid=b,ou=p,dc=x");
+
+        // Query with NO results yet (in flight or failed) → cached filter fallback.
+        st.leaf_search_rows = None;
+        st.search = "a".into();
+        assert_eq!(
+            st.leaf_rows().len(),
+            1,
+            "falls back to filtering the cached projection"
+        );
+    }
+
+    #[test]
+    fn switching_branch_drops_live_results() {
+        let structure = Structure::build("dc=x", vec![si("dc=x", None), si("ou=p,dc=x", None)]);
+        let schema = SchemaModel::from_raw(&RawSubschema::default());
+        let mut st =
+            UiState::new_for_test(structure, schema, "dc=x".into(), Vec::new(), Vec::new());
+        st.search = "ann".into();
+        st.leaf_search_rows = Some(vec!["uid=ann,ou=q,dc=x".to_string()]);
+
+        st.commit_branch("ou=p,dc=x".into());
+
+        assert!(st.search.is_empty());
+        assert!(
+            st.leaf_search_rows.is_none(),
+            "another branch's hits must not leak into this one"
+        );
+    }
+
+    #[test]
+    fn empty_query_clears_live_results_without_a_search() {
+        let structure = Structure::build("dc=x", vec![si("dc=x", None), si("ou=p,dc=x", None)]);
+        let schema = SchemaModel::from_raw(&RawSubschema::default());
+        let mut st =
+            UiState::new_for_test(structure, schema, "dc=x".into(), Vec::new(), Vec::new());
+        st.current_branch = Some("ou=p,dc=x".into());
+        st.leaf_search_rows = Some(vec!["uid=ann,ou=p,dc=x".to_string()]);
+
+        st.set_leaf_search(String::new());
+
+        assert!(st.leaf_search_rows.is_none());
+        assert!(st.list_dirty);
     }
 }
 
