@@ -24,6 +24,7 @@
 - [Object Model](concepts/object-model.md)
 - [LDAP Constraints](concepts/ldap-constraints.md)
 - [Change Flow](concepts/change-flow.md)
+- [Optimistic concurrency](concepts/optimistic-concurrency.md)
 
 # Usage
 
