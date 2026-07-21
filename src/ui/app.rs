@@ -691,23 +691,43 @@ fn do_combined_save(
             // Alongside it, a per-group entryCSN pre-read (Task 8) so each fan-out
             // leg's MODIFY can assert its group's CSN — a concurrent membership
             // change on that group then surfaces as a Conflict leg instead of a
-            // raw LDAP error.
-            let (group_members, group_csns) = {
+            // raw LDAP error. Both the group CSNs and the own-entry CSN are gated
+            // on `st.assertion_supported`, mirroring the plain-save idiom at
+            // `do_save` (~line 568): a server that exposes a readable `entryCSN`
+            // but does not advertise the RFC 4528 Assertion control would reject
+            // a critical assertion with rc 12 (unavailableCriticalExtension), so
+            // every leg must stay blind (`assert_csn: None`) on such servers.
+            let (group_members, group_csns, own_assert_csn) = {
                 // Safe to hold this read borrow across the blocking worker.request: it's a
                 // synchronous channel round-trip in dispatch (no event-loop pump → no reentrant borrow).
                 let st = state.borrow();
+                let assertion_supported = st.assertion_supported;
                 match (st.worker.as_ref(), st.edit_form.as_ref()) {
-                    (Some(w), Some(_)) => (
-                        crate::workflows::write_flow::fetch_group_members_for_must(
-                            w,
-                            st.read_flow.schema(),
-                            &combined.fanout,
-                        ),
-                        crate::workflows::write_flow::fetch_group_csns(w, &combined.fanout),
-                    ),
+                    (Some(w), Some(form)) => {
+                        let group_csns = if assertion_supported {
+                            crate::workflows::write_flow::fetch_group_csns(w, &combined.fanout)
+                        } else {
+                            std::collections::HashMap::new()
+                        };
+                        let own_assert_csn = if assertion_supported {
+                            form.baseline_csn.clone()
+                        } else {
+                            None
+                        };
+                        (
+                            crate::workflows::write_flow::fetch_group_members_for_must(
+                                w,
+                                st.read_flow.schema(),
+                                &combined.fanout,
+                            ),
+                            group_csns,
+                            own_assert_csn,
+                        )
+                    }
                     _ => (
                         std::collections::HashMap::new(),
                         std::collections::HashMap::new(),
+                        None,
                     ),
                 }
             };
@@ -743,6 +763,7 @@ fn do_combined_save(
                         combined,
                         &group_members,
                         &group_csns,
+                        own_assert_csn,
                         &reread_dn,
                         quit_after,
                     )

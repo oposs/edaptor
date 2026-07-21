@@ -570,15 +570,23 @@ impl WriteFlow {
     /// `group_csns.get(&group_dn)` (from [`fetch_group_csns`]) so a concurrent
     /// membership change on that group surfaces as a [`WriteOutcome::Conflict`]
     /// leg instead of a raw LDAP error. A group
-    /// missing from the map submits blind (`assert_csn: None`). The own-entry
-    /// leg is unrelated to `group_csns` and unchanged by this (still a blind
-    /// write here).
+    /// missing from the map submits blind (`assert_csn: None`).
+    ///
+    /// **Own-entry CSN assertion:** the own-entry leg (when `own_mods` is
+    /// non-empty) asserts `own_assert_csn` — the caller's job to populate with
+    /// the form's `baseline_csn` (mirroring the plain-save path), or `None` for
+    /// a blind write. This function does not itself decide whether assertion is
+    /// supported by the server; both `own_assert_csn` and `group_csns` are
+    /// expected to already be gated (e.g. on `assertion_supported`) by the
+    /// caller — see `do_combined_save` in `src/ui/app.rs`.
+    #[allow(clippy::too_many_arguments)]
     pub fn submit_combined(
         &mut self,
         worker: &WorkerHandle,
         combined: CombinedSave,
         group_members: &std::collections::HashMap<String, Vec<String>>,
         group_csns: &std::collections::HashMap<String, String>,
+        own_assert_csn: Option<String>,
         reread_dn: &str,
         quit_after: bool,
     ) -> std::result::Result<(), String> {
@@ -598,11 +606,11 @@ impl WriteFlow {
         }
 
         // 2. Assemble the legs: own entry first (if any own changes), then groups.
-        //    Each group leg's assert_csn comes from `group_csns`; the own-entry
-        //    leg is out of scope here (unchanged: blind write).
+        //    The own-entry leg's assert_csn is the caller-supplied
+        //    `own_assert_csn`; each group leg's comes from `group_csns`.
         let mut legs: Vec<(String, Vec<ModOp>, Option<String>)> = Vec::new();
         if !own_mods.is_empty() {
-            legs.push((own_dn, own_mods, None));
+            legs.push((own_dn, own_mods, own_assert_csn));
         }
         for (group_dn, op) in fanout {
             let assert_csn = group_csns.get(&group_dn).cloned();
@@ -1353,6 +1361,7 @@ mod tests {
             combined,
             &members,
             &HashMap::new(),
+            None,
             "uid=ann,ou=people,dc=x",
             false,
         )
@@ -1384,7 +1393,10 @@ mod tests {
 
     /// Each group leg's `Request::Modify` carries that group's `entryCSN` from
     /// `group_csns`; a group missing from the map gets `assert_csn: None` (blind
-    /// write, server remains the backstop).
+    /// write, server remains the backstop). The own-entry leg carries whatever
+    /// `own_assert_csn` the caller passed (the UI gates this on
+    /// `assertion_supported` before calling; `submit_combined` itself just
+    /// threads it through).
     #[test]
     fn combined_legs_carry_group_csn() {
         let mut wf = WriteFlow::new();
@@ -1408,6 +1420,7 @@ mod tests {
             combined,
             &members,
             &csns,
+            Some("OWN-CSN-1".to_string()),
             "uid=ann,ou=people,dc=x",
             false,
         )
@@ -1433,8 +1446,50 @@ mod tests {
         );
         assert_eq!(
             own_csn,
+            Some(Some("OWN-CSN-1".to_string())),
+            "own-entry leg asserts the caller-supplied CSN when assertion is supported"
+        );
+    }
+
+    /// When the caller passes `own_assert_csn: None` (assertion unsupported, or no
+    /// baseline CSN available), the own-entry leg is a blind write — mirrors the
+    /// plain-save gating idiom in `do_save` (`src/ui/app.rs`).
+    #[test]
+    fn combined_own_leg_blind_when_no_own_csn() {
+        let mut wf = WriteFlow::new();
+        let (worker, rx) = WorkerHandle::recording();
+        let combined = combined_with(
+            vec![ModOp::Replace {
+                attr: "description".into(),
+                values: vec!["new".into()],
+            }],
+            vec![add_op("cn=staff,dc=example,dc=org")],
+        );
+        let members: HashMap<String, Vec<String>> = HashMap::new();
+
+        wf.submit_combined(
+            &worker,
+            combined,
+            &members,
+            &HashMap::new(),
+            None,
+            "uid=ann,ou=people,dc=x",
+            false,
+        )
+        .expect("valid combined save submits");
+
+        let mut own_csn = None;
+        while let Ok((req, _)) = rx.try_recv() {
+            if let Request::Modify { dn, assert_csn, .. } = req {
+                if dn == "uid=ann,ou=people,dc=x" {
+                    own_csn = Some(assert_csn);
+                }
+            }
+        }
+        assert_eq!(
+            own_csn,
             Some(None),
-            "own-entry leg is out of scope for this task (unchanged: blind write)"
+            "own-entry leg is blind when own_assert_csn is None"
         );
     }
 
@@ -1466,6 +1521,7 @@ mod tests {
                 combined,
                 &members,
                 &HashMap::new(),
+                None,
                 "uid=ann,ou=people,dc=x",
                 false,
             )

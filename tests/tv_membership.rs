@@ -426,6 +426,7 @@ fn combined_membership_save_round_trips_via_write_flow() {
         combined,
         &group_members,
         &group_csns,
+        None, // own_mods is empty here, so this is unused
         USER_DN,
         false,
     )
@@ -485,6 +486,7 @@ fn combined_membership_save_round_trips_via_write_flow() {
         combined2,
         &group_members,
         &group_csns,
+        None, // own_mods is empty here, so this is unused
         USER_DN,
         false,
     )
