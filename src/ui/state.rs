@@ -659,7 +659,29 @@ impl UiState {
                 // asks for one — `Structure::remove` only reports the parent's
                 // branch->leaf flip, not that a container's label moved in the tree.
                 if let Some(old) = renamed_from {
-                    self.structure.remove(&old);
+                    // A renamed CONTAINER takes its whole subtree with it: every
+                    // descendant DN changed on the server, so no local reflow is
+                    // correct. Re-scan instead (the same work Alt+R does).
+                    let was_branch = self
+                        .structure
+                        .get(&old)
+                        .map(|n| n.is_branch())
+                        .unwrap_or(false);
+                    if was_branch {
+                        let was_current = self
+                            .current_branch
+                            .as_deref()
+                            .map(|b| b.eq_ignore_ascii_case(&old))
+                            .unwrap_or(false);
+                        self.reload_structure();
+                        // Keep the operator on the container they just renamed
+                        // rather than falling back to the base DN.
+                        if was_current {
+                            self.current_branch = Some(reread_dn.clone());
+                        }
+                    } else {
+                        self.structure.remove(&old);
+                    }
                     self.tree_dirty = true;
                     self.list_dirty = true;
                 }
@@ -2478,6 +2500,57 @@ mod tests {
         );
         assert!(st.list_dirty);
         assert!(st.tree_dirty, "a rename must trigger a tree rebuild too");
+    }
+
+    /// Renaming a CONTAINER must not orphan its subtree. A plain `structure.remove`
+    /// deletes exactly the renamed node — its children stay linked under the OLD DN,
+    /// which no longer exists on the server. That case must re-scan instead (no
+    /// local reflow is correct: every descendant DN changed too), so it must NOT
+    /// take the plain-`remove` path a leaf rename takes.
+    ///
+    /// `new_for_test` installs no worker, so `reload_structure` returns early and
+    /// leaves `structure` untouched — exactly the observable difference from the
+    /// leaf case above (which unconditionally removes the old node). That is what
+    /// this test asserts: not that a rescan happened (it can't, without a worker),
+    /// but that the branch case did NOT delete the old node/subtree the way the
+    /// leaf case does.
+    #[test]
+    fn saved_renaming_a_container_does_not_orphan_its_subtree() {
+        let structure = Structure::build(
+            "dc=x",
+            vec![
+                si("dc=x", None),
+                si("ou=old,dc=x", None),
+                si("uid=child,ou=old,dc=x", Some("Child")),
+            ],
+        );
+        let schema = SchemaModel::from_raw(&RawSubschema::default());
+        let mut st =
+            UiState::new_for_test(structure, schema, "dc=x".into(), Vec::new(), Vec::new());
+        st.current_branch = Some("ou=old,dc=x".into());
+
+        st.apply_write_outcome(WriteOutcome::Saved {
+            reread_dn: "ou=new,dc=x".into(),
+            renamed_from: Some("ou=old,dc=x".into()),
+            quit_after: false,
+        });
+
+        // Unlike the leaf case, the old branch and its child are left in place for
+        // the rescan to replace — a plain `remove` would delete the container and
+        // strand the child under a DN that no longer exists on the server.
+        assert!(
+            st.structure.get("ou=old,dc=x").is_some(),
+            "a renamed CONTAINER must not be plain-removed — that would orphan its subtree"
+        );
+        assert!(
+            st.structure.get("uid=child,ou=old,dc=x").is_some(),
+            "the child must not be stranded under the old, now-invalid DN"
+        );
+        assert!(st.list_dirty);
+        assert!(st.tree_dirty);
+        // The operator stays on the container they just renamed rather than falling
+        // back to the base DN.
+        assert_eq!(st.current_branch.as_deref(), Some("ou=new,dc=x"));
     }
 
     #[test]
