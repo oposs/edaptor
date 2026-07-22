@@ -1347,13 +1347,18 @@ impl UiState {
         let rows = self.leaf_rows();
         let branch = self.current_branch.as_deref();
         let is_self_row = |dn: &str| branch.is_some_and(|b| dn.eq_ignore_ascii_case(b));
-        let Some((_, first_dn)) = rows.iter().find(|(_, dn)| !is_self_row(dn)) else {
-            return HighlightPlan::Clear;
-        };
+        // "Open entry is in the rows" is checked before any "absent" case, per
+        // the truth table — including when the open entry IS the `‹self›` row
+        // (a childless container the operator has open). Only once that's
+        // ruled out does the fallback-first-row search, which skips `‹self›`,
+        // get to decide there is nothing to highlight.
         if let Some(cur) = self.current_leaf.as_deref() {
             if rows.iter().any(|(_, dn)| dn.eq_ignore_ascii_case(cur)) {
                 return HighlightPlan::Pin(cur.to_string());
             }
+            let Some((_, first_dn)) = rows.iter().find(|(_, dn)| !is_self_row(dn)) else {
+                return HighlightPlan::Clear;
+            };
             let dirty = self
                 .edit_form
                 .as_ref()
@@ -1364,7 +1369,10 @@ impl UiState {
             }
             return HighlightPlan::Follow(first_dn.clone());
         }
-        HighlightPlan::Pin(first_dn.clone())
+        match rows.iter().find(|(_, dn)| !is_self_row(dn)) {
+            Some((_, first_dn)) => HighlightPlan::Pin(first_dn.clone()),
+            None => HighlightPlan::Clear,
+        }
     }
 
     /// The list row index of the entry currently shown in the form (`current_leaf`),
@@ -4185,6 +4193,30 @@ mod write_routing_tests {
     fn highlight_plan_clears_when_there_are_no_rows() {
         let mut st = st_with_rows(&[]);
         st.current_leaf = Some("cn=gone,ou=p,dc=x".to_string());
+        assert_eq!(st.leaf_highlight_plan(), HighlightPlan::Clear);
+    }
+
+    /// The `‹self›` row IS a row: an operator with the container's own entry
+    /// open (`current_leaf == current_branch`) must still be pinned to it, even
+    /// when it is the only row in `leaf_rows()`. The "open entry is in the
+    /// rows" check must run before the fallback-first-row (which skips `‹self›`)
+    /// ever gets a chance to declare there is nothing to highlight.
+    #[test]
+    fn highlight_plan_pins_the_self_row_when_the_container_is_open_and_childless() {
+        let mut st = st_with_rows(&[]);
+        st.current_leaf = Some("ou=p,dc=x".to_string());
+        assert_eq!(
+            st.leaf_highlight_plan(),
+            HighlightPlan::Pin("ou=p,dc=x".to_string())
+        );
+    }
+
+    /// Companion to the above: a childless container with nothing open at all
+    /// still clears (no non-`‹self›` row to fall back to, and no open entry to
+    /// pin).
+    #[test]
+    fn highlight_plan_clears_for_a_childless_container_with_nothing_open() {
+        let st = st_with_rows(&[]);
         assert_eq!(st.leaf_highlight_plan(), HighlightPlan::Clear);
     }
 }
