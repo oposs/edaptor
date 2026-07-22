@@ -10,8 +10,8 @@ matching the attributes your `label` template renders. An entry another
 administrator created seconds ago is therefore findable immediately — the find
 is never answered from the copy loaded at startup. Matches are folded into the
 local model, so they stay listed after you clear the query. At most 500
-matches are returned per find; when that limit is hit the status line says so
-and asks you to narrow the query.
+matches are returned per find; if you do not see the entry you expect, narrow
+the query.
 
 The `lookup` field's candidate list works the same way: every keystroke asks
 the server, capped at 100 candidates per query, so candidates beyond the first
@@ -23,6 +23,10 @@ Creating an entry adds it to the list and selects it. Renaming one moves it.
 Editing an attribute that appears in a label re-renders that label in the tree
 and the entry list. This happens without a rescan: every entry eDAPtor reads —
 including the read that follows a save — refreshes that entry in the model.
+
+Renaming a **container**, however, does trigger a rescan: every entry under it
+changed its DN on the server, so no local reflow could be correct. eDAPtor runs
+the same scan **Alt+R** does and keeps you on the container under its new name.
 
 ## Alt+R reloads the tree
 
