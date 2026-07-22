@@ -796,7 +796,9 @@ impl UiState {
                 self.list_dirty = true;
                 self.edit_form = None; // re-read reloads it in Edit mode
                 if self.worker.is_some() {
-                    self.reread_public(&dn, &ocs);
+                    // The write path's own re-read: use the non-clearing variant so
+                    // a status set for this create survives to be seen.
+                    self.reread(&dn, &ocs);
                 }
                 return PumpResult {
                     changed: true,
@@ -809,22 +811,27 @@ impl UiState {
     }
 
     /// Public wrapper around the private `reread` for the dispatch closure.
+    ///
+    /// Every caller of this wrapper is an operator navigating to another entry
+    /// (the guard's Discard path, the container chooser), so it clears `status`:
+    /// a message describing the previous action no longer describes what is on
+    /// screen. The write path calls the private [`reread`] instead, which does
+    /// not clear — see the note there.
     pub fn reread_public(&mut self, dn: &str, ocs: &[String]) {
+        self.status.clear();
         self.reread(dn, ocs);
     }
 
     /// Submit a base-scope re-read of `dn`, selecting a profile by `ocs`.
     ///
-    /// Clears `status` FIRST, but only when `dn` is genuinely a different entry
-    /// than the one already shown: that is what distinguishes an operator opening
-    /// ANOTHER entry (navigation, or discarding edits to jump to a guard target)
-    /// from the read that follows a save re-reading the SAME entry it just wrote.
-    /// The latter must not erase the "Saved." that `apply_write_outcome` set a
-    /// moment ago and calls this in the same breath to refresh.
+    /// Deliberately does NOT clear `status`. This is the write path's re-read:
+    /// `apply_write_outcome` sets "Saved." and calls this in the same breath to
+    /// refresh the entry, so clearing here would erase the confirmation before it
+    /// could be seen — including on a rename, where the re-read targets the NEW
+    /// dn and so cannot be distinguished from navigation by comparing dns.
+    /// Operator-initiated reads clear `status` at their own call sites
+    /// ([`reread_public`] and [`reconcile_selection`]).
     fn reread(&mut self, dn: &str, ocs: &[String]) {
-        if self.current_leaf.as_deref() != Some(dn) {
-            self.status.clear();
-        }
         let Self {
             worker,
             read_flow,
@@ -1100,6 +1107,9 @@ impl UiState {
             self.guard_target = Some(GuardTarget::Leaf(dn, ocs));
             true
         } else {
+            // The operator opened another entry: whatever the status line was
+            // reporting described the previous action, not this one.
+            self.status.clear();
             self.reread(&dn, &ocs);
             false
         }
@@ -3058,6 +3068,107 @@ mod tests {
         );
     }
 
+    /// `status` must not pin the status line forever: switching containers,
+    /// typing a find query, or committing a field edit is a new operator action,
+    /// so any status left over from a previous one is cleared.
+    #[test]
+    fn commit_branch_clears_a_stale_status() {
+        let structure = Structure::build("dc=x", vec![si("dc=x", None), si("ou=p,dc=x", None)]);
+        let schema = SchemaModel::from_raw(&RawSubschema::default());
+        let mut st =
+            UiState::new_for_test(structure, schema, "dc=x".into(), Vec::new(), Vec::new());
+        st.status = "Reload failed: timeout".into();
+
+        st.commit_branch("ou=p,dc=x".into());
+
+        assert!(st.status.is_empty());
+    }
+
+    #[test]
+    fn set_leaf_search_clears_a_stale_status() {
+        let structure = Structure::build("dc=x", vec![si("dc=x", None), si("ou=p,dc=x", None)]);
+        let schema = SchemaModel::from_raw(&RawSubschema::default());
+        let mut st =
+            UiState::new_for_test(structure, schema, "dc=x".into(), Vec::new(), Vec::new());
+        st.status = "Saved.".into();
+
+        st.set_leaf_search("ann".into());
+
+        assert!(st.status.is_empty());
+    }
+
+    #[test]
+    fn apply_commit_clears_a_stale_status() {
+        use crate::ui::widget::CommitOutcome;
+
+        let structure = Structure::build("dc=x", vec![si("dc=x", None)]);
+        let schema = SchemaModel::from_raw(&RawSubschema::default());
+        let mut st =
+            UiState::new_for_test(structure, schema, "dc=x".into(), Vec::new(), Vec::new());
+        st.status = "Saved.".into();
+
+        st.apply_commit(0, CommitOutcome::Cancelled);
+
+        assert!(st.status.is_empty());
+    }
+
+    /// The read that follows a save re-reads the SAME entry it just wrote —
+    /// `reread`'s status-clearing must not treat that as "opening another entry",
+    /// or "Saved." would be erased before the operator ever sees it.
+    #[test]
+    fn saved_status_survives_the_post_save_reread_of_the_same_entry() {
+        let structure = Structure::build(
+            "dc=x",
+            vec![
+                si("dc=x", None),
+                si("ou=p,dc=x", None),
+                si("uid=a,ou=p,dc=x", Some("A")),
+            ],
+        );
+        let schema = SchemaModel::from_raw(&RawSubschema::default());
+        let mut st =
+            UiState::new_for_test(structure, schema, "dc=x".into(), Vec::new(), Vec::new());
+        st.current_leaf = Some("uid=a,ou=p,dc=x".into());
+
+        st.apply_write_outcome(WriteOutcome::Saved {
+            reread_dn: "uid=a,ou=p,dc=x".into(),
+            renamed_from: None,
+            quit_after: false,
+        });
+
+        assert_eq!(st.status, "Saved.");
+    }
+
+    /// By contrast, reading a genuinely DIFFERENT entry — the operator navigating
+    /// the entry list — clears a stale status, via `reconcile_selection`'s clean
+    /// (non-dirty) path into `reread`.
+    #[test]
+    fn reconcile_selection_clears_a_stale_status_when_opening_a_different_entry() {
+        let structure = Structure::build(
+            "dc=x",
+            vec![
+                si("dc=x", None),
+                si("ou=p,dc=x", None),
+                si("uid=a,ou=p,dc=x", Some("A")),
+                si("uid=b,ou=p,dc=x", Some("B")),
+            ],
+        );
+        let schema = SchemaModel::from_raw(&RawSubschema::default());
+        let mut st =
+            UiState::new_for_test(structure, schema, "dc=x".into(), Vec::new(), Vec::new());
+        st.current_leaf = Some("uid=a,ou=p,dc=x".into());
+        st.status = "Search failed: timeout".into();
+        st.request_leaf("uid=b,ou=p,dc=x".into(), Vec::new());
+
+        let guard_raised = st.reconcile_selection();
+
+        assert!(!guard_raised, "a clean form must not raise the guard");
+        assert!(
+            st.status.is_empty(),
+            "opening a different entry must clear a stale status"
+        );
+    }
+
     #[test]
     fn adopt_structure_keeps_a_still_existing_branch_and_leaf() {
         let old = Structure::build(
@@ -3270,6 +3381,34 @@ mod write_routing_tests {
         assert!(res.changed);
         assert!(!res.quit);
         assert_eq!(st.status, "Saved.");
+    }
+
+    /// The write path's re-read must not erase the confirmation it was set with.
+    ///
+    /// A rename re-reads the NEW dn while `current_leaf` still holds the old one,
+    /// so any attempt to distinguish "operator navigated away" from "the save is
+    /// refreshing what it just wrote" by comparing dns silently eats "Saved." on
+    /// every rename. Operator-initiated reads clear `status` at their own call
+    /// sites instead.
+    #[test]
+    fn a_rename_keeps_its_saved_confirmation() {
+        let mut st = empty_state();
+        st.current_leaf = Some("cn=old,dc=x".into());
+        st.apply_write_outcome(WriteOutcome::Saved {
+            reread_dn: "cn=new,dc=x".into(),
+            renamed_from: Some("cn=old,dc=x".into()),
+            quit_after: false,
+        });
+        assert_eq!(st.status, "Saved.");
+    }
+
+    /// The mirror image: opening another entry DOES drop the stale message.
+    #[test]
+    fn navigating_to_another_entry_clears_a_stale_status() {
+        let mut st = empty_state();
+        st.status = "Saved.".to_string();
+        st.reread_public("cn=b,dc=x", &[]);
+        assert_eq!(st.status, "");
     }
 
     #[test]
