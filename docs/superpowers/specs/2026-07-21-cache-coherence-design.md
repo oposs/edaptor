@@ -169,10 +169,15 @@ clears `leaf_search_rows`.
 input change submits a fresh candidate search whose results replace the candidate
 set — the `multi_picker` pattern. The wrinkle: this dialog's `InputLine` doubles
 as the committed value, and picking a row writes `"5000 (staff)"` back into it. A
-re-query must fire only on **typing**, not on that write-back, so the dialog
-suppresses the query when the input change is one it made itself. When the result
-set is truncated the dialog title reports that the list shows the first
-`PICKER_SEARCH_CAP` matches.
+re-query must fire only on **typing**, not on that write-back. That suppression
+turns out to need no new code: `mirror_focused` already syncs `last_input` when it
+writes a picked row back, and the change detector compares against it.
+
+**No truncation notice.** An earlier draft of this spec had the dialog title report
+when the candidate list was capped at `PICKER_SEARCH_CAP`. Dropped deliberately:
+once every keystroke re-queries, typing reaches candidates past the cap, which is
+the harm the notice was meant to warn about. The cap is documented in prose on the
+`docs/src/concepts/live-data.md` page instead.
 
 ### 5. Refresh and cache invalidation
 
