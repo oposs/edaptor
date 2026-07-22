@@ -1375,6 +1375,19 @@ impl UiState {
         }
     }
 
+    /// Where the tree's highlight belongs after a rebuild. Only ever `Pin` or
+    /// `Clear`: unlike the entry list, the tree never moves the form by itself.
+    pub fn branch_highlight_plan(&self) -> HighlightPlan {
+        let Some(cur) = self.current_branch.as_deref() else {
+            return HighlightPlan::Clear;
+        };
+        if self.branch_dns.iter().any(|d| d.eq_ignore_ascii_case(cur)) {
+            HighlightPlan::Pin(cur.to_string())
+        } else {
+            HighlightPlan::Clear
+        }
+    }
+
     /// The list row index of the entry currently shown in the form (`current_leaf`),
     /// or `None` if it is not in the current rows. Used to snap the highlight back
     /// to the pinned form on a guard "Stay".
@@ -4218,5 +4231,43 @@ mod write_routing_tests {
     fn highlight_plan_clears_for_a_childless_container_with_nothing_open() {
         let st = st_with_rows(&[]);
         assert_eq!(st.leaf_highlight_plan(), HighlightPlan::Clear);
+    }
+
+    /// The tree shares the enum but must never navigate the form on its own:
+    /// a branch change is always operator-driven or an explicit `commit_branch`.
+    #[test]
+    fn branch_highlight_plan_pins_the_current_branch() {
+        let mut st = st_with_rows(&[]);
+        st.branch_dns = vec!["dc=x".to_string(), "ou=p,dc=x".to_string()];
+        st.current_branch = Some("ou=p,dc=x".to_string());
+        assert_eq!(
+            st.branch_highlight_plan(),
+            HighlightPlan::Pin("ou=p,dc=x".to_string())
+        );
+    }
+
+    #[test]
+    fn branch_highlight_plan_clears_when_the_branch_vanished() {
+        let mut st = st_with_rows(&[]);
+        st.branch_dns = vec!["dc=x".to_string()];
+        st.current_branch = Some("ou=gone,dc=x".to_string());
+        assert_eq!(st.branch_highlight_plan(), HighlightPlan::Clear);
+    }
+
+    #[test]
+    fn branch_highlight_plan_clears_rather_than_falling_back_to_a_first_row() {
+        let mut st = st_with_rows(&[]);
+        st.branch_dns = vec!["dc=x".to_string(), "ou=p,dc=x".to_string()];
+        st.current_branch = Some("ou=gone,dc=x".to_string());
+        // Assert the FULL value, not merely "not Follow": the likely wrong
+        // implementation is a copy-paste of the leaf policy, which falls back to
+        // the first row and would return Pin("dc=x") — and a !matches!(Follow)
+        // check would wave that straight through. This is the case where the two
+        // policies genuinely diverge, so it is the one worth pinning down.
+        assert_eq!(
+            st.branch_highlight_plan(),
+            HighlightPlan::Clear,
+            "a tree rebuild must never navigate the form, nor fall back to a row"
+        );
     }
 }
