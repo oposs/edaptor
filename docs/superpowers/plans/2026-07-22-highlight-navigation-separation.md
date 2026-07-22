@@ -391,18 +391,27 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
         );
     }
 
-    /// The modal-mid-keystroke bug, at pane level: a find that excludes the open
-    /// entry moves the highlight but leaves the form pinned, so the controller is
-    /// never asked to navigate and the dirty guard cannot fire.
+    /// A rebuild where the open entry is no longer among the rows must move the
+    /// highlight but leave a DIRTY form pinned — so the controller is never asked
+    /// to navigate and the dirty guard cannot fire. This is the pane-level half of
+    /// the modal-mid-keystroke fix.
+    ///
+    /// NOTE ON SETUP: do not simulate the find by assigning `st.search` +
+    /// `st.leaf_search_rows` directly. After repopulating, `handle_event` compares
+    /// the ListBox's own find query against `last_search`; the ListBox's query is
+    /// still empty, so it would call `set_leaf_search("")`, wipe
+    /// `leaf_search_rows`, and repopulate a second time against the full row set —
+    /// and the assertions below would be measuring that second pass, not the
+    /// policy. Making the open entry absent from the structure exercises the same
+    /// `HighlightPlan` arms without fighting the find-query sync.
     #[test]
-    fn find_rebuild_does_not_move_a_dirty_form() {
+    fn rebuild_does_not_move_a_dirty_form_off_a_vanished_entry() {
         let shared = shared_with_rows(&["cn=a,ou=p,dc=x", "cn=b,ou=p,dc=x"]);
         {
             let mut st = shared.borrow_mut();
-            st.current_leaf = Some("cn=b,ou=p,dc=x".to_string());
-            st.edit_form = Some(dirty_form("cn=b,ou=p,dc=x"));
-            st.leaf_search_rows = Some(vec!["cn=a,ou=p,dc=x".to_string()]);
-            st.search = "a".to_string();
+            // Open an entry that is not in this container's rows at all.
+            st.current_leaf = Some("cn=gone,ou=p,dc=x".to_string());
+            st.edit_form = Some(dirty_form("cn=gone,ou=p,dc=x"));
             st.list_dirty = true;
         }
         let mut pane = LeafPane::new(Rect::new(0, 0, 30, 10), shared.clone());
@@ -411,29 +420,37 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
         assert_eq!(
             shared.borrow().requested_leaf,
             None,
-            "a dirty form is never dragged along by a find"
+            "a dirty form is never dragged along by a rebuild"
+        );
+        assert_eq!(
+            pane.selected_row_for_test(),
+            1,
+            "the highlight still moves to the first real row (row 0 is ‹self›)"
         );
     }
 
-    /// The clean counterpart: find-follow is deliberate, so the form tracks the
-    /// first hit.
+    /// The clean counterpart: the form follows, because following is only ever
+    /// withheld to protect unsaved edits.
     #[test]
-    fn find_rebuild_follows_the_first_hit_when_clean() {
+    fn rebuild_follows_the_first_row_when_the_form_is_clean() {
         let shared = shared_with_rows(&["cn=a,ou=p,dc=x", "cn=b,ou=p,dc=x"]);
         {
             let mut st = shared.borrow_mut();
-            st.current_leaf = Some("cn=b,ou=p,dc=x".to_string());
-            st.leaf_search_rows = Some(vec!["cn=a,ou=p,dc=x".to_string()]);
-            st.search = "a".to_string();
+            st.current_leaf = Some("cn=gone,ou=p,dc=x".to_string());
+            // No edit_form at all == clean.
             st.list_dirty = true;
         }
         let mut pane = LeafPane::new(Rect::new(0, 0, 30, 10), shared.clone());
         refresh(&mut pane);
 
         assert_eq!(
-            shared.borrow().requested_leaf.as_ref().map(|(dn, _)| dn.as_str()),
+            shared
+                .borrow()
+                .requested_leaf
+                .as_ref()
+                .map(|(dn, _)| dn.as_str()),
             Some("cn=a,ou=p,dc=x"),
-            "a clean form follows the find to the first hit"
+            "a clean form follows the rebuild to the first real row"
         );
     }
 ```
