@@ -344,6 +344,13 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
     /// A rebuild that moves the pinned entry to a different index must follow the
     /// DN — and must NOT look like a navigation. This is the general form of the
     /// I1 fix: the index is never computed against the pre-rebuild row source.
+    ///
+    /// The shift is produced by REMOVING a row that precedes the pinned one
+    /// (another admin deleting an entry). Do not try to produce it by upserting a
+    /// new entry: `leaf_rows` is `‹self›` followed by `leaves_of`, which returns
+    /// children in INSERTION order with no sort, so an upsert appends last and the
+    /// pinned row's index would not move at all — the test would pass against a
+    /// stale-index implementation and prove nothing.
     #[test]
     fn rebuild_keeps_the_highlight_on_the_pinned_dn_without_reporting() {
         let shared = shared_with_rows(&["cn=a,ou=p,dc=x", "cn=b,ou=p,dc=x"]);
@@ -351,11 +358,17 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
         let mut pane = LeafPane::new(Rect::new(0, 0, 30, 10), shared.clone());
         refresh(&mut pane);
         shared.borrow_mut().requested_leaf = None;
+        // Precondition: rows are [‹self› ou=p, cn=a, cn=b], so cn=b is row 2.
+        assert_eq!(
+            pane.selected_row_for_test(),
+            2,
+            "test premise: the pinned entry starts at row 2 (row 0 is ‹self›)"
+        );
 
-        // A new entry sorts ahead of both, shifting cn=b from row 1 to row 2.
+        // cn=a disappears → rows become [‹self› ou=p, cn=b] → cn=b moves to row 1.
         {
             let mut st = shared.borrow_mut();
-            st.structure.upsert(si("cn=A0,ou=p,dc=x"));
+            st.structure.remove("cn=a,ou=p,dc=x");
             st.list_dirty = true;
         }
         refresh(&mut pane);
@@ -363,7 +376,7 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
         let st = shared.borrow();
         assert_eq!(
             pane.selected_row_for_test(),
-            2,
+            1,
             "the highlight follows the DN across the renumbering"
         );
         assert_eq!(
@@ -419,9 +432,56 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
     }
 ```
 
-Reuse the existing test scaffolding in `leaf.rs` for `shared_with_rows` and the
-`refresh` helper (a `REFRESH` broadcast through `handle_event`) — the file already
-builds both for the I4 test around `leaf.rs:854`.
+**`leaf.rs`'s test module has no helpers** — `shared_with_rows`, `refresh` and
+`si` do not exist there, and the existing tests build `StructureInput` literally
+and construct a `Context` by hand (see the I4 test at `leaf.rs:861`). Write these
+three small helpers at the top of that test module and use them for the new tests:
+
+```rust
+    /// A `StructureInput` for `dn`, with the RDN value as its `cn` so the row
+    /// renders a label. Note: `state.rs`'s test module has a two-argument `si`;
+    /// this one is local to this file.
+    fn si(dn: &str) -> StructureInput {
+        let cn = dn.split('=').nth(1).and_then(|s| s.split(',').next());
+        StructureInput {
+            dn: dn.into(),
+            cn: cn.map(str::to_string),
+            description: None,
+            object_classes: vec![],
+            attrs: BTreeMap::new(),
+        }
+    }
+
+    /// Shared state on branch `ou=p,dc=x` holding `dns` as its leaves.
+    fn shared_with_rows(dns: &[&str]) -> Shared {
+        let mut inputs = vec![si("dc=x"), si("ou=p,dc=x")];
+        inputs.extend(dns.iter().map(|d| si(d)));
+        let structure = Structure::build("dc=x", inputs);
+        let schema = SchemaModel::from_raw(&RawSubschema::default());
+        let mut st =
+            UiState::new_for_test(structure, schema, "dc=x".into(), Vec::new(), Vec::new());
+        st.current_branch = Some("ou=p,dc=x".into());
+        st.list_dirty = true;
+        Rc::new(RefCell::new(st))
+    }
+
+    /// Drive one `REFRESH` broadcast through the pane.
+    fn refresh(pane: &mut LeafPane) {
+        let mut out: VecDeque<Event> = VecDeque::new();
+        let mut timers = tv::timer::TimerQueue::new();
+        let mut deferred: Vec<tv::Deferred> = Vec::new();
+        let mut ctx = tv::Context::new(&mut out, &mut timers, 0, &mut deferred);
+        let mut ev = Event::Broadcast {
+            command: REFRESH,
+            source: None,
+        };
+        pane.handle_event(&mut ev, &mut ctx);
+    }
+```
+
+Set `list_dirty = true` before each `refresh` where a rebuild is expected.
+**Do not refactor the existing I4 test onto these helpers** — it is a regression
+test for a shipped bug and stays as it is.
 
 **`dirty_form` is defined in `state.rs`'s test module (Task 1) and is not visible
 here** — Rust test modules are private to their file. Hoist it instead: put it in
