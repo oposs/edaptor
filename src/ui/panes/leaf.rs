@@ -847,4 +847,85 @@ mod tests {
             "both ou=q leaves are listed, got {rows:?}"
         );
     }
+
+    /// I4 regression, pane level. `adopt_structure` rebuilds the leaf list from
+    /// scratch: `repopulate` resets `last_sel` to -1 and `ListBox::new_list`
+    /// re-focuses row 0 — the ‹self› container row. Without a snap-back
+    /// (`set_leaf_row`), the next REFRESH's `report_selection` reads that row-0
+    /// refocus as a FRESH selection and records it as `requested_leaf`, which
+    /// would drag the form off the entry the operator was on. The reviewer's
+    /// probe observed exactly this before the fix: `requested_leaf` became
+    /// `Some(("ou=p,dc=x", []))` while `current_leaf` was
+    /// `Some("cn=b,ou=p,dc=x")`.
+    #[test]
+    fn reload_rebuild_does_not_report_the_self_row_as_a_fresh_selection() {
+        let inputs = vec![
+            StructureInput {
+                dn: "dc=x".into(),
+                cn: None,
+                description: None,
+                object_classes: vec![],
+                attrs: BTreeMap::new(),
+            },
+            StructureInput {
+                dn: "ou=p,dc=x".into(),
+                cn: None,
+                description: None,
+                object_classes: vec![],
+                attrs: BTreeMap::new(),
+            },
+            StructureInput {
+                dn: "cn=b,ou=p,dc=x".into(),
+                cn: Some("b".into()),
+                description: None,
+                object_classes: vec![],
+                attrs: BTreeMap::new(),
+            },
+        ];
+        let structure = Structure::build("dc=x", inputs.clone());
+        let schema = SchemaModel::from_raw(&RawSubschema::default());
+        let mut state =
+            UiState::new_for_test(structure, schema, "dc=x".into(), Vec::new(), Vec::new());
+        state.current_branch = Some("ou=p,dc=x".into());
+        // The operator has "b" open in the form — the entry a rebuild must not
+        // navigate away from.
+        state.current_leaf = Some("cn=b,ou=p,dc=x".into());
+        let shared: Shared = Rc::new(RefCell::new(state));
+
+        let mut pane = LeafPane::new(Rect::new(0, 0, 30, 10), shared.clone());
+        let mut out: VecDeque<Event> = VecDeque::new();
+        let mut timers = tv::timer::TimerQueue::new();
+        let mut deferred: Vec<tv::Deferred> = Vec::new();
+        let mut ctx = tv::Context::new(&mut out, &mut timers, 0, &mut deferred);
+
+        // Seed the pane once (an ordinary fresh-load row-0 report is not what is
+        // under test here); clear the requested_leaf it produces so the
+        // assertion below is only about the rebuild that follows.
+        shared.borrow_mut().list_dirty = true;
+        let mut seed = Event::Broadcast {
+            command: REFRESH,
+            source: None,
+        };
+        pane.handle_event(&mut seed, &mut ctx);
+        shared.borrow_mut().requested_leaf = None;
+
+        // Simulate Alt+R: a fresh scan of the same structure is adopted
+        // mid-session, exactly as `reload_structure` does after a successful
+        // blocking scan.
+        let fresh = Structure::build("dc=x", inputs);
+        shared.borrow_mut().adopt_structure(fresh);
+
+        let mut reload_refresh = Event::Broadcast {
+            command: REFRESH,
+            source: None,
+        };
+        pane.handle_event(&mut reload_refresh, &mut ctx);
+
+        assert_ne!(
+            shared.borrow().requested_leaf,
+            Some(("ou=p,dc=x".to_string(), Vec::new())),
+            "the rebuild's row-0 refocus must not be reported as a fresh \
+             selection onto the container's ‹self› row"
+        );
+    }
 }

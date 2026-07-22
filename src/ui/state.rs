@@ -1245,16 +1245,22 @@ impl UiState {
                 // The upserts above computed their snap index against the PREVIOUS
                 // row source; `leaf_rows()` now answers from the rows just
                 // installed, so the index has to be recomputed or the highlight
-                // lands on a different entry than the form shows.
-                if self.set_leaf_row.is_some() {
-                    self.set_leaf_row = self.current_leaf_row();
-                }
+                // lands on a different entry than the form shows. Unconditional,
+                // not just when already set: the pane rebuilds from scratch and
+                // re-focuses row 0, which — without a snap — would be reported as
+                // a fresh selection, navigating the form onto the wrong entry and
+                // clearing the status this outcome just set.
+                self.set_leaf_row = self.current_leaf_row();
                 self.list_dirty = true;
             }
             LeafSearchOutcome::Failed(msg) => {
                 self.status = format!("Search failed: {msg}");
                 self.leaf_search_rows = None;
                 self.leaf_search_truncated = false;
+                // Same reasoning as the `Results` arm above: without a snap the
+                // rebuilt pane's row-0 refocus would be reported as a fresh
+                // selection, navigating the form away and erasing this message.
+                self.set_leaf_row = self.current_leaf_row();
                 self.list_dirty = true;
             }
             LeafSearchOutcome::Ignored => {}
@@ -1391,6 +1397,12 @@ impl UiState {
         self.lookup_cache.clear();
         self.list_dirty = true;
         self.tree_dirty = true;
+        // The pane rebuilds from scratch and re-focuses row 0, which it would
+        // report as a fresh selection — navigating the form to the container's
+        // ‹self› row and clearing the status this action just set. Snap the
+        // highlight back to the entry on screen instead. `None` is correct when
+        // that entry is gone: there is nothing to snap to.
+        self.set_leaf_row = self.current_leaf_row();
     }
 
     /// Re-run the eager structure scan and adopt the result (Alt+R).
@@ -3014,6 +3026,97 @@ mod tests {
         assert!(st.list_dirty);
     }
 
+    /// I4 regression: a `Results` outcome whose hits do NOT include `current_leaf`
+    /// is the common case for a find (the operator is looking at one entry while
+    /// searching for another). The rendered rows are exactly the hits, so
+    /// `current_leaf` genuinely has no row here — but `set_leaf_row` must still be
+    /// explicitly recomputed (to `None`) rather than left at whatever stale value
+    /// it happened to carry in, or the pane's row-0 refocus on the coming rebuild
+    /// would be reported as a fresh selection, navigating the form away and
+    /// clearing the status this outcome just set.
+    #[test]
+    fn apply_leaf_search_results_without_current_leaf_among_hits_recomputes_the_snap() {
+        use crate::ldap::worker::LdapEntry;
+
+        let structure = Structure::build(
+            "dc=x",
+            vec![
+                si("dc=x", None),
+                si("ou=p,dc=x", None),
+                si("uid=ann,ou=p,dc=x", Some("Ann")),
+                si("uid=bob,ou=p,dc=x", Some("Bob")),
+            ],
+        );
+        let schema = SchemaModel::from_raw(&RawSubschema::default());
+        let mut st =
+            UiState::new_for_test(structure, schema, "dc=x".into(), Vec::new(), Vec::new());
+        st.current_branch = Some("ou=p,dc=x".into());
+        st.current_leaf = Some("uid=bob,ou=p,dc=x".into());
+        st.search = "ann".to_string();
+        // A stale leftover from some earlier action — must not survive uncorrected.
+        st.set_leaf_row = Some(99);
+
+        let mut ann_attrs: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        ann_attrs.insert("cn".to_string(), vec!["Ann".to_string()]);
+        st.apply_leaf_search_outcome(LeafSearchOutcome::Results {
+            entries: vec![LdapEntry {
+                dn: "uid=ann,ou=p,dc=x".to_string(),
+                attrs: ann_attrs,
+                bin_attrs: Default::default(),
+            }],
+            truncated: false,
+        });
+
+        assert_eq!(
+            st.set_leaf_row, None,
+            "Bob (current_leaf) is not among the hits, so the freshly-installed \
+             rows genuinely have no row for him — but the stale Some(99) must not \
+             survive the outcome uncorrected"
+        );
+        assert_eq!(st.set_leaf_row, st.current_leaf_row());
+    }
+
+    /// I4 regression: `Failed` previously never touched `set_leaf_row` at all.
+    /// When `current_leaf` is still present in the cached-projection fallback
+    /// (the rows `Failed` drops back to), the snap must be set so the pane's
+    /// row-0 refocus is not mistaken for a fresh selection — which would navigate
+    /// the form away and erase the "Search failed: …" message just set above.
+    #[test]
+    fn apply_leaf_search_failed_snaps_to_current_leaf_in_the_fallback_projection() {
+        let structure = Structure::build(
+            "dc=x",
+            vec![
+                si("dc=x", None),
+                si("ou=p,dc=x", None),
+                si("uid=ann,ou=p,dc=x", Some("Ann")),
+            ],
+        );
+        let schema = SchemaModel::from_raw(&RawSubschema::default());
+        let mut st =
+            UiState::new_for_test(structure, schema, "dc=x".into(), Vec::new(), Vec::new());
+        st.current_branch = Some("ou=p,dc=x".into());
+        st.current_leaf = Some("uid=ann,ou=p,dc=x".into());
+        // A previous (now failing) query's rows, about to be dropped.
+        st.leaf_search_rows = Some(vec!["uid=stale,ou=p,dc=x".to_string()]);
+
+        st.apply_leaf_search_outcome(LeafSearchOutcome::Failed("Operations error".into()));
+
+        // Fallback projection: [‹self› ou=p, Ann] — Ann is row 1.
+        assert_eq!(
+            st.leaf_rows(),
+            vec![
+                ("‹self› ou=p".to_string(), "ou=p,dc=x".to_string()),
+                ("Ann".to_string(), "uid=ann,ou=p,dc=x".to_string()),
+            ]
+        );
+        assert_eq!(
+            st.set_leaf_row,
+            Some(1),
+            "current_leaf is still visible in the fallback projection, so the \
+             snap must be set — the old code left this field untouched on Failed"
+        );
+    }
+
     /// Regression for the cross-branch leak: a search issued under container A
     /// still in flight when the operator commits to container B must be ignored
     /// when its response lands, even though B's own query has landed rows.
@@ -3207,6 +3310,18 @@ mod tests {
         assert!(st.lookup_cache.is_empty());
         assert!(st.list_dirty);
         assert!(st.tree_dirty);
+        assert_eq!(
+            st.set_leaf_row,
+            st.current_leaf_row(),
+            "the rebuild re-focuses row 0; the snap must pull the highlight back \
+             onto the entry on screen instead of letting row 0 be reported as a \
+             fresh selection"
+        );
+        assert_eq!(
+            st.set_leaf_row,
+            Some(1),
+            "row 0 is the ‹self› row of ou=p,dc=x; uid=a is the only leaf, at row 1"
+        );
     }
 
     /// Regression for the reload race: a find issued before Alt+R still in flight
@@ -3268,6 +3383,10 @@ mod tests {
             "a vanished container falls back to the base DN"
         );
         assert_eq!(st.current_leaf, None);
+        assert_eq!(
+            st.set_leaf_row, None,
+            "no current_leaf means there is nothing to snap to"
+        );
     }
 }
 
