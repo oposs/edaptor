@@ -147,9 +147,13 @@ instead of seven bare `status.clear()` calls.
 ## Removed
 
 `set_leaf_row`, `set_tree_row`, the snapping use of `current_leaf_row()` and
-`current_branch_row()`, `apply_branch_guard_stay`, `apply_cancelled_guard_save`,
-and `leaf_search_truncated` (follow-up #3 — set in six places, read only by two
-tests; the truncation notice travels via `status`).
+`current_branch_row()`, `apply_branch_guard_stay`, and `leaf_search_truncated`
+(follow-up #3 — set in six places, read only by two tests; the truncation notice
+travels via `status`).
+
+`apply_cancelled_guard_save` is **reduced, not removed**: it still clears
+`guard_target` and `pending_nav`, but its highlight push becomes a rebuild
+request, leaving the plan to resolve where the highlight belongs.
 
 ## Testing
 
