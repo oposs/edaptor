@@ -28,7 +28,17 @@ All notable changes to eDAPtor are documented here. The format follows
   of filtering a one-shot, capped load — candidates past the first 100 are now
   reachable.
 - New **Alt+R** (File → Reload) re-runs the directory scan, keeping the selected
-  container and entry; the open edit form is left untouched.
+  container and entry; the open edit form is left untouched. A reload that fails
+  now raises an error dialog instead of passing for a successful one.
+- **Status messages are now actually shown.** The status line has a footer that
+  reports what just happened — "Saved.", the reload's entry count, a failed
+  search, a truncated find, and the one-time notice when the server does not
+  support concurrent-edit protection. These messages existed before but were
+  never rendered anywhere. A message is cleared as soon as you move on
+  (switching container, opening another entry, searching, or editing a field),
+  so it never hides the per-field key hints.
+- Renaming a **container** now re-runs the scan, so its contents follow it under
+  the new name instead of disappearing from the tree until a restart.
 - Editing an attribute used in a tree or list label now refreshes that label in
   place, and the cached reverse-label lookups are dropped after every write
   (they previously kept showing values eDAPtor itself had changed).
