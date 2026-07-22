@@ -1082,10 +1082,6 @@ impl UiState {
             self.guard_target = Some(GuardTarget::Leaf(dn, ocs));
             true
         } else {
-            // A new operator-initiated read begins: any status left over from a
-            // previous action (a search failure, a stale save confirmation) no
-            // longer describes what's on screen.
-            self.status.clear();
             self.reread(&dn, &ocs);
             false
         }
@@ -1147,10 +1143,6 @@ impl UiState {
     pub fn commit_branch(&mut self, dn: String) {
         self.current_branch = Some(dn);
         self.list_dirty = true;
-        // A fresh container switch is a new operator action; any status left over
-        // from the previous one (a search failure, a stale save confirmation) no
-        // longer describes what's on screen.
-        self.status.clear();
         self.search = String::new();
         // Another container's live hits must not leak into this one.
         self.leaf_search_rows = None;
