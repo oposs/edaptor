@@ -18,6 +18,21 @@ All notable changes to eDAPtor are documented here. The format follows
   Against a server that does not advertise the assertion control, a one-time notice
   warns that concurrent edits may be lost.
 
+- Newly created entries now appear in the entry list immediately (and are
+  selected) instead of only after a restart; renamed entries move rather than
+  leaving a stale row behind.
+- The entry list's incremental find is answered by the server (one-level search
+  under the selected container), so entries created by other clients are found
+  without a restart. Capped at 500 matches with a status-line notice.
+- The `lookup` field's candidate list re-queries the server as you type instead
+  of filtering a one-shot, capped load — candidates past the first 100 are now
+  reachable.
+- New **Alt+R** (File → Reload) re-runs the directory scan, keeping the selected
+  container and entry; the open edit form is left untouched.
+- Editing an attribute used in a tree or list label now refreshes that label in
+  place, and the cached reverse-label lookups are dropped after every write
+  (they previously kept showing values eDAPtor itself had changed).
+
 ### Changed
 
 ### Fixed
