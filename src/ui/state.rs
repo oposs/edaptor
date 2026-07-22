@@ -785,6 +785,9 @@ impl UiState {
                 // first — clear explicitly so this stays correct if that check moves.
                 self.leaf_search_rows = None;
                 self.leaf_search_truncated = false;
+                // Cancel any in-flight find so its outcome, arriving after Created,
+                // cannot overwrite `status` or re-install `leaf_search_rows`.
+                self.leaf_search.cancel();
                 self.lookup_cache.clear();
                 self.current_leaf = Some(dn.clone());
                 self.list_dirty = true;
@@ -2661,6 +2664,8 @@ mod tests {
             UiState::new_for_test(structure, schema, "dc=x".into(), Vec::new(), Vec::new());
         st.current_branch = Some("ou=p,dc=x".into());
         st.search = "zzz".into();
+        // Simulate a find in flight when Created lands.
+        st.leaf_search.force_latest(9_999_999);
 
         st.apply_write_outcome(WriteOutcome::Created {
             dn: "uid=bob,ou=p,dc=x".into(),
@@ -2670,6 +2675,19 @@ mod tests {
         assert!(
             st.search.is_empty(),
             "a stale query must not hide the entry just created"
+        );
+        // The in-flight find must be cancelled too, like commit_branch/adopt_structure
+        // already do — otherwise its outcome would arrive after Created and overwrite
+        // `status` or re-install `leaf_search_rows`.
+        let resp = crate::ldap::worker::Response::Entries {
+            id: 9_999_999,
+            entries: vec![],
+            truncated: false,
+        };
+        assert_eq!(
+            st.leaf_search.on_response(&resp),
+            LeafSearchOutcome::Ignored,
+            "the pre-Created find must have been cancelled"
         );
     }
 
@@ -2755,6 +2773,9 @@ mod tests {
         let mut st =
             UiState::new_for_test(structure, schema, "dc=x".into(), Vec::new(), Vec::new());
         st.current_branch = Some("ou=p,dc=x".into());
+        // A differently-cased "CN" is already among the caller's fetch attrs — the
+        // augmentation must recognize it and not add a case-duplicate "cn".
+        st.scan_attrs = vec!["CN".to_string()];
         let (worker, rx) = WorkerHandle::recording();
         st.worker = Some(worker);
 
@@ -2767,6 +2788,7 @@ mod tests {
                 scope,
                 filter,
                 size_limit,
+                attrs,
                 ..
             } => {
                 assert_eq!(base, "ou=p,dc=x");
@@ -2776,6 +2798,19 @@ mod tests {
                     size_limit,
                     Some(crate::workflows::leaf_search::LEAF_SEARCH_CAP)
                 );
+                // `cn`/`description`/`objectClass` are appended for the row label,
+                // case-insensitively deduped against the caller's own attrs — exactly
+                // one of each, never a case-duplicate.
+                for want in ["cn", "description", "objectClass"] {
+                    assert_eq!(
+                        attrs
+                            .iter()
+                            .filter(|a| a.eq_ignore_ascii_case(want))
+                            .count(),
+                        1,
+                        "{want} must appear exactly once in {attrs:?}"
+                    );
+                }
             }
             other => panic!("expected Request::Search, got {other:?}"),
         }
