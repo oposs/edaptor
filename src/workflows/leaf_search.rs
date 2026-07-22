@@ -152,6 +152,15 @@ impl LeafSearchFlow {
     pub(crate) fn force_latest(&mut self, id: u64) {
         self.latest = Some(id);
     }
+
+    /// Abandon any in-flight find, so its response is ignored when it lands.
+    ///
+    /// Called when the container changes: the results would belong to the previous
+    /// container, and the entry list's "keep the previous rows while the next search
+    /// is in flight" behaviour would then show them under the new one.
+    pub fn cancel(&mut self) {
+        self.latest = None;
+    }
 }
 
 #[cfg(test)]

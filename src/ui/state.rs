@@ -759,6 +759,10 @@ impl UiState {
                 // A leftover incremental-find query would hide the new row; the
                 // cached labels may be stale for the same reason as on Saved.
                 self.search.clear();
+                // Harmless today only because `leaf_rows()` checks `search.is_empty()`
+                // first — clear explicitly so this stays correct if that check moves.
+                self.leaf_search_rows = None;
+                self.leaf_search_truncated = false;
                 self.lookup_cache.clear();
                 self.current_leaf = Some(dn.clone());
                 self.list_dirty = true;
@@ -1118,6 +1122,10 @@ impl UiState {
         // Another container's live hits must not leak into this one.
         self.leaf_search_rows = None;
         self.leaf_search_truncated = false;
+        // Cancel any in-flight find too: its response, once landed, would carry the
+        // OLD container's DNs, and the deliberate "keep previous rows while the next
+        // search is in flight" behaviour would then show them under the new one.
+        self.leaf_search.cancel();
     }
 
     /// The entry list's find changed: mirror the query and answer it from the
@@ -2584,6 +2592,177 @@ mod tests {
 
         assert!(st.leaf_search_rows.is_none());
         assert!(st.list_dirty);
+    }
+
+    /// A non-empty query with a worker and a current branch must submit a
+    /// one-level `Request::Search` scoped to that branch, capped at
+    /// `LEAF_SEARCH_CAP`.
+    #[test]
+    fn set_leaf_search_submits_a_scoped_one_level_search() {
+        let structure = Structure::build("dc=x", vec![si("dc=x", None), si("ou=p,dc=x", None)]);
+        let schema = SchemaModel::from_raw(&RawSubschema::default());
+        let mut st =
+            UiState::new_for_test(structure, schema, "dc=x".into(), Vec::new(), Vec::new());
+        st.current_branch = Some("ou=p,dc=x".into());
+        let (worker, rx) = WorkerHandle::recording();
+        st.worker = Some(worker);
+
+        st.set_leaf_search("ann".into());
+
+        let (req, _) = rx.try_recv().expect("a search must have been submitted");
+        match req {
+            Request::Search {
+                base,
+                scope,
+                filter,
+                size_limit,
+                ..
+            } => {
+                assert_eq!(base, "ou=p,dc=x");
+                assert_eq!(scope, SearchScope::OneLevel);
+                assert_eq!(filter, "(|(cn=*ann*)(uid=*ann*))");
+                assert_eq!(
+                    size_limit,
+                    Some(crate::workflows::leaf_search::LEAF_SEARCH_CAP)
+                );
+            }
+            other => panic!("expected Request::Search, got {other:?}"),
+        }
+    }
+
+    /// `Results` upserts the hits into the structure (so another client's entry
+    /// becomes a permanent local node), keeps their DNs as `leaf_search_rows`, and
+    /// marks the list dirty.
+    #[test]
+    fn apply_leaf_search_results_upserts_and_sets_rows() {
+        use crate::ldap::worker::LdapEntry;
+
+        let structure = Structure::build("dc=x", vec![si("dc=x", None), si("ou=p,dc=x", None)]);
+        let schema = SchemaModel::from_raw(&RawSubschema::default());
+        let mut st =
+            UiState::new_for_test(structure, schema, "dc=x".into(), Vec::new(), Vec::new());
+        st.current_branch = Some("ou=p,dc=x".into());
+        st.list_dirty = false;
+
+        let mut attrs: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        attrs.insert("cn".to_string(), vec!["Ann".to_string()]);
+        let entry = LdapEntry {
+            dn: "uid=ann,ou=p,dc=x".to_string(),
+            attrs,
+            bin_attrs: Default::default(),
+        };
+
+        st.apply_leaf_search_outcome(LeafSearchOutcome::Results {
+            entries: vec![entry],
+            truncated: false,
+        });
+
+        assert!(
+            st.structure.get("uid=ann,ou=p,dc=x").is_some(),
+            "a hit from another client must become a permanent local node"
+        );
+        assert_eq!(
+            st.leaf_search_rows,
+            Some(vec!["uid=ann,ou=p,dc=x".to_string()])
+        );
+        assert!(!st.leaf_search_truncated);
+        assert!(st.list_dirty);
+    }
+
+    /// `Results { truncated: true }` sets `leaf_search_truncated` and reports the
+    /// cap in `status`.
+    #[test]
+    fn apply_leaf_search_results_truncated_reports_the_cap() {
+        let structure = Structure::build("dc=x", vec![si("dc=x", None)]);
+        let schema = SchemaModel::from_raw(&RawSubschema::default());
+        let mut st =
+            UiState::new_for_test(structure, schema, "dc=x".into(), Vec::new(), Vec::new());
+
+        st.apply_leaf_search_outcome(LeafSearchOutcome::Results {
+            entries: vec![],
+            truncated: true,
+        });
+
+        assert!(st.leaf_search_truncated);
+        assert!(
+            st.status
+                .contains(&crate::workflows::leaf_search::LEAF_SEARCH_CAP.to_string()),
+            "status must mention the cap: {}",
+            st.status
+        );
+    }
+
+    /// `Failed` surfaces the error, drops `leaf_search_rows` (so `leaf_rows()`
+    /// falls back to the cached projection instead of a blank pane), and marks
+    /// the list dirty.
+    #[test]
+    fn apply_leaf_search_failed_falls_back_to_cached_projection() {
+        let structure = Structure::build("dc=x", vec![si("dc=x", None)]);
+        let schema = SchemaModel::from_raw(&RawSubschema::default());
+        let mut st =
+            UiState::new_for_test(structure, schema, "dc=x".into(), Vec::new(), Vec::new());
+        st.leaf_search_rows = Some(vec!["uid=stale,dc=x".to_string()]);
+        st.list_dirty = false;
+
+        st.apply_leaf_search_outcome(LeafSearchOutcome::Failed("Operations error".into()));
+
+        assert!(st.status.contains("Operations error"));
+        assert!(st.leaf_search_rows.is_none());
+        assert!(st.list_dirty);
+    }
+
+    /// Regression for the cross-branch leak: a search issued under container A
+    /// still in flight when the operator commits to container B must be ignored
+    /// when its response lands, even though B's own query has landed rows.
+    #[test]
+    fn commit_branch_cancels_in_flight_search_so_its_response_is_ignored() {
+        use crate::ldap::worker::LdapEntry;
+
+        let structure = Structure::build(
+            "dc=x",
+            vec![
+                si("dc=x", None),
+                si("ou=a,dc=x", None),
+                si("ou=b,dc=x", None),
+            ],
+        );
+        let schema = SchemaModel::from_raw(&RawSubschema::default());
+        let mut st =
+            UiState::new_for_test(structure, schema, "dc=x".into(), Vec::new(), Vec::new());
+        st.current_branch = Some("ou=a,dc=x".into());
+        let (worker, rx) = WorkerHandle::recording();
+        st.worker = Some(worker);
+
+        // A find is issued under container A and lands rows (deliberately kept
+        // visible in flight — see the module docs).
+        st.set_leaf_search("ann".into());
+        let (req_a, _) = rx.try_recv().expect("container A's search was submitted");
+        let id_a = match req_a {
+            Request::Search { id, .. } => id,
+            other => panic!("expected Request::Search, got {other:?}"),
+        };
+
+        // Operator switches to container B before A's response lands.
+        st.commit_branch("ou=b,dc=x".into());
+
+        // A's (now superseded) response finally arrives.
+        let mut attrs: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        attrs.insert("cn".to_string(), vec!["Ann".to_string()]);
+        let resp = Response::Entries {
+            id: id_a,
+            entries: vec![LdapEntry {
+                dn: "uid=ann,ou=a,dc=x".to_string(),
+                attrs,
+                bin_attrs: Default::default(),
+            }],
+            truncated: false,
+        };
+        st.pump_responses_for_test(&[resp]);
+
+        assert!(
+            st.leaf_search_rows.is_none(),
+            "container A's cancelled search must not leak its DNs into container B"
+        );
     }
 }
 
