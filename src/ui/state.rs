@@ -648,6 +648,14 @@ impl UiState {
                 quit_after,
             } => {
                 self.status = "Saved.".to_string();
+                // Check quit BEFORE the rename rescan below: on save-and-quit there is
+                // no pane left to show the rescanned structure to, so a renamed
+                // container would pay for a full blocking scan whose result is
+                // immediately discarded.
+                if quit_after {
+                    out.quit = true;
+                    return out;
+                }
                 // Our own write may have changed any label we cached (including via a
                 // rename), and the cache stores negatives too — drop it wholesale and
                 // let the visible fields re-resolve lazily.
@@ -673,10 +681,14 @@ impl UiState {
                             .as_deref()
                             .map(|b| b.eq_ignore_ascii_case(&old))
                             .unwrap_or(false);
-                        // Best-effort: a failure here already lands in `self.status`
-                        // (set by `reload_structure` itself); the save itself already
-                        // succeeded, so there is no separate error surface to drive.
-                        let _ = self.reload_structure();
+                        // The rename itself already succeeded — a rescan failure here
+                        // must not be reported as if the save had failed, replacing
+                        // "Saved." with an error the operator would read as the write
+                        // being lost. Combine the two into one message instead: the
+                        // model is knowingly stale, but the save was not.
+                        if let Err(msg) = self.reload_structure() {
+                            self.status = format!("Saved, but the rescan failed: {msg}");
+                        }
                         // Keep the operator on the container they just renamed
                         // rather than falling back to the base DN.
                         if was_current {
@@ -687,10 +699,6 @@ impl UiState {
                     }
                     self.tree_dirty = true;
                     self.list_dirty = true;
-                }
-                if quit_after {
-                    out.quit = true;
-                    return out;
                 }
                 // Navigate to the guard's target if one is pending, else re-read.
                 // The plain-save fallback must carry the entry's REAL objectClasses
@@ -3539,6 +3547,81 @@ mod write_routing_tests {
             quit_after: true,
         });
         assert!(res.quit);
+    }
+
+    /// Minor A regression: a save-and-quit on a renamed CONTAINER must not pay for
+    /// the rescan — there is no pane left to show its result to. The early return
+    /// must land BEFORE `reload_structure` is even called.
+    #[test]
+    fn saved_container_rename_with_quit_skips_the_rescan() {
+        let structure = Structure::build("dc=x", vec![si("dc=x", None), si("ou=old,dc=x", None)]);
+        let schema = SchemaModel::from_raw(&RawSubschema::default());
+        let mut st =
+            UiState::new_for_test(structure, schema, "dc=x".into(), Vec::new(), Vec::new());
+        st.current_branch = Some("ou=old,dc=x".into());
+        let (worker, rx) = WorkerHandle::recording();
+        st.worker = Some(worker);
+
+        let res = st.apply_write_outcome(WriteOutcome::Saved {
+            reread_dn: "ou=new,dc=x".into(),
+            renamed_from: Some("ou=old,dc=x".into()),
+            quit_after: true,
+        });
+
+        assert!(res.quit);
+        assert_eq!(
+            st.status, "Saved.",
+            "the quit path must still report the save"
+        );
+        assert!(
+            rx.try_recv().is_err(),
+            "no LoadStructure request must be sent on a save-and-quit"
+        );
+    }
+
+    /// Minor B regression: when the post-rename rescan itself fails, the operator
+    /// must not be told the SAVE failed (that would misreport a write that
+    /// actually succeeded) — the two outcomes are combined into one message.
+    #[test]
+    fn saved_container_rename_reports_a_failed_rescan_without_hiding_the_save() {
+        let structure = Structure::build(
+            "dc=x",
+            vec![
+                si("dc=x", None),
+                si("ou=old,dc=x", None),
+                si("uid=child,ou=old,dc=x", Some("Child")),
+            ],
+        );
+        let schema = SchemaModel::from_raw(&RawSubschema::default());
+        let mut st =
+            UiState::new_for_test(structure, schema, "dc=x".into(), Vec::new(), Vec::new());
+        st.current_branch = Some("ou=old,dc=x".into());
+        let (worker, rx) = WorkerHandle::recording();
+        st.worker = Some(worker);
+
+        let responder = std::thread::spawn(move || {
+            let (req, reply) = rx.recv().expect("a LoadStructure request must be sent");
+            let Request::LoadStructure { id, .. } = req else {
+                panic!("expected Request::LoadStructure, got {req:?}");
+            };
+            let _ = reply.send(Response::StructureError {
+                id,
+                msg: "Size limit exceeded".into(),
+                truncated: true,
+            });
+        });
+
+        st.apply_write_outcome(WriteOutcome::Saved {
+            reread_dn: "ou=new,dc=x".into(),
+            renamed_from: Some("ou=old,dc=x".into()),
+            quit_after: false,
+        });
+        responder.join().expect("responder thread must not panic");
+
+        assert_eq!(
+            st.status, "Saved, but the rescan failed: Size limit exceeded",
+            "the save's own success must not be erased by an unrelated rescan failure"
+        );
     }
 
     #[test]
