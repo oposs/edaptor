@@ -814,7 +814,17 @@ impl UiState {
     }
 
     /// Submit a base-scope re-read of `dn`, selecting a profile by `ocs`.
+    ///
+    /// Clears `status` FIRST, but only when `dn` is genuinely a different entry
+    /// than the one already shown: that is what distinguishes an operator opening
+    /// ANOTHER entry (navigation, or discarding edits to jump to a guard target)
+    /// from the read that follows a save re-reading the SAME entry it just wrote.
+    /// The latter must not erase the "Saved." that `apply_write_outcome` set a
+    /// moment ago and calls this in the same breath to refresh.
     fn reread(&mut self, dn: &str, ocs: &[String]) {
+        if self.current_leaf.as_deref() != Some(dn) {
+            self.status.clear();
+        }
         let Self {
             worker,
             read_flow,
@@ -1000,6 +1010,11 @@ impl UiState {
     /// (split-borrow so `edit_form` and `read_flow` are borrowed disjointly).
     pub fn apply_commit(&mut self, field_idx: usize, outcome: crate::ui::widget::CommitOutcome) {
         use crate::ui::widget::CommitOutcome;
+        // Committing a field edit is a new operator action: any status left over
+        // from a previous one (a save confirmation, a search failure) no longer
+        // describes what's on screen. Cleared FIRST, before the match below, so it
+        // cannot erase anything this call might set later (it sets none today).
+        self.status.clear();
         let UiState {
             edit_form,
             read_flow,
@@ -1144,6 +1159,11 @@ impl UiState {
     /// paths. The `LeafPane` mirrors the cleared `search` back onto its
     /// `ListBox` find query on the next repopulate.
     pub fn commit_branch(&mut self, dn: String) {
+        // A container switch is a new operator action: any status left over from
+        // the previous one (a search failure, a stale save confirmation) no longer
+        // describes what's on screen. Cleared FIRST so a message this same call
+        // sets later (there is none today, but a future one would) survives.
+        self.status.clear();
         self.current_branch = Some(dn);
         self.list_dirty = true;
         self.search = String::new();
@@ -1161,6 +1181,12 @@ impl UiState {
     /// container listing; a non-empty one submits a fresh one-level search whose
     /// predecessor (if any) is superseded. No-op without a worker or a branch.
     pub fn set_leaf_search(&mut self, query: String) {
+        // Typing a new find query is a new operator action: any status left over
+        // from a previous one no longer describes what's on screen. The find's own
+        // outcome (e.g. the truncation notice) lands later, asynchronously, via
+        // `apply_leaf_search_outcome` — never in this same call — so clearing here
+        // cannot erase it before it is seen.
+        self.status.clear();
         self.search = query;
         self.list_dirty = true;
         if self.search.is_empty() {
