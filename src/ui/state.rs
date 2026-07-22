@@ -1313,6 +1313,10 @@ impl UiState {
         self.search.clear();
         self.leaf_search_rows = None;
         self.leaf_search_truncated = false;
+        // Abandon any in-flight find: its response would arrive after the reload and,
+        // although its rows can no longer render (the query is cleared), its status
+        // message would clobber the reload confirmation the operator just triggered.
+        self.leaf_search.cancel();
         self.lookup_cache.clear();
         self.list_dirty = true;
         self.tree_dirty = true;
@@ -2870,6 +2874,48 @@ mod tests {
         assert!(st.lookup_cache.is_empty());
         assert!(st.list_dirty);
         assert!(st.tree_dirty);
+    }
+
+    /// Regression for the reload race: a find issued before Alt+R still in flight
+    /// when the blocking reload completes must be ignored when its response lands,
+    /// so a straggling failure/truncation message can't clobber the "Reloaded N
+    /// entries." confirmation the operator just saw.
+    #[test]
+    fn adopt_structure_cancels_in_flight_search_so_its_response_is_ignored() {
+        let structure = Structure::build("dc=x", vec![si("dc=x", None), si("ou=a,dc=x", None)]);
+        let schema = SchemaModel::from_raw(&RawSubschema::default());
+        let mut st =
+            UiState::new_for_test(structure, schema, "dc=x".into(), Vec::new(), Vec::new());
+        st.current_branch = Some("ou=a,dc=x".into());
+        let (worker, rx) = WorkerHandle::recording();
+        st.worker = Some(worker);
+
+        // A find is issued and still in flight when the reload happens.
+        st.set_leaf_search("ann".into());
+        let (req, _) = rx.try_recv().expect("the search was submitted");
+        let id = match req {
+            Request::Search { id, .. } => id,
+            other => panic!("expected Request::Search, got {other:?}"),
+        };
+
+        // Alt+R adopts a freshly scanned structure, then reports success — mirroring
+        // what `reload_structure` does after a successful blocking scan.
+        let fresh = Structure::build("dc=x", vec![si("dc=x", None), si("ou=a,dc=x", None)]);
+        st.adopt_structure(fresh);
+        st.status = "Reloaded 3 entries.".to_string();
+
+        // The straggling (now superseded) response finally arrives.
+        let resp = Response::SearchError {
+            id,
+            msg: "boom".to_string(),
+        };
+        st.pump_responses_for_test(&[resp]);
+
+        assert_eq!(
+            st.status, "Reloaded 3 entries.",
+            "a straggling find response must not overwrite the reload confirmation"
+        );
+        assert!(st.leaf_search_rows.is_none());
     }
 
     #[test]
