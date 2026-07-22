@@ -128,8 +128,15 @@ pub(crate) fn dispatch(prog: &mut Program, cmd: Command, state: &Shared) {
         }
     } else if cmd == RELOAD {
         // Blocking rescan; the pump broadcasts REFRESH for the list/tree because
-        // adopt_structure marks both dirty.
-        state.borrow_mut().reload_structure();
+        // adopt_structure marks both dirty. A failure must not look like a
+        // successful no-op reload, so surface it in the same error modal the
+        // save path uses — but only after the borrow is dropped, or the modal's
+        // event loop would deadlock on a re-entrant borrow.
+        let err = state.borrow_mut().reload_structure().err();
+        if let Some(msg) = err {
+            let (view, ok) = error::build(&msg);
+            prog.exec_view_focused(view, ok);
+        }
     } else if cmd == ACTIVATE {
         // Open a field's modal editor. The pane recorded which field.
         let idx = state.borrow_mut().activate_field.take();

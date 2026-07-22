@@ -673,7 +673,10 @@ impl UiState {
                             .as_deref()
                             .map(|b| b.eq_ignore_ascii_case(&old))
                             .unwrap_or(false);
-                        self.reload_structure();
+                        // Best-effort: a failure here already lands in `self.status`
+                        // (set by `reload_structure` itself); the save itself already
+                        // succeeded, so there is no separate error surface to drive.
+                        let _ = self.reload_structure();
                         // Keep the operator on the container they just renamed
                         // rather than falling back to the base DN.
                         if was_current {
@@ -1360,10 +1363,16 @@ impl UiState {
     /// duration, which is acceptable for an explicit, operator-initiated action. The
     /// open edit form is deliberately left untouched, so unsaved work is never at
     /// risk and no dirty-form guard is needed. On failure the previous structure is
-    /// kept and the error is surfaced in the status line.
-    pub fn reload_structure(&mut self) {
+    /// kept and the error is surfaced in the status line *and* returned so the
+    /// caller can put it in front of the operator — a failed reload must never look
+    /// like a successful no-op one.
+    ///
+    /// Returns `Ok(count)` (entries adopted) on success, `Err(msg)` on failure.
+    /// With no worker attached there is nothing to reload; treated as a no-op
+    /// success (`Ok(0)`) rather than an error, since it is not a failed action.
+    pub fn reload_structure(&mut self) -> Result<usize, String> {
         let Some(worker) = self.worker.as_ref() else {
-            return;
+            return Ok(0);
         };
         let resp = worker.request(Request::LoadStructure {
             id: 0,
@@ -1380,15 +1389,21 @@ impl UiState {
                 );
                 self.adopt_structure(structure);
                 self.status = format!("Reloaded {count} entries.");
+                Ok(count)
             }
             Ok(Response::StructureError { msg, .. }) => {
                 self.status = format!("Reload failed: {msg}");
+                Err(msg)
             }
             Ok(other) => {
-                self.status = format!("Reload failed: unexpected {other:?}");
+                let msg = format!("unexpected {other:?}");
+                self.status = format!("Reload failed: {msg}");
+                Err(msg)
             }
             Err(e) => {
-                self.status = format!("Reload failed: {e}");
+                let msg = e.to_string();
+                self.status = format!("Reload failed: {msg}");
+                Err(msg)
             }
         }
     }
@@ -3489,5 +3504,136 @@ mod write_routing_tests {
             .as_deref()
             .unwrap()
             .contains("could not be re-read"));
+    }
+
+    /// A successful rescan returns `Ok(count)` with the entry count it adopted,
+    /// and the structure/status reflect the reload — same assertions
+    /// `reload_structure`'s own doc comment already promises the success path.
+    #[test]
+    fn reload_structure_ok_returns_entry_count() {
+        let structure = Structure::build("dc=x", vec![si("dc=x", None)]);
+        let schema = SchemaModel::from_raw(&RawSubschema::default());
+        let mut st =
+            UiState::new_for_test(structure, schema, "dc=x".into(), Vec::new(), Vec::new());
+        let (worker, rx) = WorkerHandle::recording();
+        st.worker = Some(worker);
+
+        // `reload_structure` blocks on `worker.request`, so the reply must be sent
+        // from another thread while the main thread is waiting on it.
+        let responder = std::thread::spawn(move || {
+            let (req, reply) = rx.recv().expect("a LoadStructure request must be sent");
+            let Request::LoadStructure { id, .. } = req else {
+                panic!("expected Request::LoadStructure, got {req:?}");
+            };
+            let _ = reply.send(Response::StructureEntries {
+                id,
+                nodes: vec![crate::ldap::worker::StructureNodeRaw {
+                    dn: "dc=x".into(),
+                    cn: None,
+                    description: None,
+                    object_classes: vec![],
+                    attrs: BTreeMap::new(),
+                }],
+            });
+        });
+
+        let result = st.reload_structure();
+        responder.join().expect("responder thread must not panic");
+
+        assert_eq!(result, Ok(1));
+        assert_eq!(st.status, "Reloaded 1 entries.");
+        assert!(st.list_dirty);
+        assert!(st.tree_dirty);
+    }
+
+    /// A `StructureError` response (e.g. a size/time/admin-limit failure) must map
+    /// to `Err` carrying the same human-readable message written to `status` — the
+    /// caller (dispatch's RELOAD arm) needs that message to pop the error modal.
+    #[test]
+    fn reload_structure_structure_error_returns_err_with_message() {
+        let structure = Structure::build("dc=x", vec![si("dc=x", None)]);
+        let schema = SchemaModel::from_raw(&RawSubschema::default());
+        let mut st =
+            UiState::new_for_test(structure, schema, "dc=x".into(), Vec::new(), Vec::new());
+        let (worker, rx) = WorkerHandle::recording();
+        st.worker = Some(worker);
+
+        let responder = std::thread::spawn(move || {
+            let (req, reply) = rx.recv().expect("a LoadStructure request must be sent");
+            let Request::LoadStructure { id, .. } = req else {
+                panic!("expected Request::LoadStructure, got {req:?}");
+            };
+            let _ = reply.send(Response::StructureError {
+                id,
+                msg: "Size limit exceeded".into(),
+                truncated: true,
+            });
+        });
+
+        let result = st.reload_structure();
+        responder.join().expect("responder thread must not panic");
+
+        assert_eq!(result, Err("Size limit exceeded".to_string()));
+        assert!(st.status.contains("Size limit exceeded"));
+    }
+
+    /// With no worker attached (e.g. offline/read-only mode) there is nothing to
+    /// reload, so it is treated as a no-op success rather than a failed action.
+    #[test]
+    fn reload_structure_without_worker_is_a_no_op_ok() {
+        let structure = Structure::build("dc=x", vec![si("dc=x", None)]);
+        let schema = SchemaModel::from_raw(&RawSubschema::default());
+        let mut st =
+            UiState::new_for_test(structure, schema, "dc=x".into(), Vec::new(), Vec::new());
+        assert!(st.worker.is_none());
+        assert_eq!(st.reload_structure(), Ok(0));
+    }
+
+    /// A dropped reply channel (worker thread gone) surfaces as `Err`, not a panic
+    /// or a silently-kept-stale structure.
+    #[test]
+    fn reload_structure_dropped_worker_returns_err() {
+        let structure = Structure::build("dc=x", vec![si("dc=x", None)]);
+        let schema = SchemaModel::from_raw(&RawSubschema::default());
+        let mut st =
+            UiState::new_for_test(structure, schema, "dc=x".into(), Vec::new(), Vec::new());
+        let (worker, rx) = WorkerHandle::recording();
+        st.worker = Some(worker);
+
+        // Receive the request and drop its reply sender without answering —
+        // simulates the worker thread dying mid-request.
+        let responder = std::thread::spawn(move || {
+            let (_req, reply) = rx.recv().expect("a LoadStructure request must be sent");
+            drop(reply);
+        });
+
+        let result = st.reload_structure();
+        responder.join().expect("responder thread must not panic");
+
+        assert!(result.is_err());
+        assert!(st.status.starts_with("Reload failed:"));
+    }
+
+    /// An unexpected response variant (a worker/routing bug, not a real failure
+    /// mode) still maps to `Err` rather than being silently swallowed.
+    #[test]
+    fn reload_structure_unexpected_response_returns_err() {
+        let structure = Structure::build("dc=x", vec![si("dc=x", None)]);
+        let schema = SchemaModel::from_raw(&RawSubschema::default());
+        let mut st =
+            UiState::new_for_test(structure, schema, "dc=x".into(), Vec::new(), Vec::new());
+        let (worker, rx) = WorkerHandle::recording();
+        st.worker = Some(worker);
+
+        let responder = std::thread::spawn(move || {
+            let (_req, reply) = rx.recv().expect("a LoadStructure request must be sent");
+            let _ = reply.send(Response::Done);
+        });
+
+        let result = st.reload_structure();
+        responder.join().expect("responder thread must not panic");
+
+        assert!(result.is_err());
+        assert!(st.status.contains("unexpected"));
     }
 }
