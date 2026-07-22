@@ -1289,6 +1289,73 @@ impl UiState {
             self.set_leaf_row = self.current_leaf_row();
         }
     }
+
+    /// Install a freshly scanned structure, keeping the operator's place.
+    ///
+    /// The current container and entry are preserved **by DN** when they still
+    /// exist; a vanished container falls back to the base DN and a vanished entry to
+    /// no selection. Every projection derived from the old scan is dropped: the find
+    /// query, its live rows, and the reverse-label cache (which caches negatives, so
+    /// a stale miss would otherwise outlive the refresh). Pure — no I/O — so the
+    /// place-keeping rules are unit-testable.
+    pub fn adopt_structure(&mut self, structure: Structure) {
+        self.structure = structure;
+        if let Some(branch) = self.current_branch.clone() {
+            if self.structure.get(&branch).is_none() {
+                self.current_branch = Some(self.base_dn.clone());
+            }
+        }
+        if let Some(leaf) = self.current_leaf.clone() {
+            if self.structure.get(&leaf).is_none() {
+                self.current_leaf = None;
+            }
+        }
+        self.search.clear();
+        self.leaf_search_rows = None;
+        self.leaf_search_truncated = false;
+        self.lookup_cache.clear();
+        self.list_dirty = true;
+        self.tree_dirty = true;
+    }
+
+    /// Re-run the eager structure scan and adopt the result (Alt+R).
+    ///
+    /// Blocking, like the bootstrap scan it repeats: the TUI is unresponsive for its
+    /// duration, which is acceptable for an explicit, operator-initiated action. The
+    /// open edit form is deliberately left untouched, so unsaved work is never at
+    /// risk and no dirty-form guard is needed. On failure the previous structure is
+    /// kept and the error is surfaced in the status line.
+    pub fn reload_structure(&mut self) {
+        let Some(worker) = self.worker.as_ref() else {
+            return;
+        };
+        let resp = worker.request(Request::LoadStructure {
+            id: 0,
+            base: self.base_dn.clone(),
+            page_size: 500,
+            attrs: self.scan_attrs.clone(),
+        });
+        match resp {
+            Ok(Response::StructureEntries { nodes, .. }) => {
+                let count = nodes.len();
+                let structure = Structure::build(
+                    &self.base_dn,
+                    crate::workflows::labels::structure_inputs(nodes),
+                );
+                self.adopt_structure(structure);
+                self.status = format!("Reloaded {count} entries.");
+            }
+            Ok(Response::StructureError { msg, .. }) => {
+                self.status = format!("Reload failed: {msg}");
+            }
+            Ok(other) => {
+                self.status = format!("Reload failed: unexpected {other:?}");
+            }
+            Err(e) => {
+                self.status = format!("Reload failed: {e}");
+            }
+        }
+    }
 }
 
 /// Derive a `SambaDomainInfo` from the config `[samba]` table.
@@ -2763,6 +2830,65 @@ mod tests {
             st.leaf_search_rows.is_none(),
             "container A's cancelled search must not leak its DNs into container B"
         );
+    }
+
+    #[test]
+    fn adopt_structure_keeps_a_still_existing_branch_and_leaf() {
+        let old = Structure::build(
+            "dc=x",
+            vec![
+                si("dc=x", None),
+                si("ou=p,dc=x", None),
+                si("uid=a,ou=p,dc=x", Some("A")),
+            ],
+        );
+        let schema = SchemaModel::from_raw(&RawSubschema::default());
+        let mut st = UiState::new_for_test(old, schema, "dc=x".into(), Vec::new(), Vec::new());
+        st.current_branch = Some("ou=p,dc=x".into());
+        st.current_leaf = Some("uid=a,ou=p,dc=x".into());
+        st.search = "zzz".into();
+        st.leaf_search_rows = Some(vec!["uid=a,ou=p,dc=x".to_string()]);
+        st.lookup_cache.insert(
+            crate::workflows::resolve_flow::member_key("uid=a,ou=p,dc=x"),
+            Some("A".into()),
+        );
+
+        let fresh = Structure::build(
+            "dc=x",
+            vec![
+                si("dc=x", None),
+                si("ou=p,dc=x", None),
+                si("uid=a,ou=p,dc=x", Some("A")),
+            ],
+        );
+        st.adopt_structure(fresh);
+
+        assert_eq!(st.current_branch.as_deref(), Some("ou=p,dc=x"));
+        assert_eq!(st.current_leaf.as_deref(), Some("uid=a,ou=p,dc=x"));
+        assert!(st.search.is_empty());
+        assert!(st.leaf_search_rows.is_none());
+        assert!(st.lookup_cache.is_empty());
+        assert!(st.list_dirty);
+        assert!(st.tree_dirty);
+    }
+
+    #[test]
+    fn adopt_structure_falls_back_when_the_branch_is_gone() {
+        let old = Structure::build("dc=x", vec![si("dc=x", None), si("ou=p,dc=x", None)]);
+        let schema = SchemaModel::from_raw(&RawSubschema::default());
+        let mut st = UiState::new_for_test(old, schema, "dc=x".into(), Vec::new(), Vec::new());
+        st.current_branch = Some("ou=gone,dc=x".into());
+        st.current_leaf = Some("uid=ghost,ou=gone,dc=x".into());
+
+        let fresh = Structure::build("dc=x", vec![si("dc=x", None), si("ou=p,dc=x", None)]);
+        st.adopt_structure(fresh);
+
+        assert_eq!(
+            st.current_branch.as_deref(),
+            Some("dc=x"),
+            "a vanished container falls back to the base DN"
+        );
+        assert_eq!(st.current_leaf, None);
     }
 }
 

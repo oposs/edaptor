@@ -17,7 +17,9 @@ use crate::ui::pump::PumpView;
 use crate::ui::state::GuardTarget;
 use crate::ui::widget::{widget_for, Activation};
 use crate::ui::StartupAction;
-use crate::ui::{Shared, ACTIVATE, CREATE, GUARD_NAV, REQUEST_QUIT, SAVE, SHOW_ERROR, STARTUP};
+use crate::ui::{
+    Shared, ACTIVATE, CREATE, GUARD_NAV, RELOAD, REQUEST_QUIT, SAVE, SHOW_ERROR, STARTUP,
+};
 use crate::workflows::create::{resolve_create_container, CreateContainer};
 use crate::workflows::save::PrepareSave;
 
@@ -41,6 +43,7 @@ fn init_menu_bar(r: Rect) -> Option<Box<dyn View>> {
         .submenu("~F~ile", alt('f'), |m| {
             m.command_key("~N~ew", CREATE, alt('n'), "Alt-N")
                 .command_key("~S~ave", SAVE, alt('s'), "Alt-S")
+                .command_key("~R~eload", RELOAD, alt('r'), "Alt-R")
                 .command_key("E~x~it", REQUEST_QUIT, alt('x'), "Alt-X")
         })
         .build();
@@ -123,6 +126,10 @@ pub(crate) fn dispatch(prog: &mut Program, cmd: Command, state: &Shared) {
         } else {
             let _ = do_save(prog, state, None, false);
         }
+    } else if cmd == RELOAD {
+        // Blocking rescan; the pump broadcasts REFRESH for the list/tree because
+        // adopt_structure marks both dirty.
+        state.borrow_mut().reload_structure();
     } else if cmd == ACTIVATE {
         // Open a field's modal editor. The pane recorded which field.
         let idx = state.borrow_mut().activate_field.take();

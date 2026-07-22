@@ -52,6 +52,10 @@ pub const SHOW_ERROR: tv::Command = tv::Command::custom("edaptor.show_error");
 
 pub const STARTUP: tv::Command = tv::Command::custom("edaptor.startup");
 
+/// Re-run the eager structure scan (Alt+R) — the escape hatch for structure
+/// staleness that no local reflow can see (another client created a container).
+pub const RELOAD: tv::Command = tv::Command::custom("edaptor.reload");
+
 /// A one-shot action to run once the TUI has started (schema is already loaded by
 /// `bootstrap`). Carried on `UiState::pending_startup`, posted by the pump as the
 /// `STARTUP` command, and executed once in `app::dispatch`.
