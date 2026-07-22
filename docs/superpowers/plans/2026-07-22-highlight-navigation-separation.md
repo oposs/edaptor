@@ -831,7 +831,7 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 
 **Files:**
 - Modify: `src/ui/state.rs` (new method; call sites `commit_branch` ~`:1191`, `reconcile_selection` `:1127`, `set_leaf_search` `:1214`, `apply_commit`)
-- Modify: `src/ui/app.rs:442` (`open_create`), the modal-cancel path, the guard `Stay` arm `:265-275`
+- Modify: `src/ui/app.rs:442` (`open_create`), `:133` (`SAVE` dispatch arm), `apply_cancelled_guard_save` + the guard `Stay` arm `:265-275`
 - Test: `src/ui/state.rs`, `src/ui/app.rs`
 
 **Interfaces:**
@@ -841,13 +841,22 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 
 ```rust
     /// Follow-up #2: a status message must not outlive the action it describes.
-    /// Opening the create form is a new operator action, so "Saved." goes.
+    /// Guard "Stay" is an operator action — they explicitly chose to keep
+    /// editing — so a "Saved." left over from a previous action must go. This
+    /// tests a real CALL SITE, not the helper: a test that only asserted
+    /// `begin_operator_action()` empties the string would be a tautology over a
+    /// one-line function, and the whole point of the task is that the call sites
+    /// actually call it.
     #[test]
-    fn open_create_clears_a_stale_status() {
+    fn guard_stay_clears_a_stale_status() {
         let mut st = st_with_rows(&["cn=a,ou=p,dc=x"]);
+        st.current_leaf = Some("cn=a,ou=p,dc=x".to_string());
         st.status = "Saved.".to_string();
-        st.begin_operator_action();
-        assert!(st.status.is_empty());
+        crate::ui::app::apply_cancelled_guard_save(&mut st);
+        assert!(
+            st.status.is_empty(),
+            "guard Stay must not leave a message describing the previous action"
+        );
     }
 
 ```
@@ -860,7 +869,7 @@ confirm it still passes; do not duplicate or modify it.
 
 - [ ] **Step 2: Run the test to verify it fails**
 
-Run: `cargo test -j4 --lib open_create_clears_a_stale_status`
+Run: `cargo test -j4 --lib guard_stay_clears_a_stale_status`
 Expected: FAIL — `no method named begin_operator_action`.
 
 - [ ] **Step 3: Implement**
@@ -878,9 +887,31 @@ Expected: FAIL — `no method named begin_operator_action`.
     }
 ```
 
-Replace the bare `self.status.clear()` at the four existing sites with
-`self.begin_operator_action()`, and add the call to `open_create`, the modal-cancel
-path, and the guard `Stay` arm.
+**Where the call goes — the exact sites, no others.** The spec's phrase "modal
+cancel" is superseded: clear when the operator *starts* an action, not when they
+back out of one, so a cancel needs no handling at all — the status was already
+cleared when the action began, and a completed action sets its own message.
+
+1. The four existing bare `self.status.clear()` calls — in `commit_branch`,
+   `reconcile_selection`, `set_leaf_search`, and `apply_commit` — become
+   `self.begin_operator_action()`. Behaviour identical; this is the rename that
+   makes the policy greppable. Confirm there are exactly four by grepping
+   `self.status.clear()` before and after.
+2. `open_create` (`src/ui/app.rs:442`) — opening the create form is a new action;
+   add `state.borrow_mut().begin_operator_action();` at the top, before the form
+   is built (mind the existing borrow scopes in that function).
+3. The `SAVE` dispatch arm (`src/ui/app.rs:133`) — pressing Save is the action;
+   whether it ends in a write, "No changes.", a validation error, or a cancelled
+   confirm, the previous action's message is stale the moment Save is pressed.
+4. `apply_cancelled_guard_save` and the guard `Stay` arm (`src/ui/app.rs`) — the
+   operator chose to keep editing; that is an action too. `apply_cancelled_guard_save`
+   takes `&mut UiState`, so call `st.begin_operator_action()` there.
+
+Do **not** add it inside `reread`, or anywhere else on the shared write path: that
+is exactly the mistake `c016f2a` fixed, where a rename ate its own confirmation
+because a post-write re-read is indistinguishable from a navigation. Task 3 also
+touches `apply_cancelled_guard_save`; if Task 3 has landed, add the clear to the
+version already there rather than reverting its `list_dirty` change.
 
 - [ ] **Step 4: Run the suite**
 
