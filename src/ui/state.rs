@@ -1178,6 +1178,13 @@ impl UiState {
                         crate::workflows::leaf_search::LEAF_SEARCH_CAP
                     );
                 }
+                // The upserts above computed their snap index against the PREVIOUS
+                // row source; `leaf_rows()` now answers from the rows just
+                // installed, so the index has to be recomputed or the highlight
+                // lands on a different entry than the form shows.
+                if self.set_leaf_row.is_some() {
+                    self.set_leaf_row = self.current_leaf_row();
+                }
                 self.list_dirty = true;
             }
             LeafSearchOutcome::Failed(msg) => {
@@ -2738,6 +2745,72 @@ mod tests {
         );
         assert!(!st.leaf_search_truncated);
         assert!(st.list_dirty);
+    }
+
+    /// The upserts inside the `Results` loop compute their snap index against the
+    /// STALE `leaf_search_rows` (the previous query's answer) because it is only
+    /// replaced after the loop. Left uncorrected, the highlight lands on whatever
+    /// row that stale, single-hit source happened to put the entry at — not the
+    /// row the freshly-installed, alphabetically-sorted rows actually give it.
+    #[test]
+    fn apply_leaf_search_results_recomputes_the_snap_row_against_the_new_rows() {
+        use crate::ldap::worker::LdapEntry;
+
+        // ou=p,dc=x already contains "Zoe" (found by an earlier, different query);
+        // its label is the plain RDN "ou=p", which does not contain "z", so the
+        // ‹self› row is filtered out of every projection below.
+        let structure = Structure::build(
+            "dc=x",
+            vec![
+                si("dc=x", None),
+                si("ou=p,dc=x", None),
+                si("uid=zoe,ou=p,dc=x", Some("Zoe")),
+            ],
+        );
+        let schema = SchemaModel::from_raw(&RawSubschema::default());
+        let mut st =
+            UiState::new_for_test(structure, schema, "dc=x".into(), Vec::new(), Vec::new());
+        st.current_branch = Some("ou=p,dc=x".into());
+        st.current_leaf = Some("uid=zoe,ou=p,dc=x".into());
+        st.search = "z".to_string();
+        // The stale row source from the previous query: just Zoe, at index 0.
+        st.leaf_search_rows = Some(vec!["uid=zoe,ou=p,dc=x".to_string()]);
+
+        let mut liz_attrs: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        liz_attrs.insert("cn".to_string(), vec!["Liz".to_string()]);
+        let mut zoe_attrs: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        zoe_attrs.insert("cn".to_string(), vec!["Zoe".to_string()]);
+
+        st.apply_leaf_search_outcome(LeafSearchOutcome::Results {
+            entries: vec![
+                LdapEntry {
+                    dn: "uid=liz,ou=p,dc=x".to_string(),
+                    attrs: liz_attrs,
+                    bin_attrs: Default::default(),
+                },
+                LdapEntry {
+                    dn: "uid=zoe,ou=p,dc=x".to_string(),
+                    attrs: zoe_attrs,
+                    bin_attrs: Default::default(),
+                },
+            ],
+            truncated: false,
+        });
+
+        // Final rows, sorted by label: [Liz, Zoe] — Zoe is row 1, not row 0.
+        assert_eq!(
+            st.leaf_rows(),
+            vec![
+                ("Liz".to_string(), "uid=liz,ou=p,dc=x".to_string()),
+                ("Zoe".to_string(), "uid=zoe,ou=p,dc=x".to_string()),
+            ]
+        );
+        assert_eq!(
+            st.set_leaf_row,
+            Some(1),
+            "must snap to Zoe's row in the FINAL rows, not the row the stale \
+             previous-query source gave it mid-loop"
+        );
     }
 
     /// `Results { truncated: true }` sets `leaf_search_truncated` and reports the
