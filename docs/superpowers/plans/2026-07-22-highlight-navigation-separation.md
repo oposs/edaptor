@@ -649,9 +649,21 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
     /// Follow-up #1: the guard "Stay" snap used to be an index resolved against
     /// the PRE-rebuild `branch_dns`. With a rebuild pending, that index described
     /// the old numbering. Resolving by DN after the rebuild removes the class.
+    /// SETUP NOTE: `ou=a,dc=x` must exist as a childless leaf in the initial
+    /// inputs. `Structure::upsert` links a node under its parent only when that
+    /// parent is already a known node, so upserting `cn=2,ou=a,dc=x` into a
+    /// structure that has never heard of `ou=a` leaves the child unlinked and
+    /// invisible — `branch_dns` would not change and this test would fail for a
+    /// reason that has nothing to do with the highlight. This mirrors the setup
+    /// of the existing `refresh_with_tree_dirty_rebuilds_and_keeps_the_selected_dn`.
     #[test]
     fn guard_stay_snaps_by_dn_across_a_pending_rebuild() {
-        let inputs = vec![si("dc=x"), si("ou=b,dc=x"), si("cn=1,ou=b,dc=x")];
+        let inputs = vec![
+            si("dc=x"),
+            si("ou=a,dc=x"),
+            si("ou=b,dc=x"),
+            si("cn=1,ou=b,dc=x"),
+        ];
         let structure = Structure::build("dc=x", inputs);
         let schema = SchemaModel::from_raw(&RawSubschema::default());
         let mut st = UiState::new_for_test(
@@ -668,11 +680,12 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
             std::rc::Rc::new(std::cell::RefCell::new(st));
         let mut pane = TreePane::new(Rect::new(0, 0, 30, 10), root, shared.clone());
 
-        // A new container sorts ahead of ou=b, so ou=b moves from row 1 to row 2 —
-        // and the rebuild has NOT happened yet when the guard resolves.
+        // A child lands under the childless ou=a, promoting it leaf -> branch, so
+        // ou=b moves from row 1 to row 2 — and the rebuild has NOT happened yet
+        // when the guard resolves.
         {
             let mut st = shared.borrow_mut();
-            st.structure.upsert(si("cn=1,ou=a,dc=x"));
+            st.structure.upsert(si("cn=2,ou=a,dc=x"));
             st.tree_dirty = true;
         }
         refresh_tree(&mut pane);
@@ -698,9 +711,41 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
     }
 ```
 
-Reuse the `refresh_tree` helper pattern already used by
-`refresh_with_tree_dirty_rebuilds_and_keeps_the_selected_dn` (`tree.rs:528`), and
-add a `selected_row_for_test` accessor reading the outline's `value()`.
+**`tree.rs`'s test module has no `refresh_tree` helper** — the existing tests build
+the `Context` inline (see `refresh_with_tree_dirty_rebuilds_and_keeps_the_selected_dn`).
+It does have a single-argument `si` at `tree.rs:314`; reuse that. Add these two to
+the test module:
+
+```rust
+    /// Drive one `REFRESH` broadcast through the pane.
+    fn refresh_tree(pane: &mut TreePane) {
+        let mut out = std::collections::VecDeque::new();
+        let mut timers = tv::timer::TimerQueue::new();
+        let mut deferred: Vec<tv::Deferred> = Vec::new();
+        let mut ctx = Context::new(&mut out, &mut timers, 0, &mut deferred);
+        let mut ev = Event::Broadcast {
+            command: REFRESH,
+            source: None,
+        };
+        pane.handle_event(&mut ev, &mut ctx);
+    }
+```
+
+and a `selected_row_for_test` accessor beside the pane's other `#[cfg(test)]`
+helpers, reading the outline's `value()`:
+
+```rust
+    #[cfg(test)]
+    pub(crate) fn selected_row_for_test(&mut self) -> i32 {
+        match self.outline_mut().and_then(|o| o.value()) {
+            Some(FieldValue::Int(i)) => i,
+            _ => -1,
+        }
+    }
+```
+
+Do not refactor the existing tests onto `refresh_tree` — they are regression tests
+and stay as they are.
 
 - [ ] **Step 2: Run the test to verify it fails**
 
