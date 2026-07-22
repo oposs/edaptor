@@ -191,7 +191,15 @@ Add to the `impl UiState` block containing `leaf_rows`:
     /// unsaved edits, and never by raising the dirty guard mid-keystroke.
     pub fn leaf_highlight_plan(&self) -> HighlightPlan {
         let rows = self.leaf_rows();
-        let Some((_, first_dn)) = rows.first() else {
+        // NOT `rows.first()`: `leaf_rows` puts the branch's own `‹self›` row at
+        // index 0 whenever no filter is active, so the literal first row is the
+        // CONTAINER — the I4 trap this design exists to remove. A childless
+        // container therefore yields `Clear`. The `Pin(current_leaf)` check below
+        // still searches the full row set, so an operator who deliberately opened
+        // the container's own entry keeps it.
+        let branch = self.current_branch.as_deref();
+        let is_self_row = |dn: &str| branch.is_some_and(|b| dn.eq_ignore_ascii_case(b));
+        let Some((_, first_dn)) = rows.iter().find(|(_, dn)| !is_self_row(dn)) else {
             return HighlightPlan::Clear;
         };
         if let Some(cur) = self.current_leaf.as_deref() {

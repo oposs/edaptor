@@ -95,6 +95,14 @@ Resolved by a pure method on `UiState` against the freshly-built row source:
 | open entry absent, form **dirty** | `Pin(first_row)` |
 | no form open yet | `Pin(first_row)` |
 
+**`first_row` means the first row that is not the `‹self›` row.** `leaf_rows`
+puts the branch's own entry at row 0 whenever no filter is active, so a literal
+`rows.first()` would resolve to the *container* — which is exactly the I4 defect
+this design exists to remove (a rebuild dragging the form onto the container and
+wiping the status). A container with no children therefore yields `Clear`, not a
+`Pin` on itself. The `Pin(current_leaf)` check still searches the **full** row
+set, so an operator who deliberately opened the container's own entry keeps it.
+
 `Pin` sets the widget focus and resyncs `last_sel` only. `Follow` does that *and*
 emits `request_leaf`, so the form moves through the existing
 `reconcile_selection` path — which cannot raise the guard here, because `Follow`
