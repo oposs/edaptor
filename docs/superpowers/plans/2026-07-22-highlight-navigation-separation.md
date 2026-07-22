@@ -892,8 +892,13 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 
 ### Task 7: The Vanished dialog — Keep editing / Discard / Re-create
 
+**Blocked on:** tvision 0.13 (`Dialog::button_row` auto-sizing). Verify
+`Cargo.toml` pins a version providing it before starting; if it does not, stop and
+report rather than hand-laying a button row.
+
 **Files:**
 - Create: `src/ui/dialog/vanished.rs`
+- Modify: `src/ui/dialog/guard.rs` (drop its `button_row` fork)
 - Modify: `src/ui/dialog/mod.rs` (module decl, `VanishedDecision`, `vanished_decision`)
 - Modify: `src/ui/app.rs:229-276` (`GUARD_NAV` dispatch)
 - Modify: `src/ui/state.rs:793` (`WriteOutcome::Created` sets a status)
@@ -979,27 +984,61 @@ Expected: FAIL — `cannot find function vanished_decision`.
 
 - [ ] **Step 3: Implement**
 
-`src/ui/dialog/vanished.rs` — copy the hand-laid button row from `guard.rs`
-verbatim (same `BTN_W` reasoning: "Keep editing" is wider than a 10-column face):
+`src/ui/dialog/vanished.rs` — use `Dialog::button_row`, which as of tvision
+0.13 sizes its faces to the widest label. **Do not hand-lay a button row**, and
+do not declare width constants: "Keep editing" is 12 columns, so the row sizes
+itself to 16.
 
 ```rust
 //! The entry being edited vanished from the directory: Re-create / Discard /
 //! Keep editing over a form whose DN no longer exists.
+
+use tvision_rs::{ButtonFlags, Command, Dialog, Rect, StaticText, View, ViewId};
+use tvision_rs::dialog::ButtonRowAlign;
+
+const DLG_W: i32 = 64;
+const DLG_H: i32 = 9;
+
+/// Build the vanished-entry dialog. Returns the view and the "Keep editing"
+/// button id to focus on open, so Enter takes the only non-destructive choice.
+/// The dialog returns `Command::YES` (Re-create), `Command::NO` (Discard), or
+/// `Command::CANCEL` (Keep editing).
+pub fn build(dn: &str) -> (Box<dyn View>, ViewId) {
+    let mut dlg = Dialog::new(
+        Rect::new(0, 0, DLG_W, DLG_H),
+        Some("Entry removed".to_string()),
+    );
+    dlg.state_mut().options.center_x = true;
+    dlg.state_mut().options.center_y = true;
+    dlg.insert_child(Box::new(StaticText::new(
+        Rect::new(2, 2, 62, 5),
+        format!("{dn}\nis no longer in the directory. You have unsaved changes."),
+    )));
+    let ids = dlg.button_row(
+        &[
+            ("~R~e-create", Command::YES, ButtonFlags::new()),
+            ("~D~iscard", Command::NO, ButtonFlags::new()),
+            (
+                "~K~eep editing",
+                Command::CANCEL,
+                ButtonFlags {
+                    default: true,
+                    ..ButtonFlags::new()
+                },
+            ),
+        ],
+        ButtonRowAlign::Right,
+    );
+    (Box::new(dlg), ids[2])
+}
 ```
 
-with `specs`:
-
-```rust
-    let specs: [(&str, Command, bool); 3] = [
-        ("~R~e-create", Command::YES, false),
-        ("~D~iscard", Command::NO, false),
-        ("~K~eep editing", Command::CANCEL, true),
-    ];
-```
-
-"Keep editing" is the default (it is the only non-destructive choice), and
-`build` returns its id so Enter keeps the edits. `BTN_W` must be widened to fit
-"Keep editing" (13 glyphs) — use `15`.
+**Also simplify `src/ui/dialog/guard.rs` in this task.** It hand-lays its row
+solely because the old `button_row` forced a 10-column face; that reason is gone.
+Replace its manual layout and its four local constants (`BTN_W`, `BTN_H`,
+`BTN_GAP`, `MARGIN_RIGHT`, `BUTTON_ROW_FROM_BOTTOM`) with one `button_row` call
+using the same three specs it has today, keeping Save as the focused/default
+button. Its existing tests must pass unchanged.
 
 In `mod.rs`:
 
