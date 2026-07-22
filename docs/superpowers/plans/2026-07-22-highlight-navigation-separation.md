@@ -276,13 +276,19 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
     }
 
     #[test]
-    fn branch_highlight_plan_never_follows() {
+    fn branch_highlight_plan_clears_rather_than_falling_back_to_a_first_row() {
         let mut st = st_with_rows(&[]);
         st.branch_dns = vec!["dc=x".to_string(), "ou=p,dc=x".to_string()];
         st.current_branch = Some("ou=gone,dc=x".to_string());
-        assert!(
-            !matches!(st.branch_highlight_plan(), HighlightPlan::Follow(_)),
-            "a tree rebuild must never navigate the form"
+        // Assert the FULL value, not merely "not Follow": the likely wrong
+        // implementation is a copy-paste of the leaf policy, which falls back to
+        // the first row and would return Pin("dc=x") — and a !matches!(Follow)
+        // check would wave that straight through. This is the case where the two
+        // policies genuinely diverge, so it is the one worth pinning down.
+        assert_eq!(
+            st.branch_highlight_plan(),
+            HighlightPlan::Clear,
+            "a tree rebuild must never navigate the form, nor fall back to a row"
         );
     }
 ```
