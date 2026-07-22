@@ -78,7 +78,9 @@ pub(crate) enum SaveOutcome {
 /// Called when the guard→Save path does not submit (cancelled confirm == Stay).
 /// Pure (no ctx); unit-tested.
 pub(crate) fn apply_cancelled_guard_save(st: &mut crate::ui::state::UiState) {
-    st.set_leaf_row = st.current_leaf_row();
+    // The highlight is re-resolved from `leaf_highlight_plan` on the next
+    // rebuild, which returns `Pin(current_leaf)` while the form is pinned.
+    st.list_dirty = true;
     st.guard_target = None;
     st.pending_nav = None;
 }
@@ -268,7 +270,7 @@ pub(crate) fn dispatch(prog: &mut Program, cmd: Command, state: &Shared) {
                 match target {
                     Some(GuardTarget::Branch(_)) => apply_branch_guard_stay(&mut st),
                     _ => {
-                        st.set_leaf_row = st.current_leaf_row();
+                        st.list_dirty = true;
                     }
                 }
                 st.guard_target = None;
@@ -1061,8 +1063,9 @@ mod tests {
 
     #[test]
     fn cancelled_guard_save_snaps_highlight_back() {
-        // The guard→Save path that does NOT submit must request a snap-back to the
-        // pinned form's row and clear the stashed nav targets (like Stay).
+        // The guard→Save path that does NOT submit must request a rebuild (so the
+        // highlight re-resolves onto the pinned form's row) and clear the stashed
+        // nav targets (like Stay).
         use crate::ldap::worker::RawSubschema;
         use crate::schema::SchemaModel;
         use crate::ui::state::UiState;
@@ -1106,10 +1109,14 @@ mod tests {
 
         apply_cancelled_guard_save(&mut st);
 
+        assert!(
+            st.list_dirty,
+            "a rebuild is requested so the pane re-resolves the highlight"
+        );
         assert_eq!(
-            st.set_leaf_row,
-            st.current_leaf_row(),
-            "snap back to the pinned form's row"
+            st.leaf_highlight_plan(),
+            crate::ui::state::HighlightPlan::Pin("cn=a,ou=p,dc=x".to_string()),
+            "the rebuild will pin the highlight back onto the pinned form's entry"
         );
         assert!(st.guard_target.is_none());
         assert!(st.pending_nav.is_none());

@@ -10,6 +10,7 @@ use tvision_rs::{
     Rect, ScrollBar, View,
 };
 
+use crate::ui::state::HighlightPlan;
 use crate::ui::{Shared, REFRESH};
 
 /// A `ListBox` (with incremental find) of the current branch's leaves. Recomputes
@@ -94,8 +95,49 @@ impl LeafPane {
             }
         }
         self.last_search = search;
-        self.last_sel = -1;
+        self.apply_highlight_plan(ctx);
         self.sync_scrollbar(ctx);
+    }
+
+    /// Resolve the controller's [`HighlightPlan`] against the rows just installed,
+    /// set the widget focus, and resync `last_sel` **silently** so the move is not
+    /// re-reported as an operator navigation. `Follow` additionally asks the
+    /// controller to move the form, which it only ever does for a clean form.
+    fn apply_highlight_plan(&mut self, ctx: &mut Context) {
+        let (plan, rows) = {
+            let st = self.state.borrow();
+            (st.leaf_highlight_plan(), st.leaf_rows())
+        };
+        let dn = match &plan {
+            HighlightPlan::Pin(dn) | HighlightPlan::Follow(dn) => dn.clone(),
+            HighlightPlan::Clear => {
+                self.last_sel = -1;
+                return;
+            }
+        };
+        let row = rows
+            .iter()
+            .position(|(_, d)| d.eq_ignore_ascii_case(&dn))
+            .map(|i| i as i32)
+            .unwrap_or(-1);
+        if row >= 0 {
+            if let Some(list) = self.group.child_mut(self.list_id) {
+                list.set_value_ctx(FieldValue::Int(row), ctx);
+            }
+        }
+        // Silently: `report_selection` compares against `last_sel`, so syncing it
+        // here is what makes the rebuild invisible to the controller.
+        self.last_sel = row;
+        if let HighlightPlan::Follow(dn) = plan {
+            let ocs = {
+                let st = self.state.borrow();
+                st.structure
+                    .get(&dn)
+                    .map(|n| n.object_classes.clone())
+                    .unwrap_or_default()
+            };
+            self.state.borrow_mut().request_leaf(dn, ocs);
+        }
     }
 
     /// Pure layout decision for the focus-gated scroll bar. Given the list's
@@ -176,6 +218,14 @@ impl LeafPane {
             .and_then(|lb| lb.find_query().map(str::to_string))
     }
 
+    #[cfg(test)]
+    pub(crate) fn selected_row_for_test(&mut self) -> i32 {
+        match self.group.child_mut(self.list_id).and_then(|v| v.value()) {
+            Some(FieldValue::Int(i)) => i,
+            _ => -1,
+        }
+    }
+
     /// Pure selector: when the highlight lands on a new row, record the requested
     /// leaf in shared state. The controller (the pump's `reconcile_selection`)
     /// decides whether to load it or raise the dirty guard — the pane never loads,
@@ -205,19 +255,6 @@ impl LeafPane {
         };
         if let Some((dn, ocs)) = target {
             self.state.borrow_mut().request_leaf(dn, ocs);
-        }
-    }
-
-    /// Controller → pane: if `set_leaf_row` was set (a guard "Stay" snapping the
-    /// highlight back to the pinned form), apply it to the list and sync `last_sel`
-    /// so it is not re-reported as a fresh move.
-    fn apply_set_row(&mut self, ctx: &mut Context) {
-        let row = self.state.borrow_mut().set_leaf_row.take();
-        if let Some(row) = row {
-            if let Some(list) = self.group.child_mut(self.list_id) {
-                list.set_value_ctx(FieldValue::Int(row), ctx);
-            }
-            self.last_sel = row;
         }
     }
 }
@@ -285,11 +322,9 @@ impl View for LeafPane {
             self.repopulate(ctx);
         }
 
-        // First honour any controller-requested highlight (snap-back on guard
-        // "Stay"), then report a new highlight. The ListBox CONSUMES (clears)
-        // Up/Down keys, so detection compares the list's `value()` to `last_sel`
-        // (a cheap no-op when unchanged) rather than inspecting the cleared event.
-        self.apply_set_row(ctx);
+        // Report a new highlight. The ListBox CONSUMES (clears) Up/Down keys, so
+        // detection compares the list's `value()` to `last_sel` (a cheap no-op
+        // when unchanged) rather than inspecting the cleared event.
         self.report_selection();
 
         // Re-evaluate the bar's focus + overflow gate now that the list length
@@ -308,6 +343,46 @@ mod tests {
     use std::cell::RefCell;
     use std::collections::{BTreeMap, VecDeque};
     use std::rc::Rc;
+
+    /// A `StructureInput` for `dn`, with the RDN value as its `cn` so the row
+    /// renders a label. Note: `state.rs`'s test module has a two-argument `si`;
+    /// this one is local to this file.
+    fn si(dn: &str) -> StructureInput {
+        let cn = dn.split('=').nth(1).and_then(|s| s.split(',').next());
+        StructureInput {
+            dn: dn.into(),
+            cn: cn.map(str::to_string),
+            description: None,
+            object_classes: vec![],
+            attrs: BTreeMap::new(),
+        }
+    }
+
+    /// Shared state on branch `ou=p,dc=x` holding `dns` as its leaves.
+    fn shared_with_rows(dns: &[&str]) -> Shared {
+        let mut inputs = vec![si("dc=x"), si("ou=p,dc=x")];
+        inputs.extend(dns.iter().map(|d| si(d)));
+        let structure = Structure::build("dc=x", inputs);
+        let schema = SchemaModel::from_raw(&RawSubschema::default());
+        let mut st =
+            UiState::new_for_test(structure, schema, "dc=x".into(), Vec::new(), Vec::new());
+        st.current_branch = Some("ou=p,dc=x".into());
+        st.list_dirty = true;
+        Rc::new(RefCell::new(st))
+    }
+
+    /// Drive one `REFRESH` broadcast through the pane.
+    fn refresh(pane: &mut LeafPane) {
+        let mut out: VecDeque<Event> = VecDeque::new();
+        let mut timers = tv::timer::TimerQueue::new();
+        let mut deferred: Vec<tv::Deferred> = Vec::new();
+        let mut ctx = tv::Context::new(&mut out, &mut timers, 0, &mut deferred);
+        let mut ev = Event::Broadcast {
+            command: REFRESH,
+            source: None,
+        };
+        pane.handle_event(&mut ev, &mut ctx);
+    }
 
     /// Regression: children must grow via grow_mode when the Splitter drives
     /// Group::change_bounds — NOT via an on_bounds_changed override (which the
@@ -413,14 +488,15 @@ mod tests {
         let mut deferred: Vec<tv::Deferred> = Vec::new();
         let mut ctx = tv::Context::new(&mut out, &mut timers, 0, &mut deferred);
 
-        // Seed the list (‹self› + two leaves) and settle currency on row 0.
+        // Seed the list (‹self› + two leaves); no current_leaf, so the highlight
+        // plan settles currency on row 1, the first real leaf (row 0 is ‹self›).
         shared.borrow_mut().list_dirty = true;
         let mut seed = Event::Broadcast {
             command: REFRESH,
             source: None,
         };
         pane.handle_event(&mut seed, &mut ctx);
-        assert_eq!(pane.last_sel, 0, "seeding selects row 0");
+        assert_eq!(pane.last_sel, 1, "seeding settles on the first real row");
 
         let theme = crate::ui::theme::edaptor_theme();
         let active_bg = theme.style(Role::ListNormal).bg;
@@ -448,8 +524,8 @@ mod tests {
                     DrawCtx::new(&mut buf, &theme, Rect::new(0, 0, 30, 10), Point::new(0, 0));
                 <LeafPane as View>::draw(pane, &mut dctx);
             }
-            // Row 0 is the current row; row 1 is a normal content row.
-            (buf.get(0, 0).style().bg, buf.get(0, 1).style().bg)
+            // Row 1 is the current row; row 0 (‹self›) is a normal content row.
+            (buf.get(0, 1).style().bg, buf.get(0, 0).style().bg)
         };
 
         let (cur_focused, row_focused) = draw_bgs(&mut pane, true);
@@ -536,9 +612,9 @@ mod tests {
     fn test_leaf_selection_change_detected_when_key_was_consumed() {
         // Regression: the `ListBox` CONSUMES (clears) Up/Down keys, so the leaf pane
         // must detect a selection change from the list's value() — NOT by inspecting
-        // the (already-cleared) event. Here the selection moves to row 1, then a
+        // the (already-cleared) event. Here the selection moves to row 2, then a
         // non-Up/Down event is delivered (standing in for the consumed key); the pane
-        // must still pick up the new selection (last_sel advances to 1).
+        // must still pick up the new selection (last_sel advances to 2).
         let inputs = vec![
             StructureInput {
                 dn: "dc=x".into(),
@@ -582,18 +658,19 @@ mod tests {
         let mut deferred: Vec<tv::Deferred> = Vec::new();
         let mut ctx = tv::Context::new(&mut out, &mut timers, 0, &mut deferred);
 
-        // Seed (initial selection settles on row 0).
+        // Seed (no current_leaf, so the highlight plan skips the ‹self› row and
+        // settles on the first real entry, row 1).
         shared.borrow_mut().list_dirty = true;
         let mut seed = Event::Broadcast {
             command: REFRESH,
             source: None,
         };
         pane.handle_event(&mut seed, &mut ctx);
-        assert_eq!(pane.last_sel, 0, "seeding selects row 0");
+        assert_eq!(pane.last_sel, 1, "seeding settles on the first real row");
 
-        // Move the list selection to row 1 (as a consumed Up/Down would).
+        // Move the list selection to row 2 (as a consumed Up/Down would).
         if let Some(list) = pane.group.child_mut(pane.list_id) {
-            list.set_value_ctx(FieldValue::Int(1), &mut ctx);
+            list.set_value_ctx(FieldValue::Int(2), &mut ctx);
         }
 
         // Deliver an event that is NOT a live Up/Down key (the real key was cleared).
@@ -604,7 +681,7 @@ mod tests {
         pane.handle_event(&mut other, &mut ctx);
 
         assert_eq!(
-            pane.last_sel, 1,
+            pane.last_sel, 2,
             "leaf pane must detect the new selection from value(), not the cleared key event"
         );
     }
@@ -656,21 +733,22 @@ mod tests {
         let mut deferred: Vec<tv::Deferred> = Vec::new();
         let mut ctx = tv::Context::new(&mut out, &mut timers, 0, &mut deferred);
 
-        // Seed (selection settles on row 0).
+        // Seed (no current_leaf, so the highlight plan settles on the first real
+        // row instead of the ‹self› row).
         shared.borrow_mut().list_dirty = true;
         let mut seed = Event::Broadcast {
             command: REFRESH,
             source: None,
         };
         pane.handle_event(&mut seed, &mut ctx);
-        assert_eq!(pane.last_sel, 0, "seeding selects row 0");
+        assert_eq!(pane.last_sel, 1, "seeding settles on the first real row");
 
         // A Down key reaches the focused list and moves the selection, which
         // submit_selected then picks up.
         let mut down = Event::KeyDown(tv::KeyEvent::from(tv::Key::Down));
         pane.handle_event(&mut down, &mut ctx);
         assert_eq!(
-            pane.last_sel, 1,
+            pane.last_sel, 2,
             "Down advances the list selection (forwarded to the list)"
         );
     }
@@ -926,6 +1004,113 @@ mod tests {
             Some(("ou=p,dc=x".to_string(), Vec::new())),
             "the rebuild's row-0 refocus must not be reported as a fresh \
              selection onto the container's ‹self› row"
+        );
+    }
+
+    /// A rebuild that moves the pinned entry to a different index must follow the
+    /// DN — and must NOT look like a navigation. This is the general form of the
+    /// I1 fix: the index is never computed against the pre-rebuild row source.
+    ///
+    /// The shift is produced by REMOVING a row that precedes the pinned one
+    /// (another admin deleting an entry). Do not try to produce it by upserting a
+    /// new entry: `leaf_rows` is `‹self›` followed by `leaves_of`, which returns
+    /// children in INSERTION order with no sort, so an upsert appends last and the
+    /// pinned row's index would not move at all — the test would pass against a
+    /// stale-index implementation and prove nothing.
+    #[test]
+    fn rebuild_keeps_the_highlight_on_the_pinned_dn_without_reporting() {
+        let shared = shared_with_rows(&["cn=a,ou=p,dc=x", "cn=b,ou=p,dc=x"]);
+        shared.borrow_mut().current_leaf = Some("cn=b,ou=p,dc=x".to_string());
+        let mut pane = LeafPane::new(Rect::new(0, 0, 30, 10), shared.clone());
+        refresh(&mut pane);
+        shared.borrow_mut().requested_leaf = None;
+        // Precondition: rows are [‹self› ou=p, cn=a, cn=b], so cn=b is row 2.
+        assert_eq!(
+            pane.selected_row_for_test(),
+            2,
+            "test premise: the pinned entry starts at row 2 (row 0 is ‹self›)"
+        );
+
+        // cn=a disappears → rows become [‹self› ou=p, cn=b] → cn=b moves to row 1.
+        {
+            let mut st = shared.borrow_mut();
+            st.structure.remove("cn=a,ou=p,dc=x");
+            st.list_dirty = true;
+        }
+        refresh(&mut pane);
+
+        let st = shared.borrow();
+        assert_eq!(
+            pane.selected_row_for_test(),
+            1,
+            "the highlight follows the DN across the renumbering"
+        );
+        assert_eq!(
+            st.requested_leaf, None,
+            "a rebuild must never be reported as an operator navigation"
+        );
+    }
+
+    /// A rebuild where the open entry is no longer among the rows must move the
+    /// highlight but leave a DIRTY form pinned — so the controller is never asked
+    /// to navigate and the dirty guard cannot fire. This is the pane-level half of
+    /// the modal-mid-keystroke fix.
+    ///
+    /// NOTE ON SETUP: do not simulate the find by assigning `st.search` +
+    /// `st.leaf_search_rows` directly. After repopulating, `handle_event` compares
+    /// the ListBox's own find query against `last_search`; the ListBox's query is
+    /// still empty, so it would call `set_leaf_search("")`, wipe
+    /// `leaf_search_rows`, and repopulate a second time against the full row set —
+    /// and the assertions below would be measuring that second pass, not the
+    /// policy. Making the open entry absent from the structure exercises the same
+    /// `HighlightPlan` arms without fighting the find-query sync.
+    #[test]
+    fn rebuild_does_not_move_a_dirty_form_off_a_vanished_entry() {
+        let shared = shared_with_rows(&["cn=a,ou=p,dc=x", "cn=b,ou=p,dc=x"]);
+        {
+            let mut st = shared.borrow_mut();
+            // Open an entry that is not in this container's rows at all.
+            st.current_leaf = Some("cn=gone,ou=p,dc=x".to_string());
+            st.edit_form = Some(crate::ui::test_support::dirty_form("cn=gone,ou=p,dc=x"));
+            st.list_dirty = true;
+        }
+        let mut pane = LeafPane::new(Rect::new(0, 0, 30, 10), shared.clone());
+        refresh(&mut pane);
+
+        assert_eq!(
+            shared.borrow().requested_leaf,
+            None,
+            "a dirty form is never dragged along by a rebuild"
+        );
+        assert_eq!(
+            pane.selected_row_for_test(),
+            1,
+            "the highlight still moves to the first real row (row 0 is ‹self›)"
+        );
+    }
+
+    /// The clean counterpart: the form follows, because following is only ever
+    /// withheld to protect unsaved edits.
+    #[test]
+    fn rebuild_follows_the_first_row_when_the_form_is_clean() {
+        let shared = shared_with_rows(&["cn=a,ou=p,dc=x", "cn=b,ou=p,dc=x"]);
+        {
+            let mut st = shared.borrow_mut();
+            st.current_leaf = Some("cn=gone,ou=p,dc=x".to_string());
+            // No edit_form at all == clean.
+            st.list_dirty = true;
+        }
+        let mut pane = LeafPane::new(Rect::new(0, 0, 30, 10), shared.clone());
+        refresh(&mut pane);
+
+        assert_eq!(
+            shared
+                .borrow()
+                .requested_leaf
+                .as_ref()
+                .map(|(dn, _)| dn.as_str()),
+            Some("cn=a,ou=p,dc=x"),
+            "a clean form follows the rebuild to the first real row"
         );
     }
 }

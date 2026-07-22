@@ -195,10 +195,6 @@ pub struct UiState {
     /// Set when the highlight moves; consumed by [`reconcile_selection`]. The panes
     /// never load or guard themselves — they only record this intent.
     pub requested_leaf: Option<(String, Vec<String>)>,
-    /// Controller → leaf pane: force the list highlight to this row on the pane's
-    /// next event (used to snap the highlight back to `current_leaf` after a guard
-    /// "Stay", so highlight and form always agree).
-    pub set_leaf_row: Option<i32>,
     /// Pane → controller: the branch a selector pane wants shown (dn).
     /// Set when the tree highlight moves; consumed by [`reconcile_branch`].
     pub requested_branch: Option<String>,
@@ -303,7 +299,6 @@ impl UiState {
             list_dirty: false,
             tree_dirty: false,
             requested_leaf: None,
-            set_leaf_row: None,
             requested_branch: None,
             set_tree_row: None,
             activate_field: None,
@@ -1272,25 +1267,17 @@ impl UiState {
                         crate::workflows::leaf_search::LEAF_SEARCH_CAP
                     );
                 }
-                // The upserts above computed their snap index against the PREVIOUS
-                // row source; `leaf_rows()` now answers from the rows just
-                // installed, so the index has to be recomputed or the highlight
-                // lands on a different entry than the form shows. Unconditional,
-                // not just when already set: the pane rebuilds from scratch and
-                // re-focuses row 0, which — without a snap — would be reported as
-                // a fresh selection, navigating the form onto the wrong entry and
-                // clearing the status this outcome just set.
-                self.set_leaf_row = self.current_leaf_row();
+                // `leaf_rows()` now answers from the rows just installed, so the
+                // highlight is re-resolved from `leaf_highlight_plan` on the
+                // coming rebuild rather than an index computed here against a row
+                // source about to be replaced.
                 self.list_dirty = true;
             }
             LeafSearchOutcome::Failed(msg) => {
                 self.status = format!("Search failed: {msg}");
                 self.leaf_search_rows = None;
                 self.leaf_search_truncated = false;
-                // Same reasoning as the `Results` arm above: without a snap the
-                // rebuilt pane's row-0 refocus would be reported as a fresh
-                // selection, navigating the form away and erasing this message.
-                self.set_leaf_row = self.current_leaf_row();
+                // Same reasoning as the `Results` arm above.
                 self.list_dirty = true;
             }
             LeafSearchOutcome::Ignored => {}
@@ -1404,9 +1391,11 @@ impl UiState {
     /// Projects the raw attributes onto the label/tree template attributes
     /// (`scan_attrs`) plus `objectClass`, so a node never carries the entry's whole
     /// attribute set, then upserts it. Marks the leaf list dirty and — when the
-    /// upsert reports a branch-level change — the tree too. When the refreshed entry
-    /// is the one on screen, the leaf highlight is snapped to its row, which is what
-    /// makes a newly created entry both appear AND become selected.
+    /// upsert reports a branch-level change — the tree too. `list_dirty` is what
+    /// drives the leaf pane's next rebuild, which resolves `leaf_highlight_plan`
+    /// against the fresh rows — pinning to the refreshed entry when it is the one
+    /// on screen, which is what makes a newly created entry both appear AND
+    /// become selected.
     ///
     /// Called for every entry read: navigation clicks and post-write re-reads alike,
     /// so any entry the operator visits self-heals from live data.
@@ -1444,14 +1433,6 @@ impl UiState {
             self.tree_dirty = true;
         }
         self.list_dirty = true;
-        if self
-            .current_leaf
-            .as_deref()
-            .map(|c| c.eq_ignore_ascii_case(dn))
-            .unwrap_or(false)
-        {
-            self.set_leaf_row = self.current_leaf_row();
-        }
     }
 
     /// Install a freshly scanned structure, keeping the operator's place.
@@ -1484,12 +1465,9 @@ impl UiState {
         self.lookup_cache.clear();
         self.list_dirty = true;
         self.tree_dirty = true;
-        // The pane rebuilds from scratch and re-focuses row 0, which it would
-        // report as a fresh selection — navigating the form to the container's
-        // ‹self› row and clearing the status this action just set. Snap the
-        // highlight back to the entry on screen instead. `None` is correct when
-        // that entry is gone: there is nothing to snap to.
-        self.set_leaf_row = self.current_leaf_row();
+        // The pane rebuilds from scratch on the coming REFRESH and resolves
+        // `leaf_highlight_plan` against the fresh rows itself — pinning back to
+        // `current_leaf` when it survived, or clearing when it is gone.
     }
 
     /// Re-run the eager structure scan and adopt the result (Alt+R).
@@ -1703,7 +1681,6 @@ pub(crate) fn bootstrap(config: Config, password: String) -> Result<UiState> {
         list_dirty: false,
         tree_dirty: false,
         requested_leaf: None,
-        set_leaf_row: None,
         requested_branch: None,
         set_tree_row: None,
         activate_field: None,
@@ -2619,8 +2596,12 @@ mod tests {
 
         st.upsert_from_read("uid=bob,ou=p,dc=x", &attrs);
 
-        // Rows are [‹self› ou=p, Bob] → the new entry is row 1.
-        assert_eq!(st.set_leaf_row, Some(1));
+        // Rows are [‹self› ou=p, Bob] → the new entry is among them, so the
+        // highlight plan pins to it rather than falling back to the ‹self› row.
+        assert_eq!(
+            st.leaf_highlight_plan(),
+            HighlightPlan::Pin("uid=bob,ou=p,dc=x".to_string())
+        );
     }
 
     #[test]
@@ -3005,11 +2986,12 @@ mod tests {
         assert!(st.list_dirty);
     }
 
-    /// The upserts inside the `Results` loop compute their snap index against the
-    /// STALE `leaf_search_rows` (the previous query's answer) because it is only
-    /// replaced after the loop. Left uncorrected, the highlight lands on whatever
-    /// row that stale, single-hit source happened to put the entry at — not the
-    /// row the freshly-installed, alphabetically-sorted rows actually give it.
+    /// `upsert_from_read` (called once per hit, inside the loop) no longer computes
+    /// any snap itself — `leaf_highlight_plan` is resolved once, on the pane's next
+    /// rebuild, against `self.leaf_rows()` as it reads AFTER the loop replaces
+    /// `leaf_search_rows`. So the plan must name Zoe regardless of whatever row the
+    /// STALE single-hit `leaf_search_rows` (the previous query's answer, still in
+    /// place mid-loop) would have given her.
     #[test]
     fn apply_leaf_search_results_recomputes_the_snap_row_against_the_new_rows() {
         use crate::ldap::worker::LdapEntry;
@@ -3064,9 +3046,9 @@ mod tests {
             ]
         );
         assert_eq!(
-            st.set_leaf_row,
-            Some(1),
-            "must snap to Zoe's row in the FINAL rows, not the row the stale \
+            st.leaf_highlight_plan(),
+            HighlightPlan::Pin("uid=zoe,ou=p,dc=x".to_string()),
+            "must pin Zoe by DN against the FINAL rows, not the row the stale \
              previous-query source gave it mid-loop"
         );
     }
@@ -3116,11 +3098,11 @@ mod tests {
     /// I4 regression: a `Results` outcome whose hits do NOT include `current_leaf`
     /// is the common case for a find (the operator is looking at one entry while
     /// searching for another). The rendered rows are exactly the hits, so
-    /// `current_leaf` genuinely has no row here — but `set_leaf_row` must still be
-    /// explicitly recomputed (to `None`) rather than left at whatever stale value
-    /// it happened to carry in, or the pane's row-0 refocus on the coming rebuild
-    /// would be reported as a fresh selection, navigating the form away and
-    /// clearing the status this outcome just set.
+    /// `current_leaf` genuinely has no row here — `leaf_highlight_plan` must fall
+    /// through to its "open entry absent" branch and follow the first hit (the form
+    /// is clean) rather than pin a stale row, which is what let the pane's row-0
+    /// refocus on the coming rebuild be reported as a fresh selection, navigating
+    /// the form away and clearing the status this outcome just set.
     #[test]
     fn apply_leaf_search_results_without_current_leaf_among_hits_recomputes_the_snap() {
         use crate::ldap::worker::LdapEntry;
@@ -3140,8 +3122,6 @@ mod tests {
         st.current_branch = Some("ou=p,dc=x".into());
         st.current_leaf = Some("uid=bob,ou=p,dc=x".into());
         st.search = "ann".to_string();
-        // A stale leftover from some earlier action — must not survive uncorrected.
-        st.set_leaf_row = Some(99);
 
         let mut ann_attrs: BTreeMap<String, Vec<String>> = BTreeMap::new();
         ann_attrs.insert("cn".to_string(), vec!["Ann".to_string()]);
@@ -3155,19 +3135,18 @@ mod tests {
         });
 
         assert_eq!(
-            st.set_leaf_row, None,
-            "Bob (current_leaf) is not among the hits, so the freshly-installed \
-             rows genuinely have no row for him — but the stale Some(99) must not \
-             survive the outcome uncorrected"
+            st.leaf_highlight_plan(),
+            HighlightPlan::Follow("uid=ann,ou=p,dc=x".to_string()),
+            "Bob (current_leaf) is not among the hits, so a clean form follows \
+             the search to the first hit instead of leaving a stale highlight"
         );
-        assert_eq!(st.set_leaf_row, st.current_leaf_row());
     }
 
-    /// I4 regression: `Failed` previously never touched `set_leaf_row` at all.
-    /// When `current_leaf` is still present in the cached-projection fallback
-    /// (the rows `Failed` drops back to), the snap must be set so the pane's
-    /// row-0 refocus is not mistaken for a fresh selection — which would navigate
-    /// the form away and erase the "Search failed: …" message just set above.
+    /// I4 regression: when `current_leaf` is still present in the
+    /// cached-projection fallback (the rows `Failed` drops back to),
+    /// `leaf_highlight_plan` must pin to it so the pane's row-0 refocus is not
+    /// mistaken for a fresh selection — which would navigate the form away and
+    /// erase the "Search failed: …" message just set above.
     #[test]
     fn apply_leaf_search_failed_snaps_to_current_leaf_in_the_fallback_projection() {
         let structure = Structure::build(
@@ -3197,10 +3176,10 @@ mod tests {
             ]
         );
         assert_eq!(
-            st.set_leaf_row,
-            Some(1),
+            st.leaf_highlight_plan(),
+            HighlightPlan::Pin("uid=ann,ou=p,dc=x".to_string()),
             "current_leaf is still visible in the fallback projection, so the \
-             snap must be set — the old code left this field untouched on Failed"
+             plan must pin to it"
         );
     }
 
@@ -3398,14 +3377,14 @@ mod tests {
         assert!(st.list_dirty);
         assert!(st.tree_dirty);
         assert_eq!(
-            st.set_leaf_row,
-            st.current_leaf_row(),
-            "the rebuild re-focuses row 0; the snap must pull the highlight back \
+            st.leaf_highlight_plan(),
+            HighlightPlan::Pin("uid=a,ou=p,dc=x".to_string()),
+            "the rebuild re-focuses row 0; the plan must pull the highlight back \
              onto the entry on screen instead of letting row 0 be reported as a \
              fresh selection"
         );
         assert_eq!(
-            st.set_leaf_row,
+            st.current_leaf_row(),
             Some(1),
             "row 0 is the ‹self› row of ou=p,dc=x; uid=a is the only leaf, at row 1"
         );
@@ -3470,9 +3449,11 @@ mod tests {
             "a vanished container falls back to the base DN"
         );
         assert_eq!(st.current_leaf, None);
+        // No current_leaf: the plan falls back to pinning the first real row —
+        // here ou=p,dc=x, dc=x's only (childless, so leaf) child.
         assert_eq!(
-            st.set_leaf_row, None,
-            "no current_leaf means there is nothing to snap to"
+            st.leaf_highlight_plan(),
+            HighlightPlan::Pin("ou=p,dc=x".to_string())
         );
     }
 }
