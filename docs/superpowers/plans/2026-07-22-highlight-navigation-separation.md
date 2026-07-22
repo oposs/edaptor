@@ -896,7 +896,8 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 - Create: `src/ui/dialog/vanished.rs`
 - Modify: `src/ui/dialog/mod.rs` (module decl, `VanishedDecision`, `vanished_decision`)
 - Modify: `src/ui/app.rs:229-276` (`GUARD_NAV` dispatch)
-- Test: `src/ui/dialog/mod.rs`, `src/ui/app.rs`
+- Modify: `src/ui/state.rs:793` (`WriteOutcome::Created` sets a status)
+- Test: `src/ui/dialog/mod.rs`, `src/ui/app.rs`, `src/ui/state.rs`
 
 **Interfaces:**
 - Consumes: `GuardTarget::Vanished` (Task 6).
@@ -950,6 +951,24 @@ the modal itself is not unit-testable):
             !attrs.contains_key("description"),
             "an empty attribute must not be sent"
         );
+    }
+```
+
+and in `state.rs`'s tests, for the silent-create bug:
+
+```rust
+    /// A create has never reported itself: `Created` set no status, while `Saved`
+    /// set "Saved." — invisible until Spec 2 made the status line render at all.
+    /// The comment at the re-read call claims a status "set for this create"
+    /// survives; nothing ever set one.
+    #[test]
+    fn a_successful_create_says_so() {
+        let mut st = st_with_rows(&["cn=a,ou=p,dc=x"]);
+        st.apply_write_outcome(WriteOutcome::Created {
+            dn: "cn=new,ou=p,dc=x".into(),
+            quit_after: false,
+        });
+        assert_eq!(st.status, "Created cn=new,ou=p,dc=x.");
     }
 ```
 
@@ -1035,12 +1054,24 @@ fn recreate_attrs(
                         st.list_dirty = true;
                     }
                     VanishedDecision::Recreate => {
+                        let Some(attrs) = state.borrow().edit_form.as_ref().map(recreate_attrs)
+                        else {
+                            return;
+                        };
+                        // Behind the same LDIF preview as every other write: this
+                        // resurrects an entry someone deliberately deleted, and it
+                        // must not be the one unconfirmed write in the app. Borrow
+                        // is dropped before exec_view — the draw path borrows too.
+                        let ldif = crate::ldap::ldif::render_add(&dn, &attrs);
+                        let (view, save) = crate::ui::dialog::confirm::build(&ldif);
+                        if prog.exec_view_focused(view, save) != Command::OK {
+                            return; // cancel: keep the form and its edits
+                        }
                         let mut st = state.borrow_mut();
-                        let attrs = st.edit_form.as_ref().map(recreate_attrs);
                         let crate::ui::state::UiState {
                             worker, write_flow, ..
                         } = &mut *st;
-                        if let (Some(w), Some(attrs)) = (worker.as_ref(), attrs) {
+                        if let Some(w) = worker.as_ref() {
                             // rc 68 (entryAlreadyExists) rejects this safely if
                             // another client re-created the DN meanwhile.
                             let _ = write_flow.submit_create(w, &dn, attrs, false);
@@ -1051,6 +1082,20 @@ fn recreate_attrs(
             }
 ```
 
+In `src/ui/state.rs`, the `WriteOutcome::Created` arm (`:793`) gains a status
+alongside the existing `current_leaf` / `list_dirty` assignments, before the
+`reread` call:
+
+```rust
+                self.status = format!("Created {dn}.");
+```
+
+The message is deliberately **not** specialised to "Re-created": telling the two
+apart means threading a flag through `WriteIntent`/`WriteOutcome`, and that async
+correlation surface is where Spec 2's worst defect came from. "Created X." is
+accurate for both. The existing comment at `:814-816` — which claims a status set
+for this create survives the re-read — becomes true for the first time; leave it.
+
 - [ ] **Step 4: Run the suite**
 
 Run: `cargo test -j4 --lib`
@@ -1059,8 +1104,12 @@ Expected: PASS.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/ui/dialog/vanished.rs src/ui/dialog/mod.rs src/ui/app.rs
+git add src/ui/dialog/vanished.rs src/ui/dialog/mod.rs src/ui/app.rs src/ui/state.rs
 git commit -m "feat(ui): ask before losing edits to an entry that vanished
+
+Re-create goes behind the same LDIF preview as every other write, and a
+successful create finally reports itself — Created set no status at all,
+which nobody could see until the status line began rendering.
 
 Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 ```

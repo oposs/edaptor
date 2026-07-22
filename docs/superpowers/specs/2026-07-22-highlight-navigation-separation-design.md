@@ -127,12 +127,32 @@ or a re-read returning no-such-object.
   - *Keep editing* — the form and its edits stay; the status carries the notice.
   - *Discard* — clears the form **without** the re-read the normal Discard path
     does (`app.rs:257`), which would fail against a deleted DN.
-  - *Re-create* — submits the form's values as an ADD at that DN through the
-    existing create path. If another admin re-created the DN meanwhile, LDAP's
-    rc 68 (`entryAlreadyExists`) rejects it, so the action is safe by
-    construction.
+  - *Re-create* — submits the form's values as an ADD at that DN, **behind the
+    same LDIF confirm preview every other write in edaptor uses**
+    (`confirm::build`, as in `do_save` `app.rs:579` and `do_create` `app.rs:916`),
+    rendered with `crate::ldap::ldif::render_add`. Resurrecting an entry another
+    admin deliberately deleted is the most consequential write of the three and
+    must not be the only unconfirmed one. If another client re-created the DN
+    meanwhile, LDAP's rc 68 (`entryAlreadyExists`) rejects it, so the action is
+    safe by construction.
 
 Unsaved work is never destroyed without asking.
+
+### 3a. A successful create must say so
+
+`WriteOutcome::Created` (`state.rs:793`) sets **no** status, unlike `Saved`
+(`:650`). The comment at `state.rs:815` justifies using the non-clearing re-read
+*"so a status set for this create survives to be seen"* — but nothing ever sets
+one. A create has been silent since it was written, invisibly so until Spec 2
+made the status line render at all.
+
+`Created` now sets `status = format!("Created {dn}.")`. This fixes the ordinary
+create path as much as the re-creation path.
+
+The message is deliberately **not** specialised to "Re-created": distinguishing
+the two would mean threading a flag through `WriteIntent`/`WriteOutcome`, and
+that async correlation surface is exactly where Spec 2's worst defect came from
+(inferring a rename from UI state). "Created X." is accurate for both.
 
 ### 4. One named status-clearing policy
 
