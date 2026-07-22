@@ -7,7 +7,7 @@ use tvision_rs::{
 
 use crate::form::validate::format_validation_errors;
 use crate::ui::dialog::{confirm, error, guard, guard_decision, GuardDecision};
-use crate::ui::help_ctx::hint_for;
+use crate::ui::help_ctx::{hint_for, status_or_hint};
 use crate::ui::panes::{
     form::FormPane,
     leaf::LeafPane,
@@ -23,7 +23,7 @@ use crate::ui::{
 use crate::workflows::create::{resolve_create_container, CreateContainer};
 use crate::workflows::save::PrepareSave;
 
-fn init_status_line(r: Rect) -> Option<Box<dyn View>> {
+fn init_status_line(r: Rect, state: Shared) -> Option<Box<dyn View>> {
     let mut r = r;
     r.a.y = r.b.y - 1;
     let defs = StatusDef::list()
@@ -33,7 +33,21 @@ fn init_status_line(r: Rect) -> Option<Box<dyn View>> {
                 .item("~Alt-X~ Exit", alt('x'), REQUEST_QUIT)
         })
         .build();
-    Some(Box::new(StatusLine::new(r, defs).with_hint(hint_for)))
+    Some(Box::new(StatusLine::new(r, defs).with_hint(move |ctx| {
+        // This runs inside draw. `try_borrow` (never `borrow`): a panic here would
+        // take the whole TUI down. On `Err` (some other view's draw somehow holds
+        // the borrow) fall back to the plain field hint rather than block or abort.
+        // Copy the status string out and drop the guard immediately — never hold
+        // it across the `hint_for` call below.
+        match state.try_borrow() {
+            Ok(st) => {
+                let status = st.status.clone();
+                drop(st);
+                status_or_hint(&status, ctx)
+            }
+            Err(_) => hint_for(ctx),
+        }
+    })))
 }
 
 fn init_menu_bar(r: Rect) -> Option<Box<dyn View>> {
@@ -1004,12 +1018,13 @@ fn init_desktop(r: Rect, state: Shared) -> Option<Box<dyn View>> {
 
 pub(crate) fn build_program(backend: Box<dyn tv::Backend>, state: Shared) -> Program {
     let s = state.clone();
+    let status_state = state;
     Program::new(
         backend,
         Box::new(SystemClock::new()),
         crate::ui::theme::edaptor_theme(),
         move |r| init_desktop(r, s.clone()),
-        init_status_line,
+        move |r| init_status_line(r, status_state.clone()),
         init_menu_bar,
     )
 }
