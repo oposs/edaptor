@@ -686,8 +686,15 @@ impl UiState {
                         // "Saved." with an error the operator would read as the write
                         // being lost. Combine the two into one message instead: the
                         // model is knowingly stale, but the save was not.
-                        if let Err(msg) = self.reload_structure() {
-                            self.status = format!("Saved, but the rescan failed: {msg}");
+                        match self.reload_structure() {
+                            // A successful rescan sets its own "Reloaded N entries.",
+                            // which would silently replace the confirmation for the
+                            // action the operator actually took. The rescan is an
+                            // implementation detail of the rename; the save is the news.
+                            Ok(_) => self.status = "Saved.".to_string(),
+                            Err(msg) => {
+                                self.status = format!("Saved, but the rescan failed: {msg}")
+                            }
                         }
                         // Keep the operator on the container they just renamed
                         // rather than falling back to the base DN.
@@ -3527,6 +3534,60 @@ mod write_routing_tests {
             quit_after: false,
         });
         assert_eq!(st.status, "Saved.");
+    }
+
+    /// Renaming a CONTAINER triggers a full rescan, and the rescan sets its own
+    /// "Reloaded N entries." — which would silently replace the confirmation for
+    /// the action the operator actually took. The rescan is an implementation
+    /// detail of the rename; the save is the news.
+    #[test]
+    fn a_container_rename_reports_the_save_not_the_rescan() {
+        // `ou=old` is a BRANCH (it has a child), so the rename takes the rescan path.
+        let structure = Structure::build(
+            "dc=x",
+            vec![
+                si("dc=x", None),
+                si("ou=old,dc=x", None),
+                si("cn=kid,ou=old,dc=x", Some("Kid")),
+            ],
+        );
+        let schema = SchemaModel::from_raw(&RawSubschema::default());
+        let mut st =
+            UiState::new_for_test(structure, schema, "dc=x".into(), Vec::new(), Vec::new());
+        st.current_leaf = Some("ou=old,dc=x".into());
+        st.current_branch = Some("ou=old,dc=x".into());
+        let (worker, rx) = WorkerHandle::recording();
+        st.worker = Some(worker);
+
+        // The rescan blocks on `worker.request`, so answer it from another thread.
+        let responder = std::thread::spawn(move || {
+            let (req, reply) = rx.recv().expect("a LoadStructure request must be sent");
+            let Request::LoadStructure { id, .. } = req else {
+                panic!("expected Request::LoadStructure, got {req:?}");
+            };
+            let _ = reply.send(Response::StructureEntries {
+                id,
+                nodes: vec![crate::ldap::worker::StructureNodeRaw {
+                    dn: "dc=x".into(),
+                    cn: None,
+                    description: None,
+                    object_classes: vec![],
+                    attrs: BTreeMap::new(),
+                }],
+            });
+        });
+
+        st.apply_write_outcome(WriteOutcome::Saved {
+            reread_dn: "ou=new,dc=x".into(),
+            renamed_from: Some("ou=old,dc=x".into()),
+            quit_after: false,
+        });
+        responder.join().expect("responder thread must not panic");
+
+        assert_eq!(
+            st.status, "Saved.",
+            "the rescan's own message must not bury the save confirmation"
+        );
     }
 
     /// The mirror image: opening another entry DOES drop the stale message.
