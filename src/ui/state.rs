@@ -28,6 +28,21 @@ pub enum GuardTarget {
     Branch(String),
 }
 
+/// What a pane should do with its highlight after rebuilding its row source.
+///
+/// A rebuild must never look like an operator navigation, so the controller
+/// answers with a **DN** — resolved against the freshly-built rows by the pane —
+/// rather than a row index computed against the rows the rebuild just replaced.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HighlightPlan {
+    /// Highlight this DN. The form does not move.
+    Pin(String),
+    /// Highlight this DN and let the form follow it.
+    Follow(String),
+    /// Nothing to highlight.
+    Clear,
+}
+
 /// What `pump_worker` wants the pump view to do after draining responses.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct PumpResult {
@@ -1314,6 +1329,42 @@ impl UiState {
                 &self.label_rules,
             ),
         }
+    }
+
+    /// Where the entry list's highlight belongs after a rebuild, and whether the
+    /// form should follow it. See the truth table in the design doc.
+    ///
+    /// `Follow` is produced only for a **clean** form: typing a find is
+    /// navigation, so the form tracks the first hit — but never at the cost of
+    /// unsaved edits, and never by raising the dirty guard mid-keystroke.
+    ///
+    /// The `‹self›` row (the branch's own entry, always row 0 of `leaf_rows`
+    /// when the branch carries no active filter) is not a "first hit": it is
+    /// the I4 trap (see the design doc) that let a plain rebuild drag the form
+    /// onto the container. It still answers `Pin(current_leaf)` when the
+    /// operator has it open, but it is never the *fallback* first row.
+    pub fn leaf_highlight_plan(&self) -> HighlightPlan {
+        let rows = self.leaf_rows();
+        let branch = self.current_branch.as_deref();
+        let is_self_row = |dn: &str| branch.is_some_and(|b| dn.eq_ignore_ascii_case(b));
+        let Some((_, first_dn)) = rows.iter().find(|(_, dn)| !is_self_row(dn)) else {
+            return HighlightPlan::Clear;
+        };
+        if let Some(cur) = self.current_leaf.as_deref() {
+            if rows.iter().any(|(_, dn)| dn.eq_ignore_ascii_case(cur)) {
+                return HighlightPlan::Pin(cur.to_string());
+            }
+            let dirty = self
+                .edit_form
+                .as_ref()
+                .map(|f| f.is_dirty())
+                .unwrap_or(false);
+            if dirty {
+                return HighlightPlan::Pin(first_dn.clone());
+            }
+            return HighlightPlan::Follow(first_dn.clone());
+        }
+        HighlightPlan::Pin(first_dn.clone())
     }
 
     /// The list row index of the entry currently shown in the form (`current_leaf`),
@@ -4063,5 +4114,77 @@ mod write_routing_tests {
 
         assert!(result.is_err());
         assert!(st.status.contains("unexpected"));
+    }
+
+    /// A `UiState` whose current branch is `ou=p,dc=x` and whose structure holds
+    /// `dns` as its children, so `leaf_rows()` returns them in order.
+    fn st_with_rows(dns: &[&str]) -> UiState {
+        let mut inputs = vec![si("dc=x", None), si("ou=p,dc=x", None)];
+        inputs.extend(dns.iter().map(|d| si(d, None)));
+        let structure = Structure::build("dc=x", inputs);
+        let schema = SchemaModel::from_raw(&RawSubschema::default());
+        let mut st = UiState::new_for_test(
+            structure,
+            schema,
+            "dc=x".into(),
+            Vec::new(),
+            crate::config::tree_label::compile_tree_rules(&crate::config::TreeConfig::default()),
+        );
+        st.current_branch = Some("ou=p,dc=x".to_string());
+        st
+    }
+
+    /// The truth table from the design. `Pin` moves the highlight only; `Follow`
+    /// additionally lets the form follow. A dirty form is never followed, so a
+    /// find-driven rebuild cannot raise the guard.
+    #[test]
+    fn highlight_plan_pins_the_open_entry_when_it_is_still_listed() {
+        let mut st = st_with_rows(&["cn=a,ou=p,dc=x", "cn=b,ou=p,dc=x"]);
+        st.current_leaf = Some("cn=b,ou=p,dc=x".to_string());
+        assert_eq!(
+            st.leaf_highlight_plan(),
+            HighlightPlan::Pin("cn=b,ou=p,dc=x".to_string())
+        );
+    }
+
+    #[test]
+    fn highlight_plan_follows_the_first_row_when_the_open_entry_is_absent_and_clean() {
+        let mut st = st_with_rows(&["cn=a,ou=p,dc=x", "cn=b,ou=p,dc=x"]);
+        st.current_leaf = Some("cn=gone,ou=p,dc=x".to_string());
+        // No edit_form at all == clean.
+        assert_eq!(
+            st.leaf_highlight_plan(),
+            HighlightPlan::Follow("cn=a,ou=p,dc=x".to_string())
+        );
+    }
+
+    /// The modal-mid-keystroke bug: a find that excludes the open entry must move
+    /// the highlight but NOT the form, so `reconcile_selection` is never reached
+    /// and the dirty guard never fires.
+    #[test]
+    fn highlight_plan_only_pins_when_the_form_is_dirty() {
+        let mut st = st_with_rows(&["cn=a,ou=p,dc=x", "cn=b,ou=p,dc=x"]);
+        st.current_leaf = Some("cn=gone,ou=p,dc=x".to_string());
+        st.edit_form = Some(crate::ui::test_support::dirty_form("cn=gone,ou=p,dc=x"));
+        assert_eq!(
+            st.leaf_highlight_plan(),
+            HighlightPlan::Pin("cn=a,ou=p,dc=x".to_string())
+        );
+    }
+
+    #[test]
+    fn highlight_plan_pins_the_first_row_when_no_entry_is_open() {
+        let st = st_with_rows(&["cn=a,ou=p,dc=x"]);
+        assert_eq!(
+            st.leaf_highlight_plan(),
+            HighlightPlan::Pin("cn=a,ou=p,dc=x".to_string())
+        );
+    }
+
+    #[test]
+    fn highlight_plan_clears_when_there_are_no_rows() {
+        let mut st = st_with_rows(&[]);
+        st.current_leaf = Some("cn=gone,ou=p,dc=x".to_string());
+        assert_eq!(st.leaf_highlight_plan(), HighlightPlan::Clear);
     }
 }
