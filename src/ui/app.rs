@@ -7,7 +7,7 @@ use tvision_rs::{
 
 use crate::form::validate::format_validation_errors;
 use crate::ui::dialog::{confirm, error, guard, guard_decision, GuardDecision};
-use crate::ui::help_ctx::hint_for;
+use crate::ui::help_ctx::status_or_hint;
 use crate::ui::panes::{
     form::FormPane,
     leaf::LeafPane,
@@ -23,7 +23,7 @@ use crate::ui::{
 use crate::workflows::create::{resolve_create_container, CreateContainer};
 use crate::workflows::save::PrepareSave;
 
-fn init_status_line(r: Rect) -> Option<Box<dyn View>> {
+fn init_status_line(r: Rect, state: Shared) -> Option<Box<dyn View>> {
     let mut r = r;
     r.a.y = r.b.y - 1;
     let defs = StatusDef::list()
@@ -33,7 +33,13 @@ fn init_status_line(r: Rect) -> Option<Box<dyn View>> {
                 .item("~Alt-X~ Exit", alt('x'), REQUEST_QUIT)
         })
         .build();
-    Some(Box::new(StatusLine::new(r, defs).with_hint(hint_for)))
+    Some(Box::new(StatusLine::new(r, defs).with_hint(move |ctx| {
+        // Shortest possible borrow: copy the status string out and drop the
+        // borrow before calling `status_or_hint`/`hint_for` — this runs during
+        // draw, so it must never hold the Shared borrow across another call.
+        let status = state.borrow().status.clone();
+        status_or_hint(&status, ctx)
+    })))
 }
 
 fn init_menu_bar(r: Rect) -> Option<Box<dyn View>> {
@@ -997,12 +1003,13 @@ fn init_desktop(r: Rect, state: Shared) -> Option<Box<dyn View>> {
 
 pub(crate) fn build_program(backend: Box<dyn tv::Backend>, state: Shared) -> Program {
     let s = state.clone();
+    let status_state = state;
     Program::new(
         backend,
         Box::new(SystemClock::new()),
         crate::ui::theme::edaptor_theme(),
         move |r| init_desktop(r, s.clone()),
-        init_status_line,
+        move |r| init_status_line(r, status_state.clone()),
         init_menu_bar,
     )
 }

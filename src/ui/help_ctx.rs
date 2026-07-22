@@ -26,6 +26,19 @@ pub(crate) const FIELD_LAUNCH_PICKER: HelpCtx = HelpCtx::custom("edaptor.field.l
 /// A modal-launch field that opens a password editor.
 pub(crate) const FIELD_LAUNCH_PASSWORD: HelpCtx = HelpCtx::custom("edaptor.field.launch.password");
 
+/// Decide what the status line's footer shows: an active operator-facing
+/// `status` message (a just-finished save, reload, or find outcome) takes
+/// precedence over the field-level hint for `ctx`; an empty `status` falls back
+/// to [`hint_for`].
+///
+/// Pure, so the precedence rule is unit-testable without a terminal.
+pub(crate) fn status_or_hint(status: &str, ctx: HelpCtx) -> Option<String> {
+    if !status.is_empty() {
+        return Some(status.to_string());
+    }
+    hint_for(ctx)
+}
+
 /// Map a `HelpCtx` to the hint string shown in the status line footer.
 /// Returns `None` for any unknown context (no hint drawn).
 ///
@@ -76,6 +89,20 @@ mod tests {
                 hint_for(ctx).unwrap_or_else(|| panic!("hint_for({}) returned None", ctx.name()));
             assert_eq!(hint, expected, "wrong hint for context {}", ctx.name());
         }
+    }
+
+    #[test]
+    fn status_or_hint_prefers_a_non_empty_status_over_the_field_hint() {
+        assert_eq!(
+            status_or_hint("Saved.", FIELD_TEXT),
+            Some("Saved.".to_string())
+        );
+    }
+
+    #[test]
+    fn status_or_hint_falls_back_to_hint_for_when_status_is_empty() {
+        assert_eq!(status_or_hint("", FIELD_TEXT), hint_for(FIELD_TEXT));
+        assert_eq!(status_or_hint("", HelpCtx::NO_CONTEXT), None);
     }
 
     #[test]
