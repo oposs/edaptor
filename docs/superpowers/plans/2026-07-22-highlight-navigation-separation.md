@@ -892,24 +892,36 @@ cancel" is superseded: clear when the operator *starts* an action, not when they
 back out of one, so a cancel needs no handling at all — the status was already
 cleared when the action began, and a completed action sets its own message.
 
-1. The four existing bare `self.status.clear()` calls — in `commit_branch`,
-   `reconcile_selection`, `set_leaf_search`, and `apply_commit` — become
-   `self.begin_operator_action()`. Behaviour identical; this is the rename that
-   makes the policy greppable. Confirm there are exactly four by grepping
-   `self.status.clear()` before and after.
-2. `open_create` (`src/ui/app.rs:442`) — opening the create form is a new action;
-   add `state.borrow_mut().begin_operator_action();` at the top, before the form
-   is built (mind the existing borrow scopes in that function).
-3. The `SAVE` dispatch arm (`src/ui/app.rs:133`) — pressing Save is the action;
-   whether it ends in a write, "No changes.", a validation error, or a cancelled
-   confirm, the previous action's message is stale the moment Save is pressed.
-4. `apply_cancelled_guard_save` and the guard `Stay` arm (`src/ui/app.rs`) — the
-   operator chose to keep editing; that is an action too. `apply_cancelled_guard_save`
-   takes `&mut UiState`, so call `st.begin_operator_action()` there.
+**Grep `self.status.clear()` in `src/ui/state.rs` first — line numbers below are
+stale.** At audit time there were **five** sites (Tasks 1–4 shifted the file); all
+five are operator-action boundaries and all five become `self.begin_operator_action()`:
 
-Do **not** add it inside `reread`, or anywhere else on the shared write path: that
-is exactly the mistake `c016f2a` fixed, where a rename ate its own confirmation
-because a post-write re-read is indistinguishable from a navigation. Task 3 also
+1. The five existing bare `self.status.clear()` calls — in `reread_public`,
+   `apply_commit`, `reconcile_selection`, `commit_branch`, and `set_leaf_search`
+   — become `self.begin_operator_action()`. Behaviour identical; this is the
+   rename that makes the policy greppable. `reread_public` is the public wrapper
+   every operator navigation (guard Discard, container chooser) reaches, and it
+   already clears for exactly this reason — its private sibling `reread`, on the
+   shared write path, must NOT (see the warning below). Grep before and after to
+   confirm you converted every site and left the private `reread` alone.
+2. `open_create` (`src/ui/app.rs`) — opening the create form is a new action; add
+   `state.borrow_mut().begin_operator_action();` at the top, before the form is
+   built (mind the existing borrow scopes in that function).
+3. The `SAVE` dispatch arm (`src/ui/app.rs`, `if cmd == SAVE`) — pressing Save is
+   the action; whether it ends in a write, "No changes.", a validation error, or
+   a cancelled confirm, the previous action's message is stale the moment Save is
+   pressed.
+4. Both keep-editing seams in `src/ui/app.rs` — `apply_cancelled_guard_save`
+   (guard→Save→confirm cancelled) and `apply_guard_stay` (guard "Stay"). Both mean
+   "the operator chose to keep editing," which is an action. Each takes
+   `&mut UiState`, so call `st.begin_operator_action();` in each. (Task 4 extracted
+   `apply_guard_stay` from the inline Stay arm; it is where the Stay wiring now
+   lives.)
+
+Do **not** add it inside the private `reread`, or anywhere else on the shared
+write path: that is exactly the mistake `c016f2a` fixed, where a rename ate its
+own confirmation because a post-write re-read is indistinguishable from a
+navigation. Task 3 also
 touches `apply_cancelled_guard_save`; if Task 3 has landed, add the clear to the
 version already there rather than reverting its `list_dirty` change.
 
