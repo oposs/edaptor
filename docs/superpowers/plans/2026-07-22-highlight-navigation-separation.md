@@ -1457,27 +1457,43 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 ### Task 8: Delete `leaf_search_truncated`, docs, and the gate
 
 **Files:**
-- Modify: `src/ui/state.rs` (`:129`, `:270`, `:805`, `:1197`, `:1219`, `:1253`, `:1274`, `:1407`, `:1613`, and the two tests at `:2932`, `:3016`)
+- Modify: `src/ui/state.rs` — the field, both initialisers, every assignment, and
+  the two tests that read it.
 - Modify: `CHANGES.md`, `docs/src/concepts/live-data.md`
 
-- [ ] **Step 1: Rewrite the two tests to assert the observable behaviour**
+**This task runs last, so all line numbers below are stale — do NOT trust them.**
+Locate every site with `grep -n leaf_search_truncated src/ui/state.rs` and work
+from that. At the time of writing there were: the field decl, two initialisers,
+six `= false`/`= truncated` assignments, one doc comment, and two test
+assertions. Confirm nothing outside `state.rs` references it
+(`grep -rn leaf_search_truncated src/`).
 
-The truncation notice reaches the operator through `status`, so assert that:
+- [ ] **Step 1: Adjust the two tests that read the field**
 
-```rust
-        assert!(
-            st.status.contains("Showing the first"),
-            "the truncation notice reaches the operator via the status line"
-        );
-```
+There are exactly two reader sites, and they are **not** rewritten to a new
+assertion — the truncation notice already reaches the operator through `status`,
+and one of the tests already asserts that. Handle each:
+
+1. A broad test (currently `..._becomes_a_permanent_local_node`, around the
+   `assert!(!st.leaf_search_truncated)` line) asserts the *non*-truncated field as
+   one incidental line among several. **Delete just that one `assert!` line**; the
+   test's real subject (a hit becoming a permanent node, `leaf_search_rows`,
+   `list_dirty`) is untouched.
+2. `apply_leaf_search_results_truncated_reports_the_cap` asserts **both**
+   `st.leaf_search_truncated` **and** that `st.status` contains
+   `LEAF_SEARCH_CAP`. **Delete the field assertion, keep the status assertion** —
+   that status check is the observable behaviour and the real point of the test.
+   Fix the test's doc comment, which currently says "sets `leaf_search_truncated`
+   and reports the cap in `status`" → "reports the cap in `status`".
 
 Run: `cargo test -j4 --lib leaf_search`
-Expected: PASS (the field still exists at this point).
+Expected: still PASS (the field still exists at this point; you only removed
+assertions on it).
 
 - [ ] **Step 2: Delete the field and every assignment**
 
-Remove `pub leaf_search_truncated: bool`, both initialisers and all six
-assignments. Nothing reads it.
+Remove `pub leaf_search_truncated: bool`, both initialisers and every assignment
+(grep to find them all — there were six). Nothing reads it once Step 1 is done.
 
 - [ ] **Step 3: Run the gate**
 
