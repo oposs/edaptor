@@ -4,14 +4,65 @@ Carries the **current concern** into the next session. Not a project history —
 that see `git log`, the specs under `docs/superpowers/specs/`, the SDD ledger
 (`.superpowers/sdd/progress.md`), and project memory (`…/memory/MEMORY.md`).
 
-**Date:** 2026-07-22 · **Branch: `feat/cache-coherence`** (worktree at
+**Date:** 2026-07-23 · **Branch: `feat/cache-coherence`** (worktree at
 `/scratch/oetiker/claude-worktrees/edaptor-feat-cache-coherence`, off `main` @
-`4231dcd`). 29 commits, 22 files, ~+2990/-228. `Cargo.toml` version **1.2.1**.
+`4231dcd`, HEAD `df672d3`). `Cargo.toml` version **1.2.1**; **tvision-rs 0.13**.
 
-**Current concern: Spec 2 of the "real-time consistency" overhaul is CODE-COMPLETE
-and reviewed READY TO MERGE — it is waiting on the merge decision.** Specs 3 and 4
-are the remaining work (umbrella:
-`docs/superpowers/specs/2026-07-21-realtime-consistency-design.md`).
+**Current concern: Spec 2 (cache coherence) AND the follow-up "highlight/navigation
+separation" batch are both DONE and reviewed READY TO MERGE.** The branch will
+carry Spec 2 + this batch + (still to come) Specs 3 and 4 into one PR — nothing is
+pushed or merged yet; that is the pending decision. Umbrella:
+`docs/superpowers/specs/2026-07-21-realtime-consistency-design.md`.
+
+---
+
+## DONE — highlight/navigation separation (READY TO MERGE, opus final sign-off)
+
+Design `docs/superpowers/specs/2026-07-22-highlight-navigation-separation-design.md`,
+plan `docs/superpowers/plans/2026-07-22-highlight-navigation-separation.md`. Built
+with SDD: 8 tasks, each spec+quality reviewed, 6 fix rounds (every one a real defect
+a review caught) + a whole-branch opus review that found one cross-task **Critical**
+no per-task lens could see. `make check` green (867 lib + integration + doc-tests).
+Batch = `866f7a8..df672d3`, 32 commits, 15 files, ~+3283/-243.
+
+**What it does.** The two list panes used to report a navigation whenever their
+widget's focus index changed, so a *rebuild* was indistinguishable from an operator
+move (four shipped bugs). Now the controller answers with a **DN**
+(`HighlightPlan` → `leaf_highlight_plan`/`branch_highlight_plan`) that the pane
+resolves *after* its rebuild, resyncing `last_sel` to the widget's **actual**
+`value()` (never the row it pushed) so `report_selection` is a no-op on rebuild and
+only genuine moves are reported. Plus: a **vanished-entry signal** — an open entry
+deleted elsewhere is detected in `adopt_structure` (`note_entry_vanished`), which
+clears a clean form (+ status) or, for a dirty form, raises `GuardTarget::Vanished`
+drained by `drain_vanished_guard` in the RELOAD arm into a **Keep editing / Discard
+/ Re-create** dialog (Re-create behind the standard LDIF preview). `WriteOutcome::
+Created` finally sets a "Created X." status (was silent). `guard.rs` simplified onto
+tvision 0.13's `Dialog::button_row` + `ButtonLayout::Uniform`. Dead
+`leaf_search_truncated` removed.
+
+**The whole-branch Critical (worth remembering).** `adopt_structure` has TWO
+callers; vanish-detection was folded into it but the drain wired into only the
+RELOAD arm. The other caller — the container-rename rescan in `apply_write_outcome`'s
+`Saved` arm (`state.rs:~685`) — stranded a `GuardTarget::Vanished` on a *dirty
+container self-rename*, surfacing as a false destructive dialog on the next Alt+R.
+Fixed (`df672d3`) by moving `current_leaf` old→`reread_dn` **before** that rescan.
+Non-blocking note: that arm still has no drain, relying on the invariant
+`current_leaf == edit_form.dn == old` (holds today); a defensive drain/suppress
+there is optional future hardening.
+
+**Open Minors (all triaged acceptable-as-is, none blocking):** the one worth doing
+someday is renaming the test `guard_stay_clears_a_stale_status` → it actually
+exercises `apply_cancelled_guard_save`, not `apply_guard_stay`.
+
+**tvision 0.13** (published this session, PR #19): `Dialog::set_button_layout(
+ButtonLayout::{Classic,Uniform,Ragged})` + `set_button_min_width` (Classic = fixed
+min, default; Uniform/Ragged floor at min) and public `text::cstrlen`. edaptor pins
+`0.13`. `button_row` defaults to `Classic` (fixed `STD_BUTTON`), so long-label rows
+must opt into `Uniform`.
+
+---
+
+## DONE — Spec 2: cache coherence (ready to merge)
 
 ---
 
