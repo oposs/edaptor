@@ -1148,11 +1148,21 @@ status still contains "no longer" after `reload_structure` on a worker-backed
 
 Run: `cargo test -j4 --lib`
 Expected: PASS. Every `match` on `GuardTarget` must now handle `Vanished`; clippy
-will point at any that do not. The existing
-`reload_rebuild_does_not_report_the_self_row_as_a_fresh_selection` (leaf.rs) and
-the `adopt_structure` reload tests must still pass — check that none asserted the
-silent-null behaviour you just changed; if one did, its scenario (leaf kept) is
-unaffected, but a leaf-dropped assertion must move to the new behaviour.
+will point at any that do not.
+
+**One existing test drops a leaf and asserts the old behaviour — expect it to
+still pass, but know why.** `adopt_structure_falls_back_when_the_branch_is_gone`
+(in `state.rs`'s test module) sets `current_leaf` to a leaf under a gone branch,
+adopts a structure without it, and asserts `current_leaf == None`. That assertion
+**still holds** — your clean-vanish path also nulls `current_leaf` — so do NOT
+change the test. It now additionally sets a status ("… is no longer in the
+directory."), which that test does not assert, so it stays green. If you find it
+red, you have wired the clean path wrong (it must still null `current_leaf`).
+`adopt_structure_keeps_a_still_existing_branch_and_leaf` (the entry survives) must
+also stay green and must NOT gain a vanished status — that is your "keeps the
+entry" case. The leaf.rs
+`reload_rebuild_does_not_report_the_self_row_as_a_fresh_selection` regression test
+must pass unchanged too.
 
 - [ ] **Step 5: Commit**
 
