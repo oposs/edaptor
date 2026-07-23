@@ -1,111 +1,123 @@
-# Password reveal-eye — design
+# InputLine masking + reveal-eye — design
 
-## Goal
+Supersedes the earlier "build a masked field around InputLine" approach. The
+capability is added to **tvision-rs** (`../rstv`) so edaptor can delete its
+fragile masking mirror and every tvision app gains a real password field.
 
-Add a "reveal password" affordance to the Set-password dialog's masked fields
-(`MaskedInputLine`): a small eye control at the right end of the **active**
-(focused) field that momentarily shows the typed password in the clear.
+## Why in the framework, not around it
 
-- **Mouse:** press-and-hold the eye → cleartext while held; release → back to
-  bullets.
-- **Keyboard:** with the eye focused, **Space** reveals for **1 second**, then
-  auto-reverts.
+edaptor's `MaskedInputLine` masks by keeping the password **twice** — bullets in
+an inner `InputLine`, cleartext in a parallel `real` string — and syncing them on
+every edit. Both password bugs we just fixed were the two halves of one
+**mirror desync** (paste wrote cleartext into the bullet buffer and left `real`
+empty; backspace then indexed `real` with the bullet caret and panicked). Native
+masking stores the password **once** and masks only at draw: caret, selection,
+scroll, paste, backspace are all InputLine's own tested code, so the desync bug
+class cannot exist. It is also reusable — the same pattern edaptor already
+upstreams (Shuttle, ListViewer, InputLine bracketed paste).
 
-## Why a timed keyboard reveal
+## Terminal constraint
 
-The terminal (crossterm, no Kitty keyboard protocol negotiated) delivers **only
-`KeyDown`** — there is no key-release event. So keyboard "hold to reveal, release
-to hide" cannot detect the release. A one-shot 1 s timer (`ctx.set_timer(dur,
-None)` → `Event::Timer`) gives a keyboard reveal that needs no release event.
-
-Mouse press/release *is* available: `Event::MouseDown` / `Event::MouseUp`, with
-`MouseTrackCapture` routing the `MouseUp` back to the presser (the exact pattern
-`widgets::button` uses). So the mouse behaviour matches the request precisely.
-
-**Enter is deliberately not a reveal key:** Enter broadcasts `Command::DEFAULT`,
-which fires the dialog's OK button globally regardless of focus, so binding Enter
-to reveal would trip the OK / password-match flow. Space only.
+crossterm (no Kitty keyboard protocol) delivers **only `KeyDown`** — there is no
+key-release. So keyboard "hold to reveal, release to hide" is impossible; the
+keyboard peek is time-boxed instead. Mouse press/release *is* available
+(`MouseDown`/`MouseUp` with `MouseTrackCapture`, the `widgets::button` pattern),
+so the mouse behaviour is a true hold.
 
 ## Glyphs
 
-Single-width (ambiguous-width, rendered 1 col in Western terminals — same class
-as the existing `•` bullet), from the geometric/math blocks:
+Single-width (ambiguous-width → 1 col in Western terminals, same class as `•`):
 
 - **Revealed:** `◉` U+25C9 FISHEYE
 - **Hidden:** `⊝` U+229D CIRCLED DASH
 
-## Components
+Both configurable (see `RevealEyeConfig`).
 
-### `EyeToggle` (new focusable view)
+---
 
-- Single-cell, selectable view drawn as `◉` (revealed) / `⊝` (hidden).
-- Holds only its *reveal intent*: `Off`, `Held` (mouse down, cleared on
-  `MouseUp`), or `Timed` (Space pressed; the dialog owns the timer that clears
-  it).
-- `MouseDown` → intent `Held`, start a `MouseTrackCapture` (so `MouseUp` returns
-  here), and broadcast `CMD_PW_REVEAL_CHANGED { source: self.id }`. `MouseUp` →
-  intent `Off`, broadcast again.
-- `Space` (`KeyDown`) → intent `Timed`, broadcast; the dialog arms the timer.
-  All other keys pass through (Tab, arrows for field navigation).
-- Never edits or holds any password text.
+## Layer 1 — tvision-rs (`../rstv`)
 
-### `MaskedInputLine` (extend)
+### `InputLine` — masking (pure enhancement)
 
-- Add `revealed: bool` and `set_revealed(bool)`.
-- The stored model is unchanged: inner field holds bullets, `real` mirrors the
-  cleartext 1:1 (this is what the existing masking/paste/backspace logic relies
-  on).
-- **Reveal rendering:** when `revealed`, `draw` shows `real` instead of the
-  bullets by briefly substituting the inner field's display buffer with `real`
-  — caret and selection remapped from their char index (already available via
-  `caret_char` / `selection_chars`) to the corresponding byte offsets in `real`
-  — drawing through the inner field so its scroll/caret/selection rendering is
-  reused, then restoring the bullet buffer. Char counts are equal by construction,
-  so single-width columns line up 1:1 (the mirror already assumes this mapping).
-- Reserve the **last column** of the field for the eye: the editable width is
-  the field width minus one, and the eye is drawn/hit in that last column.
+- `mask: Option<char>` + `set_mask(Option<char>)`. When `Some(ch)`, `draw`
+  paints `ch` per grapheme of the visible window; the stored `data` / `value()`
+  stay the real text.
+- `reveal: bool` + `set_reveal(bool)`. Transient; when true, `draw` paints the
+  real glyphs despite `mask`.
+- Clipboard safety: while masked **and not** revealed, Cut/Copy emit nothing
+  (no cleartext to the clipboard); Paste still inserts into the real data.
+- Default (`mask = None`) leaves InputLine byte-for-byte unchanged.
 
-### `PasswordDialog` (coordinator — already mediates keys / `valid` / staging)
+### `RevealEye` — a focusable one-cell view (new)
 
-- Insert an `EyeToggle` per masked field, positioned over each field's last
-  column. Keep a `field_id → eye_id` (and reverse) mapping.
-- Tab order: New → New-eye → Confirm → Confirm-eye → OK → Cancel.
-- **Active-line only:** an eye is drawn only while its paired field or the eye
-  itself is focused; otherwise it is hidden. So exactly the focused row shows an
-  eye.
-- On `CMD_PW_REVEAL_CHANGED` (checked after delegating, like `CMD_SHUTTLE_CHANGED`):
-  read the source eye's intent and apply it to the paired field via
-  `set_revealed`. For a `Timed` intent, arm a one-shot 1 s timer (`ctx.set_timer`),
-  remembering `(timer_id → field_id)`; pressing Space again kills the pending
-  timer and re-arms.
-- On `Event::Timer(id)`: if `id` is a pending reveal timer, `set_revealed(false)`
-  on its field and drop the mapping.
-- Cancelling/closing the dialog leaves nothing revealed (fields are cleared on
-  close as today).
+Its own Tab stop; drives a paired field's `set_reveal`.
 
-## Security
+- Draws `◉` when the paired field is revealed, else `⊝`.
+- **Mouse:** `MouseDown` → reveal + `MouseTrackCapture`; `MouseUp` (routed back)
+  → hide. A true momentary peek.
+- **Space** (while focused):
+  - default (non-sticky): a **timed peek** — reveal, arm a one-shot timer
+    (`ctx.set_timer(duration, None)`, default 1 s), hide on `Event::Timer`.
+    Pressing Space again re-arms.
+  - sticky mode (configured): **toggle** a latched reveal on/off; no timer.
+- `RevealEyeConfig { hidden_glyph: '⊝', revealed_glyph: '◉', peek: Duration(1s),
+  sticky: bool }`.
+- Tab / arrows / other keys pass through so the owner keeps field navigation.
 
-Cleartext is shown only during a deliberate peek and always reverts — on mouse
-release or after 1 s. No change to staging, and nothing secret is logged. The
-reveal is transient view state, never persisted.
+### `MaskedInput` — composite (new)
+
+The consumer-facing widget: an `InputLine` (with `mask` set) plus a `RevealEye`
+in its **last column**, bundled as a group and pre-wired.
+
+- Layout: the input occupies width − 1; the eye sits in the last column.
+- Tab order within the group: input caret → eye → (exit). This is how the eye
+  is "its own Tab stop" without giving InputLine an internal sub-focus.
+- Internal wiring: the eye's reveal intent drives the input's `set_reveal` — no
+  broadcast needed, they share a parent.
+- `value()` / cleartext delegate to the inner input.
+- Optional: hide the eye unless the group (input or eye) is focused, so only the
+  **active** row shows one.
+- Builder passes through `RevealEyeConfig` + the mask char.
+
+Release `../rstv` as **0.14.0** (new feature → minor bump).
+
+---
+
+## Layer 2 — edaptor
+
+- Replace `MaskedInputLine` with `MaskedInput` (mask `•`, non-sticky → Space =
+  1 s peek). **Delete the mirror** and everything it forced: `real`,
+  `insert_char_masked`, `mutate_real`, the per-event masking, the CUT/COPY/PASTE
+  swallow, and the backspace bounds-guard (all now native / unnecessary).
+- `PasswordDialog` reads each field's cleartext via `value()`; the New==Confirm
+  `valid()` gate we just added **stays**.
+- Active-line only: the eye shows on the focused field's row (via `MaskedInput`'s
+  focus-gated eye).
+- During development edaptor points `tvision-rs` at `path = "../rstv"`; once
+  0.14.0 is published, pin the crates.io version and drop the path.
 
 ## Testing
 
-- `EyeToggle`: `MouseDown` sets `Held` + broadcasts; `MouseUp` clears + rebroadcasts;
-  `Space` sets `Timed` + broadcasts; Tab/arrows pass through; draw shows the right
-  glyph per intent.
-- `MaskedInputLine`: `set_revealed(true)` draw shows `real`; `false` shows bullets;
-  caret position preserved across a reveal/hide cycle; the eye column is reserved
-  (editable width = field width − 1).
-- `PasswordDialog`: a reveal-changed broadcast from an eye toggles the *paired*
-  field only; a `Timed` reveal arms a timer and the matching `Event::Timer` hides
-  it; a second Space re-arms (kills the old timer); an eye is drawn only on the
-  focused row.
+**tvision (`../rstv`):**
+- `InputLine`: masked draw paints the echo char while `value()` returns real
+  text; `set_reveal(true)` paints real; caret/selection/scroll unaffected;
+  masked Cut/Copy emit nothing, Paste inserts.
+- `RevealEye`: `MouseDown` reveals + `MouseUp` hides; Space non-sticky arms a
+  timed reveal and `Event::Timer` hides it; Space sticky toggles on/off; glyph
+  tracks state.
+- `MaskedInput`: Tab visits input then eye; eye reveals the paired input; eye
+  reserved to the last column; focus-gated eye visibility.
+
+**edaptor:**
+- New/Confirm fields mask and reveal via the widget; `PasswordDialog::value`
+  reads cleartext; the OK match-gate still vetoes a mismatch; no mirror remains.
+
+## Implementation order (two plans)
+
+1. tvision-rs: InputLine masking + `RevealEye` + `MaskedInput`, tests, 0.14.0.
+2. edaptor: adopt `MaskedInput`, delete the mirror, wire the dialog.
 
 ## Out of scope
 
-- No reveal on the read-only `‹set›/‹unset›` cell in the form (only inside the
-  editor dialog).
-- No config option to default-reveal or to disable masking.
-- No change to the mirror architecture (a larger "store real, mask at draw"
-  refactor that would also remove the desync bug class is noted but deferred).
+- Reveal on the read-only `‹set›/‹unset›` cell in the form (editor dialog only).
+- Any change to how passwords are hashed/staged.
