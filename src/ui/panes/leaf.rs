@@ -100,35 +100,36 @@ impl LeafPane {
     }
 
     /// Resolve the controller's [`HighlightPlan`] against the rows just installed,
-    /// set the widget focus, and resync `last_sel` **silently** so the move is not
-    /// re-reported as an operator navigation. `Follow` additionally asks the
-    /// controller to move the form, which it only ever does for a clean form.
+    /// force the widget onto the planned row (when the plan names one), and
+    /// resync `last_sel` **silently** to whatever the widget now actually reads —
+    /// including the `Clear` arm, where nothing is forced and the widget's own
+    /// default (row 0, the `‹self›` row, for a non-empty list) must not read back
+    /// as a fresh operator move. `Follow` additionally asks the controller to move
+    /// the form, which it only ever does for a clean form.
     fn apply_highlight_plan(&mut self, ctx: &mut Context) {
         let (plan, rows) = {
             let st = self.state.borrow();
             (st.leaf_highlight_plan(), st.leaf_rows())
         };
-        let dn = match &plan {
-            HighlightPlan::Pin(dn) | HighlightPlan::Follow(dn) => dn.clone(),
-            HighlightPlan::Clear => {
-                self.last_sel = -1;
-                return;
+        let follow_dn = match &plan {
+            HighlightPlan::Pin(dn) | HighlightPlan::Follow(dn) => {
+                if let Some(row) = rows.iter().position(|(_, d)| d.eq_ignore_ascii_case(dn)) {
+                    if let Some(list) = self.group.child_mut(self.list_id) {
+                        list.set_value_ctx(FieldValue::Int(row as i32), ctx);
+                    }
+                }
+                matches!(plan, HighlightPlan::Follow(_)).then(|| dn.clone())
             }
+            HighlightPlan::Clear => None,
         };
-        let row = rows
-            .iter()
-            .position(|(_, d)| d.eq_ignore_ascii_case(&dn))
-            .map(|i| i as i32)
-            .unwrap_or(-1);
-        if row >= 0 {
-            if let Some(list) = self.group.child_mut(self.list_id) {
-                list.set_value_ctx(FieldValue::Int(row), ctx);
-            }
-        }
-        // Silently: `report_selection` compares against `last_sel`, so syncing it
-        // here is what makes the rebuild invisible to the controller.
-        self.last_sel = row;
-        if let HighlightPlan::Follow(dn) = plan {
+        // Silently: `report_selection` compares against `last_sel`, so reading the
+        // widget's actual value back here — for every arm, not just Pin/Follow —
+        // is what makes the rebuild invisible to the controller.
+        self.last_sel = match self.group.child_mut(self.list_id).and_then(|v| v.value()) {
+            Some(FieldValue::Int(i)) => i,
+            _ => -1,
+        };
+        if let Some(dn) = follow_dn {
             let ocs = {
                 let st = self.state.borrow();
                 st.structure
@@ -1111,6 +1112,23 @@ mod tests {
                 .map(|(dn, _)| dn.as_str()),
             Some("cn=a,ou=p,dc=x"),
             "a clean form follows the rebuild to the first real row"
+        );
+    }
+
+    /// CRITICAL regression: a rebuild into a Clear plan (childless container,
+    /// nothing open) must not report the ‹self› row as a fresh selection — the
+    /// widget defaults its focus to row 0, and last_sel must be synced to that so
+    /// report_selection stays silent. Without the fix this fabricates a
+    /// navigation onto the container, the I4 bug through the Clear arm.
+    #[test]
+    fn rebuild_into_clear_does_not_report_the_self_row() {
+        let shared = shared_with_rows(&[]); // childless container, no current_leaf
+        let mut pane = LeafPane::new(Rect::new(0, 0, 30, 10), shared.clone());
+        refresh(&mut pane);
+        assert_eq!(
+            shared.borrow().requested_leaf,
+            None,
+            "a Clear rebuild must not fabricate a navigation onto the ‹self› row"
         );
     }
 }
