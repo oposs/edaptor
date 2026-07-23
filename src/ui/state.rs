@@ -688,6 +688,23 @@ impl UiState {
                             .as_deref()
                             .map(|b| b.eq_ignore_ascii_case(&old))
                             .unwrap_or(false);
+                        // The renamed container may itself be the open entry (its
+                        // ‹self› row): move current_leaf to the new DN BEFORE the
+                        // rescan, so adopt_structure finds it present and does not
+                        // read the rename as a vanish. It MUST be before the rescan
+                        // (not after, as current_branch is below): a vanish now
+                        // raises GuardTarget::Vanished, and this path has no drain —
+                        // a post-rescan fixup would leave a stuck guard that the
+                        // next Alt+R surfaces as a false, destructive vanished
+                        // dialog.
+                        if self
+                            .current_leaf
+                            .as_deref()
+                            .map(|l| l.eq_ignore_ascii_case(&old))
+                            .unwrap_or(false)
+                        {
+                            self.current_leaf = Some(reread_dn.clone());
+                        }
                         // The rename itself already succeeded — a rescan failure here
                         // must not be reported as if the save had failed, replacing
                         // "Saved." with an error the operator would read as the write
@@ -3724,6 +3741,79 @@ mod write_routing_tests {
             st.status, "Saved.",
             "the rescan's own message must not bury the save confirmation"
         );
+    }
+
+    /// CRITICAL: a dirty container self-rename must NOT leave a stuck
+    /// `GuardTarget::Vanished`. The rescan drops the OLD container DN (it was
+    /// renamed on the server), but `current_leaf` must have already followed to
+    /// the new DN before the rescan runs, so `adopt_structure` never reads the
+    /// rename as a vanish. Without the fix, this raises
+    /// `Vanished("ou=old,dc=x")`, which the next Alt+R surfaces as a false,
+    /// destructive "no longer in the directory" dialog even though the form is
+    /// showing the live, just-renamed entry.
+    #[test]
+    fn a_dirty_container_self_rename_does_not_leave_a_vanished_guard() {
+        // The operator has the container's own ‹self› row open (current_leaf ==
+        // current_branch == ou=old) with unsaved edits, and renames it. A child
+        // makes ou=old a BRANCH (`is_branch` == has children), so the rename
+        // takes the rescan path, like the existing container-rename tests.
+        let structure = Structure::build(
+            "dc=x",
+            vec![
+                si("dc=x", None),
+                si("ou=old,dc=x", None),
+                si("cn=kid,ou=old,dc=x", Some("Kid")),
+            ],
+        );
+        let schema = SchemaModel::from_raw(&RawSubschema::default());
+        let mut st =
+            UiState::new_for_test(structure, schema, "dc=x".into(), Vec::new(), Vec::new());
+        st.current_branch = Some("ou=old,dc=x".into());
+        st.current_leaf = Some("ou=old,dc=x".into());
+        st.edit_form = Some(dirty_form("ou=old,dc=x"));
+        let (worker, rx) = WorkerHandle::recording();
+        st.worker = Some(worker);
+
+        // The rescan reflects the server-side rename: ou=old is gone, ou=new is
+        // there in its place.
+        let responder = std::thread::spawn(move || {
+            let (req, reply) = rx.recv().expect("a LoadStructure request must be sent");
+            let Request::LoadStructure { id, .. } = req else {
+                panic!("expected Request::LoadStructure, got {req:?}");
+            };
+            let _ = reply.send(Response::StructureEntries {
+                id,
+                nodes: vec![
+                    crate::ldap::worker::StructureNodeRaw {
+                        dn: "dc=x".into(),
+                        cn: None,
+                        description: None,
+                        object_classes: vec![],
+                        attrs: BTreeMap::new(),
+                    },
+                    crate::ldap::worker::StructureNodeRaw {
+                        dn: "ou=new,dc=x".into(),
+                        cn: None,
+                        description: None,
+                        object_classes: vec![],
+                        attrs: BTreeMap::new(),
+                    },
+                ],
+            });
+        });
+
+        st.apply_write_outcome(WriteOutcome::Saved {
+            reread_dn: "ou=new,dc=x".into(),
+            renamed_from: Some("ou=old,dc=x".into()),
+            quit_after: false,
+        });
+        responder.join().expect("responder thread must not panic");
+
+        assert_eq!(
+            st.guard_target, None,
+            "no stuck vanished guard after the rename"
+        );
+        assert_eq!(st.status, "Saved.");
     }
 
     /// The mirror image: opening another entry DOES drop the stale message.
