@@ -85,6 +85,19 @@ pub(crate) fn apply_cancelled_guard_save(st: &mut crate::ui::state::UiState) {
     st.pending_nav = None;
 }
 
+/// Guard "Stay": the operator chose to keep editing the pinned form. Mark the
+/// pane that holds the abandoned navigation target dirty, so its highlight
+/// re-resolves to the pinned entry/branch on the next rebuild (via
+/// `leaf_highlight_plan` / `branch_highlight_plan`), and drop the target. Pure;
+/// unit-tested.
+pub(crate) fn apply_guard_stay(st: &mut crate::ui::state::UiState, target: &Option<GuardTarget>) {
+    match target {
+        Some(GuardTarget::Branch(_)) => st.tree_dirty = true,
+        _ => st.list_dirty = true,
+    }
+    st.guard_target = None;
+}
+
 /// What the save flow should do for a given prepare result.
 pub(crate) enum SaveAction {
     Status(String),
@@ -264,19 +277,10 @@ pub(crate) fn dispatch(prog: &mut Program, cmd: Command, state: &Shared) {
                 state.borrow_mut().guard_target = None;
             }
             GuardDecision::Stay => {
-                // Keep editing the pinned form; snap the highlight back so it agrees.
+                // Keep editing the pinned form; the highlight re-resolves on the
+                // next rebuild (branch_/leaf_highlight_plan → Pin the pinned DN).
                 let mut st = state.borrow_mut();
-                match target {
-                    // The highlight is re-resolved from `branch_highlight_plan` on the
-                    // next rebuild, which returns `Pin(current_branch)` while pinned.
-                    Some(GuardTarget::Branch(_)) => {
-                        st.tree_dirty = true;
-                    }
-                    _ => {
-                        st.list_dirty = true;
-                    }
-                }
-                st.guard_target = None;
+                apply_guard_stay(&mut st, &target);
             }
         }
     } else if cmd == REQUEST_QUIT {
@@ -1040,13 +1044,58 @@ mod tests {
     use crate::form::validate::ValidationError;
     use crate::workflows::save::PrepareSave;
 
-    // The Branch arm of `apply_branch_guard_stay` was inlined into `dispatch`'s
-    // guard "Stay" and "Save (not submitted)" paths as `st.tree_dirty = true`
-    // (plus clearing `guard_target`) — the tree pane now re-resolves the
-    // highlight itself via `branch_highlight_plan` on the next rebuild, so there
-    // is no standalone pure function left to unit-test here. Coverage for
-    // "guard 'Stay' snaps the tree back by DN across a pending rebuild" lives in
-    // `panes::tree::tests::guard_stay_snaps_by_dn_across_a_pending_rebuild`.
+    /// Guard "Stay" on a Branch target marks the tree for rebuild (its highlight
+    /// re-resolves to `current_branch` via `branch_highlight_plan`) and drops the
+    /// guard target.
+    #[test]
+    fn guard_stay_marks_the_tree_dirty_and_clears_the_target() {
+        use crate::ldap::worker::RawSubschema;
+        use crate::schema::SchemaModel;
+        use crate::ui::state::UiState;
+        use crate::workflows::structure::Structure;
+        let structure = Structure::build("dc=x", vec![]);
+        let schema = SchemaModel::from_raw(&RawSubschema::default());
+        let mut st =
+            UiState::new_for_test(structure, schema, "dc=x".into(), Vec::new(), Vec::new());
+        st.branch_dns = vec!["dc=x".into(), "ou=p,dc=x".into(), "ou=q,dc=x".into()];
+        st.current_branch = Some("ou=p,dc=x".into());
+        let target = Some(GuardTarget::Branch("ou=q,dc=x".into()));
+        st.guard_target = target.clone();
+
+        apply_guard_stay(&mut st, &target);
+
+        assert!(
+            st.tree_dirty,
+            "the tree re-resolves its highlight on rebuild"
+        );
+        assert!(!st.list_dirty, "the entry list is not disturbed");
+        assert_eq!(st.guard_target, None, "the abandoned target is dropped");
+    }
+
+    /// Guard "Stay" on a Leaf target marks the entry list for rebuild instead
+    /// (its highlight re-resolves via `leaf_highlight_plan`).
+    #[test]
+    fn guard_stay_marks_the_list_dirty_for_a_leaf_target() {
+        use crate::ldap::worker::RawSubschema;
+        use crate::schema::SchemaModel;
+        use crate::ui::state::UiState;
+        use crate::workflows::structure::Structure;
+        let structure = Structure::build("dc=x", vec![]);
+        let schema = SchemaModel::from_raw(&RawSubschema::default());
+        let mut st =
+            UiState::new_for_test(structure, schema, "dc=x".into(), Vec::new(), Vec::new());
+        let target = Some(GuardTarget::Leaf("cn=a,ou=p,dc=x".into(), vec![]));
+        st.guard_target = target.clone();
+
+        apply_guard_stay(&mut st, &target);
+
+        assert!(
+            st.list_dirty,
+            "the entry list re-resolves its highlight on rebuild"
+        );
+        assert!(!st.tree_dirty, "the tree is not disturbed");
+        assert_eq!(st.guard_target, None, "the abandoned target is dropped");
+    }
 
     #[test]
     fn cancelled_guard_save_snaps_highlight_back() {
