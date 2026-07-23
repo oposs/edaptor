@@ -8,6 +8,14 @@ All notable changes to eDAPtor are documented here. The format follows
 
 ### New
 
+### Changed
+
+### Fixed
+
+## 1.3.0 - 2026-07-23
+
+### New
+
 - **Concurrent-edit protection (optimistic concurrency).** When two people edit the
   same entry, eDAPtor no longer lets the second save silently overwrite the first.
   A save now asserts the version the entry had when you opened it; if it changed
@@ -56,7 +64,6 @@ All notable changes to eDAPtor are documented here. The format follows
   a row. (A container's first entry is likewise shown at startup.) An
   edit-in-progress is never disturbed: the form only follows when nothing unsaved
   is open.
-
 ### Changed
 
 ### Fixed
