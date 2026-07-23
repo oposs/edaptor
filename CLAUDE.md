@@ -54,6 +54,16 @@ When in doubt about where something goes: details → mdBook, orientation → RE
 - `examples/config.toml` — the annotated reference config that
   `docs/src/configuration/full-example.md` embeds. Keep the two consistent.
 
+## Upstream framework: tvision-rs
+
+edaptor is built on **tvision-rs** and regularly upstreams reusable widgets to it
+(the Shuttle view, the ListViewer find, InputLine bracketed paste). The working
+checkout of that crate lives at **`../rstv`** (sibling of this repo,
+`/home/oetiker/checkouts/rstv`). When a fix or feature belongs in the framework
+rather than in edaptor, develop it there — iterate from edaptor via a `path`
+dependency on `../rstv`, then release a tagged version and bump the `tvision-rs`
+requirement in `Cargo.toml` back to the published crate.
+
 ## Build, test, lint
 
 `cargo`/`make` from the repo root. **Cap parallelism at 4 cores** (shared machine):
