@@ -1312,8 +1312,12 @@ impl View for FormPane {
         // we never infer navigation from an unconsumed event). For Text and
         // Launch fields, Up/Down move focus between fields as before.
         let is_keydown = matches!(ev, Event::KeyDown(_));
+        // Bracketed paste is a focused edit too: a multi-line paste grows the
+        // block, so it must run the same snapshot-and-relayout path as a keystroke
+        // (it never signals a boundary exit — take_boundary_exit stays None).
+        let is_paste = matches!(ev, Event::Paste(_));
         let nav = matches!(ev, Event::KeyDown(k) if matches!(k.key, Key::Up | Key::Down));
-        if is_keydown && self.focused_is_list_view() {
+        if (is_keydown || is_paste) && self.focused_is_list_view() {
             // The list view edits (or moves the caret / reorders). Snapshot its
             // line count first so we can detect a grow / shrink afterwards.
             let before = self.focused_list_line_count();
@@ -2554,6 +2558,71 @@ mod tests {
             cn_top_after,
             cn_top_before + 1,
             "the following field's block moved down by one row"
+        );
+    }
+
+    #[test]
+    fn multiline_paste_into_list_field_grows_block_and_syncs_values() {
+        // A bracketed paste of a newline-separated string into a focused inline List
+        // field must (a) insert one value per line via the model, (b) relayout so the
+        // block grows and the following field shifts down (the paste is not a keydown,
+        // so this proves Event::Paste runs the same grow path), and (c) flow through
+        // sync_into_form into edit_form.fields[i].values, marking the form dirty.
+        let (shared, mut pane) =
+            build_pane_with_form(vec![multi_list("mail", &[]), ef("cn", "z", true)]);
+        let mut out = VecDeque::new();
+        let mut timers = tv::timer::TimerQueue::new();
+        let mut deferred = Vec::new();
+        let mut ctx = headless_ctx(&mut out, &mut timers, &mut deferred);
+        let mut ev = Event::Broadcast {
+            command: REFRESH,
+            source: None,
+        };
+        pane.handle_event(&mut ev, &mut ctx); // render + focus the (empty) List field
+
+        assert_eq!(pane.kinds[0], ValueKind::List { ordered: false });
+        assert_eq!(pane.focused_field_idx(), Some(0));
+        // Empty list block is one placeholder row; cn is one row below it.
+        assert_eq!(pane.block_heights, vec![1, 1]);
+        let cn_vid = pane.value_ids[1];
+        let cn_top_before = pane
+            .scroll_mut()
+            .and_then(|sg| sg.logical_of(cn_vid))
+            .map(|r| r.a.y)
+            .unwrap();
+
+        // Paste three newline-separated addresses (CRLF mixed in to prove normalisation).
+        let mut paste = Event::Paste("a@x\r\nb@x\nc@x".to_string());
+        pane.handle_event(&mut paste, &mut ctx);
+        assert!(paste.is_nothing(), "the paste event must be consumed");
+
+        // (b) The block grew to three rows and the following field shifted down by two.
+        assert_eq!(
+            pane.block_heights[0], 3,
+            "the List block grew to three rows after the multi-line paste"
+        );
+        let cn_top_after = pane
+            .scroll_mut()
+            .and_then(|sg| sg.logical_of(cn_vid))
+            .map(|r| r.a.y)
+            .unwrap();
+        assert_eq!(
+            cn_top_after,
+            cn_top_before + 2,
+            "the following field's block moved down by two rows"
+        );
+
+        // (a) + (c) Values landed as one per line and the form is dirty.
+        let st = shared.borrow();
+        let form = st.edit_form.as_ref().unwrap();
+        assert_eq!(
+            form.fields[0].values,
+            vec!["a@x".to_string(), "b@x".to_string(), "c@x".to_string()],
+            "each pasted line becomes a separate value"
+        );
+        assert!(
+            form.is_dirty(),
+            "a paste that adds values must mark the form dirty"
         );
     }
 

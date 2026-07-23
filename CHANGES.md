@@ -12,6 +12,11 @@ All notable changes to eDAPtor are documented here. The format follows
 
 ### Fixed
 
+- Pasting into a multi-value field (e.g. `givenName`) now works. The inline
+  multi-value editor is eDAPtor's own view rather than a plain input line, and it
+  was silently dropping the terminal's bracketed-paste event; it now inserts the
+  pasted text at the cursor, with each pasted line starting a new value.
+
 ## 1.3.0 - 2026-07-23
 
 ### New
