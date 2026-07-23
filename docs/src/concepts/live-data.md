@@ -40,3 +40,10 @@ line reports how many entries were loaded, and a failed reload raises an error
 dialog rather than passing silently for a successful one. The scan blocks briefly
 on large directories. Your open edit form is left untouched, so unsaved changes
 are never at risk.
+
+If the entry you were editing is gone when the projection is rebuilt — because
+another client deleted or renamed it — edaptor tells you rather than quietly
+moving you somewhere else. With no unsaved changes the form is cleared and the
+status line names the entry. With unsaved changes nothing is thrown away: you
+are asked whether to keep editing, discard your changes, or re-create the entry
+from the values still on screen.

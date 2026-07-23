@@ -42,6 +42,15 @@ All notable changes to eDAPtor are documented here. The format follows
 - Editing an attribute used in a tree or list label now refreshes that label in
   place, and the cached reverse-label lookups are dropped after every write
   (they previously kept showing values eDAPtor itself had changed).
+- The entry list and tree no longer move the form on their own. Rebuilding a
+  list (after a create, rename, reload or find) restores the highlight by DN
+  instead of by row number, so it can no longer land on the wrong entry.
+- Typing a find query no longer interrupts you with the "unsaved changes"
+  prompt: the list narrows and highlights, but a form with unsaved edits stays
+  put until you navigate deliberately.
+- When the entry you are editing is deleted by someone else, edaptor now says
+  so instead of silently moving you elsewhere — and if you have unsaved edits it
+  asks whether to keep them, discard them, or re-create the entry.
 
 ### Changed
 

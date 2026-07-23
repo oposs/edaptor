@@ -144,8 +144,6 @@ pub struct UiState {
     /// DNs returned by the newest find, or `None` when no find is active / none has
     /// landed yet. `leaf_rows` falls back to filtering the cached projection then.
     pub leaf_search_rows: Option<Vec<String>>,
-    /// True when the newest find hit `LEAF_SEARCH_CAP`.
-    pub leaf_search_truncated: bool,
     /// The loaded editable form (None until a leaf is read).
     pub edit_form: Option<EditForm>,
     /// Create-mode live-template latches (attr → latch), built by `open_create`
@@ -279,7 +277,6 @@ impl UiState {
             search: String::new(),
             leaf_search: LeafSearchFlow::new(),
             leaf_search_rows: None,
-            leaf_search_truncated: false,
             edit_form: None,
             live_templates: std::collections::BTreeMap::new(),
             computed_defaults: std::collections::BTreeMap::new(),
@@ -812,7 +809,6 @@ impl UiState {
                 // Harmless today only because `leaf_rows()` checks `search.is_empty()`
                 // first — clear explicitly so this stays correct if that check moves.
                 self.leaf_search_rows = None;
-                self.leaf_search_truncated = false;
                 // Cancel any in-flight find so its outcome, arriving after Created,
                 // cannot overwrite `status` or re-install `leaf_search_rows`.
                 self.leaf_search.cancel();
@@ -1215,7 +1211,6 @@ impl UiState {
         self.search = String::new();
         // Another container's live hits must not leak into this one.
         self.leaf_search_rows = None;
-        self.leaf_search_truncated = false;
         // Cancel any in-flight find too: its response, once landed, would carry the
         // OLD container's DNs, and the deliberate "keep previous rows while the next
         // search is in flight" behaviour would then show them under the new one.
@@ -1237,7 +1232,6 @@ impl UiState {
         self.list_dirty = true;
         if self.search.is_empty() {
             self.leaf_search_rows = None;
-            self.leaf_search_truncated = false;
             return;
         }
         let Some(branch) = self.current_branch.clone() else {
@@ -1271,7 +1265,6 @@ impl UiState {
                     dns.push(e.dn.clone());
                 }
                 self.leaf_search_rows = Some(dns);
-                self.leaf_search_truncated = truncated;
                 if truncated {
                     self.status = format!(
                         "Showing the first {} matches — narrow the search.",
@@ -1287,7 +1280,6 @@ impl UiState {
             LeafSearchOutcome::Failed(msg) => {
                 self.status = format!("Search failed: {msg}");
                 self.leaf_search_rows = None;
-                self.leaf_search_truncated = false;
                 // Same reasoning as the `Results` arm above.
                 self.list_dirty = true;
             }
@@ -1509,7 +1501,6 @@ impl UiState {
         }
         self.search.clear();
         self.leaf_search_rows = None;
-        self.leaf_search_truncated = false;
         // Abandon any in-flight find: its response would arrive after the reload and,
         // although its rows can no longer render (the query is cleared), its status
         // message would clobber the reload confirmation the operator just triggered.
@@ -1723,7 +1714,6 @@ pub(crate) fn bootstrap(config: Config, password: String) -> Result<UiState> {
         search: String::new(),
         leaf_search: LeafSearchFlow::new(),
         leaf_search_rows: None,
-        leaf_search_truncated: false,
         edit_form: None,
         live_templates: std::collections::BTreeMap::new(),
         computed_defaults: std::collections::BTreeMap::new(),
@@ -3044,7 +3034,6 @@ mod tests {
             st.leaf_search_rows,
             Some(vec!["uid=ann,ou=p,dc=x".to_string()])
         );
-        assert!(!st.leaf_search_truncated);
         assert!(st.list_dirty);
     }
 
@@ -3115,8 +3104,7 @@ mod tests {
         );
     }
 
-    /// `Results { truncated: true }` sets `leaf_search_truncated` and reports the
-    /// cap in `status`.
+    /// `Results { truncated: true }` reports the cap in `status`.
     #[test]
     fn apply_leaf_search_results_truncated_reports_the_cap() {
         let structure = Structure::build("dc=x", vec![si("dc=x", None)]);
@@ -3129,7 +3117,6 @@ mod tests {
             truncated: true,
         });
 
-        assert!(st.leaf_search_truncated);
         assert!(
             st.status
                 .contains(&crate::workflows::leaf_search::LEAF_SEARCH_CAP.to_string()),
