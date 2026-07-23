@@ -815,6 +815,7 @@ impl UiState {
                 self.lookup_cache.clear();
                 self.current_leaf = Some(dn.clone());
                 self.list_dirty = true;
+                self.status = format!("Created {dn}.");
                 self.edit_form = None; // re-read reloads it in Edit mode
                 if self.worker.is_some() {
                     // The write path's own re-read: use the non-clearing variant so
@@ -3636,6 +3637,20 @@ mod write_routing_tests {
             quit_after: false,
         });
         assert_eq!(st.status, "Saved.");
+    }
+
+    /// A create has never reported itself: `Created` set no status, while `Saved`
+    /// set "Saved." — invisible until Spec 2 made the status line render at all.
+    /// The comment at the re-read call claims a status "set for this create"
+    /// survives; nothing ever set one.
+    #[test]
+    fn a_successful_create_says_so() {
+        let mut st = st_with_rows(&["cn=a,ou=p,dc=x"]);
+        st.apply_write_outcome(WriteOutcome::Created {
+            dn: "cn=new,ou=p,dc=x".into(),
+            quit_after: false,
+        });
+        assert_eq!(st.status, "Created cn=new,ou=p,dc=x.");
     }
 
     /// Follow-up #2: a status message must not outlive the action it describes.

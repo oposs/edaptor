@@ -38,8 +38,8 @@ cannot be observed locally. **Alt+R** re-runs the full scan, keeping your place:
 the selected container and entry are restored when they still exist. The status
 line reports how many entries were loaded, and a failed reload raises an error
 dialog rather than passing silently for a successful one. The scan blocks briefly
-on large directories. Your open edit form is left untouched, so unsaved changes
-are never at risk.
+on large directories. Your open edit form is left untouched as long as the
+entry you were editing is still there, so unsaved changes are never at risk.
 
 If the entry you were editing is gone when the projection is rebuilt — because
 another client deleted or renamed it — edaptor tells you rather than quietly

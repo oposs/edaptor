@@ -6,7 +6,7 @@ use tvision_rs::{
 };
 
 use crate::form::validate::format_validation_errors;
-use crate::ui::dialog::{confirm, error, guard, guard_decision, GuardDecision};
+use crate::ui::dialog::{confirm, error, guard, guard_decision, GuardDecision, VanishedDecision};
 use crate::ui::help_ctx::{hint_for, status_or_hint};
 use crate::ui::panes::{
     form::FormPane,
@@ -169,6 +169,9 @@ pub(crate) fn dispatch(prog: &mut Program, cmd: Command, state: &Shared) {
         if let Some(msg) = err {
             let (view, ok) = error::build(&msg);
             prog.exec_view_focused(view, ok);
+        } else {
+            // A reload may have found the open+dirty entry deleted elsewhere.
+            drain_vanished_guard(prog, state);
         }
     } else if cmd == ACTIVATE {
         // Open a field's modal editor. The pane recorded which field.
@@ -425,6 +428,67 @@ pub(crate) fn dispatch(prog: &mut Program, cmd: Command, state: &Shared) {
             None => {}
         }
     }
+}
+
+/// The form's current values, ready for an ADD. Empty attributes are dropped —
+/// LDAP rejects an attribute carrying no values.
+fn recreate_attrs(
+    form: &crate::workflows::edit_form::EditForm,
+) -> std::collections::BTreeMap<String, Vec<String>> {
+    form.to_edit_entry()
+        .attrs
+        .into_iter()
+        .filter(|(_, v)| !v.is_empty())
+        .collect()
+}
+
+/// If a reload/rescan left a `GuardTarget::Vanished` (the open+dirty entry was
+/// deleted elsewhere), ask the operator: Re-create / Discard / Keep editing.
+/// A no-op when the target is not `Vanished`.
+fn drain_vanished_guard(prog: &mut Program, state: &Shared) {
+    let dn = match state.borrow().guard_target.clone() {
+        Some(GuardTarget::Vanished(dn)) => dn,
+        _ => return,
+    };
+    let (view, keep) = crate::ui::dialog::vanished::build(&dn);
+    let answer = prog.exec_view_focused(view, keep);
+    match crate::ui::dialog::vanished_decision(answer) {
+        VanishedDecision::KeepEditing => {}
+        VanishedDecision::Discard => {
+            // No re-read: the DN is gone, so the read would fail.
+            let mut st = state.borrow_mut();
+            st.edit_form = None;
+            st.current_leaf = None;
+            st.form_needs_render = true;
+            st.list_dirty = true;
+        }
+        VanishedDecision::Recreate => {
+            let Some(attrs) = state.borrow().edit_form.as_ref().map(recreate_attrs) else {
+                state.borrow_mut().guard_target = None;
+                return;
+            };
+            // Behind the same LDIF preview as every other write: this resurrects
+            // an entry someone deliberately deleted, and it must not be the one
+            // unconfirmed write in the app. Borrow dropped before exec_view — the
+            // draw path borrows too.
+            let ldif = crate::ldap::ldif::render_add(&dn, &attrs);
+            let (view, save) = crate::ui::dialog::confirm::build(&ldif);
+            if prog.exec_view_focused(view, save) != Command::OK {
+                state.borrow_mut().guard_target = None;
+                return; // cancel: keep the form and its edits
+            }
+            let mut st = state.borrow_mut();
+            let crate::ui::state::UiState {
+                worker, write_flow, ..
+            } = &mut *st;
+            if let Some(w) = worker.as_ref() {
+                // rc 68 (entryAlreadyExists) rejects this safely if another client
+                // re-created the DN meanwhile.
+                let _ = write_flow.submit_create(w, &dn, attrs, false);
+            }
+        }
+    }
+    state.borrow_mut().guard_target = None;
 }
 
 /// Resolve the create container for `profile_idx` under `current_branch`, asking via
@@ -1244,5 +1308,56 @@ mod tests {
             ldif: "L".into(),
         };
         assert!(matches!(save_flow_action(&ready), SaveAction::Confirm(_)));
+    }
+
+    /// Re-create submits the form's CURRENT values at the vanished DN. Empty
+    /// fields are dropped: LDAP rejects an attribute with no values.
+    #[test]
+    fn recreate_attrs_take_the_forms_current_values() {
+        use crate::schema::FieldKind;
+        use crate::workflows::edit_form::{EditField, EditForm, FormMode};
+        use crate::workflows::form_model::WidgetSpec;
+
+        let cn = EditField {
+            label: "cn".into(),
+            must: true,
+            editable: true,
+            multi: false,
+            secret: false,
+            ordered: false,
+            orphaned: false,
+            kind: FieldKind::Text,
+            widget: WidgetSpec::ReadOnlyText,
+            widget_binding: None,
+            values: vec!["alice".to_string()],
+            baseline: vec!["alice".to_string()],
+        };
+        let empty = EditField {
+            label: "description".into(),
+            must: false,
+            editable: true,
+            multi: false,
+            secret: false,
+            ordered: false,
+            orphaned: false,
+            kind: FieldKind::Text,
+            widget: WidgetSpec::ReadOnlyText,
+            widget_binding: None,
+            values: vec![],
+            baseline: vec![],
+        };
+        let form = EditForm {
+            dn: "cn=alice,ou=p,dc=x".to_string(),
+            mode: FormMode::Edit,
+            object_classes: vec![],
+            fields: vec![cn, empty],
+            baseline_csn: None,
+        };
+        let attrs = recreate_attrs(&form);
+        assert_eq!(attrs.get("cn"), Some(&vec!["alice".to_string()]));
+        assert!(
+            !attrs.contains_key("description"),
+            "an empty attribute must not be sent"
+        );
     }
 }
