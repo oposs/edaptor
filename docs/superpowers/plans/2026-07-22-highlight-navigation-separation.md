@@ -30,7 +30,7 @@
 | `src/ui/panes/tree.rs` | Same for the outline; consumes `branch_highlight_plan`. |
 | `src/ui/dialog/vanished.rs` | **New.** Keep editing / Discard / Re-create dialog. |
 | `src/ui/dialog/mod.rs` | `VanishedDecision` + `vanished_decision` mapping. |
-| `src/ui/app.rs` | `GUARD_NAV` dispatch for the new target; `apply_branch_guard_stay` / `apply_cancelled_guard_save` deleted. |
+| `src/ui/app.rs` | `drain_vanished_guard` (run from the `RELOAD` arm, not `GUARD_NAV`); `apply_branch_guard_stay` deleted, `apply_cancelled_guard_save` reduced. |
 
 Tasks 1–2 are pure controller logic and land first so the panes have something to consume. Tasks 3–4 are the pane rewrites. Task 5 is the status policy. Tasks 6–7 are the vanished path. Task 8 is the dead-field removal.
 
@@ -931,25 +931,55 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 
 ### Task 6: `note_entry_vanished` and `GuardTarget::Vanished`
 
+**Critical context — read before writing any code.** `adopt_structure`
+(`src/ui/state.rs:1446`) is the single funnel for both Alt+R reload
+(`reload_structure`) and the container-rename rescan. It **already** handles a
+vanished open entry — silently: when `current_leaf` is no longer in the rebuilt
+`structure` it sets `current_leaf = None` (`:1453-1457`) and leaves `edit_form`
+untouched, and its doc comment (`:1476-1478`) states this is deliberate ("no
+dirty-form guard is needed"). That decision is now **superseded** by this design
+(clean → say so; dirty → guard). Two consequences drive the whole task:
+
+- **Detection must live INSIDE `adopt_structure`**, replacing the silent null.
+  A hook called *after* `reload_structure` cannot work — `adopt_structure` has
+  already nulled `current_leaf`, so the vanished DN is gone by then.
+- **The guard needs a drain.** The `RELOAD` dispatch arm (`src/ui/app.rs:143`)
+  only inspects the `Err` return today; it never looks at `guard_target`. Without
+  a drain, a `GuardTarget::Vanished` is set and no dialog ever appears. The drain
+  is wired in **Task 7** (which owns the dialog); this task only sets the target
+  and leaves a `// Task 7 drains this` marker.
+
+The **rename-rescan path never needs the guard**: it runs immediately after a
+successful save, so `edit_form.is_dirty()` is false there — it only ever takes
+the clean arm. That is correct and needs no special-casing; do not add any.
+
 **Files:**
-- Modify: `src/ui/state.rs:26-29` (`GuardTarget`), new method, reload/rescan call sites (`reload_structure` ~`:1454`, the rename rescan ~`:694`)
-- Test: `src/ui/state.rs`
+- Modify: `src/ui/state.rs` — `GuardTarget` (`:26-29`), new `note_entry_vanished`,
+  and `adopt_structure` (`:1446`, replace the silent `current_leaf = None`).
+- Test: `src/ui/state.rs`.
 
 **Interfaces:**
-- Produces: `GuardTarget::Vanished(String)` and
-  `pub fn note_entry_vanished(&mut self, dn: &str)`.
-- Consumed by: Task 7.
+- Produces: `GuardTarget::Vanished(String)`, `pub fn note_entry_vanished(&mut self, dn: &str)`.
+- `adopt_structure` now calls `note_entry_vanished` for a vanished leaf.
+- Consumed by: Task 7 (the dialog + the RELOAD-arm drain).
 
 - [ ] **Step 1: Write the failing tests**
 
 ```rust
-    /// A clean form whose entry disappeared is cleared, and the operator is told.
+    /// A clean form whose entry disappeared on reload is cleared, and the operator
+    /// is told — driven through `adopt_structure`, the real path.
     #[test]
-    fn a_vanished_entry_clears_a_clean_form_and_says_so() {
-        let mut st = st_with_rows(&["cn=a,ou=p,dc=x"]);
-        st.current_leaf = Some("cn=gone,ou=p,dc=x".to_string());
-        st.note_entry_vanished("cn=gone,ou=p,dc=x");
-        assert!(st.edit_form.is_none(), "the form is cleared");
+    fn a_reload_that_drops_a_clean_open_entry_clears_it_and_says_so() {
+        let mut st = st_with_rows(&["cn=a,ou=p,dc=x", "cn=b,ou=p,dc=x"]);
+        st.current_leaf = Some("cn=b,ou=p,dc=x".to_string());
+        // Rebuild the structure WITHOUT cn=b — another client deleted it.
+        let fresh = Structure::build(
+            "dc=x",
+            vec![si("dc=x"), si("ou=p,dc=x"), si("cn=a,ou=p,dc=x")],
+        );
+        st.adopt_structure(fresh);
+        assert_eq!(st.current_leaf, None, "the gone entry is no longer current");
+        assert!(st.edit_form.is_none(), "a clean form is cleared");
         assert!(
             st.status.contains("no longer"),
             "status reports the disappearance, got {:?}",
@@ -958,9 +988,47 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
         assert_eq!(st.guard_target, None, "a clean form asks nothing");
     }
 
-    /// Unsaved work is never destroyed without asking: the guard is raised instead.
+    /// Unsaved work is never destroyed without asking: a reload that drops a DIRTY
+    /// open entry raises the guard instead of clearing, and keeps the edits.
     #[test]
-    fn a_vanished_entry_asks_before_discarding_unsaved_edits() {
+    fn a_reload_that_drops_a_dirty_open_entry_asks_first() {
+        let mut st = st_with_rows(&["cn=a,ou=p,dc=x", "cn=b,ou=p,dc=x"]);
+        st.current_leaf = Some("cn=b,ou=p,dc=x".to_string());
+        st.edit_form = Some(dirty_form("cn=b,ou=p,dc=x"));
+        let fresh = Structure::build(
+            "dc=x",
+            vec![si("dc=x"), si("ou=p,dc=x"), si("cn=a,ou=p,dc=x")],
+        );
+        st.adopt_structure(fresh);
+        assert_eq!(
+            st.guard_target,
+            Some(GuardTarget::Vanished("cn=b,ou=p,dc=x".to_string())),
+            "a dirty vanished entry raises the guard"
+        );
+        assert!(st.edit_form.is_some(), "the edits survive until answered");
+    }
+
+    /// A reload that KEEPS the open entry must not report it vanished — the common
+    /// case. Guards against firing on every reload.
+    #[test]
+    fn a_reload_that_keeps_the_entry_does_not_report_it_vanished() {
+        let mut st = st_with_rows(&["cn=a,ou=p,dc=x"]);
+        st.current_leaf = Some("cn=a,ou=p,dc=x".to_string());
+        st.status = "Reloaded 3 entries.".to_string();
+        let fresh = Structure::build(
+            "dc=x",
+            vec![si("dc=x"), si("ou=p,dc=x"), si("cn=a,ou=p,dc=x")],
+        );
+        st.adopt_structure(fresh);
+        assert_eq!(st.current_leaf, Some("cn=a,ou=p,dc=x".to_string()));
+        assert_eq!(st.guard_target, None);
+        // note_entry_vanished never ran, so it did not overwrite the caller's status.
+        assert_eq!(st.status, "Reloaded 3 entries.");
+    }
+
+    /// The unit of the signal itself, called directly: dirty → guard, edits kept.
+    #[test]
+    fn note_entry_vanished_on_a_dirty_form_raises_the_guard() {
         let mut st = st_with_rows(&["cn=a,ou=p,dc=x"]);
         st.current_leaf = Some("cn=gone,ou=p,dc=x".to_string());
         st.edit_form = Some(dirty_form("cn=gone,ou=p,dc=x"));
@@ -969,18 +1037,7 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
             st.guard_target,
             Some(GuardTarget::Vanished("cn=gone,ou=p,dc=x".to_string()))
         );
-        assert!(st.edit_form.is_some(), "the edits survive until answered");
-    }
-
-    /// Absence from a find is NOT evidence of vanishing — only a reload or a
-    /// no-such-object read is. A find must never trigger this path.
-    #[test]
-    fn a_reload_that_keeps_the_entry_does_not_report_it_vanished() {
-        let mut st = st_with_rows(&["cn=a,ou=p,dc=x"]);
-        st.current_leaf = Some("cn=a,ou=p,dc=x".to_string());
-        st.note_missing_after_reload();
-        assert!(st.status.is_empty());
-        assert_eq!(st.guard_target, None);
+        assert!(st.edit_form.is_some());
     }
 ```
 
@@ -996,16 +1053,20 @@ pub enum GuardTarget {
     Leaf(String, Vec<String>),
     Branch(String),
     /// The entry the form is editing is gone from the directory and the form has
-    /// unsaved edits. Carries the vanished DN.
+    /// unsaved edits. Carries the vanished DN. Drained by the RELOAD dispatch arm
+    /// (Task 7), which opens the Re-create / Discard / Keep editing dialog.
     Vanished(String),
 }
 ```
 
 ```rust
     /// The entry `dn` is gone from the directory. Called ONLY on hard evidence —
-    /// absence from `structure` after a reload or rescan, or a read returning
-    /// no-such-object. Absence from a find's hits is not evidence: a find excludes
-    /// rows routinely.
+    /// absence from `structure` after a reload or rescan (see `adopt_structure`),
+    /// or a read returning no-such-object. Absence from a find's hits is NOT
+    /// evidence: a find excludes rows routinely.
+    ///
+    /// Clean form → clear it and say so. Dirty form → keep the edits and raise
+    /// `GuardTarget::Vanished`; unsaved work is never dropped without asking.
     pub fn note_entry_vanished(&mut self, dn: &str) {
         let dirty = self
             .edit_form
@@ -1014,6 +1075,9 @@ pub enum GuardTarget {
             .unwrap_or(false);
         self.status = format!("{dn} is no longer in the directory.");
         if dirty {
+            // current_leaf is intentionally left in place: Re-create (Task 7)
+            // needs the DN, and the operator is still "on" this entry until they
+            // answer the guard.
             self.guard_target = Some(GuardTarget::Vanished(dn.to_string()));
         } else {
             self.edit_form = None;
@@ -1022,35 +1086,72 @@ pub enum GuardTarget {
         }
         self.list_dirty = true;
     }
-
-    /// After a reload or rescan rebuilt `structure`: if the entry the form is on
-    /// is no longer there, report it vanished.
-    pub fn note_missing_after_reload(&mut self) {
-        let Some(cur) = self.current_leaf.clone() else {
-            return;
-        };
-        if self.structure.get(&cur).is_none() {
-            self.note_entry_vanished(&cur);
-        }
-    }
 ```
 
-Call `note_missing_after_reload()` at the end of the successful `reload_structure`
-arm and after the container-rename rescan. Verify `form_needs_render` is the
-correct field name in this codebase before using it — grep it; if the form pane
-uses a different signal, use that one.
+Then change `adopt_structure`'s silent leaf-null into a `note_entry_vanished`
+call. The current block is:
+
+```rust
+        if let Some(leaf) = self.current_leaf.clone() {
+            if self.structure.get(&leaf).is_none() {
+                self.current_leaf = None;
+            }
+        }
+```
+
+Replace it with:
+
+```rust
+        if let Some(leaf) = self.current_leaf.clone() {
+            if self.structure.get(&leaf).is_none() {
+                // Was a silent null with a "form deliberately untouched" comment;
+                // superseded by the vanished-entry design — clean clears + says
+                // so, dirty raises the guard (drained by the RELOAD arm, Task 7).
+                self.note_entry_vanished(&leaf);
+            }
+        }
+```
+
+Update `adopt_structure`'s doc comment (`:1476-1478`) so it no longer claims the
+form is "deliberately left untouched / no dirty-form guard": now a vanished open
+entry clears a clean form or guards a dirty one. Leave the rest of the doc (the
+blocking-scan rationale) intact.
+
+`note_entry_vanished` sets `self.status`; `reload_structure` sets its own
+`"Reloaded N entries."` **after** `adopt_structure` returns (`:1504`). So on a
+reload that dropped the open entry, "Reloaded N" would overwrite the vanished
+message. Fix `reload_structure`'s success arm to set "Reloaded N" **only when no
+vanished message was just set** — guard it on `self.guard_target` being unset and
+`current_leaf` unchanged, or simplest: capture whether the leaf was present before
+`adopt_structure` and skip the "Reloaded N" overwrite when it vanished. Add a test
+`a_reload_that_drops_the_open_entry_keeps_the_vanished_message` asserting the
+status still contains "no longer" after `reload_structure` on a worker-backed
+`st` whose scan omits the open entry (mirror the existing worker-backed
+`reload_structure` tests around `state.rs:4021`).
+
+`form_needs_render` is the correct field (`state.rs:178`), already used by
+`discard_edits`.
 
 - [ ] **Step 4: Run the suite**
 
 Run: `cargo test -j4 --lib`
 Expected: PASS. Every `match` on `GuardTarget` must now handle `Vanished`; clippy
-will point at any that do not.
+will point at any that do not. The existing
+`reload_rebuild_does_not_report_the_self_row_as_a_fresh_selection` (leaf.rs) and
+the `adopt_structure` reload tests must still pass — check that none asserted the
+silent-null behaviour you just changed; if one did, its scenario (leaf kept) is
+unaffected, but a leaf-dropped assertion must move to the new behaviour.
 
 - [ ] **Step 5: Commit**
 
 ```bash
 git add src/ui/state.rs
-git commit -m "feat(state): note_entry_vanished — a gone entry is a signal, not an absent row
+git commit -m "feat(state): a vanished open entry is a signal, not a silent null
+
+adopt_structure quietly nulled current_leaf when the open entry vanished on
+reload, leaving a stale form and saying nothing. It now reports it: a clean
+form is cleared with a notice, a dirty one keeps its edits and raises
+GuardTarget::Vanished (drained by the RELOAD arm in the next commit).
 
 Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 ```
@@ -1067,7 +1168,7 @@ report rather than hand-laying a button row.
 - Create: `src/ui/dialog/vanished.rs`
 - Modify: `src/ui/dialog/guard.rs` (drop its `button_row` fork)
 - Modify: `src/ui/dialog/mod.rs` (module decl, `VanishedDecision`, `vanished_decision`)
-- Modify: `src/ui/app.rs:229-276` (`GUARD_NAV` dispatch)
+- Modify: `src/ui/app.rs` — new `drain_vanished_guard` helper + `recreate_attrs`, drained from the `RELOAD` arm (`:143`); `WriteOutcome::Created` status in `state.rs`
 - Modify: `src/ui/state.rs:793` (`WriteOutcome::Created` sets a status)
 - Test: `src/ui/dialog/mod.rs`, `src/ui/app.rs`, `src/ui/state.rs`
 
@@ -1228,8 +1329,13 @@ pub fn vanished_decision(answer: Command) -> VanishedDecision {
 }
 ```
 
-In `app.rs`, add a `GuardTarget::Vanished` arm to the `GUARD_NAV` dispatch that
-runs the new dialog instead of `run_guard`:
+In `app.rs`, add a helper that runs the vanished dialog, and **drain it from the
+`RELOAD` arm** — NOT from `GUARD_NAV`. `GUARD_NAV` is posted by the pump only on a
+dirty-blocked *navigation*; a reload is not a navigation, so nothing posts it
+there. Task 6 sets `GuardTarget::Vanished` inside `adopt_structure`, reached via
+`reload_structure` from the `RELOAD` dispatch arm (`app.rs:143`), so that arm is
+where it must be drained, right after a successful reload and before the borrow
+for anything else.
 
 ```rust
 /// The form's current values, ready for an ADD. Empty attributes are dropped —
@@ -1243,50 +1349,76 @@ fn recreate_attrs(
         .filter(|(_, v)| !v.is_empty())
         .collect()
 }
+
+/// If a reload/rescan left a `GuardTarget::Vanished` (the open+dirty entry was
+/// deleted elsewhere), ask the operator: Re-create / Discard / Keep editing.
+/// A no-op when the target is not `Vanished`.
+fn drain_vanished_guard(prog: &mut Program, state: &Shared) {
+    let dn = match state.borrow().guard_target.clone() {
+        Some(GuardTarget::Vanished(dn)) => dn,
+        _ => return,
+    };
+    let (view, keep) = crate::ui::dialog::vanished::build(&dn);
+    let answer = prog.exec_view_focused(view, keep);
+    match crate::ui::dialog::vanished_decision(answer) {
+        VanishedDecision::KeepEditing => {}
+        VanishedDecision::Discard => {
+            // No re-read: the DN is gone, so the read would fail.
+            let mut st = state.borrow_mut();
+            st.edit_form = None;
+            st.current_leaf = None;
+            st.form_needs_render = true;
+            st.list_dirty = true;
+        }
+        VanishedDecision::Recreate => {
+            let Some(attrs) = state.borrow().edit_form.as_ref().map(recreate_attrs) else {
+                state.borrow_mut().guard_target = None;
+                return;
+            };
+            // Behind the same LDIF preview as every other write: this resurrects
+            // an entry someone deliberately deleted, and it must not be the one
+            // unconfirmed write in the app. Borrow dropped before exec_view — the
+            // draw path borrows too.
+            let ldif = crate::ldap::ldif::render_add(&dn, &attrs);
+            let (view, save) = crate::ui::dialog::confirm::build(&ldif);
+            if prog.exec_view_focused(view, save) != Command::OK {
+                state.borrow_mut().guard_target = None;
+                return; // cancel: keep the form and its edits
+            }
+            let mut st = state.borrow_mut();
+            let crate::ui::state::UiState {
+                worker, write_flow, ..
+            } = &mut *st;
+            if let Some(w) = worker.as_ref() {
+                // rc 68 (entryAlreadyExists) rejects this safely if another client
+                // re-created the DN meanwhile.
+                let _ = write_flow.submit_create(w, &dn, attrs, false);
+            }
+        }
+    }
+    state.borrow_mut().guard_target = None;
+}
 ```
 
+Then in the `RELOAD` arm (`app.rs:143`), after the existing error handling, drain
+the guard on success. The borrow taken for `reload_structure` must be dropped
+first (it already is — the arm captures `.err()` into a local):
+
 ```rust
-            Some(GuardTarget::Vanished(dn)) => {
-                let (view, keep) = crate::ui::dialog::vanished::build(&dn);
-                let answer = prog.exec_view_focused(view, keep);
-                match crate::ui::dialog::vanished_decision(answer) {
-                    VanishedDecision::KeepEditing => {}
-                    VanishedDecision::Discard => {
-                        // No re-read: the DN is gone, so the read would fail.
-                        let mut st = state.borrow_mut();
-                        st.edit_form = None;
-                        st.current_leaf = None;
-                        st.form_needs_render = true;
-                        st.list_dirty = true;
-                    }
-                    VanishedDecision::Recreate => {
-                        let Some(attrs) = state.borrow().edit_form.as_ref().map(recreate_attrs)
-                        else {
-                            return;
-                        };
-                        // Behind the same LDIF preview as every other write: this
-                        // resurrects an entry someone deliberately deleted, and it
-                        // must not be the one unconfirmed write in the app. Borrow
-                        // is dropped before exec_view — the draw path borrows too.
-                        let ldif = crate::ldap::ldif::render_add(&dn, &attrs);
-                        let (view, save) = crate::ui::dialog::confirm::build(&ldif);
-                        if prog.exec_view_focused(view, save) != Command::OK {
-                            return; // cancel: keep the form and its edits
-                        }
-                        let mut st = state.borrow_mut();
-                        let crate::ui::state::UiState {
-                            worker, write_flow, ..
-                        } = &mut *st;
-                        if let Some(w) = worker.as_ref() {
-                            // rc 68 (entryAlreadyExists) rejects this safely if
-                            // another client re-created the DN meanwhile.
-                            let _ = write_flow.submit_create(w, &dn, attrs, false);
-                        }
-                    }
-                }
-                state.borrow_mut().guard_target = None;
-            }
+    } else if cmd == RELOAD {
+        let err = state.borrow_mut().reload_structure().err();
+        if let Some(msg) = err {
+            let (view, ok) = error::build(&msg);
+            prog.exec_view_focused(view, ok);
+        } else {
+            // A reload may have found the open+dirty entry deleted elsewhere.
+            drain_vanished_guard(prog, state);
+        }
+    }
 ```
+
+The `GUARD_NAV` arm is **not** touched — it has no `Vanished` case, because a
+`Vanished` target never arrives through a navigation.
 
 In `src/ui/state.rs`, the `WriteOutcome::Created` arm (`:793`) gains a status
 alongside the existing `current_leaf` / `list_dirty` assignments, before the

@@ -129,6 +129,19 @@ excludes rows routinely. `note_entry_vanished(dn)` fires only on hard evidence:
 `current_leaf` absent from `structure` after an Alt+R reload or a rename rescan,
 or a re-read returning no-such-object.
 
+**Detection lives inside `adopt_structure`**, the single funnel every reload and
+rescan passes through. It already nulled `current_leaf` silently for a vanished
+leaf, with a doc comment calling that deliberate ("no dirty-form guard is
+needed"); this design supersedes that decision, so the silent null becomes a
+`note_entry_vanished` call. Detecting *after* the reload cannot work —
+`adopt_structure` has by then already discarded the DN. The rename-rescan path
+runs right after a successful save, so its form is never dirty and it only ever
+takes the clean arm.
+
+For a dirty form the guard is **drained from the `RELOAD` dispatch arm**, not the
+navigation guard: a reload is not a navigation, so the pump never posts
+`GUARD_NAV` for it. The arm runs the dialog after a successful reload.
+
 - **form clean** → clear the form, status reports the entry is gone.
 - **form dirty** → `GuardTarget::Vanished(dn)`, raising a three-button dialog:
   **Keep editing / Discard / Re-create**.
