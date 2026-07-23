@@ -787,16 +787,16 @@ plan resolver right after the rebuild:
                 tv::widgets::outline::adjust_focus(outline, row, ctx);
             }
         }
-        // Finding 2: `ov_update` re-clamps `foc` internally, so `last_sel` must be
-        // resynced unconditionally — including when the branch vanished (row -1),
-        // or the pane reports a branch the operator never selected.
-        self.last_sel = if row >= 0 {
-            row
-        } else {
-            match self.outline_mut().and_then(|o| o.value()) {
-                Some(FieldValue::Int(i)) => i,
-                _ => 0,
-            }
+        // Finding 2: `ov_update` re-clamps `foc` internally, so the value we asked
+        // for may NOT be the value the widget now holds. Read the widget's ACTUAL
+        // value back — never assume `row` stuck — so `report_selection`'s next
+        // comparison is a guaranteed no-op for every arm, including a vanished
+        // branch (row -1) and the Clear case. This is the same invariant the leaf
+        // pane's `apply_highlight_plan` relies on: resync to the widget's truth,
+        // do not trust the value you pushed.
+        self.last_sel = match self.outline_mut().and_then(|o| o.value()) {
+            Some(FieldValue::Int(i)) => i,
+            _ => 0,
         };
     }
 ```
