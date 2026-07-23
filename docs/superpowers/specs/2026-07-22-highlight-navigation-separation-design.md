@@ -93,7 +93,19 @@ Resolved by a pure method on `UiState` against the freshly-built row source:
 | open entry is in the rows | `Pin(current_leaf)` |
 | open entry absent, form **clean** | `Follow(first_row)` |
 | open entry absent, form **dirty** | `Pin(first_row)` |
-| no form open yet | `Pin(first_row)` |
+| no form open yet (empty form pane) | `Follow(first_row)` |
+| no `current_leaf` but a form is present (create-in-progress) | `Pin(first_row)` |
+
+> **Revision (2026-07-23).** The "no form open yet" row originally resolved to
+> `Pin(first_row)` — highlight the first entry but leave the form pane empty until
+> the operator arrowed onto a row. In practice that read as a bug: selecting a
+> container did nothing visible in the form. It now `Follow`s, so a container
+> selection (and the initial startup population) opens the first entry. The one
+> case that must still `Pin` is a **create-in-progress**: `open_create` installs an
+> `edit_form` without a `current_leaf`, so it lands in this same fallback arm, and
+> a rebuild must never navigate the form off an unsaved new entry. The guard is
+> therefore "any `edit_form` present ⇒ `Pin`", which also covers the dirty
+> vanished-entry form the guard is still holding.
 
 **`first_row` means the first row that is not the `‹self›` row.** `leaf_rows`
 puts the branch's own entry at row 0 whenever no filter is active, so a literal

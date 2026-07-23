@@ -1342,9 +1342,12 @@ impl UiState {
     /// Where the entry list's highlight belongs after a rebuild, and whether the
     /// form should follow it. See the truth table in the design doc.
     ///
-    /// `Follow` is produced only for a **clean** form: typing a find is
-    /// navigation, so the form tracks the first hit — but never at the cost of
-    /// unsaved edits, and never by raising the dirty guard mid-keystroke.
+    /// `Follow` is produced only when no unsaved edits are at stake: typing a
+    /// find is navigation, so the form tracks the first hit, and selecting a
+    /// container with nothing open follows its first entry — but never at the
+    /// cost of unsaved edits, and never by raising the dirty guard mid-keystroke.
+    /// Any `edit_form` present (a dirty entry, or a create-in-progress that owns
+    /// the form pane without a `current_leaf`) pins instead of following.
     ///
     /// The `‹self›` row (the branch's own entry, always row 0 of `leaf_rows`
     /// when the branch carries no active filter) is not a "first hit": it is
@@ -1377,8 +1380,16 @@ impl UiState {
             }
             return HighlightPlan::Follow(first_dn.clone());
         }
+        // Nothing is open. Selecting a container should open its first entry, so
+        // the fallback `Follow`s the first real row rather than merely pinning it.
+        // The one exception is a create-in-progress: `open_create` installs an
+        // `edit_form` without a `current_leaf`, so it lands here — and a rebuild
+        // must never navigate the form out from under an unsaved new entry. Any
+        // form present (create or a dirty vanished-entry form the guard is still
+        // holding) therefore pins; only a genuinely empty form pane follows.
         match rows.iter().find(|(_, dn)| !is_self_row(dn)) {
-            Some((_, first_dn)) => HighlightPlan::Pin(first_dn.clone()),
+            Some((_, first_dn)) if self.edit_form.is_some() => HighlightPlan::Pin(first_dn.clone()),
+            Some((_, first_dn)) => HighlightPlan::Follow(first_dn.clone()),
             None => HighlightPlan::Clear,
         }
     }
@@ -3516,11 +3527,12 @@ mod tests {
             "a vanished container falls back to the base DN"
         );
         assert_eq!(st.current_leaf, None);
-        // No current_leaf: the plan falls back to pinning the first real row —
-        // here ou=p,dc=x, dc=x's only (childless, so leaf) child.
+        // No current_leaf and an empty form pane: the plan follows the first real
+        // row — here ou=p,dc=x, dc=x's only (childless, so leaf) child — so the
+        // fallback surfaces an entry instead of leaving the form blank.
         assert_eq!(
             st.leaf_highlight_plan(),
-            HighlightPlan::Pin("ou=p,dc=x".to_string())
+            HighlightPlan::Follow("ou=p,dc=x".to_string())
         );
     }
 }
@@ -4564,12 +4576,31 @@ mod write_routing_tests {
         );
     }
 
+    /// With nothing open, selecting a container follows its first entry — the
+    /// form opens on it instead of merely highlighting it (the pane-3-stays-empty
+    /// quirk). Only the `‹self›` row is skipped as the fallback target.
     #[test]
-    fn highlight_plan_pins_the_first_row_when_no_entry_is_open() {
+    fn highlight_plan_follows_the_first_row_when_no_entry_is_open() {
         let st = st_with_rows(&["cn=a,ou=p,dc=x"]);
         assert_eq!(
             st.leaf_highlight_plan(),
-            HighlightPlan::Pin("cn=a,ou=p,dc=x".to_string())
+            HighlightPlan::Follow("cn=a,ou=p,dc=x".to_string())
+        );
+    }
+
+    /// A create-in-progress installs an `edit_form` but no `current_leaf`, so it
+    /// lands in the same fallback arm as "nothing open". It must NOT follow the
+    /// first row — a rebuild (another admin's change landing while the operator
+    /// types a new entry) would otherwise navigate the form off the unsaved work.
+    #[test]
+    fn highlight_plan_pins_rather_than_follows_while_a_create_is_in_progress() {
+        let mut st = st_with_rows(&["cn=a,ou=p,dc=x"]);
+        // No current_leaf (a create has none), but the form pane is occupied.
+        st.edit_form = Some(crate::ui::test_support::dirty_form("cn=new,ou=p,dc=x"));
+        assert_eq!(
+            st.leaf_highlight_plan(),
+            HighlightPlan::Pin("cn=a,ou=p,dc=x".to_string()),
+            "a rebuild must never navigate the form off an unsaved new entry"
         );
     }
 

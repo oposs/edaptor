@@ -51,6 +51,11 @@ All notable changes to eDAPtor are documented here. The format follows
 - When the entry you are editing is deleted by someone else, edaptor now says
   so instead of silently moving you elsewhere — and if you have unsaved edits it
   asks whether to keep them, discard them, or re-create the entry.
+- Selecting a container now opens its first entry in the form pane instead of
+  only highlighting it — the entry pane no longer sits empty until you arrow onto
+  a row. (A container's first entry is likewise shown at startup.) An
+  edit-in-progress is never disturbed: the form only follows when nothing unsaved
+  is open.
 
 ### Changed
 
