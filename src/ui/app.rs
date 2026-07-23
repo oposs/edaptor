@@ -78,6 +78,9 @@ pub(crate) enum SaveOutcome {
 /// Called when the guard→Save path does not submit (cancelled confirm == Stay).
 /// Pure (no ctx); unit-tested.
 pub(crate) fn apply_cancelled_guard_save(st: &mut crate::ui::state::UiState) {
+    // Backing out of the confirm and staying on the pinned form is itself an
+    // operator action: whatever status was on screen described the previous one.
+    st.begin_operator_action();
     // The highlight is re-resolved from `leaf_highlight_plan` on the next
     // rebuild, which returns `Pin(current_leaf)` while the form is pinned.
     st.list_dirty = true;
@@ -91,6 +94,9 @@ pub(crate) fn apply_cancelled_guard_save(st: &mut crate::ui::state::UiState) {
 /// `leaf_highlight_plan` / `branch_highlight_plan`), and drop the target. Pure;
 /// unit-tested.
 pub(crate) fn apply_guard_stay(st: &mut crate::ui::state::UiState, target: &Option<GuardTarget>) {
+    // Choosing to keep editing is itself an operator action: whatever status was
+    // on screen described the previous one.
+    st.begin_operator_action();
     match target {
         Some(GuardTarget::Branch(_)) => st.tree_dirty = true,
         _ => st.list_dirty = true,
@@ -139,6 +145,11 @@ pub(crate) fn strip_sentinel_from_attrs(
 /// commands posted from panes / the pump.
 pub(crate) fn dispatch(prog: &mut Program, cmd: Command, state: &Shared) {
     if cmd == SAVE {
+        // Pressing Save is the action; whatever the status line reported — a save
+        // confirmation, "No changes.", a validation error — described the
+        // previous one, whether this attempt ends in a write, a no-op, an error,
+        // or a cancelled confirm.
+        state.borrow_mut().begin_operator_action();
         let is_create = matches!(
             state.borrow().edit_form.as_ref().map(|f| &f.mode),
             Some(crate::workflows::edit_form::FormMode::Create { .. })
@@ -449,6 +460,9 @@ fn open_create_with_container_rule(
 /// post a background scan for every autonumber field (`‹allocating…›` placeholder
 /// while the scan is in flight).
 fn open_create(state: &Shared, profile_idx: usize, container: &str) {
+    // Opening the create form is a new operator action: whatever the status
+    // line reported described the previous one.
+    state.borrow_mut().begin_operator_action();
     let form_and_reqs = {
         let st = state.borrow();
         let schema = st.read_flow.schema();

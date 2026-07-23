@@ -831,6 +831,17 @@ impl UiState {
         out
     }
 
+    /// The operator started a new action: whatever the status line was reporting
+    /// described the previous one.
+    ///
+    /// Call this at the **call site** of each operator action, never inside a
+    /// shared helper — `reread` is reached both by a navigation and by a rename's
+    /// post-write re-read, and clearing there made every rename eat its own
+    /// "Saved." (fixed in `c016f2a`).
+    pub fn begin_operator_action(&mut self) {
+        self.status.clear();
+    }
+
     /// Public wrapper around the private `reread` for the dispatch closure.
     ///
     /// Every caller of this wrapper is an operator navigating to another entry
@@ -839,7 +850,7 @@ impl UiState {
     /// screen. The write path calls the private [`reread`] instead, which does
     /// not clear — see the note there.
     pub fn reread_public(&mut self, dn: &str, ocs: &[String]) {
-        self.status.clear();
+        self.begin_operator_action();
         self.reread(dn, ocs);
     }
 
@@ -1042,7 +1053,7 @@ impl UiState {
         // from a previous one (a save confirmation, a search failure) no longer
         // describes what's on screen. Cleared FIRST, before the match below, so it
         // cannot erase anything this call might set later (it sets none today).
-        self.status.clear();
+        self.begin_operator_action();
         let UiState {
             edit_form,
             read_flow,
@@ -1130,7 +1141,7 @@ impl UiState {
         } else {
             // The operator opened another entry: whatever the status line was
             // reporting described the previous action, not this one.
-            self.status.clear();
+            self.begin_operator_action();
             self.reread(&dn, &ocs);
             false
         }
@@ -1194,7 +1205,7 @@ impl UiState {
         // the previous one (a search failure, a stale save confirmation) no longer
         // describes what's on screen. Cleared FIRST so a message this same call
         // sets later (there is none today, but a future one would) survives.
-        self.status.clear();
+        self.begin_operator_action();
         self.current_branch = Some(dn);
         self.list_dirty = true;
         self.search = String::new();
@@ -1217,7 +1228,7 @@ impl UiState {
         // outcome (e.g. the truncation notice) lands later, asynchronously, via
         // `apply_leaf_search_outcome` — never in this same call — so clearing here
         // cannot erase it before it is seen.
-        self.status.clear();
+        self.begin_operator_action();
         self.search = query;
         self.list_dirty = true;
         if self.search.is_empty() {
@@ -3582,6 +3593,25 @@ mod write_routing_tests {
             quit_after: false,
         });
         assert_eq!(st.status, "Saved.");
+    }
+
+    /// Follow-up #2: a status message must not outlive the action it describes.
+    /// Guard "Stay" is an operator action — they explicitly chose to keep
+    /// editing — so a "Saved." left over from a previous action must go. This
+    /// tests a real CALL SITE, not the helper: a test that only asserted
+    /// `begin_operator_action()` empties the string would be a tautology over a
+    /// one-line function, and the whole point of the task is that the call sites
+    /// actually call it.
+    #[test]
+    fn guard_stay_clears_a_stale_status() {
+        let mut st = st_with_rows(&["cn=a,ou=p,dc=x"]);
+        st.current_leaf = Some("cn=a,ou=p,dc=x".to_string());
+        st.status = "Saved.".to_string();
+        crate::ui::app::apply_cancelled_guard_save(&mut st);
+        assert!(
+            st.status.is_empty(),
+            "guard Stay must not leave a message describing the previous action"
+        );
     }
 
     /// Renaming a CONTAINER triggers a full rescan, and the rescan sets its own
