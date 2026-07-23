@@ -24,6 +24,8 @@ pub(crate) mod shuttle;
 // crate-external item.
 pub mod startup;
 mod state;
+#[cfg(test)]
+pub(crate) mod test_support;
 // Keep `pub`: the FieldWidget plugin contract is defined here for M1 and
 // consumed in M2. `pub` keeps the as-yet-unused contract types visible as
 // public API surface so they are NOT dead_code — no `#[allow]` needed.
@@ -51,6 +53,10 @@ pub const GUARD_NAV: tv::Command = tv::Command::custom("edaptor.guard_nav");
 pub const SHOW_ERROR: tv::Command = tv::Command::custom("edaptor.show_error");
 
 pub const STARTUP: tv::Command = tv::Command::custom("edaptor.startup");
+
+/// Re-run the eager structure scan (Alt+R) — the escape hatch for structure
+/// staleness that no local reflow can see (another client created a container).
+pub const RELOAD: tv::Command = tv::Command::custom("edaptor.reload");
 
 /// A one-shot action to run once the TUI has started (schema is already loaded by
 /// `bootstrap`). Carried on `UiState::pending_startup`, posted by the pump as the

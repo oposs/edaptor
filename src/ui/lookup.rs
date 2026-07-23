@@ -5,9 +5,13 @@
 //! committed value; picking a candidate writes `<value> (<name>)` back into it.
 //!
 //! The dialog is a combobox: an `InputLine` on top drives the candidate `ListBox`
-//! below via the list's own incremental find (`FindMode::Filter`, fed with
-//! [`ListViewer::set_find_query`] on 0.12+). Typing narrows the list in place;
-//! navigating the list copies the focused row's `<value> (<name>)` back into the
+//! below. Typing re-submits a **server-side** candidate search per keystroke (the
+//! same search the dialog runs once, with an empty term, on open), so a candidate
+//! ranked past the server's cap or created after the dialog opened is still
+//! reachable. The list only highlights matches within whatever rows the server
+//! most recently returned (`FindMode::Highlight`, fed with
+//! [`ListViewer::set_find_query`] on 0.12+) — it never narrows locally.
+//! Navigating the list copies the focused row's `<value> (<name>)` back into the
 //! input, which enables OK via the leading number.
 
 /// The pending value = the leading run of ASCII digits in `input`, if any.
@@ -110,16 +114,19 @@ impl FieldEditor for LookupEditor {
 }
 
 /// The interactive combobox: an input + OK/Cancel on row 2 (one blank row below
-/// the title), a candidate list below. Candidates load once (empty-term search);
-/// the list narrows itself via `FindMode::Filter`, fed from the input.
+/// the title), a candidate list below. The input drives a server-side candidate
+/// search — once with an empty term on open, then again on every typed change —
+/// and the list highlights matches within the returned rows (`FindMode::Highlight`)
+/// rather than narrowing a one-shot load.
 pub(crate) struct LookupDialog {
     dlg: Dialog,
     input_id: tv::ViewId,
     list_id: tv::ViewId,
     shared: Shared,
     binding: LookupBinding,
-    /// All loaded candidates (value, label). Fed to the list as its find source;
-    /// the list narrows the *displayed* rows itself (`FindMode::Filter`).
+    /// The candidates from the most recent server search (value, label). Fed to
+    /// the list as its find source; the list only highlights matches within these
+    /// rows (`FindMode::Highlight`) — it does not narrow them.
     all: Vec<(String, String)>,
     last_input: String,
     seeded: bool,
@@ -158,10 +165,12 @@ impl LookupDialog {
         );
         dlg.insert_child(Box::new(cancel));
 
-        // Rows 4..: the list spans the full inner width below the input row. It
-        // owns filtering: `FindMode::Filter` narrows the displayed rows to those
-        // matching the query the input feeds via `set_find_query`.
-        let list = ListBox::new(Rect::new(2, 4, 62, 18), 1, None, None).with_find(FindMode::Filter);
+        // Rows 4..: the list spans the full inner width below the input row. The
+        // SERVER decides which candidates exist: `FindMode::Highlight` marks the
+        // matched substring without hiding rows. Narrowing locally would cap the
+        // reachable candidates at whatever the last query returned.
+        let list =
+            ListBox::new(Rect::new(2, 4, 62, 18), 1, None, None).with_find(FindMode::Highlight);
         let list_id = dlg.insert_child(Box::new(list));
 
         // Seed the InputLine with the current value (dialog scatter protocol;
@@ -199,13 +208,15 @@ impl LookupDialog {
         attrs
     }
 
-    /// Submit the one-shot candidate load (empty term = all candidates).
-    fn submit_load(&self) {
+    /// Submit a candidate search for `term` (empty = load all, capped by the
+    /// server-side `PICKER_SEARCH_CAP`). Called on open and on every typed change,
+    /// so a candidate ranked past the cap is still reachable by typing.
+    fn submit_query(&self, term: &str) {
         let attrs = self.label_attrs();
         self.shared.borrow_mut().submit_search(
             &self.binding.scope.base,
             self.binding.object_class(),
-            "",
+            term,
             &attrs,
             Some(&self.binding.store),
         );
@@ -220,8 +231,10 @@ impl LookupDialog {
             .into_iter()
             .map(|c| (c.store_value, c.label))
             .collect();
-        // Feed the full candidate set as the list's source. `FindMode::Filter`
-        // shows all rows until a query narrows them; the list owns the narrowing.
+        // Feed the server's answer as the list's source. `FindMode::Highlight`
+        // shows every row the server returned and only marks the matched
+        // substring — the row set itself is the server's, not the list's, to
+        // decide.
         let rows: Vec<String> = self
             .all
             .iter()
@@ -305,6 +318,18 @@ impl LookupDialog {
         self.last_input = new_text;
         self.sync_ok(ctx);
     }
+
+    /// The list's currently displayed rows (test-only introspection, mirroring
+    /// `LeafPane::list_text_for_test`).
+    #[cfg(test)]
+    pub(crate) fn list_text_for_test(&mut self) -> Vec<String> {
+        self.dlg
+            .child_mut(self.list_id)
+            .and_then(|v| v.as_any_mut())
+            .and_then(|a| a.downcast_mut::<ListBox>())
+            .map(|lb| lb.list().to_vec())
+            .unwrap_or_default()
+    }
 }
 
 #[delegate(to = dlg)]
@@ -318,7 +343,7 @@ impl View for LookupDialog {
         if !self.seeded {
             self.seeded = true;
             self.sync_candidates(ctx);
-            self.submit_load();
+            self.submit_query("");
             self.sync_ok(ctx);
         }
     }
@@ -327,7 +352,7 @@ impl View for LookupDialog {
         if !self.seeded {
             self.seeded = true;
             self.sync_candidates(ctx);
-            self.submit_load();
+            self.submit_query("");
             self.sync_ok(ctx);
         }
 
@@ -372,12 +397,16 @@ impl View for LookupDialog {
             self.dlg.handle_event(ev, ctx);
         }
 
-        // Detect typed input changes → drive the list's incremental find + re-stage.
-        // A change from `mirror_focused` is already reflected in `last_input`, so it
-        // is not fed back here as a query.
+        // Detect typed input changes → re-query the server + drive the list's
+        // find highlight + re-stage. A change from `mirror_focused` is already
+        // reflected in `last_input`, so it is not fed back here as a query.
         let cur = self.current_input();
         if cur != self.last_input {
             self.last_input = cur.clone();
+            // Ask the SERVER for candidates matching the typed text. `mirror_focused`
+            // already syncs `last_input` when it writes a picked row back, so a pick
+            // never round-trips as a query.
+            self.submit_query(&cur);
             if let Some(lb) = self
                 .dlg
                 .child_mut(self.list_id)
@@ -463,7 +492,7 @@ mod dialog_tests {
         Rc::new(RefCell::new(st))
     }
 
-    fn binding() -> LookupBinding {
+    fn test_binding() -> LookupBinding {
         LookupBinding {
             attr: "gidNumber".into(),
             scope: CandidateScope {
@@ -488,13 +517,15 @@ mod dialog_tests {
     }
 
     /// After a pick (LIST_ITEM_SELECTED) copies a row into the input, the next
-    /// typed change must feed the list's find immediately — no 1-keystroke lag.
-    /// The `last_input` guard alone suffices because `set_value_ctx` on InputLine
-    /// is synchronous.
+    /// typed change must reach the list's find query immediately — no
+    /// 1-keystroke lag. The `last_input` guard alone suffices because
+    /// `set_value_ctx` on InputLine is synchronous. With the list server-backed
+    /// (`FindMode::Highlight`), the query only marks the match; it never narrows
+    /// the row set — see `candidate_list_highlights_rather_than_filters`.
     #[test]
-    fn typing_after_pick_narrows_the_list_immediately() {
+    fn typing_after_pick_updates_find_query_immediately() {
         let shared = shared_with_candidates(vec![("100", "users"), ("5000", "staff")]);
-        let mut dlg = LookupDialog::new(binding(), String::new(), shared.clone());
+        let mut dlg = LookupDialog::new(test_binding(), String::new(), shared.clone());
         let mut out = VecDeque::new();
         let mut timers = TimerQueue::new();
         let mut deferred: Vec<Deferred> = Vec::new();
@@ -526,27 +557,67 @@ mod dialog_tests {
         // Now simulate the user typing a query ("staff") by setting the input
         // value directly, then firing a benign event so the end-of-event change
         // detector runs (REFRESH returns early, so use an unrelated broadcast).
-        if let Some(v) = dlg.dlg.child_mut(dlg.input_id) {
-            v.set_value_ctx(tvision_rs::FieldValue::Text("staff".into()), &mut ctx);
-        }
+        dlg.set_input("staff", &mut ctx);
         let mut ev = Event::Broadcast {
             command: tvision_rs::Command::custom("test.tick"),
             source: None,
         };
         dlg.handle_event(&mut ev, &mut ctx);
 
-        // set_find_query("staff") must have fired: only the staff row survives.
+        // The find query must reach the list on the SAME event as the typed
+        // change — no lag from a stale `last_input` left over by the pick.
+        let query = dlg
+            .dlg
+            .child_mut(dlg.list_id)
+            .and_then(|v| v.as_any_mut())
+            .and_then(|a| a.downcast_mut::<ListBox>())
+            .and_then(|lb| lb.find_query().map(str::to_string));
         assert_eq!(
-            list_row_count(&mut dlg),
-            1,
-            "typed query must narrow the list immediately after a pick, no lag"
+            query.as_deref(),
+            Some("staff"),
+            "typed query must reach the list immediately after a pick, no lag"
+        );
+        // Highlight mode never narrows: both candidates stay reachable.
+        assert_eq!(list_row_count(&mut dlg), 2);
+    }
+
+    /// The candidate list must NOT narrow itself: with the list server-backed,
+    /// the dialog owns which rows exist and the list only highlights matches. A
+    /// local `FindMode::Filter` would hide rows the server just returned.
+    #[test]
+    fn candidate_list_highlights_rather_than_filters() {
+        let shared = shared_with_candidates(vec![("100", "users"), ("5000", "staff")]);
+        let mut dlg = LookupDialog::new(test_binding(), "5000 (staff)".into(), shared);
+        let mut out = VecDeque::new();
+        let mut timers = TimerQueue::new();
+        let mut deferred: Vec<Deferred> = Vec::new();
+        let mut ctx = tvision_rs::Context::new(&mut out, &mut timers, 0, &mut deferred);
+        let mut ev = Event::Broadcast {
+            command: crate::ui::REFRESH,
+            source: None,
+        };
+        dlg.handle_event(&mut ev, &mut ctx);
+
+        // Type a query that matches only one candidate; the list keeps BOTH rows
+        // (the server, not the list, decides the row set) and only highlights
+        // the match.
+        dlg.set_input("staff", &mut ctx);
+        let mut ev = Event::Broadcast {
+            command: tvision_rs::Command::custom("test.tick"),
+            source: None,
+        };
+        dlg.handle_event(&mut ev, &mut ctx);
+        assert_eq!(
+            dlg.list_text_for_test().len(),
+            2,
+            "rows come from the server's answer, not from local narrowing"
         );
     }
 
     #[test]
     fn seeded_numeric_input_stages_commit_and_enables_ok() {
         let shared = shared_with_candidates(vec![("100", "users"), ("5000", "staff")]);
-        let mut dlg = LookupDialog::new(binding(), "5000".into(), shared.clone());
+        let mut dlg = LookupDialog::new(test_binding(), "5000".into(), shared.clone());
         let mut out = VecDeque::new();
         let mut timers = TimerQueue::new();
         let mut deferred: Vec<Deferred> = Vec::new();

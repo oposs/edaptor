@@ -111,11 +111,25 @@ pub fn fetch_group_csns(
 #[derive(Debug, Clone)]
 enum WriteIntent {
     /// A plain save (or a rename's final leg): re-read `reread_dn` afterwards.
-    Save { reread_dn: String, quit_after: bool },
+    Save {
+        reread_dn: String,
+        /// `Some(old_dn)` when this write's plan renamed the entry (a MODRDN
+        /// landed under `old_dn`, now visible at `reread_dn`). Carried with the
+        /// write rather than derived from UI state — `current_leaf` can change
+        /// (via navigation) while a save is still in flight, so comparing it
+        /// against `reread_dn` at response time would misfire and delete a
+        /// live, unrenamed node. See `apply_write_outcome`'s `Saved` arm.
+        renamed_from: Option<String>,
+        quit_after: bool,
+    },
     /// A rename's first leg: on success, submit `mods` against `new_dn`.
     RenameThenModify {
         new_dn: String,
         mods: Vec<ModOp>,
+        /// The DN renamed away from — carried through to the follow-up
+        /// modify's `Save` intent so its eventual `Saved` outcome still
+        /// carries `renamed_from`, for the same reason as above.
+        old_dn: String,
         quit_after: bool,
     },
     /// An ADD (create new entry): on success, yield [`WriteOutcome::Created`].
@@ -152,12 +166,22 @@ pub enum WriteOutcome {
     /// Not one of our pending writes.
     Ignored,
     /// A write completed; re-read `reread_dn` (unless quitting).
-    Saved { reread_dn: String, quit_after: bool },
+    Saved {
+        reread_dn: String,
+        /// `Some(old_dn)` when this write renamed the entry away from `old_dn`.
+        /// See [`WriteIntent::Save::renamed_from`] for why this travels with
+        /// the write instead of being inferred from `current_leaf`.
+        renamed_from: Option<String>,
+        quit_after: bool,
+    },
     /// A rename's MODRDN landed; caller must submit the deferred `mods` via
     /// [`WriteFlow::submit_followup`].
     NeedFollowupModify {
         dn: String,
         mods: Vec<ModOp>,
+        /// The DN renamed away from; passed through to `submit_followup` so
+        /// the follow-up modify's eventual `Saved` still carries it.
+        renamed_from: Option<String>,
         quit_after: bool,
     },
     /// A write failed; `msg` is already human-mapped by the worker.
@@ -397,6 +421,7 @@ impl WriteFlow {
                     id,
                     WriteIntent::Save {
                         reread_dn: old_dn.to_string(),
+                        renamed_from: None,
                         quit_after,
                     },
                 );
@@ -415,6 +440,7 @@ impl WriteFlow {
                     id,
                     WriteIntent::Save {
                         reread_dn: new_dn,
+                        renamed_from: Some(old_dn.to_string()),
                         quit_after,
                     },
                 );
@@ -434,6 +460,7 @@ impl WriteFlow {
                     WriteIntent::RenameThenModify {
                         new_dn,
                         mods: then_mods,
+                        old_dn: old_dn.to_string(),
                         quit_after,
                     },
                 );
@@ -653,12 +680,16 @@ impl WriteFlow {
         Ok(())
     }
 
-    /// Submit the deferred modifications of a rename's second leg.
+    /// Submit the deferred modifications of a rename's second leg. `renamed_from`
+    /// (carried from [`WriteOutcome::NeedFollowupModify`]) is stored in the `Save`
+    /// intent so this leg's eventual `Saved` outcome still names the DN the entry
+    /// was renamed away from.
     pub fn submit_followup(
         &mut self,
         worker: &WorkerHandle,
         dn: &str,
         mods: Vec<ModOp>,
+        renamed_from: Option<String>,
         quit_after: bool,
     ) -> Result<()> {
         let id = self.alloc();
@@ -672,6 +703,7 @@ impl WriteFlow {
             id,
             WriteIntent::Save {
                 reread_dn: dn.to_string(),
+                renamed_from,
                 quit_after,
             },
         );
@@ -688,18 +720,22 @@ impl WriteFlow {
             } => match self.pending.remove(id) {
                 Some(WriteIntent::Save {
                     reread_dn,
+                    renamed_from,
                     quit_after,
                 }) => WriteOutcome::Saved {
                     reread_dn,
+                    renamed_from,
                     quit_after,
                 },
                 Some(WriteIntent::RenameThenModify {
                     new_dn,
                     mods,
+                    old_dn,
                     quit_after,
                 }) => WriteOutcome::NeedFollowupModify {
                     dn: new_dn,
                     mods,
+                    renamed_from: Some(old_dn),
                     quit_after,
                 },
                 Some(WriteIntent::Create { dn, quit_after }) => {
@@ -821,6 +857,7 @@ impl WriteFlow {
             id,
             WriteIntent::Save {
                 reread_dn,
+                renamed_from: None,
                 quit_after,
             },
         );
@@ -1073,6 +1110,7 @@ mod tests {
             7,
             WriteIntent::Save {
                 reread_dn: "cn=Bob,dc=x".into(),
+                renamed_from: None,
                 quit_after: false,
             },
         );
@@ -1083,9 +1121,11 @@ mod tests {
         }) {
             WriteOutcome::Saved {
                 reread_dn,
+                renamed_from,
                 quit_after,
             } => {
                 assert_eq!(reread_dn, "cn=Bob,dc=x");
+                assert_eq!(renamed_from, None);
                 assert!(!quit_after);
             }
             other => panic!("expected Saved, got {other:?}"),
@@ -1104,6 +1144,7 @@ mod tests {
                     attr: "sn".into(),
                     values: vec!["Z".into()],
                 }],
+                old_dn: "cn=Old,dc=x".into(),
                 quit_after: true,
             },
         );
@@ -1115,10 +1156,12 @@ mod tests {
             WriteOutcome::NeedFollowupModify {
                 dn,
                 mods,
+                renamed_from,
                 quit_after,
             } => {
                 assert_eq!(dn, "cn=New,dc=x");
                 assert_eq!(mods.len(), 1);
+                assert_eq!(renamed_from, Some("cn=Old,dc=x".to_string()));
                 assert!(quit_after);
             }
             other => panic!("expected NeedFollowupModify, got {other:?}"),
@@ -1132,6 +1175,7 @@ mod tests {
             9,
             WriteIntent::Save {
                 reread_dn: "x".into(),
+                renamed_from: None,
                 quit_after: false,
             },
         );
@@ -1804,6 +1848,7 @@ mod tests {
             1,
             WriteIntent::Save {
                 reread_dn: "x".into(),
+                renamed_from: None,
                 quit_after: false,
             },
         );
@@ -1923,6 +1968,53 @@ mod tests {
                 assert_eq!(assert_csn.as_deref(), Some("CSN-123"));
             }
             other => panic!("expected Modify, got {other:?}"),
+        }
+    }
+
+    /// A `SavePlan::RenameOnly` write's `Saved` outcome must carry `renamed_from`
+    /// naming the pre-rename DN — the signal that lets `apply_write_outcome`
+    /// (`src/ui/state.rs`) drop the stale node WITHOUT comparing against
+    /// `current_leaf`, which can race with navigation (see the module-level
+    /// doc on `WriteIntent::Save::renamed_from`).
+    #[test]
+    fn rename_only_save_reports_renamed_from() {
+        use crate::form::changeset::ModRdn;
+
+        let (worker, rx) = WorkerHandle::recording();
+        let mut wf = WriteFlow::new();
+        let plan = SavePlan::RenameOnly(ModRdn {
+            new_rdn: "cn=New".to_string(),
+            delete_old: true,
+            new_superior: None,
+        });
+
+        wf.submit(&worker, plan, "cn=Old,dc=example,dc=org", None, false)
+            .expect("submit rename-only plan");
+
+        let (req, _tx) = rx.recv().unwrap();
+        let id = match req {
+            Request::ModRdn { id, .. } => id,
+            other => panic!("expected ModRdn, got {other:?}"),
+        };
+
+        match wf.on_response(&Response::WriteOk {
+            id,
+            dn: "cn=New,dc=example,dc=org".into(),
+            new_csn: None,
+        }) {
+            WriteOutcome::Saved {
+                reread_dn,
+                renamed_from,
+                ..
+            } => {
+                assert_eq!(reread_dn, "cn=New,dc=example,dc=org");
+                assert_eq!(
+                    renamed_from,
+                    Some("cn=Old,dc=example,dc=org".to_string()),
+                    "RenameOnly must report the pre-rename dn"
+                );
+            }
+            other => panic!("expected Saved, got {other:?}"),
         }
     }
 

@@ -1,7 +1,6 @@
 //! edaptor — a schema-driven OpenLDAP TUI. The tvision UI provides the three-pane
 //! browser (tree / leaf list / entry form).
 
-pub mod app;
 pub mod config;
 pub mod form;
 pub mod ldap;

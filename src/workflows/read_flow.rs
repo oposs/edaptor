@@ -27,6 +27,11 @@ pub enum ReadOutcome {
         /// The entry's `entryCSN` at read time (version token for optimistic
         /// concurrency). `None` if the server did not return it.
         baseline_csn: Option<String>,
+        /// The entry's DN, so the controller can refresh its structure node.
+        dn: String,
+        /// The entry's raw string attributes, so the controller can project the
+        /// label/tree attributes onto the structure node without a second read.
+        attrs: std::collections::BTreeMap<String, Vec<String>>,
     },
     /// A user-facing error string to surface (e.g. via an `Overlay::Error`).
     Error(String),
@@ -78,6 +83,13 @@ impl ReadFlow {
         Ok(id)
     }
 
+    /// Test-only: register a pending read id without a live [`WorkerHandle`], so
+    /// `on_response` can be driven with hand-built responses.
+    #[cfg(test)]
+    pub(crate) fn insert_pending_for_test(&mut self, id: u64, show: Vec<String>) {
+        self.pending.insert(id, show);
+    }
+
     /// Correlate a polled [`Response`] with a pending read. On a matching
     /// `Entries` with at least one entry, build and return the [`FormModel`]; on
     /// a matching `SearchError`, return the error; otherwise `Ignored`.
@@ -94,6 +106,8 @@ impl ReadFlow {
                     model: self.form_for(entry, &show),
                     object_classes: object_classes_of(entry),
                     baseline_csn: entry_csn_of(entry),
+                    dn: entry.dn.clone(),
+                    attrs: entry.attrs.clone(),
                 }
             }
             Response::SearchError { id, msg } => {
@@ -229,6 +243,7 @@ mod tests {
                 model,
                 object_classes,
                 baseline_csn,
+                ..
             } => {
                 assert_eq!(model.title, "cn=Alice,dc=example,dc=org");
                 assert_eq!(model.fields[0].label, "cn"); // profile_show first
@@ -298,5 +313,30 @@ mod tests {
         let model = flow.form_for(&entry(), &[]);
         assert!(model.fields.iter().any(|f| f.label == "cn" && f.is_must));
         assert!(model.fields.iter().any(|f| f.label == "sn" && f.is_must));
+    }
+
+    #[test]
+    fn form_outcome_carries_dn_and_raw_attrs() {
+        let mut flow = ReadFlow::new(schema());
+        flow.insert_pending_for_test(7, Vec::new());
+        let mut attrs: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        attrs.insert("cn".to_string(), vec!["Jane".to_string()]);
+        attrs.insert("objectClass".to_string(), vec!["person".to_string()]);
+        let resp = Response::Entries {
+            id: 7,
+            entries: vec![LdapEntry {
+                dn: "uid=jane,ou=users,dc=x".to_string(),
+                attrs,
+                bin_attrs: Default::default(),
+            }],
+            truncated: false,
+        };
+        match flow.on_response(&resp) {
+            ReadOutcome::Form { dn, attrs, .. } => {
+                assert_eq!(dn, "uid=jane,ou=users,dc=x");
+                assert_eq!(attrs.get("cn").unwrap(), &vec!["Jane".to_string()]);
+            }
+            _ => panic!("expected Form"),
+        }
     }
 }

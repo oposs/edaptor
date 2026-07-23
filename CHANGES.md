@@ -18,10 +18,53 @@ All notable changes to eDAPtor are documented here. The format follows
   Against a server that does not advertise the assertion control, a one-time notice
   warns that concurrent edits may be lost.
 
+- Newly created entries now appear in the entry list immediately (and are
+  selected) instead of only after a restart; renamed entries move rather than
+  leaving a stale row behind.
+- The entry list's incremental find is answered by the server (one-level search
+  under the selected container), so entries created by other clients are found
+  without a restart. Capped at 500 matches with a status-line notice.
+- The `lookup` field's candidate list re-queries the server as you type instead
+  of filtering a one-shot, capped load — candidates past the first 100 are now
+  reachable.
+- New **Alt+R** (File → Reload) re-runs the directory scan, keeping the selected
+  container and entry; the open edit form is left untouched. A reload that fails
+  now raises an error dialog instead of passing for a successful one.
+- **Status messages are now actually shown.** The status line has a footer that
+  reports what just happened — "Saved.", the reload's entry count, a failed
+  search, a truncated find, and the one-time notice when the server does not
+  support concurrent-edit protection. These messages existed before but were
+  never rendered anywhere. A message is cleared as soon as you move on
+  (switching container, opening another entry, searching, or editing a field),
+  so it never hides the per-field key hints.
+- Renaming a **container** now re-runs the scan, so its contents follow it under
+  the new name instead of disappearing from the tree until a restart.
+- Editing an attribute used in a tree or list label now refreshes that label in
+  place, and the cached reverse-label lookups are dropped after every write
+  (they previously kept showing values eDAPtor itself had changed).
+- The entry list and tree no longer move the form on their own. Rebuilding a
+  list (after a create, rename, reload or find) restores the highlight by DN
+  instead of by row number, so it can no longer land on the wrong entry.
+- Typing a find query no longer interrupts you with the "unsaved changes"
+  prompt: the list narrows and highlights, but a form with unsaved edits stays
+  put until you navigate deliberately.
+- When the entry you are editing is deleted by someone else, edaptor now says
+  so instead of silently moving you elsewhere — and if you have unsaved edits it
+  asks whether to keep them, discard them, or re-create the entry.
+- Selecting a container now opens its first entry in the form pane instead of
+  only highlighting it — the entry pane no longer sits empty until you arrow onto
+  a row. (A container's first entry is likewise shown at startup.) An
+  edit-in-progress is never disturbed: the form only follows when nothing unsaved
+  is open.
+
 ### Changed
 
 ### Fixed
 
+- **Pasting into a form field now works.** A terminal paste (middle-click,
+  Shift-Ctrl-V, or an X primary-selection paste) into a single-line field used to
+  do nothing; it now inserts at the cursor. (Fixed upstream in tvision-rs 0.13.1,
+  which edaptor now requires.)
 - **Form no longer scrambles or re-orders after a save.** Saving an entry used to
   re-render the form with field labels and values misaligned and drop the profile
   `show` ordering (the form only realigned when you navigated to another entry and

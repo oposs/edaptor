@@ -6,8 +6,8 @@ use tvision_rs::{
 };
 
 use crate::form::validate::format_validation_errors;
-use crate::ui::dialog::{confirm, error, guard, guard_decision, GuardDecision};
-use crate::ui::help_ctx::hint_for;
+use crate::ui::dialog::{confirm, error, guard, guard_decision, GuardDecision, VanishedDecision};
+use crate::ui::help_ctx::{hint_for, status_or_hint};
 use crate::ui::panes::{
     form::FormPane,
     leaf::LeafPane,
@@ -17,11 +17,13 @@ use crate::ui::pump::PumpView;
 use crate::ui::state::GuardTarget;
 use crate::ui::widget::{widget_for, Activation};
 use crate::ui::StartupAction;
-use crate::ui::{Shared, ACTIVATE, CREATE, GUARD_NAV, REQUEST_QUIT, SAVE, SHOW_ERROR, STARTUP};
+use crate::ui::{
+    Shared, ACTIVATE, CREATE, GUARD_NAV, RELOAD, REQUEST_QUIT, SAVE, SHOW_ERROR, STARTUP,
+};
 use crate::workflows::create::{resolve_create_container, CreateContainer};
 use crate::workflows::save::PrepareSave;
 
-fn init_status_line(r: Rect) -> Option<Box<dyn View>> {
+fn init_status_line(r: Rect, state: Shared) -> Option<Box<dyn View>> {
     let mut r = r;
     r.a.y = r.b.y - 1;
     let defs = StatusDef::list()
@@ -31,7 +33,21 @@ fn init_status_line(r: Rect) -> Option<Box<dyn View>> {
                 .item("~Alt-X~ Exit", alt('x'), REQUEST_QUIT)
         })
         .build();
-    Some(Box::new(StatusLine::new(r, defs).with_hint(hint_for)))
+    Some(Box::new(StatusLine::new(r, defs).with_hint(move |ctx| {
+        // This runs inside draw. `try_borrow` (never `borrow`): a panic here would
+        // take the whole TUI down. On `Err` (some other view's draw somehow holds
+        // the borrow) fall back to the plain field hint rather than block or abort.
+        // Copy the status string out and drop the guard immediately — never hold
+        // it across the `hint_for` call below.
+        match state.try_borrow() {
+            Ok(st) => {
+                let status = st.status.clone();
+                drop(st);
+                status_or_hint(&status, ctx)
+            }
+            Err(_) => hint_for(ctx),
+        }
+    })))
 }
 
 fn init_menu_bar(r: Rect) -> Option<Box<dyn View>> {
@@ -41,6 +57,7 @@ fn init_menu_bar(r: Rect) -> Option<Box<dyn View>> {
         .submenu("~F~ile", alt('f'), |m| {
             m.command_key("~N~ew", CREATE, alt('n'), "Alt-N")
                 .command_key("~S~ave", SAVE, alt('s'), "Alt-S")
+                .command_key("~R~eload", RELOAD, alt('r'), "Alt-R")
                 .command_key("E~x~it", REQUEST_QUIT, alt('x'), "Alt-X")
         })
         .build();
@@ -61,15 +78,29 @@ pub(crate) enum SaveOutcome {
 /// Called when the guard→Save path does not submit (cancelled confirm == Stay).
 /// Pure (no ctx); unit-tested.
 pub(crate) fn apply_cancelled_guard_save(st: &mut crate::ui::state::UiState) {
-    st.set_leaf_row = st.current_leaf_row();
+    // Backing out of the confirm and staying on the pinned form is itself an
+    // operator action: whatever status was on screen described the previous one.
+    st.begin_operator_action();
+    // The highlight is re-resolved from `leaf_highlight_plan` on the next
+    // rebuild, which returns `Pin(current_leaf)` while the form is pinned.
+    st.list_dirty = true;
     st.guard_target = None;
     st.pending_nav = None;
 }
 
-/// Snap the tree highlight back to `current_branch` and clear the guard target.
-/// Called on guard "Stay" for a Branch target. Pure (no ctx); unit-tested.
-pub(crate) fn apply_branch_guard_stay(st: &mut crate::ui::state::UiState) {
-    st.set_tree_row = st.current_branch_row();
+/// Guard "Stay": the operator chose to keep editing the pinned form. Mark the
+/// pane that holds the abandoned navigation target dirty, so its highlight
+/// re-resolves to the pinned entry/branch on the next rebuild (via
+/// `leaf_highlight_plan` / `branch_highlight_plan`), and drop the target. Pure;
+/// unit-tested.
+pub(crate) fn apply_guard_stay(st: &mut crate::ui::state::UiState, target: &Option<GuardTarget>) {
+    // Choosing to keep editing is itself an operator action: whatever status was
+    // on screen described the previous one.
+    st.begin_operator_action();
+    match target {
+        Some(GuardTarget::Branch(_)) => st.tree_dirty = true,
+        _ => st.list_dirty = true,
+    }
     st.guard_target = None;
 }
 
@@ -114,6 +145,11 @@ pub(crate) fn strip_sentinel_from_attrs(
 /// commands posted from panes / the pump.
 pub(crate) fn dispatch(prog: &mut Program, cmd: Command, state: &Shared) {
     if cmd == SAVE {
+        // Pressing Save is the action; whatever the status line reported — a save
+        // confirmation, "No changes.", a validation error — described the
+        // previous one, whether this attempt ends in a write, a no-op, an error,
+        // or a cancelled confirm.
+        state.borrow_mut().begin_operator_action();
         let is_create = matches!(
             state.borrow().edit_form.as_ref().map(|f| &f.mode),
             Some(crate::workflows::edit_form::FormMode::Create { .. })
@@ -122,6 +158,20 @@ pub(crate) fn dispatch(prog: &mut Program, cmd: Command, state: &Shared) {
             do_create(prog, state);
         } else {
             let _ = do_save(prog, state, None, false);
+        }
+    } else if cmd == RELOAD {
+        // Blocking rescan; the pump broadcasts REFRESH for the list/tree because
+        // adopt_structure marks both dirty. A failure must not look like a
+        // successful no-op reload, so surface it in the same error modal the
+        // save path uses — but only after the borrow is dropped, or the modal's
+        // event loop would deadlock on a re-entrant borrow.
+        let err = state.borrow_mut().reload_structure().err();
+        if let Some(msg) = err {
+            let (view, ok) = error::build(&msg);
+            prog.exec_view_focused(view, ok);
+        } else {
+            // A reload may have found the open+dirty entry deleted elsewhere.
+            drain_vanished_guard(prog, state);
         }
     } else if cmd == ACTIVATE {
         // Open a field's modal editor. The pane recorded which field.
@@ -212,7 +262,13 @@ pub(crate) fn dispatch(prog: &mut Program, cmd: Command, state: &Shared) {
                     // Cancelled confirm or no-op: revert highlight to the pinned form.
                     let mut st = state.borrow_mut();
                     match target {
-                        Some(GuardTarget::Branch(_)) => apply_branch_guard_stay(&mut st),
+                        // The highlight is re-resolved from `branch_highlight_plan` on
+                        // the next rebuild, which returns `Pin(current_branch)` while
+                        // the form is pinned.
+                        Some(GuardTarget::Branch(_)) => {
+                            st.tree_dirty = true;
+                            st.guard_target = None;
+                        }
                         _ => apply_cancelled_guard_save(&mut st),
                     }
                 } else if let Some(GuardTarget::Branch(dn)) = target {
@@ -230,20 +286,18 @@ pub(crate) fn dispatch(prog: &mut Program, cmd: Command, state: &Shared) {
                     Some(GuardTarget::Branch(dn)) => {
                         state.borrow_mut().commit_branch(dn);
                     }
-                    None => {}
+                    // Vanished never reaches GUARD_NAV: it is raised by
+                    // adopt_structure and drained by the RELOAD arm's own dialog
+                    // (Task 7), not by a blocked navigation.
+                    Some(GuardTarget::Vanished(_)) | None => {}
                 }
                 state.borrow_mut().guard_target = None;
             }
             GuardDecision::Stay => {
-                // Keep editing the pinned form; snap the highlight back so it agrees.
+                // Keep editing the pinned form; the highlight re-resolves on the
+                // next rebuild (branch_/leaf_highlight_plan → Pin the pinned DN).
                 let mut st = state.borrow_mut();
-                match target {
-                    Some(GuardTarget::Branch(_)) => apply_branch_guard_stay(&mut st),
-                    _ => {
-                        st.set_leaf_row = st.current_leaf_row();
-                    }
-                }
-                st.guard_target = None;
+                apply_guard_stay(&mut st, &target);
             }
         }
     } else if cmd == REQUEST_QUIT {
@@ -376,6 +430,67 @@ pub(crate) fn dispatch(prog: &mut Program, cmd: Command, state: &Shared) {
     }
 }
 
+/// The form's current values, ready for an ADD. Empty attributes are dropped —
+/// LDAP rejects an attribute carrying no values.
+fn recreate_attrs(
+    form: &crate::workflows::edit_form::EditForm,
+) -> std::collections::BTreeMap<String, Vec<String>> {
+    form.to_edit_entry()
+        .attrs
+        .into_iter()
+        .filter(|(_, v)| !v.is_empty())
+        .collect()
+}
+
+/// If a reload/rescan left a `GuardTarget::Vanished` (the open+dirty entry was
+/// deleted elsewhere), ask the operator: Re-create / Discard / Keep editing.
+/// A no-op when the target is not `Vanished`.
+fn drain_vanished_guard(prog: &mut Program, state: &Shared) {
+    let dn = match state.borrow().guard_target.clone() {
+        Some(GuardTarget::Vanished(dn)) => dn,
+        _ => return,
+    };
+    let (view, keep) = crate::ui::dialog::vanished::build(&dn);
+    let answer = prog.exec_view_focused(view, keep);
+    match crate::ui::dialog::vanished_decision(answer) {
+        VanishedDecision::KeepEditing => {}
+        VanishedDecision::Discard => {
+            // No re-read: the DN is gone, so the read would fail.
+            let mut st = state.borrow_mut();
+            st.edit_form = None;
+            st.current_leaf = None;
+            st.form_needs_render = true;
+            st.list_dirty = true;
+        }
+        VanishedDecision::Recreate => {
+            let Some(attrs) = state.borrow().edit_form.as_ref().map(recreate_attrs) else {
+                state.borrow_mut().guard_target = None;
+                return;
+            };
+            // Behind the same LDIF preview as every other write: this resurrects
+            // an entry someone deliberately deleted, and it must not be the one
+            // unconfirmed write in the app. Borrow dropped before exec_view — the
+            // draw path borrows too.
+            let ldif = crate::ldap::ldif::render_add(&dn, &attrs);
+            let (view, save) = crate::ui::dialog::confirm::build(&ldif);
+            if prog.exec_view_focused(view, save) != Command::OK {
+                state.borrow_mut().guard_target = None;
+                return; // cancel: keep the form and its edits
+            }
+            let mut st = state.borrow_mut();
+            let crate::ui::state::UiState {
+                worker, write_flow, ..
+            } = &mut *st;
+            if let Some(w) = worker.as_ref() {
+                // rc 68 (entryAlreadyExists) rejects this safely if another client
+                // re-created the DN meanwhile.
+                let _ = write_flow.submit_create(w, &dn, attrs, false);
+            }
+        }
+    }
+    state.borrow_mut().guard_target = None;
+}
+
 /// Resolve the create container for `profile_idx` under `current_branch`, asking via
 /// a modal when the branch sits above the profile's home OU, then open the create
 /// form. Cancelling the container prompt aborts the create.
@@ -412,6 +527,9 @@ fn open_create_with_container_rule(
 /// post a background scan for every autonumber field (`‹allocating…›` placeholder
 /// while the scan is in flight).
 fn open_create(state: &Shared, profile_idx: usize, container: &str) {
+    // Opening the create form is a new operator action: whatever the status
+    // line reported described the previous one.
+    state.borrow_mut().begin_operator_action();
     let form_and_reqs = {
         let st = state.borrow();
         let schema = st.read_flow.schema();
@@ -990,12 +1108,13 @@ fn init_desktop(r: Rect, state: Shared) -> Option<Box<dyn View>> {
 
 pub(crate) fn build_program(backend: Box<dyn tv::Backend>, state: Shared) -> Program {
     let s = state.clone();
+    let status_state = state;
     Program::new(
         backend,
         Box::new(SystemClock::new()),
         crate::ui::theme::edaptor_theme(),
         move |r| init_desktop(r, s.clone()),
-        init_status_line,
+        move |r| init_status_line(r, status_state.clone()),
         init_menu_bar,
     )
 }
@@ -1006,11 +1125,14 @@ mod tests {
     use crate::form::validate::ValidationError;
     use crate::workflows::save::PrepareSave;
 
+    /// Guard "Stay" on a Branch target marks the tree for rebuild (its highlight
+    /// re-resolves to `current_branch` via `branch_highlight_plan`) and drops the
+    /// guard target.
     #[test]
-    fn guard_stay_on_branch_target_reverts_tree() {
+    fn guard_stay_marks_the_tree_dirty_and_clears_the_target() {
         use crate::ldap::worker::RawSubschema;
         use crate::schema::SchemaModel;
-        use crate::ui::state::{GuardTarget, UiState};
+        use crate::ui::state::UiState;
         use crate::workflows::structure::Structure;
         let structure = Structure::build("dc=x", vec![]);
         let schema = SchemaModel::from_raw(&RawSubschema::default());
@@ -1018,22 +1140,49 @@ mod tests {
             UiState::new_for_test(structure, schema, "dc=x".into(), Vec::new(), Vec::new());
         st.branch_dns = vec!["dc=x".into(), "ou=p,dc=x".into(), "ou=q,dc=x".into()];
         st.current_branch = Some("ou=p,dc=x".into());
-        st.guard_target = Some(GuardTarget::Branch("ou=q,dc=x".into()));
+        let target = Some(GuardTarget::Branch("ou=q,dc=x".into()));
+        st.guard_target = target.clone();
 
-        apply_branch_guard_stay(&mut st);
+        apply_guard_stay(&mut st, &target);
 
-        assert_eq!(
-            st.set_tree_row,
-            st.current_branch_row(),
-            "revert tree to current branch"
+        assert!(
+            st.tree_dirty,
+            "the tree re-resolves its highlight on rebuild"
         );
-        assert!(st.guard_target.is_none());
+        assert!(!st.list_dirty, "the entry list is not disturbed");
+        assert_eq!(st.guard_target, None, "the abandoned target is dropped");
+    }
+
+    /// Guard "Stay" on a Leaf target marks the entry list for rebuild instead
+    /// (its highlight re-resolves via `leaf_highlight_plan`).
+    #[test]
+    fn guard_stay_marks_the_list_dirty_for_a_leaf_target() {
+        use crate::ldap::worker::RawSubschema;
+        use crate::schema::SchemaModel;
+        use crate::ui::state::UiState;
+        use crate::workflows::structure::Structure;
+        let structure = Structure::build("dc=x", vec![]);
+        let schema = SchemaModel::from_raw(&RawSubschema::default());
+        let mut st =
+            UiState::new_for_test(structure, schema, "dc=x".into(), Vec::new(), Vec::new());
+        let target = Some(GuardTarget::Leaf("cn=a,ou=p,dc=x".into(), vec![]));
+        st.guard_target = target.clone();
+
+        apply_guard_stay(&mut st, &target);
+
+        assert!(
+            st.list_dirty,
+            "the entry list re-resolves its highlight on rebuild"
+        );
+        assert!(!st.tree_dirty, "the tree is not disturbed");
+        assert_eq!(st.guard_target, None, "the abandoned target is dropped");
     }
 
     #[test]
     fn cancelled_guard_save_snaps_highlight_back() {
-        // The guard→Save path that does NOT submit must request a snap-back to the
-        // pinned form's row and clear the stashed nav targets (like Stay).
+        // The guard→Save path that does NOT submit must request a rebuild (so the
+        // highlight re-resolves onto the pinned form's row) and clear the stashed
+        // nav targets (like Stay).
         use crate::ldap::worker::RawSubschema;
         use crate::schema::SchemaModel;
         use crate::ui::state::UiState;
@@ -1077,10 +1226,14 @@ mod tests {
 
         apply_cancelled_guard_save(&mut st);
 
+        assert!(
+            st.list_dirty,
+            "a rebuild is requested so the pane re-resolves the highlight"
+        );
         assert_eq!(
-            st.set_leaf_row,
-            st.current_leaf_row(),
-            "snap back to the pinned form's row"
+            st.leaf_highlight_plan(),
+            crate::ui::state::HighlightPlan::Pin("cn=a,ou=p,dc=x".to_string()),
+            "the rebuild will pin the highlight back onto the pinned form's entry"
         );
         assert!(st.guard_target.is_none());
         assert!(st.pending_nav.is_none());
@@ -1155,5 +1308,56 @@ mod tests {
             ldif: "L".into(),
         };
         assert!(matches!(save_flow_action(&ready), SaveAction::Confirm(_)));
+    }
+
+    /// Re-create submits the form's CURRENT values at the vanished DN. Empty
+    /// fields are dropped: LDAP rejects an attribute with no values.
+    #[test]
+    fn recreate_attrs_take_the_forms_current_values() {
+        use crate::schema::FieldKind;
+        use crate::workflows::edit_form::{EditField, EditForm, FormMode};
+        use crate::workflows::form_model::WidgetSpec;
+
+        let cn = EditField {
+            label: "cn".into(),
+            must: true,
+            editable: true,
+            multi: false,
+            secret: false,
+            ordered: false,
+            orphaned: false,
+            kind: FieldKind::Text,
+            widget: WidgetSpec::ReadOnlyText,
+            widget_binding: None,
+            values: vec!["alice".to_string()],
+            baseline: vec!["alice".to_string()],
+        };
+        let empty = EditField {
+            label: "description".into(),
+            must: false,
+            editable: true,
+            multi: false,
+            secret: false,
+            ordered: false,
+            orphaned: false,
+            kind: FieldKind::Text,
+            widget: WidgetSpec::ReadOnlyText,
+            widget_binding: None,
+            values: vec![],
+            baseline: vec![],
+        };
+        let form = EditForm {
+            dn: "cn=alice,ou=p,dc=x".to_string(),
+            mode: FormMode::Edit,
+            object_classes: vec![],
+            fields: vec![cn, empty],
+            baseline_csn: None,
+        };
+        let attrs = recreate_attrs(&form);
+        assert_eq!(attrs.get("cn"), Some(&vec!["alice".to_string()]));
+        assert!(
+            !attrs.contains_key("description"),
+            "an empty attribute must not be sent"
+        );
     }
 }

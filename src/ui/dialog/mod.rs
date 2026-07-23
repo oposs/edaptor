@@ -12,6 +12,7 @@ pub mod container_chooser;
 pub mod error;
 pub mod guard;
 pub mod profile_chooser;
+pub mod vanished;
 
 use tvision_rs::Command;
 
@@ -32,6 +33,27 @@ pub fn guard_decision(answer: Command) -> GuardDecision {
         GuardDecision::Discard
     } else {
         GuardDecision::Stay
+    }
+}
+
+/// The user's answer to the vanished-entry dialog.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VanishedDecision {
+    Recreate,
+    Discard,
+    KeepEditing,
+}
+
+/// Map a vanished dialog's returned command to a decision. `YES`=Re-create,
+/// `NO`=Discard, anything else (incl. `CANCEL` / window close) = Keep editing
+/// (the safe default).
+pub fn vanished_decision(answer: Command) -> VanishedDecision {
+    if answer == Command::YES {
+        VanishedDecision::Recreate
+    } else if answer == Command::NO {
+        VanishedDecision::Discard
+    } else {
+        VanishedDecision::KeepEditing
     }
 }
 
@@ -74,6 +96,23 @@ mod tests {
     #[test]
     fn guard_builds_without_panic() {
         let _v = guard::build();
+    }
+
+    #[test]
+    fn vanished_builds_without_panic() {
+        let _v = vanished::build("cn=gone,ou=p,dc=x");
+    }
+
+    // --- vanished_decision unit tests ---
+
+    #[test]
+    fn vanished_decision_maps_the_three_commands() {
+        assert_eq!(vanished_decision(Command::YES), VanishedDecision::Recreate);
+        assert_eq!(vanished_decision(Command::NO), VanishedDecision::Discard);
+        assert_eq!(
+            vanished_decision(Command::CANCEL),
+            VanishedDecision::KeepEditing
+        );
     }
 
     #[test]

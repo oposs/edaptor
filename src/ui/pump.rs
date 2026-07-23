@@ -87,8 +87,12 @@ impl View for PumpView {
             // sets list_dirty without any worker activity (r.changed = false). Broadcast
             // REFRESH so the leaf pane rebuilds. The leaf clears list_dirty on rebuild,
             // so this is a single idempotent refresh per dirty-marking, not a loop.
-            let list_dirty = self.state.borrow().list_dirty;
-            if r.changed || list_dirty {
+            // `tree_dirty` is the same contract for the DIT tree pane.
+            let (list_dirty, tree_dirty) = {
+                let st = self.state.borrow();
+                (st.list_dirty, st.tree_dirty)
+            };
+            if r.changed || list_dirty || tree_dirty {
                 ctx.broadcast(REFRESH, None);
             }
             if need_guard || need_branch_guard {
