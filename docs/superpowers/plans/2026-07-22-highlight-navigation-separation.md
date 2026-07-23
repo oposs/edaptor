@@ -1274,17 +1274,20 @@ Expected: FAIL — `cannot find function vanished_decision`.
 
 - [ ] **Step 3: Implement**
 
-`src/ui/dialog/vanished.rs` — use `Dialog::button_row`, which as of tvision
-0.13 sizes its faces to the widest label. **Do not hand-lay a button row**, and
-do not declare width constants: "Keep editing" is 12 columns, so the row sizes
-itself to 16.
+`src/ui/dialog/vanished.rs` — use `Dialog::button_row`. As of tvision 0.13 its
+faces default to the fixed `STD_BUTTON` width (`ButtonLayout::Classic`), so this
+row of long labels **must opt in** with
+`dlg.set_button_layout(ButtonLayout::Uniform)` before calling `button_row`, or
+"Keep editing" (12 columns) renders against the drop shadow. **Do not hand-lay a
+button row** and do not declare width constants — `Uniform` sizes every face to
+16 for you.
 
 ```rust
 //! The entry being edited vanished from the directory: Re-create / Discard /
 //! Keep editing over a form whose DN no longer exists.
 
 use tvision_rs::{ButtonFlags, Command, Dialog, Rect, StaticText, View, ViewId};
-use tvision_rs::dialog::ButtonRowAlign;
+use tvision_rs::dialog::{ButtonLayout, ButtonRowAlign};
 
 const DLG_W: i32 = 64;
 const DLG_H: i32 = 9;
@@ -1300,6 +1303,9 @@ pub fn build(dn: &str) -> (Box<dyn View>, ViewId) {
     );
     dlg.state_mut().options.center_x = true;
     dlg.state_mut().options.center_y = true;
+    // Long labels ("Keep editing" is 12 cols) need faces wider than the classic
+    // 10, or they render against the drop shadow. Uniform sizes them to fit.
+    dlg.set_button_layout(ButtonLayout::Uniform);
     dlg.insert_child(Box::new(StaticText::new(
         Rect::new(2, 2, 62, 5),
         format!("{dn}\nis no longer in the directory. You have unsaved changes."),
@@ -1324,11 +1330,14 @@ pub fn build(dn: &str) -> (Box<dyn View>, ViewId) {
 ```
 
 **Also simplify `src/ui/dialog/guard.rs` in this task.** It hand-lays its row
-solely because the old `button_row` forced a 10-column face; that reason is gone.
-Replace its manual layout and its four local constants (`BTN_W`, `BTN_H`,
-`BTN_GAP`, `MARGIN_RIGHT`, `BUTTON_ROW_FROM_BOTTOM`) with one `button_row` call
-using the same three specs it has today, keeping Save as the focused/default
-button. Its existing tests must pass unchanged.
+because it needed an 11-column face for "Discard" (7 cols); tvision 0.13 does that
+for you. Replace its manual layout and its local constants (`BTN_W`, `BTN_H`,
+`BTN_GAP`, `MARGIN_RIGHT`, `BUTTON_ROW_FROM_BOTTOM`) with `dlg.set_button_layout(
+ButtonLayout::Uniform)` followed by one `button_row` call using the same three
+specs (`~S~ave`/`~D~iscard`/`S~t~ay`), keeping Save as the focused/default button.
+"Discard" is 7 columns → `Uniform` gives every face 11, matching the old `BTN_W`
+exactly, so its existing tests pass unchanged. (Without the `Uniform` opt-in the
+faces default to 10 and "Discard" clips — the very bug the fork worked around.)
 
 In `mod.rs`:
 
