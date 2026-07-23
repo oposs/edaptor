@@ -1484,19 +1484,27 @@ impl UiState {
     /// reverse-label cache (which caches negatives, so a stale miss would
     /// otherwise outlive the refresh). Pure — no I/O — so the place-keeping
     /// rules are unit-testable.
-    pub fn adopt_structure(&mut self, structure: Structure) {
+    ///
+    /// Returns whether the open entry vanished **on this call** — callers that
+    /// need to know (e.g. `reload_structure`, to avoid clobbering the vanished
+    /// status) must use this return value rather than re-deriving it from
+    /// `current_leaf`/`guard_target` afterwards, which can carry over stale
+    /// from an earlier call.
+    pub fn adopt_structure(&mut self, structure: Structure) -> bool {
         self.structure = structure;
         if let Some(branch) = self.current_branch.clone() {
             if self.structure.get(&branch).is_none() {
                 self.current_branch = Some(self.base_dn.clone());
             }
         }
+        let mut vanished = false;
         if let Some(leaf) = self.current_leaf.clone() {
             if self.structure.get(&leaf).is_none() {
                 // Was a silent null with a "form deliberately untouched" comment;
                 // superseded by the vanished-entry design — clean clears + says
                 // so, dirty raises the guard (drained by the RELOAD arm, Task 7).
                 self.note_entry_vanished(&leaf);
+                vanished = true;
             }
         }
         self.search.clear();
@@ -1512,6 +1520,7 @@ impl UiState {
         // The pane rebuilds from scratch on the coming REFRESH and resolves
         // `leaf_highlight_plan` against the fresh rows itself — pinning back to
         // `current_leaf` when it survived, or clearing when it is gone.
+        vanished
     }
 
     /// Re-run the eager structure scan and adopt the result (Alt+R).
@@ -1546,16 +1555,14 @@ impl UiState {
                     &self.base_dn,
                     crate::workflows::labels::structure_inputs(nodes),
                 );
-                let had_leaf = self.current_leaf.is_some();
-                self.adopt_structure(structure);
+                let vanished = self.adopt_structure(structure);
                 // adopt_structure just told the operator their open entry vanished
                 // (clean: current_leaf nulled; dirty: guard_target raised) — that
                 // more specific message must survive, not get overwritten by the
-                // generic reload confirmation below.
-                let leaf_vanished = had_leaf
-                    && (self.current_leaf.is_none()
-                        || matches!(self.guard_target, Some(GuardTarget::Vanished(_))));
-                if !leaf_vanished {
+                // generic reload confirmation below. Keyed off the return value,
+                // not re-derived from current_leaf/guard_target afterwards: those
+                // can still read "vanished" from an earlier call.
+                if !vanished {
                     self.status = format!("Reloaded {count} entries.");
                 }
                 Ok(count)
@@ -4140,6 +4147,94 @@ mod write_routing_tests {
         assert!(
             st.status.contains("no longer"),
             "the vanished message survives the reload confirmation, got {:?}",
+            st.status
+        );
+    }
+
+    /// A Vanished guard from a prior reload must not suppress a LATER reload's own
+    /// "Reloaded N" once the entry is back. `reload_structure` keys off whether
+    /// THIS `adopt_structure` call vanished the entry, not off possibly-stale
+    /// `guard_target`/`current_leaf` left over from an earlier call.
+    #[test]
+    fn a_second_reload_that_finds_the_entry_again_reports_its_own_count() {
+        let structure = Structure::build("dc=x", vec![si("dc=x", None), si("cn=b,dc=x", None)]);
+        let schema = SchemaModel::from_raw(&RawSubschema::default());
+        let mut st =
+            UiState::new_for_test(structure, schema, "dc=x".into(), Vec::new(), Vec::new());
+        st.current_leaf = Some("cn=b,dc=x".to_string());
+        st.edit_form = Some(dirty_form("cn=b,dc=x"));
+        let (worker, rx) = WorkerHandle::recording();
+        st.worker = Some(worker);
+
+        // First reload: the scan omits cn=b — the dirty form raises the guard and
+        // current_leaf is intentionally kept.
+        let responder = std::thread::spawn(move || {
+            let (req, reply) = rx.recv().expect("a LoadStructure request must be sent");
+            let Request::LoadStructure { id, .. } = req else {
+                panic!("expected Request::LoadStructure, got {req:?}");
+            };
+            let _ = reply.send(Response::StructureEntries {
+                id,
+                nodes: vec![crate::ldap::worker::StructureNodeRaw {
+                    dn: "dc=x".into(),
+                    cn: None,
+                    description: None,
+                    object_classes: vec![],
+                    attrs: BTreeMap::new(),
+                }],
+            });
+            rx
+        });
+
+        let result = st.reload_structure();
+        let rx = responder.join().expect("responder thread must not panic");
+
+        assert_eq!(result, Ok(1));
+        assert_eq!(
+            st.guard_target,
+            Some(GuardTarget::Vanished("cn=b,dc=x".to_string())),
+            "dirty vanish raises the guard"
+        );
+        assert!(st.status.contains("no longer"));
+
+        // Second reload: cn=b is back in the scan. The guard from the first call
+        // is still sitting there (nothing has drained it yet), but this reload
+        // must report its OWN count, not the stale vanished message.
+        let responder = std::thread::spawn(move || {
+            let (req, reply) = rx
+                .recv()
+                .expect("a second LoadStructure request must be sent");
+            let Request::LoadStructure { id, .. } = req else {
+                panic!("expected Request::LoadStructure, got {req:?}");
+            };
+            let _ = reply.send(Response::StructureEntries {
+                id,
+                nodes: vec![
+                    crate::ldap::worker::StructureNodeRaw {
+                        dn: "dc=x".into(),
+                        cn: None,
+                        description: None,
+                        object_classes: vec![],
+                        attrs: BTreeMap::new(),
+                    },
+                    crate::ldap::worker::StructureNodeRaw {
+                        dn: "cn=b,dc=x".into(),
+                        cn: None,
+                        description: None,
+                        object_classes: vec![],
+                        attrs: BTreeMap::new(),
+                    },
+                ],
+            });
+        });
+
+        let result = st.reload_structure();
+        responder.join().expect("responder thread must not panic");
+
+        assert_eq!(result, Ok(2));
+        assert_eq!(
+            st.status, "Reloaded 2 entries.",
+            "the entry is back; a stale vanished message must not survive, got {:?}",
             st.status
         );
     }
