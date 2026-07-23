@@ -135,6 +135,33 @@ impl MaskedInputLine {
         self.inner.handle_event(&mut synth, ctx);
     }
 
+    /// Insert one real character `c` at the caret, mirroring it as a bullet in
+    /// the inner field. Any active selection is drained first, and the character
+    /// is only recorded in `real` when the inner field actually grew (so its byte
+    /// cap governs acceptance exactly as for typed input). Shared by the typed
+    /// `Key::Char` arm and the bracketed-paste arm.
+    fn insert_char_masked(&mut self, c: char, ctx: &mut Context) {
+        // Capture caret/selection BEFORE feeding the inner field (feeding moves
+        // the caret and clears the selection).
+        let sel = self.selection_chars();
+        let caret = sel.map(|(a, _)| a).unwrap_or_else(|| self.caret_char());
+        let sel_len = sel.map(|(a, b)| b - a).unwrap_or(0);
+        let pre = self.inner.data.chars().count();
+        self.feed_inner(Key::Char(BULLET), ctx);
+        // The inner field deletes any selection, then inserts the bullet UNLESS
+        // its byte cap rejects it. Mirror exactly that: always drain the
+        // selection, insert `c` only when the inner field grew.
+        let accepted = self.inner.data.chars().count() > pre - sel_len;
+        let mut chars: Vec<char> = self.real.chars().collect();
+        if let Some((a, b)) = sel {
+            chars.drain(a..b);
+        }
+        if accepted {
+            chars.insert(caret.min(chars.len()), c);
+        }
+        self.real = chars.into_iter().collect();
+    }
+
     /// Apply a positional edit to `real`, mirroring the inner field's own
     /// selection semantics: any active selection is drained first, then `op` runs
     /// with the resulting caret char index and whether a selection was drained
@@ -164,10 +191,25 @@ impl View for MaskedInputLine {
             Event::KeyDown(k) => (k.key, k.modifiers.ctrl, k.modifiers.alt),
             // Swallow clipboard commands: cut/paste would desync the mirror and copy
             // would leak the cleartext — a password field exposes none of them.
+            // (This is the INTERNAL clipboard, Ctrl+V / Shift+Insert. The terminal's
+            // bracketed paste arrives as `Event::Paste` and is masked below.)
             Event::Command(cmd)
                 if matches!(*cmd, Command::CUT | Command::COPY | Command::PASTE) =>
             {
                 ev.clear();
+                return;
+            }
+            // Bracketed paste: mask it like typed input instead of letting the
+            // cleartext reach the inner field (which would render it and leave
+            // `real` empty — visible password AND nothing staged). Control chars
+            // (a trailing newline, tabs) are dropped: a single-line password holds
+            // none.
+            Event::Paste(text) => {
+                let text = std::mem::take(text);
+                ev.clear();
+                for c in text.chars().filter(|c| !c.is_control()) {
+                    self.insert_char_masked(c, ctx);
+                }
                 return;
             }
             _ => {
@@ -179,25 +221,7 @@ impl View for MaskedInputLine {
             // Plain printable char (Shift is fine; Ctrl/Alt are not — the inner
             // field rejects those, so mirroring them would inject a stray char).
             Key::Char(c) if !ctrl && !alt => {
-                // Capture caret/selection BEFORE feeding the inner field (feeding
-                // moves the caret and clears the selection).
-                let sel = self.selection_chars();
-                let caret = sel.map(|(a, _)| a).unwrap_or_else(|| self.caret_char());
-                let sel_len = sel.map(|(a, b)| b - a).unwrap_or(0);
-                let pre = self.inner.data.chars().count();
-                self.feed_inner(Key::Char(BULLET), ctx);
-                // The inner field deletes any selection, then inserts the bullet
-                // UNLESS its byte cap rejects it. Mirror exactly that: always drain
-                // the selection, insert `c` only when the inner field grew.
-                let accepted = self.inner.data.chars().count() > pre - sel_len;
-                let mut chars: Vec<char> = self.real.chars().collect();
-                if let Some((a, b)) = sel {
-                    chars.drain(a..b);
-                }
-                if accepted {
-                    chars.insert(caret.min(chars.len()), c);
-                }
-                self.real = chars.into_iter().collect();
+                self.insert_char_masked(c, ctx);
                 ev.clear();
             }
             Key::Backspace if !ctrl && !alt => {
@@ -518,6 +542,50 @@ mod tests {
         press(&mut m, Key::Home, &mut ctx);
         press(&mut m, Key::Delete, &mut ctx);
         assert_eq!(m.real, "ab");
+    }
+
+    /// A bracketed paste (Event::Paste) must be masked exactly like typed
+    /// characters: the cleartext mirrors into `real`, the display shows only
+    /// bullets, and the event is consumed. RED before the fix: the paste fell
+    /// through to the inner InputLine, which rendered the cleartext and left
+    /// `real` empty (so nothing was staged either).
+    #[test]
+    fn masked_field_masks_bracketed_paste() {
+        let (mut out, mut timers, mut deferred) = ctx_deps();
+        let mut ctx = Context::new(&mut out, &mut timers, 0, &mut deferred);
+        let mut m = MaskedInputLine::new(Rect::new(0, 0, 40, 1));
+        m.inner.state.state.selected = true;
+        let mut ev = Event::Paste("s3cr3t".to_string());
+        m.handle_event(&mut ev, &mut ctx);
+        assert!(ev.is_nothing(), "the paste event must be consumed");
+        assert_eq!(m.real, "s3cr3t", "paste mirrors the cleartext into `real`");
+        assert_eq!(m.inner.data.chars().count(), 6, "six bullets shown");
+        assert!(
+            m.inner.data.chars().all(|c| c == '\u{2022}'),
+            "the display is all bullets, never the pasted cleartext"
+        );
+    }
+
+    /// A pasted string with control characters (a password manager's trailing
+    /// newline, embedded tabs/CR) drops them — a single-line password field can
+    /// hold none of them, and forwarding them would desync the bullet mirror.
+    #[test]
+    fn masked_field_paste_strips_control_chars() {
+        let (mut out, mut timers, mut deferred) = ctx_deps();
+        let mut ctx = Context::new(&mut out, &mut timers, 0, &mut deferred);
+        let mut m = MaskedInputLine::new(Rect::new(0, 0, 40, 1));
+        m.inner.state.state.selected = true;
+        let mut ev = Event::Paste("ab\tcd\r\n".to_string());
+        m.handle_event(&mut ev, &mut ctx);
+        assert_eq!(
+            m.real, "abcd",
+            "control characters are stripped from the paste"
+        );
+        assert_eq!(
+            m.inner.data.chars().count(),
+            4,
+            "four bullets, mirror in sync"
+        );
     }
 
     /// Multibyte characters mirror correctly (bullet count == char count, no byte

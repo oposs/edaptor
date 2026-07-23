@@ -16,6 +16,12 @@ All notable changes to eDAPtor are documented here. The format follows
   multi-value editor is eDAPtor's own view rather than a plain input line, and it
   was silently dropping the terminal's bracketed-paste event; it now inserts the
   pasted text at the cursor, with each pasted line starting a new value.
+- **Security:** pasting into a password field no longer shows the pasted text in
+  the clear. The masked field forwarded the terminal's bracketed paste straight
+  to its inner input, which rendered the cleartext (and, worse, staged nothing
+  because the masked mirror was never updated). Paste is now masked exactly like
+  typed input — bullets on screen, the real value mirrored for staging — and
+  control characters (a trailing newline, tabs) are stripped.
 
 ## 1.3.0 - 2026-07-23
 
