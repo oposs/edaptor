@@ -1465,15 +1465,35 @@ correlation surface is where Spec 2's worst defect came from. "Created X." is
 accurate for both. The existing comment at `:814-816` — which claims a status set
 for this create survives the re-read — becomes true for the first time; leave it.
 
-- [ ] **Step 4: Run the suite**
+- [ ] **Step 4: Make the docs coherent with the shipped dialog**
+
+Task 8 (which ran before this task, because this one was blocked on a tvision
+release) already wrote the user-facing docs describing this dialog — but until
+now the dialog did not exist. With it shipped, the docs are accurate; one small
+tension remains to fix. In `docs/src/concepts/live-data.md`, the sentence "Your
+open edit form is left untouched, so unsaved changes are never at risk." sits
+just above the vanished-entry paragraph and reads as a blanket claim. Scope it so
+it clearly refers to the entry-survives case, leaving the vanished paragraph to
+cover the exception:
+
+> Your open edit form is left untouched as long as the entry you were editing is
+> still there, so unsaved changes are never at risk.
+
+Do **not** rewrite the vanished paragraph itself — it now accurately describes
+this dialog. Verify `CHANGES.md`'s vanished-entry bullet also matches what you
+built (clean → cleared + notice; dirty → Keep editing / Discard / Re-create); it
+was written to this design, so it should already be correct — fix only if your
+implementation diverged.
+
+- [ ] **Step 5: Run the suite**
 
 Run: `cargo test -j4 --lib`
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 6: Commit**
 
 ```bash
-git add src/ui/dialog/vanished.rs src/ui/dialog/mod.rs src/ui/app.rs src/ui/state.rs
+git add src/ui/dialog/vanished.rs src/ui/dialog/mod.rs src/ui/app.rs src/ui/state.rs docs/src/concepts/live-data.md
 git commit -m "feat(ui): ask before losing edits to an entry that vanished
 
 Re-create goes behind the same LDIF preview as every other write, and a
