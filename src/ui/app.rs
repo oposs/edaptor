@@ -283,7 +283,10 @@ pub(crate) fn dispatch(prog: &mut Program, cmd: Command, state: &Shared) {
                     Some(GuardTarget::Branch(dn)) => {
                         state.borrow_mut().commit_branch(dn);
                     }
-                    None => {}
+                    // Vanished never reaches GUARD_NAV: it is raised by
+                    // adopt_structure and drained by the RELOAD arm's own dialog
+                    // (Task 7), not by a blocked navigation.
+                    Some(GuardTarget::Vanished(_)) | None => {}
                 }
                 state.borrow_mut().guard_target = None;
             }

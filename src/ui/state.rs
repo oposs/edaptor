@@ -26,6 +26,10 @@ pub const ALLOC_PLACEHOLDER: &str = "‹allocating…›";
 pub enum GuardTarget {
     Leaf(String, Vec<String>),
     Branch(String),
+    /// The entry the form is editing is gone from the directory and the form has
+    /// unsaved edits. Carries the vanished DN. Drained by the RELOAD dispatch arm
+    /// (Task 7), which opens the Re-create / Discard / Keep editing dialog.
+    Vanished(String),
 }
 
 /// What a pane should do with its highlight after rebuilding its row source.
@@ -1442,14 +1446,44 @@ impl UiState {
         self.list_dirty = true;
     }
 
+    /// The entry `dn` is gone from the directory. Called ONLY on hard evidence —
+    /// absence from `structure` after a reload or rescan (see `adopt_structure`),
+    /// or a read returning no-such-object. Absence from a find's hits is NOT
+    /// evidence: a find excludes rows routinely.
+    ///
+    /// Clean form → clear it and say so. Dirty form → keep the edits and raise
+    /// `GuardTarget::Vanished`; unsaved work is never dropped without asking.
+    pub fn note_entry_vanished(&mut self, dn: &str) {
+        let dirty = self
+            .edit_form
+            .as_ref()
+            .map(|f| f.is_dirty())
+            .unwrap_or(false);
+        self.status = format!("{dn} is no longer in the directory.");
+        if dirty {
+            // current_leaf is intentionally left in place: Re-create (Task 7)
+            // needs the DN, and the operator is still "on" this entry until they
+            // answer the guard.
+            self.guard_target = Some(GuardTarget::Vanished(dn.to_string()));
+        } else {
+            self.edit_form = None;
+            self.current_leaf = None;
+            self.form_needs_render = true;
+        }
+        self.list_dirty = true;
+    }
+
     /// Install a freshly scanned structure, keeping the operator's place.
     ///
     /// The current container and entry are preserved **by DN** when they still
-    /// exist; a vanished container falls back to the base DN and a vanished entry to
-    /// no selection. Every projection derived from the old scan is dropped: the find
-    /// query, its live rows, and the reverse-label cache (which caches negatives, so
-    /// a stale miss would otherwise outlive the refresh). Pure — no I/O — so the
-    /// place-keeping rules are unit-testable.
+    /// exist; a vanished container falls back to the base DN. A vanished open
+    /// entry is reported via [`Self::note_entry_vanished`]: a clean form is
+    /// cleared with a notice, a dirty one keeps its edits and raises
+    /// `GuardTarget::Vanished` instead of losing them. Every projection derived
+    /// from the old scan is dropped: the find query, its live rows, and the
+    /// reverse-label cache (which caches negatives, so a stale miss would
+    /// otherwise outlive the refresh). Pure — no I/O — so the place-keeping
+    /// rules are unit-testable.
     pub fn adopt_structure(&mut self, structure: Structure) {
         self.structure = structure;
         if let Some(branch) = self.current_branch.clone() {
@@ -1459,7 +1493,10 @@ impl UiState {
         }
         if let Some(leaf) = self.current_leaf.clone() {
             if self.structure.get(&leaf).is_none() {
-                self.current_leaf = None;
+                // Was a silent null with a "form deliberately untouched" comment;
+                // superseded by the vanished-entry design — clean clears + says
+                // so, dirty raises the guard (drained by the RELOAD arm, Task 7).
+                self.note_entry_vanished(&leaf);
             }
         }
         self.search.clear();
@@ -1480,9 +1517,11 @@ impl UiState {
     /// Re-run the eager structure scan and adopt the result (Alt+R).
     ///
     /// Blocking, like the bootstrap scan it repeats: the TUI is unresponsive for its
-    /// duration, which is acceptable for an explicit, operator-initiated action. The
-    /// open edit form is deliberately left untouched, so unsaved work is never at
-    /// risk and no dirty-form guard is needed. On failure the previous structure is
+    /// duration, which is acceptable for an explicit, operator-initiated action. If
+    /// the open entry vanished, `adopt_structure` already reported it via
+    /// `note_entry_vanished` (clean form cleared, dirty form guarded) before this
+    /// method's own "Reloaded N entries." status would run — see below, that more
+    /// specific message is not clobbered. On failure the previous structure is
     /// kept and the error is surfaced in the status line *and* returned so the
     /// caller can put it in front of the operator — a failed reload must never look
     /// like a successful no-op one.
@@ -1507,8 +1546,18 @@ impl UiState {
                     &self.base_dn,
                     crate::workflows::labels::structure_inputs(nodes),
                 );
+                let had_leaf = self.current_leaf.is_some();
                 self.adopt_structure(structure);
-                self.status = format!("Reloaded {count} entries.");
+                // adopt_structure just told the operator their open entry vanished
+                // (clean: current_leaf nulled; dirty: guard_target raised) — that
+                // more specific message must survive, not get overwritten by the
+                // generic reload confirmation below.
+                let leaf_vanished = had_leaf
+                    && (self.current_leaf.is_none()
+                        || matches!(self.guard_target, Some(GuardTarget::Vanished(_))));
+                if !leaf_vanished {
+                    self.status = format!("Reloaded {count} entries.");
+                }
                 Ok(count)
             }
             Ok(Response::StructureError { msg, .. }) => {
@@ -4052,6 +4101,49 @@ mod write_routing_tests {
         assert!(st.tree_dirty);
     }
 
+    /// `note_entry_vanished`'s status message must survive `reload_structure`'s own
+    /// "Reloaded N entries." — a reload that just dropped the open entry told the
+    /// operator so; the generic reload confirmation must not clobber it.
+    #[test]
+    fn a_reload_that_drops_the_open_entry_keeps_the_vanished_message() {
+        let structure = Structure::build("dc=x", vec![si("dc=x", None), si("cn=b,dc=x", None)]);
+        let schema = SchemaModel::from_raw(&RawSubschema::default());
+        let mut st =
+            UiState::new_for_test(structure, schema, "dc=x".into(), Vec::new(), Vec::new());
+        st.current_leaf = Some("cn=b,dc=x".to_string());
+        let (worker, rx) = WorkerHandle::recording();
+        st.worker = Some(worker);
+
+        // The rescan's response omits cn=b — another client deleted it.
+        let responder = std::thread::spawn(move || {
+            let (req, reply) = rx.recv().expect("a LoadStructure request must be sent");
+            let Request::LoadStructure { id, .. } = req else {
+                panic!("expected Request::LoadStructure, got {req:?}");
+            };
+            let _ = reply.send(Response::StructureEntries {
+                id,
+                nodes: vec![crate::ldap::worker::StructureNodeRaw {
+                    dn: "dc=x".into(),
+                    cn: None,
+                    description: None,
+                    object_classes: vec![],
+                    attrs: BTreeMap::new(),
+                }],
+            });
+        });
+
+        let result = st.reload_structure();
+        responder.join().expect("responder thread must not panic");
+
+        assert_eq!(result, Ok(1));
+        assert_eq!(st.current_leaf, None);
+        assert!(
+            st.status.contains("no longer"),
+            "the vanished message survives the reload confirmation, got {:?}",
+            st.status
+        );
+    }
+
     /// A `StructureError` response (e.g. a size/time/admin-limit failure) must map
     /// to `Err` carrying the same human-readable message written to `status` — the
     /// caller (dispatch's RELOAD arm) needs that message to pop the error modal.
@@ -4159,6 +4251,92 @@ mod write_routing_tests {
         );
         st.current_branch = Some("ou=p,dc=x".to_string());
         st
+    }
+
+    /// A clean form whose entry disappeared on reload is cleared, and the operator
+    /// is told — driven through `adopt_structure`, the real path.
+    #[test]
+    fn a_reload_that_drops_a_clean_open_entry_clears_it_and_says_so() {
+        let mut st = st_with_rows(&["cn=a,ou=p,dc=x", "cn=b,ou=p,dc=x"]);
+        st.current_leaf = Some("cn=b,ou=p,dc=x".to_string());
+        // Rebuild the structure WITHOUT cn=b — another client deleted it.
+        let fresh = Structure::build(
+            "dc=x",
+            vec![
+                si("dc=x", None),
+                si("ou=p,dc=x", None),
+                si("cn=a,ou=p,dc=x", None),
+            ],
+        );
+        st.adopt_structure(fresh);
+        assert_eq!(st.current_leaf, None, "the gone entry is no longer current");
+        assert!(st.edit_form.is_none(), "a clean form is cleared");
+        assert!(
+            st.status.contains("no longer"),
+            "status reports the disappearance, got {:?}",
+            st.status
+        );
+        assert_eq!(st.guard_target, None, "a clean form asks nothing");
+    }
+
+    /// Unsaved work is never destroyed without asking: a reload that drops a DIRTY
+    /// open entry raises the guard instead of clearing, and keeps the edits.
+    #[test]
+    fn a_reload_that_drops_a_dirty_open_entry_asks_first() {
+        let mut st = st_with_rows(&["cn=a,ou=p,dc=x", "cn=b,ou=p,dc=x"]);
+        st.current_leaf = Some("cn=b,ou=p,dc=x".to_string());
+        st.edit_form = Some(dirty_form("cn=b,ou=p,dc=x"));
+        let fresh = Structure::build(
+            "dc=x",
+            vec![
+                si("dc=x", None),
+                si("ou=p,dc=x", None),
+                si("cn=a,ou=p,dc=x", None),
+            ],
+        );
+        st.adopt_structure(fresh);
+        assert_eq!(
+            st.guard_target,
+            Some(GuardTarget::Vanished("cn=b,ou=p,dc=x".to_string())),
+            "a dirty vanished entry raises the guard"
+        );
+        assert!(st.edit_form.is_some(), "the edits survive until answered");
+    }
+
+    /// A reload that KEEPS the open entry must not report it vanished — the common
+    /// case. Guards against firing on every reload.
+    #[test]
+    fn a_reload_that_keeps_the_entry_does_not_report_it_vanished() {
+        let mut st = st_with_rows(&["cn=a,ou=p,dc=x"]);
+        st.current_leaf = Some("cn=a,ou=p,dc=x".to_string());
+        st.status = "Reloaded 3 entries.".to_string();
+        let fresh = Structure::build(
+            "dc=x",
+            vec![
+                si("dc=x", None),
+                si("ou=p,dc=x", None),
+                si("cn=a,ou=p,dc=x", None),
+            ],
+        );
+        st.adopt_structure(fresh);
+        assert_eq!(st.current_leaf, Some("cn=a,ou=p,dc=x".to_string()));
+        assert_eq!(st.guard_target, None);
+        // note_entry_vanished never ran, so it did not overwrite the caller's status.
+        assert_eq!(st.status, "Reloaded 3 entries.");
+    }
+
+    /// The unit of the signal itself, called directly: dirty → guard, edits kept.
+    #[test]
+    fn note_entry_vanished_on_a_dirty_form_raises_the_guard() {
+        let mut st = st_with_rows(&["cn=a,ou=p,dc=x"]);
+        st.current_leaf = Some("cn=gone,ou=p,dc=x".to_string());
+        st.edit_form = Some(dirty_form("cn=gone,ou=p,dc=x"));
+        st.note_entry_vanished("cn=gone,ou=p,dc=x");
+        assert_eq!(
+            st.guard_target,
+            Some(GuardTarget::Vanished("cn=gone,ou=p,dc=x".to_string()))
+        );
+        assert!(st.edit_form.is_some());
     }
 
     /// The truth table from the design. `Pin` moves the highlight only; `Follow`
