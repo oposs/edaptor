@@ -56,6 +56,10 @@ All notable changes to eDAPtor are documented here. The format follows
 
 ### Fixed
 
+- **Pasting into a form field now works.** A terminal paste (middle-click,
+  Shift-Ctrl-V, or an X primary-selection paste) into a single-line field used to
+  do nothing; it now inserts at the cursor. (Fixed upstream in tvision-rs 0.13.1,
+  which edaptor now requires.)
 - **Form no longer scrambles or re-orders after a save.** Saving an entry used to
   re-render the form with field labels and values misaligned and drop the profile
   `show` ordering (the form only realigned when you navigated to another entry and
