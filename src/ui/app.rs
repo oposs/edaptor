@@ -85,13 +85,6 @@ pub(crate) fn apply_cancelled_guard_save(st: &mut crate::ui::state::UiState) {
     st.pending_nav = None;
 }
 
-/// Snap the tree highlight back to `current_branch` and clear the guard target.
-/// Called on guard "Stay" for a Branch target. Pure (no ctx); unit-tested.
-pub(crate) fn apply_branch_guard_stay(st: &mut crate::ui::state::UiState) {
-    st.set_tree_row = st.current_branch_row();
-    st.guard_target = None;
-}
-
 /// What the save flow should do for a given prepare result.
 pub(crate) enum SaveAction {
     Status(String),
@@ -242,7 +235,13 @@ pub(crate) fn dispatch(prog: &mut Program, cmd: Command, state: &Shared) {
                     // Cancelled confirm or no-op: revert highlight to the pinned form.
                     let mut st = state.borrow_mut();
                     match target {
-                        Some(GuardTarget::Branch(_)) => apply_branch_guard_stay(&mut st),
+                        // The highlight is re-resolved from `branch_highlight_plan` on
+                        // the next rebuild, which returns `Pin(current_branch)` while
+                        // the form is pinned.
+                        Some(GuardTarget::Branch(_)) => {
+                            st.tree_dirty = true;
+                            st.guard_target = None;
+                        }
                         _ => apply_cancelled_guard_save(&mut st),
                     }
                 } else if let Some(GuardTarget::Branch(dn)) = target {
@@ -268,7 +267,11 @@ pub(crate) fn dispatch(prog: &mut Program, cmd: Command, state: &Shared) {
                 // Keep editing the pinned form; snap the highlight back so it agrees.
                 let mut st = state.borrow_mut();
                 match target {
-                    Some(GuardTarget::Branch(_)) => apply_branch_guard_stay(&mut st),
+                    // The highlight is re-resolved from `branch_highlight_plan` on the
+                    // next rebuild, which returns `Pin(current_branch)` while pinned.
+                    Some(GuardTarget::Branch(_)) => {
+                        st.tree_dirty = true;
+                    }
                     _ => {
                         st.list_dirty = true;
                     }
@@ -1037,29 +1040,13 @@ mod tests {
     use crate::form::validate::ValidationError;
     use crate::workflows::save::PrepareSave;
 
-    #[test]
-    fn guard_stay_on_branch_target_reverts_tree() {
-        use crate::ldap::worker::RawSubschema;
-        use crate::schema::SchemaModel;
-        use crate::ui::state::{GuardTarget, UiState};
-        use crate::workflows::structure::Structure;
-        let structure = Structure::build("dc=x", vec![]);
-        let schema = SchemaModel::from_raw(&RawSubschema::default());
-        let mut st =
-            UiState::new_for_test(structure, schema, "dc=x".into(), Vec::new(), Vec::new());
-        st.branch_dns = vec!["dc=x".into(), "ou=p,dc=x".into(), "ou=q,dc=x".into()];
-        st.current_branch = Some("ou=p,dc=x".into());
-        st.guard_target = Some(GuardTarget::Branch("ou=q,dc=x".into()));
-
-        apply_branch_guard_stay(&mut st);
-
-        assert_eq!(
-            st.set_tree_row,
-            st.current_branch_row(),
-            "revert tree to current branch"
-        );
-        assert!(st.guard_target.is_none());
-    }
+    // The Branch arm of `apply_branch_guard_stay` was inlined into `dispatch`'s
+    // guard "Stay" and "Save (not submitted)" paths as `st.tree_dirty = true`
+    // (plus clearing `guard_target`) — the tree pane now re-resolves the
+    // highlight itself via `branch_highlight_plan` on the next rebuild, so there
+    // is no standalone pure function left to unit-test here. Coverage for
+    // "guard 'Stay' snaps the tree back by DN across a pending rebuild" lives in
+    // `panes::tree::tests::guard_stay_snaps_by_dn_across_a_pending_rebuild`.
 
     #[test]
     fn cancelled_guard_save_snaps_highlight_back() {

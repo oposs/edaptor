@@ -198,9 +198,6 @@ pub struct UiState {
     /// Pane → controller: the branch a selector pane wants shown (dn).
     /// Set when the tree highlight moves; consumed by [`reconcile_branch`].
     pub requested_branch: Option<String>,
-    /// Controller → tree pane: force the tree highlight to this row on the pane's
-    /// next event (used to snap back to `current_branch` after a guard "Stay").
-    pub set_tree_row: Option<i32>,
     /// Form pane → controller: the field index whose modal editor should open on
     /// the next `ACTIVATE`. Set by the pane, consumed by `app::dispatch`.
     pub activate_field: Option<usize>,
@@ -300,7 +297,6 @@ impl UiState {
             tree_dirty: false,
             requested_leaf: None,
             requested_branch: None,
-            set_tree_row: None,
             activate_field: None,
             staged_commit: None,
             chosen_profile: None,
@@ -1682,7 +1678,6 @@ pub(crate) fn bootstrap(config: Config, password: String) -> Result<UiState> {
         tree_dirty: false,
         requested_leaf: None,
         requested_branch: None,
-        set_tree_row: None,
         activate_field: None,
         staged_commit: None,
         chosen_profile: None,

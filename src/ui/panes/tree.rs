@@ -5,7 +5,7 @@ use tvision_rs::{
 };
 
 use crate::config::tree_label::{eval_tree_label, fit_label};
-use crate::ui::state::UiState;
+use crate::ui::state::{HighlightPlan, UiState};
 use crate::ui::{Shared, REFRESH};
 
 /// Build a tvision `Node` tree and a parallel DFS pre-order DN index from the
@@ -91,8 +91,10 @@ pub(crate) fn build_branch_nodes(
 /// Outline pane: pure selector — records `requested_branch` when the highlighted
 /// branch changes. Never mutates `current_branch` or `list_dirty` directly, and
 /// never broadcasts; the controller ([`UiState::reconcile_branch`]) decides
-/// whether to commit the navigation. Also honours `set_tree_row` to snap the
-/// outline highlight back when a guard returns "Stay". (Auto-seeds on first event;
+/// whether to commit the navigation. After every rebuild it resolves the
+/// controller's [`HighlightPlan`] (via `apply_highlight_plan`) and resyncs to it,
+/// so a guard "Stay" is just "mark tree_dirty" — no index-based snap-back
+/// survives a rebuild it was not computed against. (Auto-seeds on first event;
 /// call `ov_update` only after a tree mutation — none here.)
 pub(crate) struct TreePane {
     /// Owning container holding the `Outline` plus its vertical `ScrollBar` as
@@ -208,34 +210,54 @@ impl TreePane {
     /// Rebuild the outline's node set from the current structure.
     ///
     /// Called when `tree_dirty` is set — a branch appeared, disappeared, or changed
-    /// its rendered label. The highlight is restored **by DN**, never by row index:
-    /// a rebuild shifts every index below the change. `last_sel` is resynced so the
-    /// restored position is not reported back as a fresh user navigation.
+    /// its rendered label. Only replaces the node set and refreshes `branch_dns`;
+    /// the caller resolves the highlight afterward via [`Self::apply_highlight_plan`]
+    /// (by DN, never by row index — a rebuild shifts every index below the change).
     fn rebuild(&mut self, ctx: &mut Context) {
         let width = (self.group.state().get_extent().b.x).max(4) as usize;
-        let (root, dns, selected) = {
+        let (root, dns) = {
             let st = self.state.borrow();
-            let (root, dns) = build_branch_nodes(&st, width);
-            (root, dns, st.current_branch.clone())
+            build_branch_nodes(&st, width)
         };
-        let row = selected
-            .and_then(|dn| dns.iter().position(|d| d.eq_ignore_ascii_case(&dn)))
-            .map(|i| i as i32);
         self.state.borrow_mut().branch_dns = dns;
         if let Some(outline) = self.outline_mut() {
             outline.root = root;
             tv::widgets::outline::ov_update(outline, ctx);
         }
-        if let Some(row) = row {
+    }
+
+    /// Resolve the controller's [`HighlightPlan`] against the DFS index just
+    /// rebuilt and resync `last_sel` silently. The tree never produces `Follow`,
+    /// so this only ever moves the highlight — never the form.
+    fn apply_highlight_plan(&mut self, ctx: &mut Context) {
+        let (plan, dns) = {
+            let st = self.state.borrow();
+            (st.branch_highlight_plan(), st.branch_dns.clone())
+        };
+        let row = match plan {
+            HighlightPlan::Pin(dn) | HighlightPlan::Follow(dn) => dns
+                .iter()
+                .position(|d| d.eq_ignore_ascii_case(&dn))
+                .map(|i| i as i32)
+                .unwrap_or(-1),
+            HighlightPlan::Clear => -1,
+        };
+        if row >= 0 {
             if let Some(outline) = self.outline_mut() {
                 tv::widgets::outline::adjust_focus(outline, row, ctx);
             }
         }
-        // Resync to the row the outline actually holds now — the DN we restored, or
-        // whatever `ov_update` clamped to when that DN is gone from the rebuilt index.
-        // Without this, a vanished branch leaves `last_sel` stale and the next event
-        // reports a branch the operator never selected (pure-selector violation).
-        self.last_sel = self.outline_mut().map(|o| o.ov().foc).unwrap_or(-1);
+        // Finding 2: `ov_update` re-clamps `foc` internally, so the value we asked
+        // for may NOT be the value the widget now holds. Read the widget's ACTUAL
+        // value back — never assume `row` stuck — so `report_selection`'s next
+        // comparison is a guaranteed no-op for every arm, including a vanished
+        // branch (row -1) and the Clear case. This is the same invariant the leaf
+        // pane's `apply_highlight_plan` relies on: resync to the widget's truth,
+        // do not trust the value you pushed.
+        self.last_sel = match self.outline_mut().and_then(|o| o.value()) {
+            Some(FieldValue::Int(i)) => i,
+            _ => 0,
+        };
     }
 
     /// Test seam: directly set the outline's focused row (bypasses `set_value_ctx`
@@ -244,6 +266,15 @@ impl TreePane {
     pub(crate) fn select_row_for_test(&mut self, row: i32, _ctx: &mut Context) {
         if let Some(outline) = self.outline_mut() {
             outline.ov_mut().foc = row;
+        }
+    }
+
+    /// Test seam: read the outline's actual focused row.
+    #[cfg(test)]
+    pub(crate) fn selected_row_for_test(&mut self) -> i32 {
+        match self.outline_mut().and_then(|o| o.value()) {
+            Some(FieldValue::Int(i)) => i,
+            _ => -1,
         }
     }
 }
@@ -269,15 +300,9 @@ impl View for TreePane {
         if needs_rebuild {
             self.rebuild(ctx);
             self.state.borrow_mut().tree_dirty = false;
-        }
-
-        // Controller → pane: snap the selection back (guard "Stay") before reporting.
-        let snap = self.state.borrow_mut().set_tree_row.take();
-        if let Some(row) = snap {
-            if let Some(outline) = self.outline_mut() {
-                tv::widgets::outline::adjust_focus(outline, row, ctx);
-            }
-            self.last_sel = row;
+            // Resolve the highlight by DN against the index just rebuilt — a guard
+            // "Stay" is now just "mark tree_dirty", which lands here.
+            self.apply_highlight_plan(ctx);
         }
 
         self.group.handle_event(ev, ctx);
@@ -319,6 +344,19 @@ mod tests {
             object_classes: vec![],
             attrs: BTreeMap::new(),
         }
+    }
+
+    /// Drive one `REFRESH` broadcast through the pane.
+    fn refresh_tree(pane: &mut TreePane) {
+        let mut out = std::collections::VecDeque::new();
+        let mut timers = tv::timer::TimerQueue::new();
+        let mut deferred: Vec<tv::Deferred> = Vec::new();
+        let mut ctx = Context::new(&mut out, &mut timers, 0, &mut deferred);
+        let mut ev = Event::Broadcast {
+            command: REFRESH,
+            source: None,
+        };
+        pane.handle_event(&mut ev, &mut ctx);
     }
 
     /// Pure focus + overflow gate (mirrors the leaf pane's Task 7 test). The bar
@@ -673,6 +711,70 @@ mod tests {
             st.current_branch.as_deref(),
             Some("ou=c,dc=x"),
             "the pane must never mutate current_branch itself"
+        );
+    }
+
+    /// Follow-up #1: the guard "Stay" snap used to be an index resolved against
+    /// the PRE-rebuild `branch_dns`. With a rebuild pending, that index described
+    /// the old numbering. Resolving by DN after the rebuild removes the class.
+    /// SETUP NOTE: `ou=a,dc=x` must exist as a childless leaf in the initial
+    /// inputs. `Structure::upsert` links a node under its parent only when that
+    /// parent is already a known node, so upserting `cn=2,ou=a,dc=x` into a
+    /// structure that has never heard of `ou=a` leaves the child unlinked and
+    /// invisible — `branch_dns` would not change and this test would fail for a
+    /// reason that has nothing to do with the highlight. This mirrors the setup
+    /// of the existing `refresh_with_tree_dirty_rebuilds_and_keeps_the_selected_dn`.
+    #[test]
+    fn guard_stay_snaps_by_dn_across_a_pending_rebuild() {
+        let inputs = vec![
+            si("dc=x"),
+            si("ou=a,dc=x"),
+            si("ou=b,dc=x"),
+            si("cn=1,ou=b,dc=x"),
+        ];
+        let structure = Structure::build("dc=x", inputs);
+        let schema = SchemaModel::from_raw(&RawSubschema::default());
+        let mut st = UiState::new_for_test(
+            structure,
+            schema,
+            "dc=x".into(),
+            Vec::new(),
+            compile_tree_rules(&TreeConfig::default()),
+        );
+        let (root, dns) = build_branch_nodes(&st, 40);
+        st.branch_dns = dns; // ["dc=x", "ou=b,dc=x"]
+        st.current_branch = Some("ou=b,dc=x".into());
+        let shared: std::rc::Rc<std::cell::RefCell<UiState>> =
+            std::rc::Rc::new(std::cell::RefCell::new(st));
+        let mut pane = TreePane::new(Rect::new(0, 0, 30, 10), root, shared.clone());
+
+        // A child lands under the childless ou=a, promoting it leaf -> branch, so
+        // ou=b moves from row 1 to row 2 — and the rebuild has NOT happened yet
+        // when the guard resolves.
+        {
+            let mut st = shared.borrow_mut();
+            st.structure.upsert(si("cn=2,ou=a,dc=x"));
+            st.tree_dirty = true;
+        }
+        refresh_tree(&mut pane);
+
+        let st = shared.borrow();
+        assert_eq!(
+            st.branch_dns,
+            vec![
+                "dc=x".to_string(),
+                "ou=a,dc=x".to_string(),
+                "ou=b,dc=x".to_string()
+            ],
+        );
+        assert_eq!(
+            pane.selected_row_for_test(),
+            2,
+            "the highlight resolves to ou=b's NEW row, not its pre-rebuild index"
+        );
+        assert_eq!(
+            st.requested_branch, None,
+            "restoring the highlight must not look like a navigation"
         );
     }
 }
