@@ -5,7 +5,7 @@
 
 use tvision_rs::{
     delegate, ButtonFlags, ButtonRowAlign, Command, Context, Dialog, Event, FieldValue, InputLine,
-    Key, KeyEvent, KeyModifiers, Rect, StaticText, View, ViewId,
+    Key, KeyEvent, KeyModifiers, MessageBoxButtons, MessageBoxKind, Rect, StaticText, View, ViewId,
 };
 
 use crate::config::widget::WidgetKind;
@@ -226,7 +226,12 @@ impl View for MaskedInputLine {
             }
             Key::Backspace if !ctrl && !alt => {
                 self.mutate_real(|chars, caret, had_sel| {
-                    if !had_sel && caret > 0 {
+                    // `caret <= chars.len()` is a safety net: the bullet field and
+                    // `real` are kept 1:1, so the caret is always in range — but a
+                    // desync must never panic the whole app inside a password field
+                    // (it did, via an out-of-bounds `remove`, when a paste bypassed
+                    // the mirror). A no-op is the safe failure here.
+                    if !had_sel && caret > 0 && caret <= chars.len() {
                         chars.remove(caret - 1);
                     }
                 });
@@ -387,6 +392,45 @@ impl View for PasswordDialog {
         self.clear_field(self.new_id);
         self.clear_field(self.confirm_id);
         self.update_staged();
+    }
+
+    /// Gate the modal close on OK: refuse (and say why) unless a non-empty New
+    /// password matches Confirm. The framework's `validate_modal_close` calls this
+    /// before ending the modal — returning `false` keeps the dialog open with the
+    /// fields intact, and the queued error box is driven inline. Without this the
+    /// default OK button closed the dialog regardless of what the two fields held,
+    /// staging nothing on a mismatch ("happy either way").
+    fn valid(&mut self, cmd: Command, ctx: &mut Context) -> bool {
+        // Cancel / Esc can never be vetoed.
+        if cmd == Command::CANCEL {
+            return true;
+        }
+        // Only the OK close is gated; anything else defers to the group.
+        if cmd != Command::OK {
+            return self.dlg.valid(cmd, ctx);
+        }
+        let new = self.real_of(self.new_id);
+        let confirm = self.real_of(self.confirm_id);
+        let problem = if new.is_empty() {
+            Some("Enter a password.")
+        } else if new != confirm {
+            Some("The two passwords do not match.")
+        } else {
+            None
+        };
+        match problem {
+            Some(msg) => {
+                ctx.request_message_box(
+                    msg.to_string(),
+                    MessageBoxKind::Error,
+                    MessageBoxButtons::ok(),
+                    None,
+                    None,
+                );
+                false
+            }
+            None => true,
+        }
     }
 
     fn handle_event(&mut self, ev: &mut Event, ctx: &mut Context) {
@@ -719,6 +763,86 @@ mod tests {
             matches!(sh.borrow().staged_commit, Some(CommitOutcome::StageSecret { ref cleartext, .. }) if cleartext == "abc"),
             "re-match → Some(StageSecret)"
         );
+    }
+
+    /// OK must be VETOED when New and Confirm differ: `valid(OK)` returns false and
+    /// queues an error box. This is the "happy either way" fix — the default OK
+    /// button used to close the dialog regardless.
+    #[test]
+    fn ok_is_vetoed_on_mismatch_and_accepted_on_match() {
+        let sh = shared_with(true);
+        let schema = make_schema();
+        let ed = test_editor(vec!["userPassword".into()]);
+        let (mut view, _focus) = ed.into_view(&schema, sh.clone());
+        let (mut out, mut timers, mut deferred) = ctx_deps();
+
+        // Scope 1: an empty then a mismatched New/Confirm — both veto OK.
+        {
+            let mut ctx = Context::new(&mut out, &mut timers, 0, &mut deferred);
+            view.reset_current(&mut ctx);
+            let pd = view
+                .as_any_mut()
+                .and_then(|a| a.downcast_mut::<PasswordDialog>())
+                .expect("PasswordDialog");
+            let (new_id, confirm_id) = (pd.new_id, pd.confirm_id);
+            assert!(
+                !pd.valid(Command::OK, &mut ctx),
+                "OK must be vetoed while both fields are empty"
+            );
+            typ(cell(pd, new_id), "abc", &mut ctx);
+            typ(cell(pd, confirm_id), "abd", &mut ctx);
+            assert!(
+                !pd.valid(Command::OK, &mut ctx),
+                "OK must be vetoed when New != Confirm"
+            );
+        } // ctx dropped → free to inspect `deferred`.
+        assert!(
+            deferred
+                .iter()
+                .any(|d| matches!(d, Deferred::OpenMessageBox { .. })),
+            "a mismatch veto must queue an error message box"
+        );
+
+        // Scope 2: fix Confirm to match → OK is accepted; Cancel never vetoed.
+        {
+            let mut ctx = Context::new(&mut out, &mut timers, 0, &mut deferred);
+            let pd = view
+                .as_any_mut()
+                .and_then(|a| a.downcast_mut::<PasswordDialog>())
+                .expect("PasswordDialog");
+            let confirm_id = pd.confirm_id;
+            press(cell(pd, confirm_id), Key::Backspace, &mut ctx); // "abd" → "ab"
+            typ(cell(pd, confirm_id), "c", &mut ctx); // "ab" → "abc"
+            assert!(
+                pd.valid(Command::OK, &mut ctx),
+                "OK must be accepted once New == Confirm"
+            );
+            assert!(
+                pd.valid(Command::CANCEL, &mut ctx),
+                "Cancel is never vetoed"
+            );
+        }
+    }
+
+    /// A paste followed by Backspace must not panic even if the mirror ever
+    /// desynced: the masked paste keeps them 1:1, and the bounds guard is the
+    /// safety net for the out-of-range `remove` that crashed the deployed build.
+    #[test]
+    fn paste_then_backspace_does_not_panic() {
+        let (mut out, mut timers, mut deferred) = ctx_deps();
+        let mut ctx = Context::new(&mut out, &mut timers, 0, &mut deferred);
+        let mut m = MaskedInputLine::new(Rect::new(0, 0, 40, 1));
+        m.inner.state.state.selected = true;
+        let mut ev = Event::Paste("hunter2".to_string());
+        m.handle_event(&mut ev, &mut ctx);
+        for _ in 0..10 {
+            press(&mut m, Key::Backspace, &mut ctx); // more backspaces than chars
+        }
+        assert_eq!(
+            m.real, "",
+            "backspacing past the start clears without panic"
+        );
+        assert_eq!(m.inner.data.chars().count(), 0, "mirror stays in sync");
     }
 
     /// Verify that for_field extracts the primary attr from WidgetKind::Password.
