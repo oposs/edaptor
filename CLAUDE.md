@@ -2,15 +2,14 @@
 
 A schema-driven TUI LDAP editor (Rust + tvision-rs). Read this before touching the repo.
 
-## Start here: read the handover
+## Start here: read the controller handoff
 
-`docs/HANDOVER.md` carries the **current concern** into each session — what is
-in-flight, what to do next, and the load-bearing facts for it. Read it right after
-pulling. Right now it covers the `feat/shuttle-widget` buttons + resizable-dialog
-work (Tasks 1–4 committed; Task 4 review + manual resize check + Task 5 docs
-remain), driven with the `superpowers:subagent-driven-development` skill against the
-plan in `docs/superpowers/plans/2026-07-03-shuttle-buttons-resize.md` and the SDD
-ledger `.superpowers/sdd/progress.md`.
+`docs/controller-handoff.md` is the starter pack carried into each session — the
+mission, where things stand, what to do next, and the judgment that git can't
+reconstruct. Read it first, then `git log <handoff-commit>..HEAD` (the commit is
+named in its header) for everything that changed since. Write a fresh one via the
+`controller-handoff` skill before rolling over. (This supersedes the old
+`docs/HANDOVER.md` convention.)
 
 ## At the start of every session: pull first
 
