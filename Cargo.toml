@@ -22,8 +22,8 @@ chumsky = "0.12"
 oid = "0.3"
 unicode-width = "0.2"
 # tvision-rs is the TUI framework driving the edaptor browser (tree / leaf list / entry form).
-# 0.13.1: InputLine handles Event::Paste, so terminal pastes reach form fields.
-tvision-rs = "0.13.1"
+# 0.14.0: native InputLine masking + RevealEye/MaskedInput (replaces the local password mirror).
+tvision-rs = "0.14.0"
 
 [dev-dependencies]
 tempfile = "3"
