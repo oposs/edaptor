@@ -10,6 +10,13 @@ All notable changes to eDAPtor are documented here. The format follows
 
 ### Changed
 
+- The password editor's New/Confirm fields now use tvision-rs's native masked
+  field instead of eDAPtor's own hand-rolled masking. Behaviour for the operator
+  is the same or better: typing and pasting a password are robust (the fixes
+  below are now guaranteed by the framework, not a local mirror), and each field
+  gains a **reveal eye** in its last column — hold Space or press-and-hold the
+  eye with the mouse to peek at the password while editing.
+
 ### Fixed
 
 - Pasting into a multi-value field (e.g. `givenName`) now works. The inline

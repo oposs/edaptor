@@ -4,8 +4,9 @@
 //! keeps `staged_commit = StageSecret { attrs, cleartext }` live on match.
 
 use tvision_rs::{
-    delegate, ButtonFlags, ButtonRowAlign, Command, Context, Dialog, Event, FieldValue, InputLine,
-    Key, KeyEvent, KeyModifiers, MessageBoxButtons, MessageBoxKind, Rect, StaticText, View, ViewId,
+    delegate, ButtonFlags, ButtonRowAlign, Command, Context, Dialog, Event, FieldValue, Key,
+    KeyEvent, KeyModifiers, MaskedInput, MessageBoxButtons, MessageBoxKind, Rect, RevealEyeConfig,
+    StaticText, View, ViewId,
 };
 
 use crate::config::widget::WidgetKind;
@@ -80,188 +81,6 @@ impl FieldEditor for PasswordEditor {
 /// The character shown in place of every typed password character.
 const BULLET: char = '\u{2022}'; // •
 
-/// A real, focusable `InputLine` that masks its content: the inner field only ever
-/// holds bullets (so its caret/selection/scroll logic works normally and nothing
-/// secret is ever rendered), while `real` mirrors the actual characters 1:1 with
-/// those bullets. Editing keys are mirrored onto `real` from the inner field's
-/// pre-event caret/selection, then a bulletised equivalent is fed to the inner
-/// field. `select_all_on_focus` is off, so focusing the field never selects-all.
-pub(crate) struct MaskedInputLine {
-    inner: InputLine,
-    real: String,
-}
-
-impl MaskedInputLine {
-    fn new(bounds: Rect) -> Self {
-        // The inner field stores 3-byte bullets, so its byte cap admits ~limit/3
-        // characters; 8 KiB leaves headroom for any realistic passphrase. The
-        // accept-gate in `handle_event` keeps `real` in sync even at the cap.
-        let mut inner = InputLine::with_limit(bounds, 8192);
-        inner.set_select_all_on_focus(false);
-        MaskedInputLine {
-            inner,
-            real: String::new(),
-        }
-    }
-
-    /// Clear both the mirror and the visible bullets.
-    fn clear(&mut self) {
-        self.real.clear();
-        self.inner.set_value(FieldValue::Text(String::new()));
-    }
-
-    /// The caret position as a char index into `real` (== bullet index in `inner`).
-    fn caret_char(&self) -> usize {
-        self.inner.data[..self.inner.cur_pos as usize]
-            .chars()
-            .count()
-    }
-
-    /// The active selection as a `[start, end)` char range, or `None` when empty.
-    fn selection_chars(&self) -> Option<(usize, usize)> {
-        let (s, e) = (self.inner.sel_start, self.inner.sel_end);
-        if e > s {
-            let a = self.inner.data[..s as usize].chars().count();
-            let b = self.inner.data[..e as usize].chars().count();
-            Some((a, b))
-        } else {
-            None
-        }
-    }
-
-    /// Feed a synthetic single-key event to the inner (bullet) field.
-    fn feed_inner(&mut self, key: Key, ctx: &mut Context) {
-        let mut synth = Event::KeyDown(KeyEvent::from(key));
-        self.inner.handle_event(&mut synth, ctx);
-    }
-
-    /// Insert one real character `c` at the caret, mirroring it as a bullet in
-    /// the inner field. Any active selection is drained first, and the character
-    /// is only recorded in `real` when the inner field actually grew (so its byte
-    /// cap governs acceptance exactly as for typed input). Shared by the typed
-    /// `Key::Char` arm and the bracketed-paste arm.
-    fn insert_char_masked(&mut self, c: char, ctx: &mut Context) {
-        // Capture caret/selection BEFORE feeding the inner field (feeding moves
-        // the caret and clears the selection).
-        let sel = self.selection_chars();
-        let caret = sel.map(|(a, _)| a).unwrap_or_else(|| self.caret_char());
-        let sel_len = sel.map(|(a, b)| b - a).unwrap_or(0);
-        let pre = self.inner.data.chars().count();
-        self.feed_inner(Key::Char(BULLET), ctx);
-        // The inner field deletes any selection, then inserts the bullet UNLESS
-        // its byte cap rejects it. Mirror exactly that: always drain the
-        // selection, insert `c` only when the inner field grew.
-        let accepted = self.inner.data.chars().count() > pre - sel_len;
-        let mut chars: Vec<char> = self.real.chars().collect();
-        if let Some((a, b)) = sel {
-            chars.drain(a..b);
-        }
-        if accepted {
-            chars.insert(caret.min(chars.len()), c);
-        }
-        self.real = chars.into_iter().collect();
-    }
-
-    /// Apply a positional edit to `real`, mirroring the inner field's own
-    /// selection semantics: any active selection is drained first, then `op` runs
-    /// with the resulting caret char index and whether a selection was drained
-    /// (so a no-selection delete knows to remove the neighbouring char).
-    fn mutate_real(&mut self, op: impl FnOnce(&mut Vec<char>, usize, bool)) {
-        let sel = self.selection_chars();
-        let caret = sel.map(|(a, _)| a).unwrap_or_else(|| self.caret_char());
-        let mut chars: Vec<char> = self.real.chars().collect();
-        if let Some((a, b)) = sel {
-            chars.drain(a..b);
-        }
-        op(&mut chars, caret, sel.is_some());
-        self.real = chars.into_iter().collect();
-    }
-}
-
-#[delegate(to = inner)]
-impl View for MaskedInputLine {
-    fn as_any_mut(&mut self) -> Option<&mut dyn core::any::Any> {
-        Some(self)
-    }
-
-    fn handle_event(&mut self, ev: &mut Event, ctx: &mut Context) {
-        // Extract the key + modifiers up front (all Copy) so the `ev` borrow ends
-        // and the arms below can `ev.clear()` / forward `ev` freely.
-        let (key, ctrl, alt) = match ev {
-            Event::KeyDown(k) => (k.key, k.modifiers.ctrl, k.modifiers.alt),
-            // Swallow clipboard commands: cut/paste would desync the mirror and copy
-            // would leak the cleartext — a password field exposes none of them.
-            // (This is the INTERNAL clipboard, Ctrl+V / Shift+Insert. The terminal's
-            // bracketed paste arrives as `Event::Paste` and is masked below.)
-            Event::Command(cmd)
-                if matches!(*cmd, Command::CUT | Command::COPY | Command::PASTE) =>
-            {
-                ev.clear();
-                return;
-            }
-            // Bracketed paste: mask it like typed input instead of letting the
-            // cleartext reach the inner field (which would render it and leave
-            // `real` empty — visible password AND nothing staged). Control chars
-            // (a trailing newline, tabs) are dropped: a single-line password holds
-            // none.
-            Event::Paste(text) => {
-                let text = std::mem::take(text);
-                ev.clear();
-                for c in text.chars().filter(|c| !c.is_control()) {
-                    self.insert_char_masked(c, ctx);
-                }
-                return;
-            }
-            _ => {
-                self.inner.handle_event(ev, ctx);
-                return;
-            }
-        };
-        match key {
-            // Plain printable char (Shift is fine; Ctrl/Alt are not — the inner
-            // field rejects those, so mirroring them would inject a stray char).
-            Key::Char(c) if !ctrl && !alt => {
-                self.insert_char_masked(c, ctx);
-                ev.clear();
-            }
-            Key::Backspace if !ctrl && !alt => {
-                self.mutate_real(|chars, caret, had_sel| {
-                    // `caret <= chars.len()` is a safety net: the bullet field and
-                    // `real` are kept 1:1, so the caret is always in range — but a
-                    // desync must never panic the whole app inside a password field
-                    // (it did, via an out-of-bounds `remove`, when a paste bypassed
-                    // the mirror). A no-op is the safe failure here.
-                    if !had_sel && caret > 0 && caret <= chars.len() {
-                        chars.remove(caret - 1);
-                    }
-                });
-                self.feed_inner(Key::Backspace, ctx);
-                ev.clear();
-            }
-            Key::Delete if !ctrl && !alt => {
-                self.mutate_real(|chars, caret, had_sel| {
-                    if !had_sel && caret < chars.len() {
-                        chars.remove(caret);
-                    }
-                });
-                self.feed_inner(Key::Delete, ctx);
-                ev.clear();
-            }
-            // Never enter overwrite mode: the inner field would delete-then-insert,
-            // keeping the bullet count constant while `real` grows — a silent
-            // desync. Swallow Insert so the field stays insert-only.
-            Key::Insert => ev.clear(),
-            // Ctrl/Alt-modified edit keys (shortcuts, word-delete) would desync the
-            // mirror — swallow them rather than half-applying.
-            Key::Char(_) | Key::Backspace | Key::Delete => ev.clear(),
-            // Navigation / selection / Tab / Enter: operate on the bullet field
-            // (positions stay 1:1 with `real`); Tab & Enter fall through unhandled
-            // so the dialog can move focus / fire the default button.
-            _ => self.inner.handle_event(ev, ctx),
-        }
-    }
-}
-
 /// Build the TLS refusal dialog. Returned directly as a `Box<dyn View>`.
 fn refusal_dialog() -> (Box<dyn View>, ViewId) {
     let msg = "Changing a password requires an encrypted connection \
@@ -287,10 +106,10 @@ fn refusal_dialog() -> (Box<dyn View>, ViewId) {
     (Box::new(dlg), ids[0])
 }
 
-/// The masked New + Confirm password dialog. The two fields are real, focusable
-/// [`MaskedInputLine`]s, so Tab/caret/focus all work natively (no phantom
-/// select-all block, no invisible "active field" flag). Staging is recomputed
-/// from the fields' mirrors after every event.
+/// The masked New + Confirm password dialog. The two fields are native
+/// tvision-rs [`MaskedInput`]s (masked InputLine + reveal eye), so Tab/caret/
+/// focus/paste/clipboard all work natively — no local mirror. Staging is
+/// recomputed from the fields' real text after every event.
 pub(crate) struct PasswordDialog {
     dlg: Dialog,
     new_id: ViewId,
@@ -310,13 +129,23 @@ impl PasswordDialog {
             Rect::new(2, 1, 30, 2),
             "New password:".to_string(),
         )));
-        let new_id = dlg.insert_child(Box::new(MaskedInputLine::new(Rect::new(2, 2, 54, 3))));
+        let new_id = dlg.insert_child(Box::new(MaskedInput::new(
+            Rect::new(2, 2, 54, 3),
+            8192,
+            BULLET,
+            RevealEyeConfig::default(),
+        )));
 
         dlg.insert_child(Box::new(StaticText::new(
             Rect::new(2, 4, 30, 5),
             "Confirm password:".to_string(),
         )));
-        let confirm_id = dlg.insert_child(Box::new(MaskedInputLine::new(Rect::new(2, 5, 54, 6))));
+        let confirm_id = dlg.insert_child(Box::new(MaskedInput::new(
+            Rect::new(2, 5, 54, 6),
+            8192,
+            BULLET,
+            RevealEyeConfig::default(),
+        )));
 
         dlg.button_row(
             &[
@@ -343,24 +172,25 @@ impl PasswordDialog {
     }
 
     /// Borrow a child masked field by id (the shared downcast chain).
-    fn masked_mut(&mut self, id: ViewId) -> Option<&mut MaskedInputLine> {
+    fn masked_mut(&mut self, id: ViewId) -> Option<&mut MaskedInput> {
         self.dlg
             .child_mut(id)
             .and_then(|v| v.as_any_mut())
-            .and_then(|a| a.downcast_mut::<MaskedInputLine>())
+            .and_then(|a| a.downcast_mut::<MaskedInput>())
     }
 
     /// The cleartext currently held by a masked field.
     fn real_of(&mut self, id: ViewId) -> String {
-        self.masked_mut(id)
-            .map(|m| m.real.clone())
-            .unwrap_or_default()
+        match self.masked_mut(id).and_then(|m| m.value()) {
+            Some(FieldValue::Text(s)) => s,
+            _ => String::new(),
+        }
     }
 
     /// Clear a masked field's content.
     fn clear_field(&mut self, id: ViewId) {
         if let Some(m) = self.masked_mut(id) {
-            m.clear();
+            m.set_value(FieldValue::Text(String::new()));
         }
     }
 
@@ -452,7 +282,8 @@ impl View for PasswordDialog {
         }
         // Native routing: the dialog delivers the event to the focused masked
         // field (which masks its own edits), moves focus on Tab, and fires OK /
-        // Cancel. Afterwards, recompute the staged commit from the field mirrors.
+        // Cancel. Afterwards, recompute the staged commit from the fields' real
+        // text.
         self.dlg.handle_event(ev, ctx);
         self.update_staged();
     }
@@ -531,160 +362,21 @@ mod tests {
     }
 
     /// Borrow a dialog's masked field mutably (test-only downcast).
-    fn cell(pd: &mut PasswordDialog, id: ViewId) -> &mut MaskedInputLine {
+    fn cell(pd: &mut PasswordDialog, id: ViewId) -> &mut MaskedInput {
         pd.dlg
             .child_mut(id)
             .and_then(|v| v.as_any_mut())
-            .and_then(|a| a.downcast_mut::<MaskedInputLine>())
+            .and_then(|a| a.downcast_mut::<MaskedInput>())
             .expect("masked cell")
     }
 
-    /// Type a string into a masked cell (marking it selected so its inner
-    /// InputLine accepts keys, as a real focused child would).
-    fn typ(cell: &mut MaskedInputLine, s: &str, ctx: &mut Context) {
-        cell.inner.state.state.selected = true;
-        for c in s.chars() {
-            let mut ev = Event::KeyDown(KeyEvent::from(Key::Char(c)));
-            cell.handle_event(&mut ev, ctx);
-        }
-    }
-
-    fn press(cell: &mut MaskedInputLine, key: Key, ctx: &mut Context) {
-        cell.inner.state.state.selected = true;
-        let mut ev = Event::KeyDown(KeyEvent::from(key));
-        cell.handle_event(&mut ev, ctx);
-    }
-
-    /// A masked field mirrors typed chars 1:1 while only ever showing bullets, and
-    /// edits (backspace / mid-caret insert / delete) keep the mirror in sync.
-    #[test]
-    fn masked_field_mirrors_real_and_masks_display() {
-        let (mut out, mut timers, mut deferred) = ctx_deps();
-        let mut ctx = Context::new(&mut out, &mut timers, 0, &mut deferred);
-        let mut m = MaskedInputLine::new(Rect::new(0, 0, 40, 1));
-
-        typ(&mut m, "abc", &mut ctx);
-        assert_eq!(m.real, "abc");
-        assert_eq!(
-            m.inner.data, "\u{2022}\u{2022}\u{2022}",
-            "display is all bullets"
-        );
-
-        press(&mut m, Key::Backspace, &mut ctx);
-        assert_eq!(m.real, "ab");
-        assert_eq!(m.inner.data, "\u{2022}\u{2022}");
-
-        // Move caret home, insert 'X' at the front.
-        press(&mut m, Key::Home, &mut ctx);
-        typ(&mut m, "X", &mut ctx);
-        assert_eq!(
-            m.real, "Xab",
-            "mid-caret insert lands at the caret, not the end"
-        );
-
-        // Delete-forward at the front removes 'X'.
-        press(&mut m, Key::Home, &mut ctx);
-        press(&mut m, Key::Delete, &mut ctx);
-        assert_eq!(m.real, "ab");
-    }
-
-    /// A bracketed paste (Event::Paste) must be masked exactly like typed
-    /// characters: the cleartext mirrors into `real`, the display shows only
-    /// bullets, and the event is consumed. RED before the fix: the paste fell
-    /// through to the inner InputLine, which rendered the cleartext and left
-    /// `real` empty (so nothing was staged either).
-    #[test]
-    fn masked_field_masks_bracketed_paste() {
-        let (mut out, mut timers, mut deferred) = ctx_deps();
-        let mut ctx = Context::new(&mut out, &mut timers, 0, &mut deferred);
-        let mut m = MaskedInputLine::new(Rect::new(0, 0, 40, 1));
-        m.inner.state.state.selected = true;
-        let mut ev = Event::Paste("s3cr3t".to_string());
-        m.handle_event(&mut ev, &mut ctx);
-        assert!(ev.is_nothing(), "the paste event must be consumed");
-        assert_eq!(m.real, "s3cr3t", "paste mirrors the cleartext into `real`");
-        assert_eq!(m.inner.data.chars().count(), 6, "six bullets shown");
-        assert!(
-            m.inner.data.chars().all(|c| c == '\u{2022}'),
-            "the display is all bullets, never the pasted cleartext"
-        );
-    }
-
-    /// A pasted string with control characters (a password manager's trailing
-    /// newline, embedded tabs/CR) drops them — a single-line password field can
-    /// hold none of them, and forwarding them would desync the bullet mirror.
-    #[test]
-    fn masked_field_paste_strips_control_chars() {
-        let (mut out, mut timers, mut deferred) = ctx_deps();
-        let mut ctx = Context::new(&mut out, &mut timers, 0, &mut deferred);
-        let mut m = MaskedInputLine::new(Rect::new(0, 0, 40, 1));
-        m.inner.state.state.selected = true;
-        let mut ev = Event::Paste("ab\tcd\r\n".to_string());
-        m.handle_event(&mut ev, &mut ctx);
-        assert_eq!(
-            m.real, "abcd",
-            "control characters are stripped from the paste"
-        );
-        assert_eq!(
-            m.inner.data.chars().count(),
-            4,
-            "four bullets, mirror in sync"
-        );
-    }
-
-    /// Multibyte characters mirror correctly (bullet count == char count, no byte
-    /// desync).
-    #[test]
-    fn masked_field_handles_multibyte() {
-        let (mut out, mut timers, mut deferred) = ctx_deps();
-        let mut ctx = Context::new(&mut out, &mut timers, 0, &mut deferred);
-        let mut m = MaskedInputLine::new(Rect::new(0, 0, 40, 1));
-        typ(&mut m, "pä€", &mut ctx);
-        assert_eq!(m.real, "pä€");
-        assert_eq!(m.inner.data.chars().count(), 3);
-        assert!(m.inner.data.chars().all(|c| c == '\u{2022}'));
-        press(&mut m, Key::Backspace, &mut ctx);
-        assert_eq!(m.real, "pä");
-    }
-
-    /// A Ctrl/Alt-modified Char (a shortcut delivered as a Char event) must NOT be
-    /// mirrored into the password — the inner field rejects it, so mirroring would
-    /// inject a stray character the operator never typed.
-    #[test]
-    fn masked_field_ignores_modified_chars() {
-        let (mut out, mut timers, mut deferred) = ctx_deps();
-        let mut ctx = Context::new(&mut out, &mut timers, 0, &mut deferred);
-        let mut m = MaskedInputLine::new(Rect::new(0, 0, 40, 1));
-        typ(&mut m, "a", &mut ctx);
-        m.inner.state.state.selected = true;
-        let mut ev = Event::KeyDown(KeyEvent::new(
-            Key::Char('b'),
-            KeyModifiers {
-                ctrl: true,
-                ..KeyModifiers::default()
-            },
-        ));
-        m.handle_event(&mut ev, &mut ctx);
-        assert_eq!(
-            m.real, "a",
-            "ctrl-modified char must not enter the password"
-        );
-        assert_eq!(m.inner.data.chars().count(), 1, "bullets stay in sync");
-    }
-
-    /// The Insert key must not switch the field into overwrite mode — that would
-    /// keep the bullet count constant while `real` grows, desyncing the mirror.
-    #[test]
-    fn masked_field_insert_key_never_overwrites() {
-        let (mut out, mut timers, mut deferred) = ctx_deps();
-        let mut ctx = Context::new(&mut out, &mut timers, 0, &mut deferred);
-        let mut m = MaskedInputLine::new(Rect::new(0, 0, 40, 1));
-        typ(&mut m, "ab", &mut ctx);
-        press(&mut m, Key::Home, &mut ctx);
-        press(&mut m, Key::Insert, &mut ctx); // must be swallowed
-        typ(&mut m, "X", &mut ctx);
-        assert_eq!(m.real, "Xab", "Insert must not engage overwrite mode");
-        assert_eq!(m.inner.data.chars().count(), 3, "bullets track real 1:1");
+    /// Seed a masked field's real text directly. `MaskedInput`'s internals
+    /// (its inner InputLine + reveal eye) are private, so simulating keystrokes
+    /// isn't possible from outside the crate; `set_value` is the field's own
+    /// real API for writing its content, and is exactly what a dialog's
+    /// scatter pass would use.
+    fn set_text(cell: &mut MaskedInput, s: &str) {
+        cell.set_value(FieldValue::Text(s.to_string()));
     }
 
     /// `handle_event` maps Up/Down onto Tab / Shift+Tab so the arrows move between
@@ -730,15 +422,15 @@ mod tests {
         let (new_id, confirm_id) = (pd.new_id, pd.confirm_id);
 
         // New = "abc", Confirm still empty → mismatch → None.
-        typ(cell(pd, new_id), "abc", &mut ctx);
+        set_text(cell(pd, new_id), "abc");
         pd.update_staged();
         assert!(
             sh.borrow().staged_commit.is_none(),
-            "new typed but confirm empty → None"
+            "new set but confirm empty → None"
         );
 
         // Confirm = "abc" → match → StageSecret.
-        typ(cell(pd, confirm_id), "abc", &mut ctx);
+        set_text(cell(pd, confirm_id), "abc");
         pd.update_staged();
         match sh.borrow().staged_commit.clone() {
             Some(CommitOutcome::StageSecret { attrs, cleartext }) => {
@@ -748,16 +440,16 @@ mod tests {
             other => panic!("expected StageSecret on match, got {other:?}"),
         }
 
-        // Backspace confirm → "ab" ≠ "abc" → None.
-        press(cell(pd, confirm_id), Key::Backspace, &mut ctx);
+        // Shorten confirm → "ab" ≠ "abc" → None.
+        set_text(cell(pd, confirm_id), "ab");
         pd.update_staged();
         assert!(
             sh.borrow().staged_commit.is_none(),
             "mismatch (confirm != new) → None"
         );
 
-        // Re-type 'c' → match again.
-        typ(cell(pd, confirm_id), "c", &mut ctx);
+        // Re-set confirm → match again.
+        set_text(cell(pd, confirm_id), "abc");
         pd.update_staged();
         assert!(
             matches!(sh.borrow().staged_commit, Some(CommitOutcome::StageSecret { ref cleartext, .. }) if cleartext == "abc"),
@@ -789,8 +481,8 @@ mod tests {
                 !pd.valid(Command::OK, &mut ctx),
                 "OK must be vetoed while both fields are empty"
             );
-            typ(cell(pd, new_id), "abc", &mut ctx);
-            typ(cell(pd, confirm_id), "abd", &mut ctx);
+            set_text(cell(pd, new_id), "abc");
+            set_text(cell(pd, confirm_id), "abd");
             assert!(
                 !pd.valid(Command::OK, &mut ctx),
                 "OK must be vetoed when New != Confirm"
@@ -811,8 +503,7 @@ mod tests {
                 .and_then(|a| a.downcast_mut::<PasswordDialog>())
                 .expect("PasswordDialog");
             let confirm_id = pd.confirm_id;
-            press(cell(pd, confirm_id), Key::Backspace, &mut ctx); // "abd" → "ab"
-            typ(cell(pd, confirm_id), "c", &mut ctx); // "ab" → "abc"
+            set_text(cell(pd, confirm_id), "abc"); // "abd" → "abc", matches New
             assert!(
                 pd.valid(Command::OK, &mut ctx),
                 "OK must be accepted once New == Confirm"
@@ -822,27 +513,6 @@ mod tests {
                 "Cancel is never vetoed"
             );
         }
-    }
-
-    /// A paste followed by Backspace must not panic even if the mirror ever
-    /// desynced: the masked paste keeps them 1:1, and the bounds guard is the
-    /// safety net for the out-of-range `remove` that crashed the deployed build.
-    #[test]
-    fn paste_then_backspace_does_not_panic() {
-        let (mut out, mut timers, mut deferred) = ctx_deps();
-        let mut ctx = Context::new(&mut out, &mut timers, 0, &mut deferred);
-        let mut m = MaskedInputLine::new(Rect::new(0, 0, 40, 1));
-        m.inner.state.state.selected = true;
-        let mut ev = Event::Paste("hunter2".to_string());
-        m.handle_event(&mut ev, &mut ctx);
-        for _ in 0..10 {
-            press(&mut m, Key::Backspace, &mut ctx); // more backspaces than chars
-        }
-        assert_eq!(
-            m.real, "",
-            "backspacing past the start clears without panic"
-        );
-        assert_eq!(m.inner.data.chars().count(), 0, "mirror stays in sync");
     }
 
     /// Verify that for_field extracts the primary attr from WidgetKind::Password.
