@@ -12,6 +12,10 @@ All notable changes to eDAPtor are documented here. The format follows
 
 ### Fixed
 
+## 1.5.1 - 2026-07-24
+
+### Fixed
+
 - **The main window no longer sits one row too low with its bottom edge overlaid
   by the footer.** The window's bounds were built in screen-absolute coordinates
   but applied as desktop-local ones, shifting the whole window down a row — a
@@ -26,7 +30,6 @@ All notable changes to eDAPtor are documented here. The format follows
   first/last editable field now walks the viewport through that read-only
   head/tail one line at a time before focus moves on, and the reveal stays put
   instead of snapping back.
-
 ## 1.5.0 - 2026-07-24
 
 ### Changed
