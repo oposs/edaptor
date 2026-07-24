@@ -1309,11 +1309,23 @@ impl View for FormPane {
         // inline `ListValueView` gets first crack at every key so it can edit
         // in place; field navigation across a list boundary is driven SOLELY by
         // its `take_boundary_exit()` flag (the view always consumes Up/Down, so
-        // we never infer navigation from an unconsumed event). For Text and
-        // Launch fields, Up/Down move focus between fields as before.
+        // we never infer navigation from an unconsumed event). A focused
+        // `LaunchValueView` (read-only, modal-edited) is handled next: Up/Down/
+        // PageUp/PageDown SCROLL through the block one line/page at a time while
+        // it has hidden lines, and only move focus once its near edge is already
+        // visible (so a block taller than the viewport is fully reachable instead
+        // of jumping straight past it). Any other key on a Launch field requests
+        // modal activation, as before. For Text fields, Up/Down move focus
+        // between fields as before.
         let is_keydown = matches!(ev, Event::KeyDown(_));
+        // Bracketed paste is a focused edit too: a multi-line paste grows the
+        // block, so it must run the same snapshot-and-relayout path as a keystroke
+        // (it never signals a boundary exit — take_boundary_exit stays None).
+        let is_paste = matches!(ev, Event::Paste(_));
         let nav = matches!(ev, Event::KeyDown(k) if matches!(k.key, Key::Up | Key::Down));
-        if is_keydown && self.focused_is_list_view() {
+        let page_nav =
+            matches!(ev, Event::KeyDown(k) if matches!(k.key, Key::PageUp | Key::PageDown));
+        if (is_keydown || is_paste) && self.focused_is_list_view() {
             // The list view edits (or moves the caret / reorders). Snapshot its
             // line count first so we can detect a grow / shrink afterwards.
             let before = self.focused_list_line_count();
@@ -1326,6 +1338,40 @@ impl View for FormPane {
                 // The edit changed the block's line count: relayout so it grows /
                 // shrinks and the following blocks shift, then keep it visible.
                 self.relayout_after_list_edit(ctx);
+            }
+        } else if is_keydown && self.focused_is_launch_view() && (nav || page_nav) {
+            // Read-only block taller than the viewport: scroll through it (pure
+            // geometry, no per-line caret — the block is a single focus stop)
+            // before advancing focus to the prev/next field. `by` is one line
+            // for Up/Down, one viewport page for PageUp/PageDown.
+            let down =
+                matches!(ev, Event::KeyDown(k) if matches!(k.key, Key::Down | Key::PageDown));
+            let by = if page_nav {
+                self.scroll_mut()
+                    .map(|sg| sg.viewport_h())
+                    .unwrap_or(1)
+                    .max(1)
+            } else {
+                1
+            };
+            let focused_id = self.scroll_mut().and_then(|sg| sg.current());
+            let scrolled = focused_id
+                .and_then(|id| {
+                    self.scroll_mut()
+                        .map(|sg| sg.scroll_block_edge(id, down, by, ctx))
+                })
+                .unwrap_or(false);
+            if scrolled {
+                ev.clear();
+            } else if nav {
+                self.focus_field(if down { 1 } else { -1 }, ctx);
+                ev.clear();
+            } else {
+                // PageUp/PageDown with the block's near edge already visible:
+                // fall back to the existing page-by-viewport behaviour
+                // (ScrollGroup's own PageUp/PageDown handling), unchanged from
+                // before this fix.
+                self.group.handle_event(ev, ctx);
             }
         } else if nav {
             let down = matches!(ev, Event::KeyDown(k) if k.key == Key::Down);
@@ -2487,6 +2533,134 @@ mod tests {
         );
     }
 
+    #[test]
+    fn tall_launch_block_scrolls_line_by_line_without_jumping_fields() {
+        // A read-only Launch block (objectClass) taller than the viewport must
+        // scroll through its lines on Down before advancing focus to the next
+        // field. Before the fix, Down jumped straight to `focus_field`,
+        // stranding the block's lower lines below the frame.
+        let many: Vec<String> = (0..12).map(|i| format!("oc{i}")).collect();
+        let object_class = EditField {
+            label: "objectClass".into(),
+            must: true,
+            editable: false,
+            multi: true,
+            secret: false,
+            ordered: false,
+            orphaned: false,
+            kind: FieldKind::Text,
+            widget: WidgetSpec::ReadOnlyText,
+            widget_binding: None,
+            values: many.clone(),
+            baseline: many,
+        };
+        let (_shared, mut pane) = build_pane_with_form(vec![object_class, ef("cn", "z", true)]);
+        // Shrink the pane to a short viewport: rows 2..8 → a 6-row viewport, far
+        // shorter than the 12-line objectClass block.
+        <FormPane as View>::change_bounds(&mut pane, Rect::new(0, 0, 80, 8));
+
+        let mut out = VecDeque::new();
+        let mut timers = tv::timer::TimerQueue::new();
+        let mut deferred = Vec::new();
+        let mut tick = Event::Broadcast {
+            command: REFRESH,
+            source: None,
+        };
+        pane.handle_event(
+            &mut tick,
+            &mut headless_ctx(&mut out, &mut timers, &mut deferred),
+        );
+
+        // render() focuses the first focusable field: the objectClass Launch block.
+        assert!(
+            pane.focused_is_launch_view(),
+            "objectClass is the first (and focused) field"
+        );
+        let launch_id = pane.scroll_mut().and_then(|sg| sg.current()).unwrap();
+
+        // Press Down repeatedly: while the block still has hidden lines below,
+        // focus must STAY on it and the scroll top must advance by one line
+        // each time (viewport 6, block height 12 → top climbs 1..6).
+        for expected_top in 1..=6 {
+            let mut d = Event::KeyDown(tv::KeyEvent::from(tv::Key::Down));
+            pane.handle_event(
+                &mut d,
+                &mut headless_ctx(&mut out, &mut timers, &mut deferred),
+            );
+            let top = pane.scroll_mut().unwrap().top_for_test();
+            assert_eq!(top, expected_top, "Down scrolls one line at a time");
+            assert_eq!(
+                pane.scroll_mut().and_then(|sg| sg.current()),
+                Some(launch_id),
+                "focus stays on the launch field while it has hidden lines"
+            );
+        }
+
+        // The block's bottom edge (row 12) is now exactly at top(6)+viewport(6):
+        // fully visible. One more Down must advance focus to the next field.
+        let mut d = Event::KeyDown(tv::KeyEvent::from(tv::Key::Down));
+        pane.handle_event(
+            &mut d,
+            &mut headless_ctx(&mut out, &mut timers, &mut deferred),
+        );
+        assert_eq!(
+            pane.focused_field_idx(),
+            Some(1),
+            "Down at the block's edge advances focus to the next field"
+        );
+    }
+
+    #[test]
+    fn short_launch_block_advances_focus_immediately() {
+        // A Launch block that already fits the viewport must behave exactly as
+        // before this fix: Down moves focus to the next field on the very
+        // first press, with no scrolling.
+        let object_class = EditField {
+            label: "objectClass".into(),
+            must: true,
+            editable: false,
+            multi: true,
+            secret: false,
+            ordered: false,
+            orphaned: false,
+            kind: FieldKind::Text,
+            widget: WidgetSpec::ReadOnlyText,
+            widget_binding: None,
+            values: vec!["top".into(), "person".into()],
+            baseline: vec!["top".into(), "person".into()],
+        };
+        let (_shared, mut pane) = build_pane_with_form(vec![object_class, ef("cn", "z", true)]);
+        let mut out = VecDeque::new();
+        let mut timers = tv::timer::TimerQueue::new();
+        let mut deferred = Vec::new();
+        let mut tick = Event::Broadcast {
+            command: REFRESH,
+            source: None,
+        };
+        pane.handle_event(
+            &mut tick,
+            &mut headless_ctx(&mut out, &mut timers, &mut deferred),
+        );
+        assert!(pane.focused_is_launch_view());
+        let top_before = pane.scroll_mut().unwrap().top_for_test();
+
+        let mut d = Event::KeyDown(tv::KeyEvent::from(tv::Key::Down));
+        pane.handle_event(
+            &mut d,
+            &mut headless_ctx(&mut out, &mut timers, &mut deferred),
+        );
+        assert_eq!(
+            pane.focused_field_idx(),
+            Some(1),
+            "Down advances focus immediately (block already fits the viewport)"
+        );
+        assert_eq!(
+            pane.scroll_mut().unwrap().top_for_test(),
+            top_before,
+            "no scroll needed for a block that already fits"
+        );
+    }
+
     /// Build a plain multi-value (unordered `List`) field with the given values.
     fn multi_list(label: &str, values: &[&str]) -> EditField {
         EditField {
@@ -2554,6 +2728,71 @@ mod tests {
             cn_top_after,
             cn_top_before + 1,
             "the following field's block moved down by one row"
+        );
+    }
+
+    #[test]
+    fn multiline_paste_into_list_field_grows_block_and_syncs_values() {
+        // A bracketed paste of a newline-separated string into a focused inline List
+        // field must (a) insert one value per line via the model, (b) relayout so the
+        // block grows and the following field shifts down (the paste is not a keydown,
+        // so this proves Event::Paste runs the same grow path), and (c) flow through
+        // sync_into_form into edit_form.fields[i].values, marking the form dirty.
+        let (shared, mut pane) =
+            build_pane_with_form(vec![multi_list("mail", &[]), ef("cn", "z", true)]);
+        let mut out = VecDeque::new();
+        let mut timers = tv::timer::TimerQueue::new();
+        let mut deferred = Vec::new();
+        let mut ctx = headless_ctx(&mut out, &mut timers, &mut deferred);
+        let mut ev = Event::Broadcast {
+            command: REFRESH,
+            source: None,
+        };
+        pane.handle_event(&mut ev, &mut ctx); // render + focus the (empty) List field
+
+        assert_eq!(pane.kinds[0], ValueKind::List { ordered: false });
+        assert_eq!(pane.focused_field_idx(), Some(0));
+        // Empty list block is one placeholder row; cn is one row below it.
+        assert_eq!(pane.block_heights, vec![1, 1]);
+        let cn_vid = pane.value_ids[1];
+        let cn_top_before = pane
+            .scroll_mut()
+            .and_then(|sg| sg.logical_of(cn_vid))
+            .map(|r| r.a.y)
+            .unwrap();
+
+        // Paste three newline-separated addresses (CRLF mixed in to prove normalisation).
+        let mut paste = Event::Paste("a@x\r\nb@x\nc@x".to_string());
+        pane.handle_event(&mut paste, &mut ctx);
+        assert!(paste.is_nothing(), "the paste event must be consumed");
+
+        // (b) The block grew to three rows and the following field shifted down by two.
+        assert_eq!(
+            pane.block_heights[0], 3,
+            "the List block grew to three rows after the multi-line paste"
+        );
+        let cn_top_after = pane
+            .scroll_mut()
+            .and_then(|sg| sg.logical_of(cn_vid))
+            .map(|r| r.a.y)
+            .unwrap();
+        assert_eq!(
+            cn_top_after,
+            cn_top_before + 2,
+            "the following field's block moved down by two rows"
+        );
+
+        // (a) + (c) Values landed as one per line and the form is dirty.
+        let st = shared.borrow();
+        let form = st.edit_form.as_ref().unwrap();
+        assert_eq!(
+            form.fields[0].values,
+            vec!["a@x".to_string(), "b@x".to_string(), "c@x".to_string()],
+            "each pasted line becomes a separate value"
+        );
+        assert!(
+            form.is_dirty(),
+            "a paste that adds values must mark the form dirty"
         );
     }
 

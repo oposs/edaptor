@@ -83,6 +83,27 @@ pub(crate) fn render_node_label(
     fallback.to_string()
 }
 
+/// Prefix marking a sub-container row in the entry list (panel 2), so it reads
+/// visually distinct from a plain leaf entry — the `‹self›` row already has its
+/// own convention, this is the sibling convention for a CHILD that is itself a
+/// container (e.g. a sub-OU).
+pub(crate) const CONTAINER_ROW_MARKER: &str = "▸ ";
+
+/// Render one child node's row: the profile label rules (falling back to the
+/// structural label), with the sub-container marker prepended when the child is
+/// itself a container (see [`crate::workflows::structure::StructureNode::is_container`]).
+fn render_child_row(
+    rules: &[LabelRule],
+    node: &crate::workflows::structure::StructureNode,
+) -> String {
+    let label = render_node_label(rules, &node.object_classes, &node.attrs, &node.label);
+    if node.is_container() {
+        format!("{CONTAINER_ROW_MARKER}{label}")
+    } else {
+        label
+    }
+}
+
 pub(crate) fn compute_rows(
     structure: &Structure,
     branch: &str,
@@ -95,7 +116,7 @@ pub(crate) fn compute_rows(
     // not just the structural cn. The ‹self› row is filtered too, so a query that
     // matches nothing leaves ZERO rows: the entries list is then genuinely empty
     // and its find mode renders the "No match: <query>" placeholder. Get every
-    // leaf (empty query) and filter here.
+    // direct child — sub-containers AND leaves — (empty query) and filter here.
     let q = search.to_lowercase();
     if let Some(node) = structure.get(branch) {
         let self_label = format!("‹self› {}", node.label);
@@ -103,10 +124,10 @@ pub(crate) fn compute_rows(
             rows.push((self_label, branch.to_string()));
         }
     }
-    for leaf in structure.filter_leaves(branch, "") {
-        let label = render_node_label(rules, &leaf.object_classes, &leaf.attrs, &leaf.label);
+    for child in structure.children_of(branch) {
+        let label = render_child_row(rules, child);
         if q.is_empty() || label.to_lowercase().contains(&q) {
-            rows.push((label, leaf.dn.clone()));
+            rows.push((label, child.dn.clone()));
         }
     }
     rows
@@ -116,8 +137,11 @@ pub(crate) fn compute_rows(
 /// as [`compute_rows`] does) followed by the given `dns` rendered through the label
 /// rules and sorted by label.
 ///
-/// DNs the model does not know, and DNs that are branches (pane 2 lists leaves),
-/// are skipped — a one-level search returns containers too.
+/// DNs the model does not know are skipped (unknown to the local structure —
+/// there is nothing to render). DNs that are themselves containers are NOT
+/// skipped: a one-level search returns sub-containers alongside leaves, exactly
+/// like the static `compute_rows` listing, marked with the same
+/// [`CONTAINER_ROW_MARKER`] prefix.
 pub(crate) fn compute_rows_for_dns(
     structure: &Structure,
     branch: &str,
@@ -136,15 +160,18 @@ pub(crate) fn compute_rows_for_dns(
     let mut hits: Vec<(String, String)> = dns
         .iter()
         .filter_map(|dn| structure.get(dn))
-        .filter(|n| !n.is_branch())
-        .map(|n| {
-            (
-                render_node_label(rules, &n.object_classes, &n.attrs, &n.label),
-                n.dn.clone(),
-            )
-        })
+        .map(|n| (render_child_row(rules, n), n.dn.clone()))
         .collect();
-    hits.sort_by_key(|a| a.0.to_lowercase());
+    // Sort by the underlying label, not the displayed string: a container
+    // row's `CONTAINER_ROW_MARKER` (▸) prefix would otherwise sort it after
+    // every plain leaf label (U+25B8 is far above any ASCII letter), clumping
+    // all container hits at the end instead of interleaving them in
+    // directory order like the static `compute_rows` listing does.
+    hits.sort_by_key(|a| {
+        a.0.strip_prefix(CONTAINER_ROW_MARKER)
+            .unwrap_or(&a.0)
+            .to_lowercase()
+    });
     rows.extend(hits);
     rows
 }
@@ -383,15 +410,121 @@ mod tests {
     }
 
     #[test]
-    fn compute_rows_for_dns_skips_branches_and_unknown_dns() {
+    fn compute_rows_for_dns_includes_containers_and_skips_unknown_dns() {
         let s = structure();
         let dns = vec![
-            "ou=users,dc=example,dc=org".to_string(), // a branch: pane 2 shows leaves
-            "uid=ghost,ou=users,dc=example,dc=org".to_string(), // not in the model
+            "ou=users,dc=example,dc=org".to_string(), // a container: now included, marked
+            "uid=ghost,ou=users,dc=example,dc=org".to_string(), // not in the model: skipped
         ];
         let rows = compute_rows_for_dns(&s, "dc=example,dc=org", "", &[], &dns);
-        // Only the ‹self› row for the container remains.
+        // ‹self› row + the container hit (the unknown DN is skipped).
+        assert_eq!(rows.len(), 2, "got {rows:?}");
+        assert!(rows[1].0.starts_with(CONTAINER_ROW_MARKER));
+        assert_eq!(rows[1].1, "ou=users,dc=example,dc=org");
+    }
+
+    /// A container that has NO children of its own (a childless sub-OU) is still
+    /// included in `children_of` and marked — this is what makes bug (b) (a
+    /// sub-OU never showing up under its parent) visible in pane 2.
+    #[test]
+    fn compute_rows_includes_a_childless_sub_container_marked() {
+        let s = Structure::build(
+            "dc=example,dc=org",
+            vec![
+                input("dc=example,dc=org", &[]),
+                input(
+                    "ou=users,dc=example,dc=org",
+                    &[("objectClass", "organizationalUnit")],
+                ),
+                input(
+                    "uid=jane,ou=users,dc=example,dc=org",
+                    &[("cn", "Jane"), ("objectClass", "inetOrgPerson")],
+                ),
+                input(
+                    "ou=contractors,ou=users,dc=example,dc=org",
+                    &[("objectClass", "organizationalUnit")],
+                ),
+            ],
+        );
+        let rows = compute_rows(&s, "ou=users,dc=example,dc=org", "", &[]);
+        assert_eq!(
+            rows.len(),
+            3,
+            "‹self› + leaf + childless sub-container: {rows:?}"
+        );
+        assert_eq!(rows[0].0, "‹self› ou=users");
+        assert_eq!(
+            rows[1],
+            (
+                "Jane".to_string(),
+                "uid=jane,ou=users,dc=example,dc=org".to_string()
+            ),
+            "the leaf carries no marker"
+        );
+        assert_eq!(
+            rows[2],
+            (
+                format!("{CONTAINER_ROW_MARKER}ou=contractors"),
+                "ou=contractors,ou=users,dc=example,dc=org".to_string()
+            ),
+            "the childless sub-OU is included and marked as a container"
+        );
+    }
+
+    /// The live-search path (`compute_rows_for_dns`) marks container hits the
+    /// same way the static path does.
+    /// Live-search hits must sort in directory order (by the underlying
+    /// label), not by the displayed string with its `▸ ` container prefix —
+    /// otherwise every container hit clumps after all leaf hits (U+25B8 sorts
+    /// above every ASCII letter), unlike the static `compute_rows` listing
+    /// which interleaves containers and leaves in child order.
+    #[test]
+    fn compute_rows_for_dns_sorts_container_hits_by_label_not_prefix() {
+        let s = Structure::build(
+            "dc=example,dc=org",
+            vec![
+                input("dc=example,dc=org", &[]),
+                input(
+                    "cn=bob,dc=example,dc=org",
+                    &[("cn", "Bob"), ("objectClass", "inetOrgPerson")],
+                ),
+                input(
+                    "ou=ackerman,dc=example,dc=org",
+                    &[("cn", "Ackerman"), ("objectClass", "organizationalUnit")],
+                ),
+            ],
+        );
+        let dns = vec![
+            "cn=bob,dc=example,dc=org".to_string(),
+            "ou=ackerman,dc=example,dc=org".to_string(),
+        ];
+        let rows = compute_rows_for_dns(&s, "dc=example,dc=org", "", &[], &dns);
+        // ‹self›, then Ackerman (the container hit) before Bob (the leaf hit) —
+        // directory/alphabetical order, not "leaves first, containers last".
+        assert_eq!(rows.len(), 3, "got {rows:?}");
+        assert_eq!(rows[1].1, "ou=ackerman,dc=example,dc=org");
+        assert_eq!(rows[2].1, "cn=bob,dc=example,dc=org");
+    }
+
+    #[test]
+    fn compute_rows_for_dns_marks_a_childless_sub_container_hit() {
+        let s = Structure::build(
+            "dc=example,dc=org",
+            vec![
+                input("dc=example,dc=org", &[]),
+                input(
+                    "ou=users,dc=example,dc=org",
+                    &[("objectClass", "organizationalUnit")],
+                ),
+                input(
+                    "ou=contractors,ou=users,dc=example,dc=org",
+                    &[("objectClass", "organizationalUnit")],
+                ),
+            ],
+        );
+        let dns = vec!["ou=contractors,ou=users,dc=example,dc=org".to_string()];
+        let rows = compute_rows_for_dns(&s, "ou=users,dc=example,dc=org", "contractors", &[], &dns);
         assert_eq!(rows.len(), 1);
-        assert!(rows[0].0.starts_with("‹self›"));
+        assert_eq!(rows[0].0, format!("{CONTAINER_ROW_MARKER}ou=contractors"));
     }
 }

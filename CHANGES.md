@@ -10,7 +10,49 @@ All notable changes to eDAPtor are documented here. The format follows
 
 ### Changed
 
+- The password editor's New/Confirm fields now use tvision-rs's native masked
+  field instead of eDAPtor's own hand-rolled masking. Behaviour for the operator
+  is the same or better: typing and pasting a password are robust (the fixes
+  below are now guaranteed by the framework, not a local mirror), and each field
+  gains a **reveal eye** in its last column — hold Space or press-and-hold the
+  eye with the mouse to peek at the password while editing.
+- **The DIT browsing model now classifies containers by `objectClass`, not by
+  whether they happen to have children.** Previously a container was defined as
+  "an entry with ≥1 child", so an *empty* `organizationalUnit` vanished from the
+  **DIT** tree (it showed up misfiled in the **Entries** pane instead), and a
+  sub-OU that itself had children never appeared under its parent in the
+  **Entries** pane (the one-level find skipped it too). eDAPtor now recognizes
+  `organizationalUnit`, `organization`, `dcObject`, `domain` and `container`
+  (case-insensitive) as containers regardless of child count, in addition to
+  "has children". The **DIT** tree lists every container, including empty ones;
+  the **Entries** pane lists all direct children — sub-containers alongside leaf
+  entries — with sub-containers marked with a `▸ ` prefix so they read distinct
+  from plain entries. Selecting a sub-container row opens its own entry in the
+  form for editing, exactly like the existing `‹self›` row.
+
 ### Fixed
+
+- Pasting into a multi-value field (e.g. `givenName`) now works. The inline
+  multi-value editor is eDAPtor's own view rather than a plain input line, and it
+  was silently dropping the terminal's bracketed-paste event; it now inserts the
+  pasted text at the cursor, with each pasted line starting a new value.
+- **Security:** pasting into a password field no longer shows the pasted text in
+  the clear. The masked field forwarded the terminal's bracketed paste straight
+  to its inner input, which rendered the cleartext (and, worse, staged nothing
+  because the masked mirror was never updated). Paste is now masked exactly like
+  typed input — bullets on screen, the real value mirrored for staging — and
+  control characters (a trailing newline, tabs) are stripped.
+- The Set-password dialog now **verifies that the two fields match** before
+  accepting OK. Previously OK always closed the dialog, silently staging nothing
+  when New and Confirm differed (or were empty); it now refuses to close and
+  shows "The two passwords do not match." / "Enter a password." until they agree.
+- Fixed a crash (`removal index … should be < len …`) when editing a password
+  field whose masked mirror had desynced (triggered by the paste bug above); the
+  backspace path is now bounds-safe as a belt-and-braces guard.
+- Read-only multi-value fields edited via the modal picker (`objectClass`,
+  membership, choice, password, …) now **scroll line-by-line** when their value
+  block is taller than the form's viewport, instead of jumping straight to the
+  next field and leaving the block's lower lines unreachable below the frame.
 
 ## 1.3.0 - 2026-07-23
 

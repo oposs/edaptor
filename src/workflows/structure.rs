@@ -1,9 +1,13 @@
 //! Pure, tty-free model of the eagerly-loaded DIT structure.
 //!
 //! Built once from the flat paged scan, it answers — without further queries —
-//! which entries are branches (have children), the leaves directly under a branch,
-//! incremental-search filtering of those leaves, and the local reflow when an entry
-//! gains its first child (promote) or loses its last (demote).
+//! which entries are **containers** (either classified as such by `objectClass`,
+//! e.g. `organizationalUnit`, or simply because they have children), the direct
+//! children of a container (both sub-containers and leaf entries) for the entry
+//! list, incremental-search filtering, and the local reflow when an entry gains
+//! its first child (promote) or loses its last (demote) — a signal the tree
+//! pane still needs even though a classified container no longer disappears
+//! from the tree when it loses its last child.
 
 use std::collections::BTreeMap;
 
@@ -37,10 +41,44 @@ pub struct StructureNode {
     pub children: Vec<String>,
 }
 
+/// Well-known objectClasses that mark an entry as a container even with zero
+/// children (an empty `organizationalUnit` must still show up in the tree, not
+/// vanish into the leaf list). Hardcoded for now; a future config layer could
+/// let a deployment extend this for a custom schema (e.g. a proprietary
+/// "department" auxiliary class).
+const CONTAINER_OBJECT_CLASSES: &[&str] = &[
+    "organizationalUnit",
+    "organization",
+    "dcObject",
+    "domain",
+    "container",
+];
+
 impl StructureNode {
     /// A node is a branch iff it has at least one child.
+    ///
+    /// This is purely a child-count predicate — it is what the promote/demote
+    /// reflow in [`Structure::upsert`]/[`Structure::remove`] cares about ("did
+    /// this node just gain its first child, or lose its last") and must stay
+    /// child-count-only for that to work. Use [`Self::is_container`] for "is
+    /// this a container" (tree membership, leaf-list exclusion) — a container by
+    /// objectClass with zero children is a branch=false but container=true node.
     pub fn is_branch(&self) -> bool {
         !self.children.is_empty()
+    }
+
+    /// A node is a **container** — shown in the DIT tree (panel 1) and excluded
+    /// from the plain leaf listing — iff it has ≥1 child (whatever its class) OR
+    /// its `objectClass` matches one of [`CONTAINER_OBJECT_CLASSES`]
+    /// case-insensitively. The objectClass check is what makes an *empty* OU
+    /// still show up in the tree instead of masquerading as a leaf entry.
+    pub fn is_container(&self) -> bool {
+        self.is_branch()
+            || self.object_classes.iter().any(|oc| {
+                CONTAINER_OBJECT_CLASSES
+                    .iter()
+                    .any(|c| oc.eq_ignore_ascii_case(c))
+            })
     }
 }
 
@@ -131,18 +169,22 @@ impl Structure {
         self.nodes.get(dn)
     }
 
-    /// All branch DNs (have ≥1 child); the root is included if it is a branch.
+    /// All container DNs (see [`StructureNode::is_container`]); the root is
+    /// included if it is one. These are the DNs the DIT tree (panel 1) shows —
+    /// an empty `organizationalUnit` is included even though it has no children.
     pub fn branch_dns(&self) -> Vec<String> {
         self.nodes
             .values()
-            .filter(|n| n.is_branch())
+            .filter(|n| n.is_container())
             .map(|n| n.dn.clone())
             .collect()
     }
 
-    /// The leaf children (no children of their own) directly under `branch_dn`,
-    /// in input order.
-    pub fn leaves_of(&self, branch_dn: &str) -> Vec<&StructureNode> {
+    /// All direct children of `branch_dn` — both sub-containers and leaf
+    /// entries — in input order. This is the panel-2 (entry list) row source:
+    /// the operator sees everything directly under the selected container, not
+    /// just its leaves.
+    pub fn children_of(&self, branch_dn: &str) -> Vec<&StructureNode> {
         let Some(branch) = self.nodes.get(branch_dn) else {
             return Vec::new();
         };
@@ -150,7 +192,17 @@ impl Structure {
             .children
             .iter()
             .filter_map(|c| self.nodes.get(c))
-            .filter(|c| !c.is_branch())
+            .collect()
+    }
+
+    /// The leaf children (not containers — see [`StructureNode::is_container`])
+    /// directly under `branch_dn`, in input order. Kept for consumers that
+    /// genuinely want leaves only; panel 2 uses [`Self::children_of`] instead so
+    /// sub-containers are shown too.
+    pub fn leaves_of(&self, branch_dn: &str) -> Vec<&StructureNode> {
+        self.children_of(branch_dn)
+            .into_iter()
+            .filter(|c| !c.is_container())
             .collect()
     }
 
@@ -173,9 +225,27 @@ impl Structure {
     /// entry whose parent lies outside the loaded base is inserted but stays
     /// unlinked — hence invisible — exactly as [`Structure::build`] treats it.
     ///
-    /// Returns `true` when the **tree pane** must rebuild: either the parent flipped
-    /// leaf→branch, or an existing branch's attributes changed (the tree renders
-    /// branch labels from `attrs`).
+    /// Returns `true` when the **tree pane** must rebuild: a container
+    /// appeared or disappeared, or an in-tree (container) node's label attrs
+    /// changed.
+    ///
+    /// Tree membership is [`StructureNode::is_container`] (has-children OR a
+    /// well-known container objectClass), so the signal covers:
+    ///  - a brand-new node that is itself a container (an empty OU just
+    ///    created must appear in the tree right away, not only after a
+    ///    rescan).
+    ///  - an existing node whose container membership flips (an objectClass
+    ///    change growing/losing the container classification).
+    ///  - an existing container whose rendered attrs changed (the tree
+    ///    renders container labels from `attrs`, so a childless OU's
+    ///    relabeling must refresh it too).
+    ///  - the parent transitioning branch or container status by gaining its
+    ///    first child. This is checked on BOTH `is_branch` and `is_container`
+    ///    deliberately: `is_branch` alone still matters even for a parent that
+    ///    was already a container by class (e.g. a childless `ou=empty`
+    ///    gaining its first child) — the tree pane's expand/collapse
+    ///    affordance keys on child count, a signal the doc comment at the top
+    ///    of this file calls out as still needed post-classification.
     pub fn upsert(&mut self, input: StructureInput) -> bool {
         let dn = input.dn.clone();
         let parent = parent_of(&dn).map(str::to_string);
@@ -184,12 +254,23 @@ impl Structure {
             .and_then(|p| self.nodes.get(p))
             .map(|n| n.is_branch())
             .unwrap_or(false);
+        let parent_was_container = parent
+            .as_ref()
+            .and_then(|p| self.nodes.get(p))
+            .map(|n| n.is_container())
+            .unwrap_or(false);
 
-        // Preserve the existing subtree links; note whether this node is itself a
-        // branch whose rendered attributes change.
-        let (children, was_branch, attrs_changed) = match self.nodes.get(&dn) {
-            Some(n) => (n.children.clone(), n.is_branch(), n.attrs != input.attrs),
-            None => (Vec::new(), false, false),
+        // Preserve the existing subtree links; note whether this node already
+        // existed, whether it was a container, and whether its rendered
+        // attributes change.
+        let (children, is_new, was_container, attrs_changed) = match self.nodes.get(&dn) {
+            Some(n) => (
+                n.children.clone(),
+                false,
+                n.is_container(),
+                n.attrs != input.attrs,
+            ),
+            None => (Vec::new(), true, false, false),
         };
 
         self.nodes.insert(
@@ -208,12 +289,33 @@ impl Structure {
             }
         }
 
+        let is_container_now = self
+            .nodes
+            .get(&dn)
+            .map(|n| n.is_container())
+            .unwrap_or(false);
         let parent_is_branch = parent
             .as_ref()
             .and_then(|p| self.nodes.get(p))
             .map(|n| n.is_branch())
             .unwrap_or(false);
-        (!parent_was_branch && parent_is_branch) || (was_branch && attrs_changed)
+        let parent_is_container = parent
+            .as_ref()
+            .and_then(|p| self.nodes.get(p))
+            .map(|n| n.is_container())
+            .unwrap_or(false);
+
+        let appeared_as_container = is_new && is_container_now;
+        let membership_changed = !is_new && was_container != is_container_now;
+        let label_changed = !is_new && is_container_now && attrs_changed;
+        let parent_gained_branch_status = !parent_was_branch && parent_is_branch;
+        let parent_gained_container_status = !parent_was_container && parent_is_container;
+
+        appeared_as_container
+            || membership_changed
+            || label_changed
+            || parent_gained_branch_status
+            || parent_gained_container_status
     }
 
     /// Remove a node (e.g. after delete). Returns true if its parent changed
@@ -238,31 +340,59 @@ mod tests {
     use super::*;
 
     fn input(dn: &str, cn: Option<&str>, desc: Option<&str>) -> StructureInput {
+        input_oc(dn, cn, desc, &[])
+    }
+
+    fn input_oc(dn: &str, cn: Option<&str>, desc: Option<&str>, ocs: &[&str]) -> StructureInput {
         StructureInput {
             dn: dn.to_string(),
             cn: cn.map(str::to_string),
             description: desc.map(str::to_string),
-            object_classes: vec![],
+            object_classes: ocs.iter().map(|s| s.to_string()).collect(),
             attrs: Default::default(),
         }
     }
 
     fn fixture() -> Structure {
-        // dc=example,dc=org
-        //   ou=users        (branch: has jane)
-        //     uid=jane
-        //   ou=empty        (leaf: no children)
+        // dc=example,dc=org           (domain/dcObject; children: admin, users, empty)
+        //   cn=admin                  (inetOrgPerson leaf, directly under root)
+        //   ou=users                  (organizationalUnit; child: jane)
+        //     uid=jane                (inetOrgPerson leaf)
+        //   ou=empty                  (organizationalUnit, NO children — a container by
+        //                              objectClass alone; this is the "empty OU" bug case)
         Structure::build(
             "dc=example,dc=org",
             vec![
-                input("dc=example,dc=org", None, Some("Example")),
-                input("ou=users,dc=example,dc=org", None, None),
-                input(
+                input_oc(
+                    "dc=example,dc=org",
+                    None,
+                    Some("Example"),
+                    &["dcObject", "organization"],
+                ),
+                input_oc(
+                    "cn=admin,dc=example,dc=org",
+                    Some("Admin"),
+                    None,
+                    &["inetOrgPerson"],
+                ),
+                input_oc(
+                    "ou=users,dc=example,dc=org",
+                    None,
+                    None,
+                    &["organizationalUnit"],
+                ),
+                input_oc(
                     "uid=jane,ou=users,dc=example,dc=org",
                     Some("Jane Doe"),
                     None,
+                    &["inetOrgPerson"],
                 ),
-                input("ou=empty,dc=example,dc=org", None, None),
+                input_oc(
+                    "ou=empty,dc=example,dc=org",
+                    None,
+                    None,
+                    &["organizationalUnit"],
+                ),
             ],
         )
     }
@@ -285,12 +415,75 @@ mod tests {
     fn branch_is_has_children() {
         let s = fixture();
         assert!(s.get("ou=users,dc=example,dc=org").unwrap().is_branch());
+        // ou=empty has NO children — is_branch is purely child-count, so this
+        // stays false even though it IS a container by objectClass (see
+        // `is_container_true_for_empty_organizational_unit` below).
         assert!(!s.get("ou=empty,dc=example,dc=org").unwrap().is_branch());
         assert!(!s
             .get("uid=jane,ou=users,dc=example,dc=org")
             .unwrap()
             .is_branch());
+        assert!(!s.get("cn=admin,dc=example,dc=org").unwrap().is_branch());
         assert!(s.get("dc=example,dc=org").unwrap().is_branch());
+    }
+
+    #[test]
+    fn is_container_true_for_empty_organizational_unit() {
+        let s = fixture();
+        // The core bug fix: a childless OU is still a container, by objectClass.
+        assert!(s.get("ou=empty,dc=example,dc=org").unwrap().is_container());
+    }
+
+    #[test]
+    fn is_container_false_for_leaf_with_no_children() {
+        let s = fixture();
+        assert!(!s
+            .get("uid=jane,ou=users,dc=example,dc=org")
+            .unwrap()
+            .is_container());
+        assert!(!s.get("cn=admin,dc=example,dc=org").unwrap().is_container());
+    }
+
+    #[test]
+    fn is_container_true_for_any_node_with_children_regardless_of_class() {
+        // A node classed as a plain leaf class that nonetheless has a child
+        // (unusual, but structurally possible) is still a container — the
+        // has-children fallback in `is_container` covers it.
+        let s = Structure::build(
+            "dc=x",
+            vec![
+                input_oc("dc=x", None, None, &[]),
+                input_oc("cn=weird,dc=x", None, None, &["inetOrgPerson"]),
+                input_oc("cn=kid,cn=weird,dc=x", None, None, &["inetOrgPerson"]),
+            ],
+        );
+        assert!(
+            s.get("cn=weird,dc=x").unwrap().is_container(),
+            "has children ⇒ container regardless of objectClass"
+        );
+    }
+
+    #[test]
+    fn is_container_true_for_each_known_container_class_case_insensitively() {
+        for oc in [
+            "organizationalUnit",
+            "ORGANIZATION",
+            "dcObject",
+            "Domain",
+            "CONTAINER",
+        ] {
+            let s = Structure::build("dc=x", vec![input_oc("dc=x", None, None, &[oc])]);
+            assert!(
+                s.get("dc=x").unwrap().is_container(),
+                "{oc} must classify as a container"
+            );
+        }
+        // A plain leaf class is not a container.
+        let s = Structure::build(
+            "dc=x",
+            vec![input_oc("dc=x", None, None, &["inetOrgPerson"])],
+        );
+        assert!(!s.get("dc=x").unwrap().is_container());
     }
 
     #[test]
@@ -304,26 +497,52 @@ mod tests {
     }
 
     #[test]
-    fn branch_dns_lists_only_branches_plus_root() {
+    fn branch_dns_includes_containers_even_with_no_children() {
         let s = fixture();
         let mut branches = s.branch_dns();
         branches.sort();
+        // ou=empty (a childless OU) now appears in the tree — the fix for bug (a).
         assert_eq!(
             branches,
-            vec!["dc=example,dc=org", "ou=users,dc=example,dc=org"]
+            vec![
+                "dc=example,dc=org",
+                "ou=empty,dc=example,dc=org",
+                "ou=users,dc=example,dc=org",
+            ]
         );
     }
 
     #[test]
-    fn leaves_of_lists_only_leaf_children() {
+    fn children_of_returns_all_direct_children_containers_and_leaves() {
         let s = fixture();
-        // Under root: ou=users is a branch (excluded), ou=empty is a leaf (included).
+        // Root's children: a leaf (admin) and two containers (users, empty) — all
+        // three must be present; this is the panel-2 row source.
+        let dns: Vec<&str> = s
+            .children_of("dc=example,dc=org")
+            .iter()
+            .map(|n| n.dn.as_str())
+            .collect();
+        assert_eq!(
+            dns,
+            vec![
+                "cn=admin,dc=example,dc=org",
+                "ou=users,dc=example,dc=org",
+                "ou=empty,dc=example,dc=org",
+            ]
+        );
+    }
+
+    #[test]
+    fn leaves_of_excludes_containers_even_when_childless() {
+        let s = fixture();
+        // Under root: ou=users and ou=empty are BOTH containers now (one by
+        // children, one by objectClass) — only the leaf (admin) remains.
         let leaves: Vec<&str> = s
             .leaves_of("dc=example,dc=org")
             .iter()
             .map(|n| n.dn.as_str())
             .collect();
-        assert_eq!(leaves, vec!["ou=empty,dc=example,dc=org"]);
+        assert_eq!(leaves, vec!["cn=admin,dc=example,dc=org"]);
         // Under ou=users: uid=jane is a leaf.
         let leaves: Vec<&str> = s
             .leaves_of("ou=users,dc=example,dc=org")
@@ -387,10 +606,71 @@ mod tests {
     #[test]
     fn upsert_promoting_parent_leaf_to_branch_returns_true() {
         let mut s = fixture();
-        // ou=empty has no children yet: the first child flips it leaf->branch.
+        // ou=empty has no children yet: the first child flips is_branch false->true
+        // (it was already is_container==true via objectClass, so this is purely
+        // the has-children reflow signal the tree rebuild depends on).
         let changed = s.upsert(input("cn=x,ou=empty,dc=example,dc=org", Some("X"), None));
         assert!(changed, "leaf->branch flip must request a tree rebuild");
         assert!(s.get("ou=empty,dc=example,dc=org").unwrap().is_branch());
+    }
+
+    #[test]
+    fn upsert_new_childless_container_under_branch_parent_returns_true() {
+        // A brand-new empty OU appearing under a parent that already has
+        // children (root already has admin/users/empty) must still trigger a
+        // tree rebuild — otherwise the freshly-created container is invisible
+        // in panel 1 (the tree) until a full rescan. Before the fix this
+        // returned false because the tree-rebuild signal was keyed on
+        // is_branch (parent leaf->branch flip), and the parent here was
+        // already a branch.
+        let mut s = fixture();
+        let changed = s.upsert(input_oc(
+            "ou=newteam,dc=example,dc=org",
+            None,
+            None,
+            &["organizationalUnit"],
+        ));
+        assert!(changed, "a new empty container must request a tree rebuild");
+        assert!(s
+            .get("ou=newteam,dc=example,dc=org")
+            .unwrap()
+            .is_container());
+    }
+
+    #[test]
+    fn upsert_relabeling_childless_container_returns_true() {
+        // ou=empty is a childless container (by objectClass alone). Changing
+        // its label-relevant attrs must refresh the tree label, even though it
+        // was never a branch (is_branch stays false throughout). Before the
+        // fix this returned false because the attrs-changed clause was gated
+        // on `was_branch`.
+        let mut s = fixture();
+        let mut inp = input_oc(
+            "ou=empty,dc=example,dc=org",
+            None,
+            None,
+            &["organizationalUnit"],
+        );
+        inp.attrs
+            .insert("description".to_string(), vec!["Empty team".to_string()]);
+        assert!(
+            s.upsert(inp),
+            "relabeling a childless container must request a tree rebuild"
+        );
+    }
+
+    #[test]
+    fn upsert_attr_change_on_non_container_leaf_returns_false() {
+        // Regression: a plain leaf (never in the tree) whose attrs change must
+        // NOT trigger a tree rebuild — only container-relevant changes should.
+        let mut s = fixture();
+        let mut inp = input("cn=admin,dc=example,dc=org", Some("Admin"), None);
+        inp.attrs
+            .insert("description".to_string(), vec!["The admin".to_string()]);
+        assert!(
+            !s.upsert(inp),
+            "a non-container leaf's attrs changing shouldn't rebuild the tree"
+        );
     }
 
     #[test]

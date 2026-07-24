@@ -14,6 +14,9 @@ by default). The schema-generated raw field for that attribute is suppressed, so
 there is one clear place to set the password.
 
 - Type the password once, then again to confirm — they must match.
+- Each field shows only bullets while you type; a small **reveal eye** sits in
+  its last column — hold <kbd>Space</kbd>, or press and hold the eye with the
+  mouse, to peek at what you've typed.
 - The cleartext is sent to the directory; the **LDIF preview masks it as
   `********`**, so the actual password never appears on screen.
 - Like any other field, the password is applied as part of the form's normal
