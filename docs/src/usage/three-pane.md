@@ -28,22 +28,30 @@ modal dialog every time you edit.
 brighter background. In a real terminal the active border is drawn in a blue
 accent colour, which ASCII cannot show.)*
 
-- **DIT (navigation tree)** — the directory's branch structure: every container
-  (an entry that has children), with the base DN as the root. The whole
-  structure is loaded eagerly at startup, so navigation is instant and eDAPtor
-  knows exactly which nodes are branches and which are leaves. Selecting a branch
-  drives the entry list. Move with `↑↓`, fold/unfold a branch with `←→`. Moving to
-  a different branch clears any active entry-list filter, so the new branch always
-  lists unfiltered.
+- **DIT (navigation tree)** — the directory's container structure, with the base
+  DN as the root. A **container** is an entry classed as `organizationalUnit`,
+  `organization`, `dcObject`, `domain` or `container` (case-insensitive) — OR
+  simply any entry that has children, whatever its class. This means an *empty*
+  OU still shows up here, not just OUs that happen to already hold something. The
+  whole structure is loaded eagerly at startup, so navigation is instant. Selecting
+  a container drives the entry list. Move with `↑↓`, fold/unfold with `←→`. Moving
+  to a different container clears any active entry-list filter, so the new
+  container always lists unfiltered.
 
-- **Entries (entry list)** — the entries directly under the selected branch. The
-  first row is a `‹self›` row representing the branch entry itself (editable like
-  any other entry), followed by the branch's leaf entries. Each entry is shown
-  with its profile **label** — for example `Bob Baker (bob)` from a
-  `label = "{cn} ({uid})"` — rather than a raw DN. Just start typing to filter the
+- **Entries (entry list)** — every entry directly under the selected container:
+  sub-containers **and** leaf entries alike. The first row is a `‹self›` row
+  representing the container entry itself (editable like any other entry),
+  followed by its direct children in directory order. A child that is itself a
+  container (e.g. a sub-OU) is marked with a `▸ ` prefix so it reads visually
+  distinct from a plain entry; selecting it opens *its own* entry in the form for
+  editing — exactly like the `‹self›` row — it does not navigate the tree. Each
+  entry is shown with its profile **label** — for example `Bob Baker (bob)` from a
+  `label = "{cn} ({uid})"` — rather than a raw DN (a sub-container without a
+  matching label rule falls back to its RDN). Just start typing to filter the
   list in place (the incremental find matches against the rendered label and
-  highlights the match; Backspace widens, Esc clears). Moving the highlight with
-  `↑↓` selects the current entry and loads it into the form.
+  highlights the match, and runs as a live one-level directory search that
+  returns sub-containers too; Backspace widens, Esc clears). Moving the
+  highlight with `↑↓` selects the current entry and loads it into the form.
 
 - **Entry (detail/edit form)** — a scrollable form for the selected entry. Each
   attribute is a variable-height block: single-value text fields show one line;

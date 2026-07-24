@@ -86,8 +86,10 @@ currently selected branch.
    you type a value into a field, the default never overwrites it.
 3. Fill in the remaining fields (the form title reads `New entry`).
 4. Press **`Alt+S`**. The change is an LDIF *add*; review the preview and confirm
-   to create the entry. The new entry appears in the **Entries** pane, and if it
-   gives its parent its first child, the parent is promoted to a branch in the
+   to create the entry. The new entry appears in the **Entries** pane, and if its
+   parent was not already recognized as a container (i.e. not one of
+   `organizationalUnit`/`organization`/`dcObject`/`domain`/`container`, and had no
+   other children), gaining its first child now promotes the parent into the
    **DIT** tree.
 
 ### Where a new entry is created
@@ -142,9 +144,13 @@ Press **`Alt+D`** in the **Entries** pane to delete the highlighted entry.
 
 1. A confirmation overlay appears (`[Y]es` / `[N]o`).
 2. Confirm with **`Y`** to apply the delete; **`N`** (or `Esc`) aborts.
-3. After a successful delete the parent's entry list is recomputed locally; if
-   you removed the parent's last child, the parent is demoted from a branch back
-   to a leaf in the **DIT** tree.
+3. After a successful delete the parent's entry list is recomputed locally. If
+   the parent is a recognized container class (an OU, for example), it stays in
+   the **DIT** tree even after losing its last child — now shown as an empty
+   container, not demoted. Only a parent that was in the tree *solely* because it
+   had children (not a recognized container class) disappears from the **DIT**
+   tree and reverts to being listed as a plain entry in its own parent's
+   **Entries** pane.
 
 All of create, edit, rename, and delete funnel through the same
 diff → ChangeSet → LDIF-preview → apply pipeline; see

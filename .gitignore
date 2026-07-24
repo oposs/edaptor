@@ -11,3 +11,6 @@ docs/book/
 .claude
 *~
 examples/ds-carbo-feh.toml
+
+# SDD / superpowers scratch artifacts
+.superpowers/

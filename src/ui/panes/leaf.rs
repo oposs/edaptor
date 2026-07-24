@@ -372,6 +372,63 @@ mod tests {
         Rc::new(RefCell::new(st))
     }
 
+    /// The entry list must render a sub-container child (a childless OU) marked,
+    /// alongside its plain leaf siblings — the panel-2 half of the container
+    /// classification fix.
+    #[test]
+    fn repopulate_marks_a_sub_container_row() {
+        let inputs = vec![
+            StructureInput {
+                dn: "dc=x".into(),
+                cn: None,
+                description: None,
+                object_classes: vec![],
+                attrs: BTreeMap::new(),
+            },
+            StructureInput {
+                dn: "ou=p,dc=x".into(),
+                cn: None,
+                description: None,
+                object_classes: vec![],
+                attrs: BTreeMap::new(),
+            },
+            StructureInput {
+                dn: "cn=a,ou=p,dc=x".into(),
+                cn: Some("a".into()),
+                description: None,
+                object_classes: vec![],
+                attrs: BTreeMap::new(),
+            },
+            StructureInput {
+                dn: "ou=sub,ou=p,dc=x".into(),
+                cn: None,
+                description: None,
+                object_classes: vec!["organizationalUnit".into()],
+                attrs: BTreeMap::new(),
+            },
+        ];
+        let structure = Structure::build("dc=x", inputs);
+        let schema = SchemaModel::from_raw(&RawSubschema::default());
+        let mut state =
+            UiState::new_for_test(structure, schema, "dc=x".into(), Vec::new(), Vec::new());
+        state.current_branch = Some("ou=p,dc=x".into());
+        state.list_dirty = true;
+        let shared: Shared = Rc::new(RefCell::new(state));
+        let mut pane = LeafPane::new(Rect::new(0, 0, 30, 10), shared);
+        refresh(&mut pane);
+
+        let rows = pane.list_text_for_test();
+        assert_eq!(
+            rows,
+            vec![
+                "‹self› ou=p".to_string(),
+                "a".to_string(),
+                format!("{}ou=sub", crate::workflows::labels::CONTAINER_ROW_MARKER),
+            ],
+            "the childless sub-OU must appear, marked, alongside the plain leaf"
+        );
+    }
+
     /// Drive one `REFRESH` broadcast through the pane.
     fn refresh(pane: &mut LeafPane) {
         let mut out: VecDeque<Event> = VecDeque::new();
