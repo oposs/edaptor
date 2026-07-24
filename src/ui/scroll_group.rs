@@ -225,21 +225,87 @@ impl ScrollGroup {
         let Some(logical) = self.logical_of(id) else {
             return false;
         };
+        self.scroll_edge(logical, down, by, ctx)
+    }
+
+    /// The geometry shared by `scroll_block_edge` (a single content child) and
+    /// `scroll_focus_region_edge` (the focused field's extended region): scroll up
+    /// to `by` lines further toward the near/far edge of `region`, IF that edge is
+    /// still outside the viewport. Returns `true` when it scrolled.
+    fn scroll_edge(&mut self, region: Rect, down: bool, by: i32, ctx: &mut Context) -> bool {
         if down {
-            if logical.b.y > self.top + self.viewport_h {
-                let target = (self.top + by).min(logical.b.y - self.viewport_h);
+            if region.b.y > self.top + self.viewport_h {
+                let target = (self.top + by).min(region.b.y - self.viewport_h);
                 self.scroll_to(target, ctx);
                 true
             } else {
                 false
             }
-        } else if logical.a.y < self.top {
-            let target = (self.top - by).max(logical.a.y);
+        } else if region.a.y < self.top {
+            let target = (self.top - by).max(region.a.y);
             self.scroll_to(target, ctx);
             true
         } else {
             false
         }
+    }
+
+    /// The logical row-range the scroll must keep in view for the focused field.
+    /// For a mid-form field this is just the field's own rect, but for the FIRST
+    /// focusable field it extends up to the content top (row 0) and for the LAST
+    /// focusable field down to the content bottom — spanning the leading /
+    /// trailing run of non-focusable read-only fields. Read-only cells can never
+    /// take focus, and scrolling anchors on the focused field, so without this
+    /// extension a read-only head or tail is unreachable (see
+    /// `scroll_focus_region_edge`). `None` when nothing is focused.
+    fn focus_region(&mut self) -> Option<Rect> {
+        let cur = self.group.current()?;
+        let mut region = self.logical_of(cur)?;
+        // Focusable content children (framework tab-order gate), sorted top-down.
+        let mut focusable: Vec<(ViewId, i32)> = self
+            .content
+            .clone()
+            .into_iter()
+            .filter_map(|(id, r)| {
+                let ok = self
+                    .group
+                    .child_mut(id)
+                    .map(|c| {
+                        let s = c.state();
+                        s.state.visible && !s.state.disabled && s.options.selectable
+                    })
+                    .unwrap_or(false);
+                ok.then_some((id, r.a.y))
+            })
+            .collect();
+        focusable.sort_by_key(|(_, y)| *y);
+        if focusable.first().map(|(id, _)| *id) == Some(cur) {
+            region.a.y = 0;
+        }
+        if focusable.last().map(|(id, _)| *id) == Some(cur) {
+            region.b.y = self.content_height();
+        }
+        Some(region)
+    }
+
+    /// Scroll one step (`by` lines) further toward the content edge through the
+    /// focused field's region (`focus_region`) when it still has hidden lines that
+    /// way. This is what lets Down on the LAST focusable field walk the viewport
+    /// through a trailing read-only tail (and Up on the FIRST focusable field walk
+    /// through a leading read-only head) — content that can never take focus, and
+    /// so would otherwise be stranded off-screen. Returns `true` when it scrolled
+    /// (the caller consumes the key and keeps focus put); `false` when the region's
+    /// relevant edge is already in view (the caller advances focus instead).
+    pub(crate) fn scroll_focus_region_edge(
+        &mut self,
+        down: bool,
+        by: i32,
+        ctx: &mut Context,
+    ) -> bool {
+        let Some(region) = self.focus_region() else {
+            return false;
+        };
+        self.scroll_edge(region, down, by, ctx)
     }
 
     pub(crate) fn ensure_visible(&mut self, logical: Rect, ctx: &mut Context) {
@@ -287,10 +353,19 @@ impl ScrollGroup {
     pub(crate) fn ensure_focused_visible(&mut self, ctx: &mut Context) {
         if let Some(cur) = self.group.current() {
             if let Some(logical) = self.logical_of(cur) {
+                // For an edge field the region spans the read-only head/tail the
+                // scroll must be free to reveal; `ensure_visible`'s settle branch
+                // then treats an over-scrolled tall region as a fixed point, so a
+                // deliberate scroll survives the per-event re-anchor instead of
+                // snapping back to the focused field.
+                let region = self.focus_region().unwrap_or(logical);
                 let target = if logical.b.y - logical.a.y > self.viewport_h {
-                    self.focused_cursor_row(logical).unwrap_or(logical)
+                    // The focused field itself overflows (an inline list/launch
+                    // block being edited): track its caret row so editing stays on
+                    // screen, falling back to the region for a cursor-less block.
+                    self.focused_cursor_row(logical).unwrap_or(region)
                 } else {
-                    logical
+                    region
                 };
                 self.ensure_visible(target, ctx);
             }
