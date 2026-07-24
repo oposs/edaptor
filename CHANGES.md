@@ -29,6 +29,10 @@ All notable changes to eDAPtor are documented here. The format follows
 - Fixed a crash (`removal index … should be < len …`) when editing a password
   field whose masked mirror had desynced (triggered by the paste bug above); the
   backspace path is now bounds-safe as a belt-and-braces guard.
+- Read-only multi-value fields edited via the modal picker (`objectClass`,
+  membership, choice, password, …) now **scroll line-by-line** when their value
+  block is taller than the form's viewport, instead of jumping straight to the
+  next field and leaving the block's lower lines unreachable below the frame.
 
 ## 1.3.0 - 2026-07-23
 

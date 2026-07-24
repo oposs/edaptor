@@ -196,6 +196,52 @@ impl ScrollGroup {
             .map(|r| Rect::new(r.a.x, r.a.y - self.top, r.b.x, r.b.y - self.top))
     }
 
+    /// Current viewport height in rows. Exposed so a caller (the form pane) can
+    /// size a "page" scroll step through a tall read-only block the same way
+    /// `page()` sizes a field-to-field page jump.
+    pub(crate) fn viewport_h(&self) -> i32 {
+        self.viewport_h
+    }
+
+    /// Scroll one line (or `by` lines, for a page step) further into content
+    /// child `id` in the given direction, IF it still has hidden lines that
+    /// way. Domain-free geometry: unlike `ensure_visible` (which settles a
+    /// focused block's nearest edge into view), this always advances `top` by
+    /// up to `by` — the mechanism a caller uses to walk through a tall
+    /// single-focus block (e.g. a read-only `LaunchValueView`) line by line
+    /// before giving up and moving focus elsewhere.
+    ///
+    /// Returns `true` when it scrolled (the caller should consume the key and
+    /// keep focus on `id`); `false` when the relevant edge of `id`'s logical
+    /// rect is already within the viewport (the caller should advance focus
+    /// instead, as if `id` were an ordinary single-row field).
+    pub(crate) fn scroll_block_edge(
+        &mut self,
+        id: ViewId,
+        down: bool,
+        by: i32,
+        ctx: &mut Context,
+    ) -> bool {
+        let Some(logical) = self.logical_of(id) else {
+            return false;
+        };
+        if down {
+            if logical.b.y > self.top + self.viewport_h {
+                let target = (self.top + by).min(logical.b.y - self.viewport_h);
+                self.scroll_to(target, ctx);
+                true
+            } else {
+                false
+            }
+        } else if logical.a.y < self.top {
+            let target = (self.top - by).max(logical.a.y);
+            self.scroll_to(target, ctx);
+            true
+        } else {
+            false
+        }
+    }
+
     pub(crate) fn ensure_visible(&mut self, logical: Rect, ctx: &mut Context) {
         // A block taller than the viewport cannot fit whole: `logical.a.y < top`
         // (top clipped) and `logical.b.y > top + vh` (bottom clipped) are BOTH
@@ -913,6 +959,108 @@ mod tests {
             (top..top + 5).contains(&15),
             "caret row 15 must be inside the viewport rows {top}..{}",
             top + 5
+        );
+    }
+
+    #[test]
+    fn scroll_block_edge_scrolls_down_one_line_while_bottom_hidden() {
+        // A single 20-row block in a 5-row viewport: Down must scroll one line
+        // and report `true` (consumed) while the bottom edge is still hidden.
+        let mut sg = ScrollGroup::new(Rect::new(0, 0, 10, 5)); // viewport rows 0..5
+        let w = sg.inner_width();
+        let id = sg.add_content(cell(0, w), Rect::new(0, 0, w, 20));
+        let mut out = std::collections::VecDeque::new();
+        let mut timers = tv::timer::TimerQueue::new();
+        let mut deferred = Vec::new();
+        let mut ctx = Context::new(&mut out, &mut timers, 0, &mut deferred);
+
+        assert!(sg.scroll_block_edge(id, true, 1, &mut ctx));
+        assert_eq!(sg.top_for_test(), 1, "scrolled down by one line");
+    }
+
+    #[test]
+    fn scroll_block_edge_returns_false_when_bottom_edge_already_visible() {
+        // Once the block's bottom edge is within the viewport, Down must report
+        // `false` (the pane should then advance focus instead of scrolling).
+        let mut sg = ScrollGroup::new(Rect::new(0, 0, 10, 5)); // viewport rows 0..5
+        let w = sg.inner_width();
+        let id = sg.add_content(cell(0, w), Rect::new(0, 0, w, 20));
+        let mut out = std::collections::VecDeque::new();
+        let mut timers = tv::timer::TimerQueue::new();
+        let mut deferred = Vec::new();
+        let mut ctx = Context::new(&mut out, &mut timers, 0, &mut deferred);
+        sg.scroll_to(15, &mut ctx); // block bottom (20) now exactly at top+vh (15+5)
+
+        assert!(!sg.scroll_block_edge(id, true, 1, &mut ctx));
+        assert_eq!(
+            sg.top_for_test(),
+            15,
+            "no further scroll once the edge is visible"
+        );
+    }
+
+    #[test]
+    fn scroll_block_edge_scrolls_up_one_line_while_top_hidden() {
+        let mut sg = ScrollGroup::new(Rect::new(0, 0, 10, 5)); // viewport rows 0..5
+        let w = sg.inner_width();
+        let id = sg.add_content(cell(0, w), Rect::new(0, 0, w, 20));
+        let mut out = std::collections::VecDeque::new();
+        let mut timers = tv::timer::TimerQueue::new();
+        let mut deferred = Vec::new();
+        let mut ctx = Context::new(&mut out, &mut timers, 0, &mut deferred);
+        sg.scroll_to(15, &mut ctx);
+
+        assert!(sg.scroll_block_edge(id, false, 1, &mut ctx));
+        assert_eq!(sg.top_for_test(), 14, "scrolled up by one line");
+    }
+
+    #[test]
+    fn scroll_block_edge_returns_false_when_top_edge_already_visible() {
+        let mut sg = ScrollGroup::new(Rect::new(0, 0, 10, 5)); // viewport rows 0..5
+        let w = sg.inner_width();
+        let id = sg.add_content(cell(0, w), Rect::new(0, 0, w, 20));
+        let mut out = std::collections::VecDeque::new();
+        let mut timers = tv::timer::TimerQueue::new();
+        let mut deferred = Vec::new();
+        let mut ctx = Context::new(&mut out, &mut timers, 0, &mut deferred);
+        // top=0 already shows the block's top edge.
+        assert!(!sg.scroll_block_edge(id, false, 1, &mut ctx));
+        assert_eq!(sg.top_for_test(), 0);
+    }
+
+    #[test]
+    fn scroll_block_edge_returns_false_for_a_block_that_fits_the_viewport() {
+        // A short block (3 rows) inside a 5-row viewport already shows both
+        // edges → Down/Up must report `false` immediately (no scroll).
+        let mut sg = ScrollGroup::new(Rect::new(0, 0, 10, 5));
+        let w = sg.inner_width();
+        let id = sg.add_content(cell(0, w), Rect::new(0, 0, w, 3));
+        let mut out = std::collections::VecDeque::new();
+        let mut timers = tv::timer::TimerQueue::new();
+        let mut deferred = Vec::new();
+        let mut ctx = Context::new(&mut out, &mut timers, 0, &mut deferred);
+
+        assert!(!sg.scroll_block_edge(id, true, 1, &mut ctx));
+        assert!(!sg.scroll_block_edge(id, false, 1, &mut ctx));
+        assert_eq!(sg.top_for_test(), 0);
+    }
+
+    #[test]
+    fn scroll_block_edge_page_step_clamps_to_the_edge() {
+        // A page-sized step must not overshoot the block's bottom edge.
+        let mut sg = ScrollGroup::new(Rect::new(0, 0, 10, 5)); // viewport rows 0..5
+        let w = sg.inner_width();
+        let id = sg.add_content(cell(0, w), Rect::new(0, 0, w, 8)); // 3 hidden rows below
+        let mut out = std::collections::VecDeque::new();
+        let mut timers = tv::timer::TimerQueue::new();
+        let mut deferred = Vec::new();
+        let mut ctx = Context::new(&mut out, &mut timers, 0, &mut deferred);
+
+        assert!(sg.scroll_block_edge(id, true, 5, &mut ctx));
+        assert_eq!(
+            sg.top_for_test(),
+            3,
+            "a 5-row step clamps to the block's bottom edge (top=3)"
         );
     }
 
