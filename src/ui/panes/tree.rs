@@ -9,15 +9,19 @@ use crate::ui::state::{HighlightPlan, UiState};
 use crate::ui::{Shared, REFRESH};
 
 /// Build a tvision `Node` tree and a parallel DFS pre-order DN index from the
-/// structure's branch hierarchy. Only branches (nodes with ≥1 child) appear;
-/// leaves live in pane 2. Labels come from the compiled tree rules, width-fit to
-/// `width`. Pre-order matches the `foc` index `Outline` assigns.
+/// structure's container hierarchy. Only containers (see
+/// [`crate::workflows::structure::StructureNode::is_container`] — classified by
+/// objectClass, e.g. `organizationalUnit`, OR having ≥1 child) appear; an empty
+/// OU is a container too, so it shows up here rather than vanishing into pane 2.
+/// Leaves (and, now, sub-containers alongside them) live in pane 2. Labels come
+/// from the compiled tree rules, width-fit to `width`. Pre-order matches the
+/// `foc` index `Outline` assigns.
 pub(crate) fn build_branch_nodes(
     state: &UiState,
     width: usize,
 ) -> (Option<Box<tv::Node>>, Vec<String>) {
     use std::collections::HashSet;
-    let branches: HashSet<String> = state.structure.branch_dns().into_iter().collect();
+    let containers: HashSet<String> = state.structure.branch_dns().into_iter().collect();
     let mut dns = Vec::new();
 
     fn rdn_of(dn: &str) -> &str {
@@ -27,7 +31,7 @@ pub(crate) fn build_branch_nodes(
     fn build(
         dn: &str,
         state: &UiState,
-        branches: &std::collections::HashSet<String>,
+        containers: &std::collections::HashSet<String>,
         width: usize,
         dns: &mut Vec<String>,
     ) -> tv::Node {
@@ -47,11 +51,11 @@ pub(crate) fn build_branch_nodes(
         };
         let mut tnode = tv::Node::new(&label).with_expanded(true);
 
-        let child_branches: Vec<String> = node
+        let child_containers: Vec<String> = node
             .map(|n| {
                 n.children
                     .iter()
-                    .filter(|c| branches.contains(*c))
+                    .filter(|c| containers.contains(*c))
                     .cloned()
                     .collect()
             })
@@ -61,9 +65,9 @@ pub(crate) fn build_branch_nodes(
         // (the Outline numbers visible lines in pre-order). Linking the `with_next`
         // chain needs reverse folding, but that is done AFTER the recursion so it
         // does not affect `dns` ordering.
-        let mut child_nodes: Vec<tv::Node> = Vec::with_capacity(child_branches.len());
-        for cb in &child_branches {
-            child_nodes.push(build(cb, state, branches, width, dns));
+        let mut child_nodes: Vec<tv::Node> = Vec::with_capacity(child_containers.len());
+        for cb in &child_containers {
+            child_nodes.push(build(cb, state, containers, width, dns));
         }
         let mut chain: Option<Box<tv::Node>> = None;
         for child in child_nodes.into_iter().rev() {
@@ -80,8 +84,8 @@ pub(crate) fn build_branch_nodes(
     }
 
     let root_dn = state.base_dn.clone();
-    if branches.contains(&root_dn) || state.structure.get(&root_dn).is_some() {
-        let root = build(&root_dn, state, &branches, width, &mut dns);
+    if containers.contains(&root_dn) || state.structure.get(&root_dn).is_some() {
+        let root = build(&root_dn, state, &containers, width, &mut dns);
         (Some(Box::new(root)), dns)
     } else {
         (None, dns)
@@ -346,6 +350,16 @@ mod tests {
         }
     }
 
+    fn si_oc(dn: &str, ocs: &[&str]) -> StructureInput {
+        StructureInput {
+            dn: dn.into(),
+            cn: None,
+            description: None,
+            object_classes: ocs.iter().map(|s| s.to_string()).collect(),
+            attrs: BTreeMap::new(),
+        }
+    }
+
     /// Drive one `REFRESH` broadcast through the pane.
     fn refresh_tree(pane: &mut TreePane) {
         let mut out = std::collections::VecDeque::new();
@@ -482,7 +496,8 @@ mod tests {
 
     #[test]
     fn test_branch_nodes_dfs_preorder_excludes_leaves() {
-        // dc=x (root) -> ou=a (branch, has child) ; ou=b is a childless leaf.
+        // dc=x (root) -> ou=a (container, has child) ; ou=b is a childless leaf
+        // with NO container objectClass — it stays excluded from the tree.
         let inputs = vec![
             si("dc=x"),
             si("ou=a,dc=x"),
@@ -502,6 +517,30 @@ mod tests {
         assert!(root.is_some());
         assert_eq!(dns, vec!["dc=x".to_string(), "ou=a,dc=x".to_string()]);
         assert!(!dns.contains(&"ou=b,dc=x".to_string()));
+    }
+
+    /// The bug fix for panel 1: a childless `organizationalUnit` must still show
+    /// up in the tree — it is a container by objectClass even with zero children.
+    /// Before the fix, `build_branch_nodes` filtered on `is_branch` (has
+    /// children), so `ou=empty` here would NOT have appeared.
+    #[test]
+    fn build_branch_nodes_includes_a_childless_organizational_unit() {
+        let inputs = vec![si("dc=x"), si_oc("ou=empty,dc=x", &["organizationalUnit"])];
+        let structure = Structure::build("dc=x", inputs);
+        let schema = SchemaModel::from_raw(&RawSubschema::default());
+        let st = UiState::new_for_test(
+            structure,
+            schema,
+            "dc=x".into(),
+            Vec::new(),
+            compile_tree_rules(&TreeConfig::default()),
+        );
+        let (root, dns) = build_branch_nodes(&st, 40);
+        assert!(root.is_some());
+        assert!(
+            dns.iter().any(|d| d == "ou=empty,dc=x"),
+            "a childless OU must appear in the tree: {dns:?}"
+        );
     }
 
     /// Pure-selector contract: moving the tree highlight records `requested_branch`

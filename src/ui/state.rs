@@ -3066,6 +3066,46 @@ mod tests {
         assert!(st.list_dirty);
     }
 
+    /// A one-level search hit that is itself a container (e.g. a sub-OU) must
+    /// show up in the entry list too, marked with the sub-container prefix — the
+    /// live-search path must not silently drop it the way the old
+    /// leaves-only model did.
+    #[test]
+    fn apply_leaf_search_results_includes_a_container_hit_marked() {
+        use crate::ldap::worker::LdapEntry;
+        use crate::workflows::labels::CONTAINER_ROW_MARKER;
+
+        let structure = Structure::build("dc=x", vec![si("dc=x", None), si("ou=p,dc=x", None)]);
+        let schema = SchemaModel::from_raw(&RawSubschema::default());
+        let mut st =
+            UiState::new_for_test(structure, schema, "dc=x".into(), Vec::new(), Vec::new());
+        st.current_branch = Some("ou=p,dc=x".into());
+
+        let mut attrs: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        attrs.insert(
+            "objectClass".to_string(),
+            vec!["organizationalUnit".to_string()],
+        );
+        let entry = LdapEntry {
+            dn: "ou=subteam,ou=p,dc=x".to_string(),
+            attrs,
+            bin_attrs: Default::default(),
+        };
+
+        st.apply_leaf_search_outcome(LeafSearchOutcome::Results {
+            entries: vec![entry],
+            truncated: false,
+        });
+
+        let rows = st.leaf_rows();
+        assert!(
+            rows.iter()
+                .any(|(l, dn)| dn == "ou=subteam,ou=p,dc=x" && l.starts_with(CONTAINER_ROW_MARKER)),
+            "a container hit from a one-level search must appear, marked, not be \
+             skipped: {rows:?}"
+        );
+    }
+
     /// `upsert_from_read` (called once per hit, inside the loop) no longer computes
     /// any snap itself — `leaf_highlight_plan` is resolved once, on the pane's next
     /// rebuild, against `self.leaf_rows()` as it reads AFTER the loop replaces

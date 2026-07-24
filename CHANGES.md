@@ -10,6 +10,20 @@ All notable changes to eDAPtor are documented here. The format follows
 
 ### Changed
 
+- **The DIT browsing model now classifies containers by `objectClass`, not by
+  whether they happen to have children.** Previously a container was defined as
+  "an entry with ≥1 child", so an *empty* `organizationalUnit` vanished from the
+  **DIT** tree (it showed up misfiled in the **Entries** pane instead), and a
+  sub-OU that itself had children never appeared under its parent in the
+  **Entries** pane (the one-level find skipped it too). eDAPtor now recognizes
+  `organizationalUnit`, `organization`, `dcObject`, `domain` and `container`
+  (case-insensitive) as containers regardless of child count, in addition to
+  "has children". The **DIT** tree lists every container, including empty ones;
+  the **Entries** pane lists all direct children — sub-containers alongside leaf
+  entries — with sub-containers marked with a `▸ ` prefix so they read distinct
+  from plain entries. Selecting a sub-container row opens its own entry in the
+  form for editing, exactly like the existing `‹self›` row.
+
 ### Fixed
 
 - Pasting into a multi-value field (e.g. `givenName`) now works. The inline
