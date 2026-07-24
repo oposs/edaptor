@@ -10,6 +10,12 @@ All notable changes to eDAPtor are documented here. The format follows
 
 ### Changed
 
+### Fixed
+
+## 1.4.0 - 2026-07-24
+
+### Changed
+
 - The password editor's New/Confirm fields now use tvision-rs's native masked
   field instead of eDAPtor's own hand-rolled masking. Behaviour for the operator
   is the same or better: typing and pasting a password are robust (the fixes
@@ -29,7 +35,6 @@ All notable changes to eDAPtor are documented here. The format follows
   entries — with sub-containers marked with a `▸ ` prefix so they read distinct
   from plain entries. Selecting a sub-container row opens its own entry in the
   form for editing, exactly like the existing `‹self›` row.
-
 ### Fixed
 
 - Pasting into a multi-value field (e.g. `givenName`) now works. The inline
