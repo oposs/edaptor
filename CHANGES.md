@@ -12,6 +12,24 @@ All notable changes to eDAPtor are documented here. The format follows
 
 ### Fixed
 
+- Pasting into a multi-value field (e.g. `givenName`) now works. The inline
+  multi-value editor is eDAPtor's own view rather than a plain input line, and it
+  was silently dropping the terminal's bracketed-paste event; it now inserts the
+  pasted text at the cursor, with each pasted line starting a new value.
+- **Security:** pasting into a password field no longer shows the pasted text in
+  the clear. The masked field forwarded the terminal's bracketed paste straight
+  to its inner input, which rendered the cleartext (and, worse, staged nothing
+  because the masked mirror was never updated). Paste is now masked exactly like
+  typed input — bullets on screen, the real value mirrored for staging — and
+  control characters (a trailing newline, tabs) are stripped.
+- The Set-password dialog now **verifies that the two fields match** before
+  accepting OK. Previously OK always closed the dialog, silently staging nothing
+  when New and Confirm differed (or were empty); it now refuses to close and
+  shows "The two passwords do not match." / "Enter a password." until they agree.
+- Fixed a crash (`removal index … should be < len …`) when editing a password
+  field whose masked mirror had desynced (triggered by the paste bug above); the
+  backspace path is now bounds-safe as a belt-and-braces guard.
+
 ## 1.3.0 - 2026-07-23
 
 ### New

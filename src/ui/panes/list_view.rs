@@ -17,6 +17,7 @@
 //! | Home / End | jump to start / end of current display line |
 //! | Up / Down | move one display row; sets `boundary_exit` at edges |
 //! | Ctrl+Up / Ctrl+Down (ordered only) | reorder the current item |
+//! | Bracketed paste | insert the clipboard string; each line starts a new value |
 //! | Tab | **not consumed** — reserved for pane-level focus switching |
 
 use tvision_rs::{DrawCtx, Event, HelpCtx, Key, Point, Rect, Role, SurfaceRoles, View, ViewState};
@@ -263,6 +264,30 @@ impl ListValueView {
         // Keep the status-line help context in sync with the model state.
         self.sync_help_ctx();
     }
+
+    /// Insert a bracketed-paste string at the cursor — the pure logic layer for
+    /// [`View::handle_event`]'s `Event::Paste` arm (exercised directly in tests).
+    ///
+    /// The multi-value field is edaptor's own view, not an `InputLine`, so it
+    /// must apply the paste itself. Printable characters are inserted like typed
+    /// text; a line break starts a **new value** (Enter semantics), so pasting a
+    /// newline-separated list fills several values at once. CRLF/CR are
+    /// normalised to LF first. (Ctrl+V / Shift+Insert — the framework's internal
+    /// clipboard — is a separate `Command::PASTE` path this view does not join;
+    /// it has no cut/copy of its own. External clipboard text arrives here as a
+    /// terminal bracketed paste.)
+    pub(crate) fn on_paste(&mut self, text: &str) {
+        let normalized = text.replace("\r\n", "\n").replace('\r', "\n");
+        for (i, line) in normalized.split('\n').enumerate() {
+            if i > 0 {
+                self.model.enter();
+            }
+            for c in line.chars() {
+                self.model.insert_char(c);
+            }
+        }
+        self.sync_help_ctx();
+    }
 }
 
 impl View for ListValueView {
@@ -298,6 +323,14 @@ impl View for ListValueView {
             // is view-local (the group translates it). The event is left
             // unconsumed so the group still focuses this view on the click.
             Event::MouseDown(m) => self.on_mouse(m.position.x, m.position.y),
+            // Bracketed paste: the whole external-clipboard string, delivered to
+            // the focused view like a key event. Insert it and consume the event
+            // (InputLine does the same at editor.rs `Event::Paste`).
+            Event::Paste(text) => {
+                let text = std::mem::take(text);
+                self.on_paste(&text);
+                ev.clear();
+            }
             _ => {}
         }
         // Keep the hardware cursor in sync with the model *now*, not only at the
@@ -348,6 +381,51 @@ mod tests {
                 ..KeyModifiers::default()
             },
         ))
+    }
+
+    /// Run `f` with a fresh headless `Context` (bracketed-paste tests need one
+    /// because `Event::Paste` is delivered through `View::handle_event`).
+    fn with_ctx<R>(f: impl FnOnce(&mut tvision_rs::Context) -> R) -> R {
+        let mut out = std::collections::VecDeque::new();
+        let mut timers = tvision_rs::timer::TimerQueue::new();
+        let mut deferred: Vec<tvision_rs::Deferred> = Vec::new();
+        let mut ctx = tvision_rs::Context::new(&mut out, &mut timers, 0, &mut deferred);
+        f(&mut ctx)
+    }
+
+    // --- bracketed-paste ---
+
+    #[test]
+    fn paste_inserts_text_at_the_cursor() {
+        // Bracketed paste (Event::Paste) must be delivered to the model like typed
+        // text — the multi-value field is edaptor's own view, not an InputLine, so
+        // it has to handle the paste itself.
+        let mut v = ListValueView::new(
+            Rect::new(0, 0, 20, 1),
+            &["ab".into()],
+            false,
+            body(),
+            handle(),
+        );
+        v.on_key(&mut key(Key::End)); // caret after "ab"
+        let mut ev = Event::Paste("cd".to_string());
+        with_ctx(|ctx| <ListValueView as View>::handle_event(&mut v, &mut ev, ctx));
+        assert!(ev.is_nothing(), "a paste event must be consumed");
+        assert_eq!(v.to_values(), vec!["abcd".to_string()]);
+    }
+
+    #[test]
+    fn paste_with_newlines_splits_into_separate_values() {
+        // A newline-separated clipboard string pastes as one value per line — the
+        // natural mapping for a multi-value attribute (Enter semantics per line).
+        let mut v = ListValueView::new(Rect::new(0, 0, 20, 1), &[], false, body(), handle());
+        let mut ev = Event::Paste("x\r\ny\nz".to_string());
+        with_ctx(|ctx| <ListValueView as View>::handle_event(&mut v, &mut ev, ctx));
+        assert_eq!(
+            v.to_values(),
+            vec!["x".to_string(), "y".to_string(), "z".to_string()],
+            "CRLF/LF newlines each start a new value"
+        );
     }
 
     // --- tests from the task brief ---
