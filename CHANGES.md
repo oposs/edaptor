@@ -12,6 +12,21 @@ All notable changes to eDAPtor are documented here. The format follows
 
 ### Fixed
 
+- **The main window no longer sits one row too low with its bottom edge overlaid
+  by the footer.** The window's bounds were built in screen-absolute coordinates
+  but applied as desktop-local ones, shifting the whole window down a row — a
+  blank strip appeared under the menu bar and the window's bottom border landed on
+  the status-line row. The window is now positioned in desktop-local space, so it
+  lines up correctly.
+- **Read-only fields at the top or bottom of a long entry form can now be
+  scrolled into view.** Read-only fields cannot take focus, and the entry form's
+  scroll follows the focused field — so a run of read-only fields *below* the
+  last editable field (or *above* the first) used to be stranded off-screen on a
+  form taller than the pane: the last field was never visible. Up/Down on the
+  first/last editable field now walks the viewport through that read-only
+  head/tail one line at a time before focus moves on, and the reveal stays put
+  instead of snapping back.
+
 ## 1.5.0 - 2026-07-24
 
 ### Changed

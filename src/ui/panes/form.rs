@@ -786,6 +786,13 @@ impl FormPane {
             self.group.focus_child(scroll_id, ctx);
             if let Some(sg) = self.scroll_mut() {
                 sg.focus_child(id, ctx);
+                // Actively snap the landed field into view. The per-event settle
+                // (region-aware) would otherwise leave a first/last focusable field
+                // off-screen on open when it sits below a tall read-only head (its
+                // whole region is a scroll fixed point), so land it explicitly.
+                if let Some(logical) = sg.logical_of(id) {
+                    sg.ensure_visible(logical, ctx);
+                }
             }
             // Always land with the caret homed to the start of the value (not the
             // select-all-to-end block Turbo Vision leaves on focus). This covers a
@@ -860,12 +867,22 @@ impl FormPane {
             None => ids.len() - 1,
         };
         let next_id = ids[next];
+        let moved = cur != Some(next_id);
         if let Some(sg) = self.scroll_mut() {
             sg.focus_child(next_id, ctx);
-            // Scroll immediately so the newly focused field — and thus the
-            // hardware cursor — is on screen this frame, not one pump tick later.
-            if let Some(logical) = sg.logical_of(next_id) {
-                sg.ensure_visible(logical, ctx);
+            if moved {
+                // Focus actually advanced: snap the newly focused field fully into
+                // view this frame (so the hardware cursor is on screen now, not one
+                // pump tick later).
+                if let Some(logical) = sg.logical_of(next_id) {
+                    sg.ensure_visible(logical, ctx);
+                }
+            } else {
+                // Clamped at an end (Down on the last / Up on the first focusable
+                // field): don't re-snap to the bare field rect — that would yank a
+                // deliberately scrolled-in read-only head/tail back off screen. Use
+                // the region-aware settle, which leaves an in-band scroll alone.
+                sg.ensure_focused_visible(ctx);
             }
         }
         // Enter the field with the caret at the start, not a select-all block.
@@ -1374,8 +1391,21 @@ impl View for FormPane {
                 self.group.handle_event(ev, ctx);
             }
         } else if nav {
+            // Plain (non-list, non-launch) focused field. If it is the FIRST or
+            // LAST focusable field and the form has a non-focusable read-only
+            // head/tail, Up/Down first walks the viewport through that hidden
+            // region (read-only cells never take focus, so this is the only way to
+            // bring a trailing/leading read-only field into view); only once the
+            // region's near edge is visible does focus advance to the prev/next
+            // field.
             let down = matches!(ev, Event::KeyDown(k) if k.key == Key::Down);
-            self.focus_field(if down { 1 } else { -1 }, ctx);
+            let scrolled = self
+                .scroll_mut()
+                .map(|sg| sg.scroll_focus_region_edge(down, 1, ctx))
+                .unwrap_or(false);
+            if !scrolled {
+                self.focus_field(if down { 1 } else { -1 }, ctx);
+            }
             ev.clear();
         } else if is_keydown && self.focused_is_launch_view() {
             // Action key on a read-only launch/list block: route it to the focused
@@ -2608,6 +2638,139 @@ mod tests {
             Some(1),
             "Down at the block's edge advances focus to the next field"
         );
+    }
+
+    #[test]
+    fn trailing_readonly_tail_scrolls_into_view() {
+        // Reported bug: read-only fields can never take focus, and the form's
+        // scroll anchors on the focused field — so a run of read-only fields
+        // BELOW the last focusable field (past the last visible row of a long
+        // form) can never be scrolled into view. Pressing Down on the last
+        // focusable field must walk the viewport through that trailing read-only
+        // tail one line at a time, instead of clamping in place.
+        let mut fields = vec![ef("cn", "z", true)]; // the only focusable field
+        for i in 0..10 {
+            fields.push(ef(&format!("ro{i}"), &format!("v{i}"), false));
+        }
+        let (_shared, mut pane) = build_pane_with_form(fields);
+        // 6-row viewport (rows 2..8); content is 11 rows → max_top 5.
+        <FormPane as View>::change_bounds(&mut pane, Rect::new(0, 0, 80, 8));
+        let mut out = VecDeque::new();
+        let mut timers = tv::timer::TimerQueue::new();
+        let mut deferred = Vec::new();
+        let mut tick = Event::Broadcast {
+            command: REFRESH,
+            source: None,
+        };
+        pane.handle_event(
+            &mut tick,
+            &mut headless_ctx(&mut out, &mut timers, &mut deferred),
+        );
+
+        assert_eq!(
+            pane.focusable_value_ids().len(),
+            1,
+            "cn is the only focusable field; the ro* tail is read-only"
+        );
+        let max_top = pane.scroll_mut().unwrap().max_top();
+        assert_eq!(max_top, 5, "content (11) overflows the 6-row viewport");
+
+        // Down past the last focusable field scrolls the read-only tail into view
+        // one line at a time (before the fix this did nothing).
+        for expected_top in 1..=max_top {
+            let mut d = Event::KeyDown(tv::KeyEvent::from(tv::Key::Down));
+            pane.handle_event(
+                &mut d,
+                &mut headless_ctx(&mut out, &mut timers, &mut deferred),
+            );
+            assert_eq!(
+                pane.scroll_mut().unwrap().top_for_test(),
+                expected_top,
+                "Down scrolls the read-only tail into view one line at a time"
+            );
+        }
+
+        // A passive event (a REFRESH tick) must NOT yank the scroll back to the
+        // focused field: the tail stays revealed.
+        let mut tick2 = Event::Broadcast {
+            command: REFRESH,
+            source: None,
+        };
+        pane.handle_event(
+            &mut tick2,
+            &mut headless_ctx(&mut out, &mut timers, &mut deferred),
+        );
+        assert_eq!(
+            pane.scroll_mut().unwrap().top_for_test(),
+            max_top,
+            "the revealed tail is stable across passive re-anchor events"
+        );
+
+        // At the bottom, further Down is a no-op (nothing left to reveal).
+        let mut d = Event::KeyDown(tv::KeyEvent::from(tv::Key::Down));
+        pane.handle_event(
+            &mut d,
+            &mut headless_ctx(&mut out, &mut timers, &mut deferred),
+        );
+        assert_eq!(pane.scroll_mut().unwrap().top_for_test(), max_top);
+    }
+
+    #[test]
+    fn leading_readonly_head_scrolls_into_view() {
+        // Symmetric to the trailing tail: a run of read-only fields ABOVE the
+        // first focusable field. On open the focused field must be visible (the
+        // scroll snaps to show it, head partly above), and Up must then walk the
+        // viewport up through the read-only head one line at a time.
+        let mut fields: Vec<EditField> = (0..10)
+            .map(|i| ef(&format!("ro{i}"), &format!("v{i}"), false))
+            .collect();
+        fields.push(ef("cn", "z", true)); // the only focusable field, at the bottom
+        let (_shared, mut pane) = build_pane_with_form(fields);
+        // 6-row viewport (rows 2..8); content is 11 rows → max_top 5.
+        <FormPane as View>::change_bounds(&mut pane, Rect::new(0, 0, 80, 8));
+        let mut out = VecDeque::new();
+        let mut timers = tv::timer::TimerQueue::new();
+        let mut deferred = Vec::new();
+        let mut tick = Event::Broadcast {
+            command: REFRESH,
+            source: None,
+        };
+        pane.handle_event(
+            &mut tick,
+            &mut headless_ctx(&mut out, &mut timers, &mut deferred),
+        );
+
+        assert_eq!(pane.focusable_value_ids().len(), 1, "only cn is focusable");
+        // cn is the last content row (row 10); to show it the 6-row viewport must
+        // scroll to top=5 (rows 5..11) on open — not sit at top=0 hiding it.
+        assert_eq!(
+            pane.scroll_mut().unwrap().top_for_test(),
+            5,
+            "the focused field is snapped into view on open, not hidden by the head"
+        );
+
+        // Up past the first focusable field walks the read-only head into view one
+        // line at a time (top counts back down to 0).
+        for expected_top in (0..=4).rev() {
+            let mut u = Event::KeyDown(tv::KeyEvent::from(tv::Key::Up));
+            pane.handle_event(
+                &mut u,
+                &mut headless_ctx(&mut out, &mut timers, &mut deferred),
+            );
+            assert_eq!(
+                pane.scroll_mut().unwrap().top_for_test(),
+                expected_top,
+                "Up scrolls the read-only head into view one line at a time"
+            );
+        }
+
+        // At the top, further Up is a no-op.
+        let mut u = Event::KeyDown(tv::KeyEvent::from(tv::Key::Up));
+        pane.handle_event(
+            &mut u,
+            &mut headless_ctx(&mut out, &mut timers, &mut deferred),
+        );
+        assert_eq!(pane.scroll_mut().unwrap().top_for_test(), 0);
     }
 
     #[test]

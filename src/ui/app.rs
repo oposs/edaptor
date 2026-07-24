@@ -1055,7 +1055,17 @@ fn init_desktop(r: Rect, state: Shared) -> Option<Box<dyn View>> {
     r.b.y -= 1; // above status line
     let mut desktop = Desktop::new(r, |br| Some(Desktop::init_background(br)));
 
-    let win_rect = Rect::new(r.a.x + 1, r.a.y, r.b.x - 1, r.b.y);
+    // The window is a desktop CHILD, so its bounds are in desktop-LOCAL
+    // coordinates (relative to the desktop's own origin at screen row `r.a.y`),
+    // NOT screen-absolute. The desktop's local extent is `(0, 0, width, height)`.
+    // Reusing the absolute `r.a.y` / `r.b.y` here treated row 1 as a local offset,
+    // shifting the whole window one row down: a blank row appeared under the menu
+    // and the window's bottom edge landed on the footer row. Build the rect in
+    // local space — fill the desktop, inset one column left/right (the former
+    // horizontal inset) — so it lines up before the pump flips it to fullscreen.
+    let win_w = r.b.x - r.a.x;
+    let win_h = r.b.y - r.a.y;
+    let win_rect = Rect::new(1, 0, win_w - 1, win_h);
     let mut win = Window::new(win_rect, Some("edaptor".to_string()), 1);
     // No drop shadow: as a desktop-filling frameless window it has nothing to cast
     // onto, and the shadow would otherwise paint a one-cell strip over the desktop
@@ -1358,6 +1368,86 @@ mod tests {
         assert!(
             !attrs.contains_key("description"),
             "an empty attribute must not be sent"
+        );
+    }
+
+    /// The 80×24 headless screen rows (index 0 = menu row) of a freshly built
+    /// program, pumped a few times WITH events queued so no idle pass fires — i.e.
+    /// the pre-fullscreen bordered window the base `win_rect` governs.
+    #[cfg(test)]
+    fn bordered_screen_rows() -> Vec<String> {
+        use crate::ldap::worker::RawSubschema;
+        use crate::schema::SchemaModel;
+        use crate::ui::state::UiState;
+        use crate::workflows::structure::Structure;
+        let structure = Structure::build("dc=x", vec![]);
+        let schema = SchemaModel::from_raw(&RawSubschema::default());
+        let st = UiState::new_for_test(structure, schema, "dc=x".into(), Vec::new(), Vec::new());
+        let shared: Shared = std::rc::Rc::new(std::cell::RefCell::new(st));
+
+        let (backend, handle) = tv::HeadlessBackend::new(80, 24);
+        let mut prog = build_program(Box::new(backend), shared);
+        // Keep the event queue non-empty every pass so no idle pass fires the pump's
+        // fullscreen timer: this pins the bordered layout the base win_rect drives.
+        for _ in 0..5 {
+            handle.push_event(tv::Event::KeyDown(tv::KeyEvent::from(tv::Key::F(9))));
+            prog.pump_once();
+        }
+        // Extract the `text:` block of the snapshot: 24 rows each framed by `|…|`.
+        handle
+            .snapshot()
+            .lines()
+            .skip_while(|l| *l != "text:")
+            .skip(1)
+            .take_while(|l| l.starts_with('|'))
+            .map(|l| l.trim_start_matches('|').trim_end_matches('|').to_string())
+            .collect()
+    }
+
+    /// Regression: the main window must sit in desktop-LOCAL coordinates. A
+    /// screen-absolute `win_rect` shifted it one row down — leaving a blank
+    /// desktop row under the menu and pushing the window's bottom border onto the
+    /// footer row. Assert the window frame starts on row 1 (right under the menu)
+    /// and the footer alone occupies the last row.
+    #[test]
+    fn main_window_is_not_shifted_onto_the_footer() {
+        let rows = bordered_screen_rows();
+        assert_eq!(rows.len(), 24, "80x24 screen has 24 text rows");
+
+        // Row 0 is the menu bar.
+        assert!(
+            rows[0].contains("File"),
+            "row 0 is the menu bar: {:?}",
+            rows[0]
+        );
+
+        // Row 1 must be the window's top border (frame glyphs), NOT a blank desktop
+        // row. Before the fix this row was all background (`░`) + spaces.
+        assert!(
+            rows[1].contains('═') || rows[1].contains("edaptor"),
+            "row 1 must be the window top border, not a blank gap under the menu: {:?}",
+            rows[1]
+        );
+
+        // The last row is the footer/status line, and it must not be overlaid by
+        // the window's bottom border — no box-drawing frame glyphs on it.
+        let footer = &rows[23];
+        assert!(
+            footer.contains("Alt-N"),
+            "last row is the status line: {:?}",
+            footer
+        );
+        assert!(
+            !footer.contains('═') && !footer.contains('┘') && !footer.contains('╝'),
+            "the window bottom border must not overlap the footer row: {:?}",
+            footer
+        );
+
+        // The window's bottom border lives on the second-to-last row instead.
+        assert!(
+            rows[22].contains('┘') || rows[22].contains('═'),
+            "row 22 holds the window bottom border: {:?}",
+            rows[22]
         );
     }
 }
