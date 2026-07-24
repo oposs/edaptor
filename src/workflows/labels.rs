@@ -162,7 +162,16 @@ pub(crate) fn compute_rows_for_dns(
         .filter_map(|dn| structure.get(dn))
         .map(|n| (render_child_row(rules, n), n.dn.clone()))
         .collect();
-    hits.sort_by_key(|a| a.0.to_lowercase());
+    // Sort by the underlying label, not the displayed string: a container
+    // row's `CONTAINER_ROW_MARKER` (▸) prefix would otherwise sort it after
+    // every plain leaf label (U+25B8 is far above any ASCII letter), clumping
+    // all container hits at the end instead of interleaving them in
+    // directory order like the static `compute_rows` listing does.
+    hits.sort_by_key(|a| {
+        a.0.strip_prefix(CONTAINER_ROW_MARKER)
+            .unwrap_or(&a.0)
+            .to_lowercase()
+    });
     rows.extend(hits);
     rows
 }
@@ -464,6 +473,39 @@ mod tests {
 
     /// The live-search path (`compute_rows_for_dns`) marks container hits the
     /// same way the static path does.
+    /// Live-search hits must sort in directory order (by the underlying
+    /// label), not by the displayed string with its `▸ ` container prefix —
+    /// otherwise every container hit clumps after all leaf hits (U+25B8 sorts
+    /// above every ASCII letter), unlike the static `compute_rows` listing
+    /// which interleaves containers and leaves in child order.
+    #[test]
+    fn compute_rows_for_dns_sorts_container_hits_by_label_not_prefix() {
+        let s = Structure::build(
+            "dc=example,dc=org",
+            vec![
+                input("dc=example,dc=org", &[]),
+                input(
+                    "cn=bob,dc=example,dc=org",
+                    &[("cn", "Bob"), ("objectClass", "inetOrgPerson")],
+                ),
+                input(
+                    "ou=ackerman,dc=example,dc=org",
+                    &[("cn", "Ackerman"), ("objectClass", "organizationalUnit")],
+                ),
+            ],
+        );
+        let dns = vec![
+            "cn=bob,dc=example,dc=org".to_string(),
+            "ou=ackerman,dc=example,dc=org".to_string(),
+        ];
+        let rows = compute_rows_for_dns(&s, "dc=example,dc=org", "", &[], &dns);
+        // ‹self›, then Ackerman (the container hit) before Bob (the leaf hit) —
+        // directory/alphabetical order, not "leaves first, containers last".
+        assert_eq!(rows.len(), 3, "got {rows:?}");
+        assert_eq!(rows[1].1, "ou=ackerman,dc=example,dc=org");
+        assert_eq!(rows[2].1, "cn=bob,dc=example,dc=org");
+    }
+
     #[test]
     fn compute_rows_for_dns_marks_a_childless_sub_container_hit() {
         let s = Structure::build(
