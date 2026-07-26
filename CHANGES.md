@@ -22,6 +22,18 @@ All notable changes to eDAPtor are documented here. The format follows
   bottom you can always scroll back up again (previously the keys were swallowed
   by whatever field focus had landed on — "no getting back up"). The scrollbar
   thumb no longer sits frozen while you page through a tall block.
+- **Release builds no longer draw the footer one row too high, leaving the
+  bottom terminal row dead.** Every released/deployed binary laid the whole UI
+  out one row short: the status line landed on the second-to-last row and the
+  entry form lost its bottom line. Builds run from `cargo run` were unaffected,
+  which is why it only ever showed on installed binaries. The cause is a rustc
+  miscompilation (reproduced on 1.93.1, 1.95.0 and 1.96.0, at every
+  `opt-level >= 1`): `Program::new` passes the same screen extent by value to the
+  desktop / status-line / menu-bar factory closures, and the optimiser does not
+  re-materialise that argument between calls, so each factory saw whatever the
+  previous one had written into its own copy. The three factories now derive a
+  fresh `Rect` instead of mutating their parameter, which keeps the shared
+  argument intact. `cargo test --release` reproduces the old failure.
 
 ## 1.5.1 - 2026-07-24
 

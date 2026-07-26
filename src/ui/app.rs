@@ -24,8 +24,8 @@ use crate::workflows::create::{resolve_create_container, CreateContainer};
 use crate::workflows::save::PrepareSave;
 
 fn init_status_line(r: Rect, state: Shared) -> Option<Box<dyn View>> {
-    let mut r = r;
-    r.a.y = r.b.y - 1;
+    // Derive a fresh Rect; never mutate `r` in place — see `init_desktop`.
+    let r = Rect::new(r.a.x, r.b.y - 1, r.b.x, r.b.y);
     let defs = StatusDef::list()
         .def_all(|d| {
             d.item("~Alt-N~ New", alt('n'), CREATE)
@@ -51,8 +51,8 @@ fn init_status_line(r: Rect, state: Shared) -> Option<Box<dyn View>> {
 }
 
 fn init_menu_bar(r: Rect) -> Option<Box<dyn View>> {
-    let mut r = r;
-    r.b.y = r.a.y + 1;
+    // Derive a fresh Rect; never mutate `r` in place — see `init_desktop`.
+    let r = Rect::new(r.a.x, r.a.y, r.b.x, r.a.y + 1);
     let menu = tv::Menu::builder()
         .submenu("~F~ile", alt('f'), |m| {
             m.command_key("~N~ew", CREATE, alt('n'), "Alt-N")
@@ -1049,10 +1049,26 @@ fn discard_edits(state: &Shared) {
     st.form_needs_render = true;
 }
 
+/// # Do not mutate `r` in place — it is shared with the sibling factories
+///
+/// `Program::new` hands the SAME `extent` value to `init_desktop`,
+/// `init_status_line` and `init_menu_bar` in turn. Each is reached through an
+/// `impl FnOnce(Rect)` generic parameter, and under `opt-level >= 1` rustc
+/// (reproduced on 1.93.1 / 1.95.0 / 1.96.0) fails to re-materialise the by-value
+/// argument for the second and third call: whatever the *previous* factory wrote
+/// into its own copy is what the next one receives. Mutating `r` here therefore
+/// corrupted the status line's rect — it was born at `h-2..h-1` instead of
+/// `h-1..h`, which is the release-build-only "footer one row too high, last
+/// terminal row dead" bug. Debug builds were unaffected, which is why it only
+/// ever showed on deployed binaries.
+///
+/// Building a fresh `Rect` instead of assigning through `r` keeps the shared
+/// slot pristine and sidesteps the miscompilation. Keep it that way in all three
+/// factories; `cargo test --release` (NOT the default debug `cargo test`) is what
+/// catches a regression, via `main_window_is_not_shifted_onto_the_footer`.
 fn init_desktop(r: Rect, state: Shared) -> Option<Box<dyn View>> {
-    let mut r = r;
-    r.a.y += 1; // below menu bar
-    r.b.y -= 1; // above status line
+    // Fresh Rect, one row below the menu bar and one row above the status line.
+    let r = Rect::new(r.a.x, r.a.y + 1, r.b.x, r.b.y - 1);
     let mut desktop = Desktop::new(r, |br| Some(Desktop::init_background(br)));
 
     // The window is a desktop CHILD, so its bounds are in desktop-LOCAL
