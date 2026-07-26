@@ -454,7 +454,11 @@ impl ScrollGroup {
     /// on every focus move and scroll, so the bar shows a thumb from the moment the
     /// form opens.
     fn publish_bar(&mut self, ctx: &mut Context) {
-        let max = (self.content_height() - 1).max(0);
+        // Viewport bar: the value is the scroll `top`, whose range is [0, max_top]
+        // (the thumb position maps value linearly onto the track, so `max` must be
+        // the largest `top` — `max_top` — for the thumb to reach the very bottom
+        // when the form is scrolled all the way down). Page step = one viewport.
+        let max = self.max_top();
         let value = self.top.clamp(0, max);
         let show = self.bar_should_show();
         if let Some(b) = self.group.child_mut(self.v_bar) {
@@ -465,7 +469,7 @@ impl ScrollGroup {
             Some(value),
             Some(0),
             Some(max),
-            Some((self.viewport_h - 1).max(1)),
+            Some(self.viewport_h.max(1)),
             Some(1),
         );
     }
@@ -704,23 +708,19 @@ mod tests {
         let mut deferred: Vec<Deferred> = Vec::new();
         let mut ctx = Context::new(&mut out, &mut timers, 0, &mut deferred);
         sg.scroll_to(2, &mut ctx);
-        // The bar tracks the FOCUSED ROW (listbox semantics), not the viewport
-        // top: max = content_height-1 = 7 (the last logical row). With no focused
-        // child here the value falls back to the scroll top (2).
+        // Viewport bar: value = top (2), max = max_top = content_height - viewport
+        // = 8 - 5 = 3, so the thumb reaches the bottom when top == max_top.
         let found = deferred.iter().any(|d| {
             matches!(
                 d,
                 Deferred::ScrollBarSetParams {
                     value: Some(2),
-                    max: Some(7),
+                    max: Some(3),
                     ..
                 }
             )
         });
-        assert!(
-            found,
-            "publish_bar must request value=2 max=7 (content rows-1)"
-        );
+        assert!(found, "publish_bar must request value=2 max=max_top(3)");
         let _ = FieldValue::Int(0);
     }
 
@@ -750,12 +750,44 @@ mod tests {
                 Deferred::ScrollBarSetParams {
                     value: Some(2),
                     min: Some(0),
-                    max: Some(7),
+                    max: Some(4),
                     ..
                 }
             )
         });
-        assert!(found, "bar value tracks top=2 (max=7), not the focused row");
+        assert!(
+            found,
+            "bar value tracks top=2 (max=max_top=4), not the focused row"
+        );
+    }
+
+    #[test]
+    fn bar_thumb_reaches_the_end_at_the_bottom() {
+        use tvision_rs::Deferred;
+        // At the bottom (top == max_top), the bar's value must equal its max, so
+        // the thumb reaches the very end of the track — not stop short of it.
+        let mut sg = ScrollGroup::new(Rect::new(0, 0, 10, 5)); // viewport 5
+        let w = sg.inner_width();
+        for y in 0..20 {
+            sg.add_content(cell(y, w), Rect::new(0, y, w, y + 1)); // content 20, max_top 15
+        }
+        sg.group.state_mut().state.focused = true;
+        let mut out = std::collections::VecDeque::new();
+        let mut timers = tv::timer::TimerQueue::new();
+        let mut deferred: Vec<Deferred> = Vec::new();
+        let mut ctx = Context::new(&mut out, &mut timers, 0, &mut deferred);
+        sg.scroll_to(sg.max_top(), &mut ctx); // scroll to the very bottom
+        let at_end = deferred.iter().any(|d| {
+            matches!(
+                d,
+                Deferred::ScrollBarSetParams {
+                    value: Some(15),
+                    max: Some(15),
+                    ..
+                }
+            )
+        });
+        assert!(at_end, "at the bottom the thumb value equals max (15)");
     }
 
     #[test]
