@@ -25,6 +25,12 @@ pub(crate) struct ScrollGroup {
     /// Set by `change_bounds` (no ctx available there) so that `handle_event`
     /// re-publishes the scroll-bar params on the very next event after a resize.
     bar_dirty: bool,
+    /// True while the viewport has been scrolled DIRECTLY (wheel / PageUp-Down /
+    /// bar drag) away from the focused field. While set, the per-event
+    /// scroll-to-focused pass is suppressed so a deliberate scroll is not snapped
+    /// back to a now-off-screen focused field ("no getting back up"). Cleared the
+    /// moment focus is moved explicitly (`focus_child`), which re-anchors the view.
+    scroll_locked: bool,
 }
 
 impl ScrollGroup {
@@ -48,6 +54,7 @@ impl ScrollGroup {
             inner_w: (w - 1).max(0),
             viewport_h: h.max(0),
             bar_dirty: false,
+            scroll_locked: false,
         }
     }
 
@@ -144,29 +151,25 @@ impl ScrollGroup {
     }
 
     pub(crate) fn focus_child(&mut self, id: ViewId, ctx: &mut Context) {
+        // An explicit focus move re-anchors the view on the focused field, so it
+        // ends the free-scroll lock: the next scroll-to-focused pass may run.
+        self.scroll_locked = false;
         self.group.focus_child(id, ctx);
-        // The bar tracks the cursor (focused row), so a focus move must re-publish
-        // its value — this is also what gives the bar a thumb the moment the form
-        // opens (`render` focuses the first field before any scroll happens).
+        // Re-publish the bar (its thumb follows the viewport `top`) — this is also
+        // what gives the bar a thumb the moment the form opens (`render` focuses
+        // the first field before any scroll happens).
         self.publish_bar(ctx);
     }
 
-    /// The logical row the scroll bar's thumb tracks. Listbox semantics (the thumb
-    /// follows the focused field's row) for ordinary fields — but a focused block
-    /// TALLER than the viewport is scrolled through in place (its focus never
-    /// moves), so there the thumb tracks the viewport `top` instead. Otherwise it
-    /// would pin to the block's fixed top row and sit dead still the whole way
-    /// through the block (the "scrollbar is static / feels simulated" report).
-    /// Clamped into the block's own scroll span so it spans exactly the block.
-    /// Falls back to the scroll `top` when nothing is focused.
+    /// The logical row of the focused content child — the target `page()` steps
+    /// from. Falls back to the scroll `top` when nothing is focused. (The scroll
+    /// bar's thumb tracks the viewport `top`, not this — see `publish_bar`.)
     fn focused_row(&self) -> i32 {
-        match self.group.current().and_then(|id| self.logical_of(id)) {
-            Some(r) if r.b.y - r.a.y > self.viewport_h => {
-                self.top.clamp(r.a.y, (r.b.y - self.viewport_h).max(r.a.y))
-            }
-            Some(r) => r.a.y,
-            None => self.top,
-        }
+        self.group
+            .current()
+            .and_then(|id| self.logical_of(id))
+            .map(|r| r.a.y)
+            .unwrap_or(self.top)
     }
 
     /// The focusable content child nearest logical `row` — the drag target when
@@ -338,6 +341,11 @@ impl ScrollGroup {
     /// the per-event scroll-to-focused and the form's post-edit relayout call this
     /// so the two never disagree on where to scroll.
     pub(crate) fn ensure_focused_visible(&mut self, ctx: &mut Context) {
+        // A deliberate viewport scroll (wheel / PageUp-Down / bar drag) takes the
+        // view away from the focused field on purpose; don't snap it back.
+        if self.scroll_locked {
+            return;
+        }
         if let Some(cur) = self.group.current() {
             if let Some(logical) = self.logical_of(cur) {
                 // For an edge field the region spans the read-only head/tail the
@@ -392,6 +400,29 @@ impl ScrollGroup {
         self.publish_bar(ctx);
     }
 
+    /// Scroll the viewport by `delta` lines, DIRECTLY — move `top`, leave focus
+    /// alone. This is what the mouse wheel and PageUp/PageDown drive: they move the
+    /// viewport regardless of which field is focused, so scrolling works even when
+    /// focus sits on a field (e.g. an empty inline List) that would otherwise
+    /// swallow the key or show no movement. Sets the free-scroll lock so the view
+    /// is not snapped back to the focused field. Returns `true` when `top` actually
+    /// changed; `false` at the content edge (the caller may then advance focus).
+    pub(crate) fn scroll_viewport(&mut self, delta: i32, ctx: &mut Context) -> bool {
+        let new_top = (self.top + delta).clamp(0, self.max_top());
+        if new_top == self.top {
+            return false;
+        }
+        // Lock the view here: this is a deliberate scroll, decoupled from focus.
+        // The focused field is left untouched (it may scroll off-screen — its
+        // caret is hidden while off-screen, which is safe), and the lock keeps the
+        // per-event scroll-to-focused pass from dragging the view back. Any
+        // explicit focus move (`focus_child`, via arrows / click / render) clears
+        // the lock and re-anchors.
+        self.scroll_locked = true;
+        self.scroll_to(new_top, ctx);
+        true
+    }
+
     /// The bar shows only when this pane is the focused one AND the content
     /// overflows the viewport — so scroll bars appear on the focused pane alone
     /// rather than on every pane at once. Keys on the group's own `focused` (true
@@ -413,15 +444,18 @@ impl ScrollGroup {
         ctx.request_set_visible(self.v_bar, show);
     }
 
-    /// Publish the bar's params with **listbox semantics**: the thumb tracks the
-    /// focused row (the cursor), spanning `0..=content_height-1`, with a page step
-    /// of one viewport. This mirrors `ListViewer`/`ListBox` (value = focused item,
-    /// max = range-1) so the form's bar behaves like the tree/leaf panes' bars —
-    /// and, because it is published on every focus move, the bar shows a thumb
-    /// from the moment the form opens rather than only after the first scroll.
+    /// Publish the bar's params with **viewport semantics**: the thumb tracks the
+    /// scroll `top` (the top visible row), spanning `0..=content_height-1` with a
+    /// page step of one viewport, so its position and size reflect what slice of
+    /// the content is on screen. The form is a scroll container (variable-height,
+    /// read-only blocks), so a viewport thumb — which moves for EVERY scroll input
+    /// (wheel, PageUp/Down, arrows through a tall block, drag) — is correct, where
+    /// the tree/leaf panes' listbox thumb (tracking the cursor) is not. Published
+    /// on every focus move and scroll, so the bar shows a thumb from the moment the
+    /// form opens.
     fn publish_bar(&mut self, ctx: &mut Context) {
         let max = (self.content_height() - 1).max(0);
-        let value = self.focused_row().clamp(0, max);
+        let value = self.top.clamp(0, max);
         let show = self.bar_should_show();
         if let Some(b) = self.group.child_mut(self.v_bar) {
             b.state_mut().state.visible = show;
@@ -522,30 +556,13 @@ impl View for ScrollGroup {
 
     fn apply_scroll_sync(&mut self, _h: Option<i32>, v: Option<i32>, ctx: &mut Context) {
         if let Some(v) = v {
-            // The bar value is a row (cursor), not a viewport offset: a drag moves
-            // focus to the field at that row (then `focus_child` republishes the
-            // bar and `ensure_visible` scrolls it on screen), mirroring
-            // `ListViewer::apply_scroll`. Falls back to a plain viewport scroll
-            // only when no focusable field exists to land on.
-            match self.focus_target_for_row(v) {
-                Some(id) => {
-                    self.focus_child(id, ctx);
-                    if let Some(logical) = self.logical_of(id) {
-                        if logical.b.y - logical.a.y > self.viewport_h {
-                            // A block taller than the viewport is a single focus
-                            // stop, so its thumb spans the block's own scroll range
-                            // (`focused_row`). Scrub the viewport to the dragged row
-                            // within it — otherwise the drag would just park the
-                            // block's edge and the thumb couldn't move through it.
-                            let target = v.clamp(logical.a.y, logical.b.y - self.viewport_h);
-                            self.scroll_to(target, ctx);
-                        } else {
-                            self.ensure_visible(logical, ctx);
-                        }
-                    }
-                }
-                None => self.scroll_to(v, ctx),
-            }
+            // Viewport semantics: the bar value IS the scroll `top` (see
+            // `publish_bar`), so a drag scrolls the viewport there directly and
+            // locks it — decoupled from focus, exactly like the wheel / Page keys.
+            // This scrubs smoothly through tall read-only blocks (a group's member
+            // list) that are a single focus stop.
+            self.scroll_locked = true;
+            self.scroll_to(v, ctx);
         }
     }
 }
@@ -708,7 +725,7 @@ mod tests {
     }
 
     #[test]
-    fn bar_value_tracks_focused_row_not_scroll_top() {
+    fn bar_value_tracks_scroll_top_not_focused_row() {
         use tvision_rs::Deferred;
         // 8 logical rows in a 4-row viewport (overflowing) on the active pane.
         let mut sg = ScrollGroup::new(Rect::new(0, 0, 10, 4));
@@ -722,30 +739,30 @@ mod tests {
         let mut timers = tv::timer::TimerQueue::new();
         let mut deferred: Vec<Deferred> = Vec::new();
         let mut ctx = Context::new(&mut out, &mut timers, 0, &mut deferred);
-        // Focusing a content child (the cursor) must publish the bar with
-        // value = that child's logical row, NOT the viewport top — this is the
-        // "thumb follows the cursor like a listbox" contract, and publishing on
-        // focus is what gives the bar a thumb the moment the form opens.
+        // Viewport semantics: the bar tracks the scroll `top`, not the focused
+        // row. Focus a low row but scroll the viewport down — the value follows
+        // `top` (2), not the focused child's row (5).
         sg.focus_child(ids[5], &mut ctx);
+        sg.scroll_to(2, &mut ctx);
         let found = deferred.iter().any(|d| {
             matches!(
                 d,
                 Deferred::ScrollBarSetParams {
-                    value: Some(5),
+                    value: Some(2),
                     min: Some(0),
                     max: Some(7),
                     ..
                 }
             )
         });
-        assert!(found, "focusing row 5 must publish bar value=5 max=7");
+        assert!(found, "bar value tracks top=2 (max=7), not the focused row");
     }
 
     #[test]
-    fn dragging_bar_moves_focus_to_that_row() {
-        use tvision_rs::Deferred;
-        // All rows are enabled InputLines → every row is a focus target.
-        let mut sg = ScrollGroup::new(Rect::new(0, 0, 10, 4));
+    fn dragging_bar_scrolls_the_viewport() {
+        // Dragging the bar scrolls the viewport DIRECTLY (viewport semantics), it
+        // does not move focus — the drag value is a scroll `top`.
+        let mut sg = ScrollGroup::new(Rect::new(0, 0, 10, 4)); // viewport 4, max_top 4
         let w = sg.inner_width();
         let mut ids = Vec::new();
         for y in 0..8 {
@@ -754,17 +771,12 @@ mod tests {
         sg.group.state_mut().state.focused = true;
         let mut out = std::collections::VecDeque::new();
         let mut timers = tv::timer::TimerQueue::new();
-        let mut deferred: Vec<Deferred> = Vec::new();
+        let mut deferred = Vec::new();
         let mut ctx = Context::new(&mut out, &mut timers, 0, &mut deferred);
-        // Dragging the bar to value 6 (the read-sync delivers it via
-        // apply_scroll_sync) must move focus to the field at that row, so the
-        // thumb stays draggable instead of snapping back to the cursor.
-        <ScrollGroup as View>::apply_scroll_sync(&mut sg, None, Some(6), &mut ctx);
-        assert_eq!(
-            sg.current(),
-            Some(ids[6]),
-            "dragging the bar to row 6 focuses that row's field"
-        );
+        sg.focus_child(ids[0], &mut ctx);
+        <ScrollGroup as View>::apply_scroll_sync(&mut sg, None, Some(3), &mut ctx);
+        assert_eq!(sg.top_for_test(), 3, "drag scrolls the viewport to top=3");
+        assert_eq!(sg.current(), Some(ids[0]), "drag does not move focus");
     }
 
     #[test]
@@ -1186,9 +1198,8 @@ mod tests {
     }
 
     #[test]
-    fn apply_scroll_sync_focuses_dragged_row_and_scrolls_it_into_view() {
-        use tvision_rs::Deferred;
-        let mut sg = ScrollGroup::new(Rect::new(0, 0, 10, 5)); // viewport rows 0..5
+    fn apply_scroll_sync_clamps_a_drag_past_the_bottom() {
+        let mut sg = ScrollGroup::new(Rect::new(0, 0, 10, 5)); // viewport 5, max_top 3
         let w = sg.inner_width();
         let mut ids = Vec::new();
         for y in 0..8 {
@@ -1196,17 +1207,20 @@ mod tests {
         }
         let mut out = std::collections::VecDeque::new();
         let mut timers = tv::timer::TimerQueue::new();
-        let mut deferred: Vec<Deferred> = Vec::new();
+        let mut deferred = Vec::new();
         let mut ctx = Context::new(&mut out, &mut timers, 0, &mut deferred);
-        // Dragging the bar to row 7 (below the viewport) moves focus there and
-        // scrolls so the focused field is visible — the bar is a cursor, not a
-        // viewport offset.
+        // Dragging the bar to a value past the bottom scrolls the viewport to the
+        // last full page (`max_top`), showing the last content row.
         <ScrollGroup as View>::apply_scroll_sync(&mut sg, None, Some(7), &mut ctx);
-        assert_eq!(sg.current(), Some(ids[7]), "drag focuses the row-7 field");
+        assert_eq!(
+            sg.top_for_test(),
+            3,
+            "drag past the bottom clamps to max_top"
+        );
         let y = sg.child_mut(ids[7]).unwrap().state().get_bounds().a.y;
         assert!(
             (0..5).contains(&y),
-            "row 7 must be scrolled into the viewport, got y={y}"
+            "the last row is now in the viewport, got y={y}"
         );
     }
 

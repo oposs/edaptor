@@ -12,14 +12,16 @@ All notable changes to eDAPtor are documented here. The format follows
 
 ### Fixed
 
-- **Scrolling a read-only block taller than the form pane (e.g. a large group's
-  member list) now works with every input, not just the arrow keys.** The
-  scrollbar thumb tracks the position within the block as you move through it
-  (it previously stayed frozen until you passed the whole block), the **mouse
-  wheel** scrolls through the block one line at a time instead of jumping
-  straight past it to the next field, **PageUp/PageDown** page through it, and
-  the scrollbar can be **dragged** to scrub through it. All scroll inputs now
-  drive the same viewport position.
+- **The entry form pane now scrolls like a proper scroll container.** Scrolling a
+  long form — especially one with a read-only block taller than the pane, such as
+  a large group's member list — previously only worked with the arrow keys, and
+  only by moving focus from field to field. Now the **mouse wheel**,
+  **PageUp/PageDown**, and **dragging the scrollbar** move the viewport directly,
+  independent of which field is focused, and the **scrollbar thumb** tracks the
+  scroll position so it moves as you go. In particular, after scrolling to the
+  bottom you can always scroll back up again (previously the keys were swallowed
+  by whatever field focus had landed on — "no getting back up"). The scrollbar
+  thumb no longer sits frozen while you page through a tall block.
 
 ## 1.5.1 - 2026-07-24
 
