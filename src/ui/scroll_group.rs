@@ -151,15 +151,22 @@ impl ScrollGroup {
         self.publish_bar(ctx);
     }
 
-    /// The logical row of the focused content child — the value the scroll bar's
-    /// thumb tracks (listbox semantics: the thumb follows the cursor, not the
-    /// viewport offset). Falls back to the scroll `top` when nothing is focused.
+    /// The logical row the scroll bar's thumb tracks. Listbox semantics (the thumb
+    /// follows the focused field's row) for ordinary fields — but a focused block
+    /// TALLER than the viewport is scrolled through in place (its focus never
+    /// moves), so there the thumb tracks the viewport `top` instead. Otherwise it
+    /// would pin to the block's fixed top row and sit dead still the whole way
+    /// through the block (the "scrollbar is static / feels simulated" report).
+    /// Clamped into the block's own scroll span so it spans exactly the block.
+    /// Falls back to the scroll `top` when nothing is focused.
     fn focused_row(&self) -> i32 {
-        self.group
-            .current()
-            .and_then(|id| self.logical_of(id))
-            .map(|r| r.a.y)
-            .unwrap_or(self.top)
+        match self.group.current().and_then(|id| self.logical_of(id)) {
+            Some(r) if r.b.y - r.a.y > self.viewport_h => {
+                self.top.clamp(r.a.y, (r.b.y - self.viewport_h).max(r.a.y))
+            }
+            Some(r) => r.a.y,
+            None => self.top,
+        }
     }
 
     /// The focusable content child nearest logical `row` — the drag target when
@@ -203,35 +210,15 @@ impl ScrollGroup {
         self.viewport_h
     }
 
-    /// Scroll one line (or `by` lines, for a page step) further into content
-    /// child `id` in the given direction, IF it still has hidden lines that
-    /// way. Domain-free geometry: unlike `ensure_visible` (which settles a
-    /// focused block's nearest edge into view), this always advances `top` by
-    /// up to `by` — the mechanism a caller uses to walk through a tall
-    /// single-focus block (e.g. a read-only `LaunchValueView`) line by line
-    /// before giving up and moving focus elsewhere.
-    ///
-    /// Returns `true` when it scrolled (the caller should consume the key and
-    /// keep focus on `id`); `false` when the relevant edge of `id`'s logical
-    /// rect is already within the viewport (the caller should advance focus
-    /// instead, as if `id` were an ordinary single-row field).
-    pub(crate) fn scroll_block_edge(
-        &mut self,
-        id: ViewId,
-        down: bool,
-        by: i32,
-        ctx: &mut Context,
-    ) -> bool {
-        let Some(logical) = self.logical_of(id) else {
-            return false;
-        };
-        self.scroll_edge(logical, down, by, ctx)
-    }
-
-    /// The geometry shared by `scroll_block_edge` (a single content child) and
-    /// `scroll_focus_region_edge` (the focused field's extended region): scroll up
-    /// to `by` lines further toward the near/far edge of `region`, IF that edge is
-    /// still outside the viewport. Returns `true` when it scrolled.
+    /// Scroll up to `by` lines further toward the near/far edge of `region`, IF
+    /// that edge is still outside the viewport. Domain-free geometry: unlike
+    /// `ensure_visible` (which settles a focused block's nearest edge into view),
+    /// this always advances `top` by up to `by` — the mechanism used to walk
+    /// through a tall single-focus block (a read-only `LaunchValueView`) or a
+    /// read-only head/tail line by line before giving up and moving focus. Returns
+    /// `true` when it scrolled (the caller keeps focus put and consumes the key);
+    /// `false` when the relevant edge is already visible (advance focus instead).
+    /// `scroll_focus_region_edge` supplies the focused field's `focus_region`.
     fn scroll_edge(&mut self, region: Rect, down: bool, by: i32, ctx: &mut Context) -> bool {
         if down {
             if region.b.y > self.top + self.viewport_h {
@@ -544,7 +531,17 @@ impl View for ScrollGroup {
                 Some(id) => {
                     self.focus_child(id, ctx);
                     if let Some(logical) = self.logical_of(id) {
-                        self.ensure_visible(logical, ctx);
+                        if logical.b.y - logical.a.y > self.viewport_h {
+                            // A block taller than the viewport is a single focus
+                            // stop, so its thumb spans the block's own scroll range
+                            // (`focused_row`). Scrub the viewport to the dragged row
+                            // within it — otherwise the drag would just park the
+                            // block's edge and the thumb couldn't move through it.
+                            let target = v.clamp(logical.a.y, logical.b.y - self.viewport_h);
+                            self.scroll_to(target, ctx);
+                        } else {
+                            self.ensure_visible(logical, ctx);
+                        }
                     }
                 }
                 None => self.scroll_to(v, ctx),
@@ -1038,6 +1035,34 @@ mod tests {
     }
 
     #[test]
+    fn bar_value_tracks_top_while_scrolling_a_tall_focused_block() {
+        use tvision_rs::Deferred;
+        // One 20-row focused block in a 5-row viewport. As the viewport scrolls
+        // through the block, the bar's value must follow `top` — not pin to the
+        // block's fixed top row (0) — so the thumb moves instead of sitting still.
+        let mut sg = ScrollGroup::new(Rect::new(0, 0, 10, 5));
+        let w = sg.inner_width();
+        let mut state = tv::ViewState::new(Rect::new(0, 0, w, 20));
+        state.options.selectable = true;
+        let id = sg.add_content(Box::new(CursorCell { state }), Rect::new(0, 0, w, 20));
+        let mut out = std::collections::VecDeque::new();
+        let mut timers = tv::timer::TimerQueue::new();
+        let mut deferred: Vec<Deferred> = Vec::new();
+        let mut ctx = Context::new(&mut out, &mut timers, 0, &mut deferred);
+        sg.group.state_mut().state.focused = true;
+        sg.focus_child(id, &mut ctx);
+
+        sg.scroll_to(6, &mut ctx); // scroll 6 rows into the block
+        let found = deferred
+            .iter()
+            .any(|d| matches!(d, Deferred::ScrollBarSetParams { value: Some(6), .. }));
+        assert!(
+            found,
+            "bar value must track top (6) inside a tall focused block"
+        );
+    }
+
+    #[test]
     fn scroll_block_edge_scrolls_down_one_line_while_bottom_hidden() {
         // A single 20-row block in a 5-row viewport: Down must scroll one line
         // and report `true` (consumed) while the bottom edge is still hidden.
@@ -1049,7 +1074,10 @@ mod tests {
         let mut deferred = Vec::new();
         let mut ctx = Context::new(&mut out, &mut timers, 0, &mut deferred);
 
-        assert!(sg.scroll_block_edge(id, true, 1, &mut ctx));
+        assert!({
+            let r = sg.logical_of(id).unwrap();
+            sg.scroll_edge(r, true, 1, &mut ctx)
+        });
         assert_eq!(sg.top_for_test(), 1, "scrolled down by one line");
     }
 
@@ -1066,7 +1094,10 @@ mod tests {
         let mut ctx = Context::new(&mut out, &mut timers, 0, &mut deferred);
         sg.scroll_to(15, &mut ctx); // block bottom (20) now exactly at top+vh (15+5)
 
-        assert!(!sg.scroll_block_edge(id, true, 1, &mut ctx));
+        assert!(!{
+            let r = sg.logical_of(id).unwrap();
+            sg.scroll_edge(r, true, 1, &mut ctx)
+        });
         assert_eq!(
             sg.top_for_test(),
             15,
@@ -1085,7 +1116,10 @@ mod tests {
         let mut ctx = Context::new(&mut out, &mut timers, 0, &mut deferred);
         sg.scroll_to(15, &mut ctx);
 
-        assert!(sg.scroll_block_edge(id, false, 1, &mut ctx));
+        assert!({
+            let r = sg.logical_of(id).unwrap();
+            sg.scroll_edge(r, false, 1, &mut ctx)
+        });
         assert_eq!(sg.top_for_test(), 14, "scrolled up by one line");
     }
 
@@ -1099,7 +1133,10 @@ mod tests {
         let mut deferred = Vec::new();
         let mut ctx = Context::new(&mut out, &mut timers, 0, &mut deferred);
         // top=0 already shows the block's top edge.
-        assert!(!sg.scroll_block_edge(id, false, 1, &mut ctx));
+        assert!(!{
+            let r = sg.logical_of(id).unwrap();
+            sg.scroll_edge(r, false, 1, &mut ctx)
+        });
         assert_eq!(sg.top_for_test(), 0);
     }
 
@@ -1115,8 +1152,14 @@ mod tests {
         let mut deferred = Vec::new();
         let mut ctx = Context::new(&mut out, &mut timers, 0, &mut deferred);
 
-        assert!(!sg.scroll_block_edge(id, true, 1, &mut ctx));
-        assert!(!sg.scroll_block_edge(id, false, 1, &mut ctx));
+        assert!(!{
+            let r = sg.logical_of(id).unwrap();
+            sg.scroll_edge(r, true, 1, &mut ctx)
+        });
+        assert!(!{
+            let r = sg.logical_of(id).unwrap();
+            sg.scroll_edge(r, false, 1, &mut ctx)
+        });
         assert_eq!(sg.top_for_test(), 0);
     }
 
@@ -1131,7 +1174,10 @@ mod tests {
         let mut deferred = Vec::new();
         let mut ctx = Context::new(&mut out, &mut timers, 0, &mut deferred);
 
-        assert!(sg.scroll_block_edge(id, true, 5, &mut ctx));
+        assert!({
+            let r = sg.logical_of(id).unwrap();
+            sg.scroll_edge(r, true, 5, &mut ctx)
+        });
         assert_eq!(
             sg.top_for_test(),
             3,
@@ -1161,6 +1207,31 @@ mod tests {
         assert!(
             (0..5).contains(&y),
             "row 7 must be scrolled into the viewport, got y={y}"
+        );
+    }
+
+    #[test]
+    fn apply_scroll_sync_scrubs_the_viewport_through_a_tall_block() {
+        // Dragging the bar while a block taller than the viewport is the only focus
+        // stop must SCRUB the viewport to the dragged row within the block, not
+        // park its edge — so the thumb drags through the block.
+        let mut sg = ScrollGroup::new(Rect::new(0, 0, 10, 5)); // viewport 5
+        let w = sg.inner_width();
+        let mut state = tv::ViewState::new(Rect::new(0, 0, w, 20));
+        state.options.selectable = true;
+        let id = sg.add_content(Box::new(CursorCell { state }), Rect::new(0, 0, w, 20));
+        let mut out = std::collections::VecDeque::new();
+        let mut timers = tv::timer::TimerQueue::new();
+        let mut deferred = Vec::new();
+        let mut ctx = Context::new(&mut out, &mut timers, 0, &mut deferred);
+        sg.focus_child(id, &mut ctx);
+
+        <ScrollGroup as View>::apply_scroll_sync(&mut sg, None, Some(9), &mut ctx);
+        assert_eq!(sg.current(), Some(id), "focus stays on the tall block");
+        assert_eq!(
+            sg.top_for_test(),
+            9,
+            "drag scrubs the viewport to row 9 within the block"
         );
     }
 }
