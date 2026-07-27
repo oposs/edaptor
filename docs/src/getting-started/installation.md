@@ -23,6 +23,13 @@ self-contained `musl` release binaries can be produced without vendoring a TLS
 library; pre-built static binaries will be published via GitHub Releases once
 the project is pushed.
 
+The release workflow's build matrix is configured to produce binaries for
+Linux (`x86_64`/`aarch64`, static musl), macOS (Intel and Apple Silicon),
+Windows, and **illumos** (`x86_64`, e.g. OmniOS) — but no release has shipped
+yet, so no binaries have actually been published for any of these targets. The
+illumos binary is dynamically linked — illumos has no static libc — and links
+only against base system libraries.
+
 ## Configuration file
 
 eDAPtor reads a single TOML configuration file. Point it at one explicitly with

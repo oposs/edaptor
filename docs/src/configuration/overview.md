@@ -29,8 +29,8 @@ Add a `[meta]` block to make a config identifiable in the picker:
 
 ```toml
 [meta]
-name        = "carbo-link production"
-description = "dc=carbo-link,dc=com via ldapi (ds-carbo-feh)"
+name        = "example-corp production"
+description = "dc=example,dc=com via ldapi (ds-example)"
 ```
 
 Both fields are optional.

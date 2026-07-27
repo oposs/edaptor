@@ -7,5 +7,13 @@ image = "ghcr.io/cross-rs/x86_64-unknown-linux-musl:main"
 [target.aarch64-unknown-linux-musl]
 image = "ghcr.io/cross-rs/aarch64-unknown-linux-musl:main"
 
+# illumos (e.g. OmniOS). NOTE: unlike the musl targets this is a dynamically
+# linked binary — illumos has no static libc, so do NOT pass +crt-static here.
+# Pinned to 0.2.5 deliberately (unlike the musl images' :main) — the illumos
+# image is newer and less exercised upstream, so it is not floated. Do not
+# "fix" this to match the musl targets.
+[target.x86_64-unknown-illumos]
+image = "ghcr.io/cross-rs/x86_64-unknown-illumos:0.2.5"
+
 [build.env]
 passthrough = ["RUSTFLAGS"]

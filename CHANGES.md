@@ -8,6 +8,12 @@ All notable changes to eDAPtor are documented here. The format follows
 
 ### New
 
+- **illumos / OmniOS builds.** Releases now include an
+  `x86_64-unknown-illumos` binary, so eDAPtor runs on illumos hosts such as
+  OmniOS. The OS-native clipboard is not compiled in on that platform (its
+  Wayland dependency does not build there); clipboard copy falls back to OSC 52,
+  which is what works over ssh regardless.
+
 ### Changed
 
 ### Fixed

@@ -70,8 +70,8 @@ never picks does not produce an error at discovery time.
 
 ```toml
 [meta]
-name        = "carbo-link production"
-description = "dc=carbo-link,dc=com via ldapi (ds-carbo-feh)"
+name        = "example-corp production"
+description = "dc=example,dc=com via ldapi (ds-example)"
 ```
 
 Both fields are optional. The section itself is optional.
@@ -102,7 +102,7 @@ pub struct Config {
 
 | Field | Present | Absent fallback |
 |-------|---------|-----------------|
-| `name` | shown as-is | file stem (`ds-carbo-feh` from `ds-carbo-feh.toml`) |
+| `name` | shown as-is | file stem (`ds-example` from `ds-example.toml`) |
 | `description` | shown as second line | second line is blank |
 | path | always shown as third line | — |
 
@@ -125,9 +125,9 @@ pub fn pick_config(candidates: Vec<ConfigCandidate>) -> Result<Option<PathBuf>>
 ```
 ┌─ Select configuration ───────────────────────────────────────────┐
 │                                                                    │
-│  ▶ carbo-link production                                          │
-│    dc=carbo-link,dc=com via ldapi (ds-carbo-feh)                  │
-│    /etc/edaptor/ds-carbo-feh.toml                                 │
+│  ▶ example-corp production                                        │
+│    dc=example,dc=com via ldapi (ds-example)                       │
+│    /etc/edaptor/ds-example.toml                                   │
 │                                                                    │
 │    example                                                         │
 │                                                                    │

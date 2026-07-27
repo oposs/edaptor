@@ -58,8 +58,8 @@ fn meta_config_parses_both_fields() {
     let cfg: Config = toml::from_str(
         r#"
         [meta]
-        name        = "carbo-link production"
-        description = "dc=carbo-link,dc=com via ldapi"
+        name        = "example-corp production"
+        description = "dc=example,dc=com via ldapi"
         [server]
         uri     = "ldap://x"
         base_dn = "dc=x"
@@ -69,10 +69,10 @@ fn meta_config_parses_both_fields() {
         "#,
     )
     .unwrap();
-    assert_eq!(cfg.meta.name.as_deref(), Some("carbo-link production"));
+    assert_eq!(cfg.meta.name.as_deref(), Some("example-corp production"));
     assert_eq!(
         cfg.meta.description.as_deref(),
-        Some("dc=carbo-link,dc=com via ldapi")
+        Some("dc=example,dc=com via ldapi")
     );
 }
 
@@ -678,8 +678,8 @@ Add a `[meta]` block to make a config identifiable in the picker:
 
 ```toml
 [meta]
-name        = "carbo-link production"
-description = "dc=carbo-link,dc=com via ldapi (ds-carbo-feh)"
+name        = "example-corp production"
+description = "dc=example,dc=com via ldapi (ds-example)"
 ```
 
 Both fields are optional.
