@@ -12,6 +12,10 @@ All notable changes to eDAPtor are documented here. The format follows
 
 ### Fixed
 
+## 1.5.2 - 2026-07-27
+
+### Fixed
+
 - **The entry form pane now scrolls like a proper scroll container.** Scrolling a
   long form — especially one with a read-only block taller than the pane, such as
   a large group's member list — previously only worked with the arrow keys, and
@@ -34,7 +38,6 @@ All notable changes to eDAPtor are documented here. The format follows
   previous one had written into its own copy. The three factories now derive a
   fresh `Rect` instead of mutating their parameter, which keeps the shared
   argument intact. `cargo test --release` reproduces the old failure.
-
 ## 1.5.1 - 2026-07-24
 
 ### Fixed

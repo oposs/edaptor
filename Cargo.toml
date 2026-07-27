@@ -1,6 +1,6 @@
 [package]
 name = "edaptor"
-version = "1.5.1"
+version = "1.5.2"
 edition = "2021"
 description = "TUI for editing OpenLDAP directories (users, groups, memberships)"
 license = "MIT"
