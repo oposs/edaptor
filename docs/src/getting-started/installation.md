@@ -20,15 +20,13 @@ automatically, so you do not have to manage versions by hand.
 eDAPtor uses the [rustls](https://github.com/rustls/rustls) TLS backend, so
 **no OpenSSL is needed** to build or run it. This also means static,
 self-contained `musl` release binaries can be produced without vendoring a TLS
-library; pre-built static binaries will be published via GitHub Releases once
-the project is pushed.
+library.
 
-The release workflow's build matrix is configured to produce binaries for
-Linux (`x86_64`/`aarch64`, static musl), macOS (Intel and Apple Silicon),
-Windows, and **illumos** (`x86_64`, e.g. OmniOS) — but no release has shipped
-yet, so no binaries have actually been published for any of these targets. The
-illumos binary is dynamically linked — illumos has no static libc — and links
-only against base system libraries.
+Pre-built binaries are published with each
+[GitHub Release](https://github.com/oposs/edaptor/releases) for Linux
+(`x86_64`/`aarch64`, static musl), macOS (Intel and Apple Silicon), Windows, and
+**illumos** (`x86_64`, e.g. OmniOS). The illumos binary is dynamically linked —
+illumos has no static libc — and links only against base system libraries.
 
 ## Configuration file
 
