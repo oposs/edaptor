@@ -91,6 +91,9 @@ fn display_label(attr: &str) -> String {
     }
 }
 
+/// Lines the viewport scrolls per mouse-wheel notch.
+const WHEEL_STEP: i32 = 3;
+
 /// A field's value cell is focusable when the user can interact with it:
 /// - `Text` inline-editable fields (single-value free text);
 /// - `List` inline-editor fields (multi-value, plain or XOrdered);
@@ -889,6 +892,23 @@ impl FormPane {
         self.place_cursor_home(next_id);
     }
 
+    /// Scroll the focused field's region toward `down` by `by` lines if it still
+    /// has hidden content that way (a block taller than the viewport, or a
+    /// read-only head/tail beyond the first/last focusable field); otherwise move
+    /// focus to the prev/next field. Returns `true` when it scrolled (focus
+    /// unchanged). Shared by Up/Down and the mouse wheel so keyboard and pointer
+    /// drive the exact same viewport scroll.
+    fn scroll_region_or_focus(&mut self, down: bool, by: i32, ctx: &mut Context) -> bool {
+        let scrolled = self
+            .scroll_mut()
+            .map(|sg| sg.scroll_focus_region_edge(down, by, ctx))
+            .unwrap_or(false);
+        if !scrolled {
+            self.focus_field(if down { 1 } else { -1 }, ctx);
+        }
+        scrolled
+    }
+
     /// If pane-local point `pt` falls inside a field's read-only label cell,
     /// return that field's paired value-editor id so a click on the label can
     /// focus the value editor.
@@ -1296,26 +1316,37 @@ impl View for FormPane {
             return;
         }
 
-        // Mouse wheel scrolls the form by MOVING FOCUS through fields, not by
-        // sliding content under a stationary cursor. Moving focus lets
-        // `ensure_visible` scroll the form so the focused field — and the hardware
-        // cursor — stays on screen, so the wheel "advances the cursor" and can
-        // never strand it off-screen (which previously wedged the display). The
-        // form consumes the wheel only when the cursor is over IT — tvision
-        // delivers the wheel non-positionally (the splitter offers it to each pane
-        // in turn), so without this gate the form, as the splitter's last child,
-        // would grab every wheel regardless of the pointer.
+        // Mouse wheel scrolls the form. It drives the SAME scroll path as Up/Down
+        // (`scroll_region_or_focus`): a block taller than the viewport (or a
+        // read-only head/tail) scrolls one line under a held focus, and only once
+        // its near edge is visible does the wheel advance focus to the next field —
+        // so the wheel walks THROUGH a tall read-only block (e.g. a group's member
+        // list) instead of jumping straight past it. The form consumes the wheel
+        // only when the cursor is over IT — tvision delivers the wheel
+        // non-positionally (the splitter offers it to each pane in turn), so
+        // without this gate the form, as the splitter's last child, would grab
+        // every wheel regardless of the pointer.
         if super::wheel_misses_pane(self.group.state(), ev) {
             return; // cursor is over a sibling pane: let the wheel propagate
         }
         if let Event::MouseWheel(me) = ev {
-            let delta = match me.wheel {
-                tv::event::MouseWheel::Down => 1,
-                tv::event::MouseWheel::Up => -1,
-                _ => 0,
+            let down = match me.wheel {
+                tv::event::MouseWheel::Down => Some(true),
+                tv::event::MouseWheel::Up => Some(false),
+                _ => None,
             };
-            if delta != 0 {
-                self.focus_field(delta, ctx);
+            if let Some(down) = down {
+                let step = if down { WHEEL_STEP } else { -WHEEL_STEP };
+                let scrolled = self
+                    .scroll_mut()
+                    .map(|sg| sg.scroll_viewport(step, ctx))
+                    .unwrap_or(false);
+                // When the content already fits (nothing to scroll), fall back to
+                // moving focus a field — the wheel still "does something" on a short
+                // form, matching the prior behaviour.
+                if !scrolled {
+                    self.focus_field(if down { 1 } else { -1 }, ctx);
+                }
                 self.sync_into_form();
             }
             ev.clear();
@@ -1342,7 +1373,22 @@ impl View for FormPane {
         let nav = matches!(ev, Event::KeyDown(k) if matches!(k.key, Key::Up | Key::Down));
         let page_nav =
             matches!(ev, Event::KeyDown(k) if matches!(k.key, Key::PageUp | Key::PageDown));
-        if (is_keydown || is_paste) && self.focused_is_list_view() {
+        if page_nav {
+            // PageUp/PageDown page the WHOLE FORM viewport, regardless of which
+            // field kind is focused — checked FIRST so a focused inline List never
+            // swallows them. (It used to: after scrolling to the bottom, focus sat
+            // on an empty trailing List field whose editor ignores page keys and
+            // never released focus, stranding the viewport — "no getting back up".)
+            let down = matches!(ev, Event::KeyDown(k) if k.key == Key::PageDown);
+            let by = self
+                .scroll_mut()
+                .map(|sg| sg.viewport_h())
+                .unwrap_or(1)
+                .max(1);
+            self.scroll_mut()
+                .map(|sg| sg.scroll_viewport(if down { by } else { -by }, ctx));
+            ev.clear();
+        } else if (is_keydown || is_paste) && self.focused_is_list_view() {
             // The list view edits (or moves the caret / reorders). Snapshot its
             // line count first so we can detect a grow / shrink afterwards.
             let before = self.focused_list_line_count();
@@ -1356,56 +1402,15 @@ impl View for FormPane {
                 // shrinks and the following blocks shift, then keep it visible.
                 self.relayout_after_list_edit(ctx);
             }
-        } else if is_keydown && self.focused_is_launch_view() && (nav || page_nav) {
-            // Read-only block taller than the viewport: scroll through it (pure
-            // geometry, no per-line caret — the block is a single focus stop)
-            // before advancing focus to the prev/next field. `by` is one line
-            // for Up/Down, one viewport page for PageUp/PageDown.
-            let down =
-                matches!(ev, Event::KeyDown(k) if matches!(k.key, Key::Down | Key::PageDown));
-            let by = if page_nav {
-                self.scroll_mut()
-                    .map(|sg| sg.viewport_h())
-                    .unwrap_or(1)
-                    .max(1)
-            } else {
-                1
-            };
-            let focused_id = self.scroll_mut().and_then(|sg| sg.current());
-            let scrolled = focused_id
-                .and_then(|id| {
-                    self.scroll_mut()
-                        .map(|sg| sg.scroll_block_edge(id, down, by, ctx))
-                })
-                .unwrap_or(false);
-            if scrolled {
-                ev.clear();
-            } else if nav {
-                self.focus_field(if down { 1 } else { -1 }, ctx);
-                ev.clear();
-            } else {
-                // PageUp/PageDown with the block's near edge already visible:
-                // fall back to the existing page-by-viewport behaviour
-                // (ScrollGroup's own PageUp/PageDown handling), unchanged from
-                // before this fix.
-                self.group.handle_event(ev, ctx);
-            }
         } else if nav {
-            // Plain (non-list, non-launch) focused field. If it is the FIRST or
-            // LAST focusable field and the form has a non-focusable read-only
-            // head/tail, Up/Down first walks the viewport through that hidden
-            // region (read-only cells never take focus, so this is the only way to
-            // bring a trailing/leading read-only field into view); only once the
-            // region's near edge is visible does focus advance to the prev/next
-            // field.
+            // Up/Down on a non-list focused field, routed through ONE scroll path
+            // so keyboard and wheel agree on the viewport `top`. A block taller
+            // than the viewport (a launch block: a group's members, objectClass, …)
+            // or a read-only head/tail scrolls one line toward the key while it
+            // still has hidden content; only once its near edge is visible does
+            // focus advance — so a tall read-only block is reachable, not jumped.
             let down = matches!(ev, Event::KeyDown(k) if k.key == Key::Down);
-            let scrolled = self
-                .scroll_mut()
-                .map(|sg| sg.scroll_focus_region_edge(down, 1, ctx))
-                .unwrap_or(false);
-            if !scrolled {
-                self.focus_field(if down { 1 } else { -1 }, ctx);
-            }
+            self.scroll_region_or_focus(down, 1, ctx);
             ev.clear();
         } else if is_keydown && self.focused_is_launch_view() {
             // Action key on a read-only launch/list block: route it to the focused
@@ -2771,6 +2776,204 @@ mod tests {
             &mut headless_ctx(&mut out, &mut timers, &mut deferred),
         );
         assert_eq!(pane.scroll_mut().unwrap().top_for_test(), 0);
+    }
+
+    /// Build a form whose first field is a read-only Launch block taller than a
+    /// 6-row viewport (a group's member list is the real case), followed by one
+    /// editable field. Returns the pane with focus on the tall block.
+    #[cfg(test)]
+    fn pane_with_tall_launch_block() -> (Shared, FormPane) {
+        let many: Vec<String> = (0..20).map(|i| format!("oc{i}")).collect();
+        let object_class = EditField {
+            label: "objectClass".into(),
+            must: true,
+            editable: false,
+            multi: true,
+            secret: false,
+            ordered: false,
+            orphaned: false,
+            kind: FieldKind::Text,
+            widget: WidgetSpec::ReadOnlyText,
+            widget_binding: None,
+            values: many.clone(),
+            baseline: many,
+        };
+        let (shared, mut pane) = build_pane_with_form(vec![object_class, ef("cn", "z", true)]);
+        <FormPane as View>::change_bounds(&mut pane, Rect::new(0, 0, 80, 8)); // viewport 6
+        let mut out = VecDeque::new();
+        let mut timers = tv::timer::TimerQueue::new();
+        let mut deferred = Vec::new();
+        let mut tick = Event::Broadcast {
+            command: REFRESH,
+            source: None,
+        };
+        pane.handle_event(
+            &mut tick,
+            &mut headless_ctx(&mut out, &mut timers, &mut deferred),
+        );
+        assert!(pane.focused_is_launch_view(), "the tall block is focused");
+        (shared, pane)
+    }
+
+    #[test]
+    fn mouse_wheel_scrolls_through_a_tall_block_instead_of_jumping_past_it() {
+        // The wheel must walk the viewport through a read-only block taller than
+        // the pane (a group's member list) one line at a time, keeping focus on
+        // it — NOT jump straight to the next field (the reported "mouse scrolling
+        // does not work").
+        let (_shared, mut pane) = pane_with_tall_launch_block();
+        let mut out = VecDeque::new();
+        let mut timers = tv::timer::TimerQueue::new();
+        let mut deferred = Vec::new();
+        for tick in 1..=3 {
+            let mut wheel = Event::MouseWheel(tv::event::MouseEvent {
+                position: tv::Point::new(10, 4), // over the pane
+                wheel: tv::event::MouseWheel::Down,
+                ..Default::default()
+            });
+            pane.handle_event(
+                &mut wheel,
+                &mut headless_ctx(&mut out, &mut timers, &mut deferred),
+            );
+            assert_eq!(
+                pane.scroll_mut().unwrap().top_for_test(),
+                tick * WHEEL_STEP,
+                "wheel scrolls the viewport by WHEEL_STEP lines per notch"
+            );
+            assert_eq!(
+                pane.focused_field_idx(),
+                Some(0),
+                "focus stays on the block while it is still in view"
+            );
+        }
+    }
+
+    #[test]
+    fn pagedown_pages_through_a_tall_block() {
+        // PageDown must page the viewport through the tall block (not do nothing).
+        let (_shared, mut pane) = pane_with_tall_launch_block();
+        let mut out = VecDeque::new();
+        let mut timers = tv::timer::TimerQueue::new();
+        let mut deferred = Vec::new();
+        let mut pgdn = Event::KeyDown(tv::KeyEvent::from(tv::Key::PageDown));
+        pane.handle_event(
+            &mut pgdn,
+            &mut headless_ctx(&mut out, &mut timers, &mut deferred),
+        );
+        assert_eq!(
+            pane.scroll_mut().unwrap().top_for_test(),
+            6,
+            "PageDown advances the scroll by one viewport (6 rows)"
+        );
+        assert_eq!(
+            pane.focused_field_idx(),
+            Some(0),
+            "focus stays on the block being paged through"
+        );
+    }
+
+    #[test]
+    fn pageup_and_wheel_get_back_up_from_the_bottom() {
+        // Mirror cn=Engineering: a tall read-only Launch block (the member list)
+        // followed by empty inline List fields (owner, o, ou, …). Page to the
+        // bottom — focus lands on a trailing List field — then PageUp and wheel-up
+        // must scroll the viewport back up. Before, the List field swallowed
+        // PageUp and the wheel only nudged focus among the visible empty fields, so
+        // there was "no getting back up".
+        let many: Vec<String> = (0..20).map(|i| format!("m{i}")).collect();
+        let member = EditField {
+            label: "objectClass".into(), // Launch kind (read-only, modal-edited)
+            must: true,
+            editable: false,
+            multi: true,
+            secret: false,
+            ordered: false,
+            orphaned: false,
+            kind: FieldKind::Text,
+            widget: WidgetSpec::ReadOnlyText,
+            widget_binding: None,
+            values: many.clone(),
+            baseline: many,
+        };
+        let mut fields = vec![ef("cn", "g", true), member];
+        // A run of empty inline List fields longer than the viewport, so at the
+        // bottom the member block is fully off-screen and focus rests on a List.
+        for i in 0..8 {
+            fields.push(multi_list(&format!("l{i}"), &[]));
+        }
+        let (_shared, mut pane) = build_pane_with_form(fields);
+        <FormPane as View>::change_bounds(&mut pane, Rect::new(0, 0, 80, 8)); // vp 6
+        let mut out = VecDeque::new();
+        let mut timers = tv::timer::TimerQueue::new();
+        let mut deferred = Vec::new();
+        let mut tick = Event::Broadcast {
+            command: REFRESH,
+            source: None,
+        };
+        pane.handle_event(
+            &mut tick,
+            &mut headless_ctx(&mut out, &mut timers, &mut deferred),
+        );
+
+        let max_top = pane.scroll_mut().unwrap().max_top();
+        assert!(max_top > 6, "the form must overflow by more than a page");
+
+        // Page down to the very bottom.
+        for _ in 0..10 {
+            let mut pd = Event::KeyDown(tv::KeyEvent::from(tv::Key::PageDown));
+            pane.handle_event(
+                &mut pd,
+                &mut headless_ctx(&mut out, &mut timers, &mut deferred),
+            );
+        }
+        assert_eq!(
+            pane.scroll_mut().unwrap().top_for_test(),
+            max_top,
+            "PageDown reaches the bottom"
+        );
+
+        // PageUp must scroll the viewport back up — the whole point is that this
+        // works regardless of which field holds focus (a trailing inline List used
+        // to swallow the key), because viewport scrolling is decoupled from focus.
+        let mut pu = Event::KeyDown(tv::KeyEvent::from(tv::Key::PageUp));
+        pane.handle_event(
+            &mut pu,
+            &mut headless_ctx(&mut out, &mut timers, &mut deferred),
+        );
+        let after_pageup = pane.scroll_mut().unwrap().top_for_test();
+        assert!(
+            after_pageup < max_top,
+            "PageUp scrolls back up (was {max_top}, now {after_pageup})"
+        );
+
+        // Wheel-up must scroll up too.
+        let mut wheel = Event::MouseWheel(tv::event::MouseEvent {
+            position: tv::Point::new(10, 4),
+            wheel: tv::event::MouseWheel::Up,
+            ..Default::default()
+        });
+        pane.handle_event(
+            &mut wheel,
+            &mut headless_ctx(&mut out, &mut timers, &mut deferred),
+        );
+        assert!(
+            pane.scroll_mut().unwrap().top_for_test() < after_pageup,
+            "wheel-up scrolls further up"
+        );
+
+        // Enough PageUps get all the way back to the top.
+        for _ in 0..10 {
+            let mut pu = Event::KeyDown(tv::KeyEvent::from(tv::Key::PageUp));
+            pane.handle_event(
+                &mut pu,
+                &mut headless_ctx(&mut out, &mut timers, &mut deferred),
+            );
+        }
+        assert_eq!(
+            pane.scroll_mut().unwrap().top_for_test(),
+            0,
+            "PageUp returns to the top of the form"
+        );
     }
 
     #[test]
