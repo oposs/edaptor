@@ -1150,8 +1150,8 @@ mod meta_tests {
         let cfg: Config = toml::from_str(
             r#"
             [meta]
-            name        = "carbo-link production"
-            description = "dc=carbo-link,dc=com via ldapi"
+            name        = "example-corp production"
+            description = "dc=example,dc=com via ldapi"
             [server]
             uri     = "ldap://x"
             base_dn = "dc=x"
@@ -1161,10 +1161,10 @@ mod meta_tests {
             "#,
         )
         .unwrap();
-        assert_eq!(cfg.meta.name.as_deref(), Some("carbo-link production"));
+        assert_eq!(cfg.meta.name.as_deref(), Some("example-corp production"));
         assert_eq!(
             cfg.meta.description.as_deref(),
-            Some("dc=carbo-link,dc=com via ldapi")
+            Some("dc=example,dc=com via ldapi")
         );
     }
 

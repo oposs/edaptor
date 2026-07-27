@@ -10,7 +10,10 @@
 docs/book/
 .claude
 *~
+# Customer directory configs: real base DNs, bind DNs, Samba SIDs and uid/gid
+# ranges. This repo is public — these live only on the host they serve.
 examples/ds-carbo-feh.toml
+examples/ds-fugu-speag.toml
 
 # SDD / superpowers scratch artifacts
 .superpowers/
