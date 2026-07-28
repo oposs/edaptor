@@ -8,6 +8,14 @@ All notable changes to eDAPtor are documented here. The format follows
 
 ### New
 
+### Changed
+
+### Fixed
+
+## 1.6.0 - 2026-07-28
+
+### New
+
 - **Audit block in the entry form.** Below the attributes, separated by a blank
   line, the entry pane now shows the entry's server-maintained
   `createTimestamp`, `creatorsName`, `modifyTimestamp` and `modifiersName`,
@@ -18,7 +26,6 @@ All notable changes to eDAPtor are documented here. The format follows
   `20260728110322Z`. The block refreshes after each save. Entry reads now request
   these operational attributes explicitly; a server that does not return them
   simply shows no block.
-
 ### Changed
 
 - **Multi-value blocks scroll sideways too.** A member list, an `objectClass`
