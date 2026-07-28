@@ -89,8 +89,15 @@ fn attr_hint(attr: &str) -> Option<&'static str> {
 /// The label shown in the form's label column for `attr`: the attribute name,
 /// plus a parenthesised hint when [`ATTR_HINTS`] has one (e.g. `sn (surname)`).
 /// The `*` MUST marker is NOT included here — callers append it.
+///
+/// The meta block is the exception: it shows the hint ALONE (`created by`, not
+/// `creatorsName (created by)`). Those four attribute names are long, and the
+/// label column is sized to the longest label in the *whole* form — so spelling
+/// them out squeezes every value cell on a narrow pane. The block is
+/// self-explanatory as a group, so the bare hint carries it.
 fn display_label(attr: &str) -> String {
     match attr_hint(attr) {
+        Some(hint) if crate::workflows::form_model::is_meta_attr(attr) => hint.to_string(),
         Some(hint) => format!("{attr} ({hint})"),
         None => attr.to_string(),
     }
@@ -754,6 +761,18 @@ impl FormPane {
                                 // rest — matching the former `widget_for(f).present(f)`.
                                 v.set_value(FieldValue::Text(text_cell_value(field)));
                                 v.state_mut().state.disabled = !cell_focusable(field);
+                                // `set_value` select-alls, which parks the view at
+                                // the END of the text: a value wider than its cell
+                                // then shows its tail behind a `◄` marker. For a DN
+                                // or a path the front is what identifies it, so home
+                                // every cell as it is filled. (The focused cell is
+                                // homed again below; this runs on render ticks only,
+                                // never mid-typing.)
+                                if let Some(il) =
+                                    v.as_any_mut().and_then(|a| a.downcast_mut::<InputLine>())
+                                {
+                                    il.home();
+                                }
                             }
                             ValueKind::Launch => {
                                 if let Some(lv) = v
@@ -2518,6 +2537,51 @@ mod tests {
     }
 
     #[test]
+    fn a_value_wider_than_its_cell_shows_its_start() {
+        // `InputLine::set_value` select-alls, parking the view at the END of the
+        // text. For a DN the front is what identifies it, so a value too wide for
+        // its cell must still read from the beginning.
+        let (_shared, mut pane) = build_pane_with_form(vec![
+            ef("cn", "a", true),
+            ef(
+                "seeAlso",
+                "cn=admin,ou=service accounts,dc=example,dc=org",
+                false,
+            ),
+        ]);
+        let mut out = VecDeque::new();
+        let mut timers = tv::timer::TimerQueue::new();
+        let mut deferred = Vec::new();
+        let mut ev = Event::Broadcast {
+            command: REFRESH,
+            source: None,
+        };
+        pane.handle_event(
+            &mut ev,
+            &mut headless_ctx(&mut out, &mut timers, &mut deferred),
+        );
+
+        use tvision_rs::{Buffer, Point};
+        let theme = crate::ui::theme::edaptor_theme();
+        let mut buf = Buffer::new(60, 10);
+        {
+            let mut dctx =
+                DrawCtx::new(&mut buf, &theme, Rect::new(0, 0, 60, 10), Point::new(0, 0));
+            <FormPane as View>::draw(&mut pane, &mut dctx);
+        }
+        // Row 3 is the second field (header rule 0, breathing row 1, cn 2).
+        let row: String = (0..60u16).map(|x| buf.get(x, 3).symbol()).collect();
+        assert!(
+            row.contains("cn=admin,ou=serv"),
+            "the value must read from its start; got {row:?}"
+        );
+        assert!(
+            !row.contains('◄'),
+            "a start-anchored value shows no left-scroll marker; got {row:?}"
+        );
+    }
+
+    #[test]
     fn meta_rows_are_not_tab_stops() {
         let (_shared, mut pane) = build_pane_with_form(vec![
             ef("cn", "a", true),
@@ -3866,6 +3930,16 @@ mod tests {
             assert_eq!(display_label("uidNumber"), "uidNumber");
             assert_eq!(display_label("givenName"), "givenName");
             assert_eq!(display_label("somethingCustom"), "somethingCustom");
+        }
+
+        #[test]
+        fn meta_rows_show_the_hint_alone() {
+            // `modifiersName (modified by)` would be the longest label in the form
+            // and would size the label column for every other row.
+            assert_eq!(display_label("createTimestamp"), "created");
+            assert_eq!(display_label("creatorsName"), "created by");
+            assert_eq!(display_label("modifyTimestamp"), "modified");
+            assert_eq!(display_label("modifiersName"), "modified by");
         }
     }
 }

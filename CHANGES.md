@@ -10,7 +10,8 @@ All notable changes to eDAPtor are documented here. The format follows
 
 - **Audit block in the entry form.** Below the attributes, separated by a blank
   line, the entry pane now shows the entry's server-maintained
-  `createTimestamp`, `creatorsName`, `modifyTimestamp` and `modifiersName`.
+  `createTimestamp`, `creatorsName`, `modifyTimestamp` and `modifiersName`,
+  labelled `created` / `created by` / `modified` / `modified by`.
   They are read-only — no Tab stop, never part of a save — and the timestamps are
   rendered in local time (`2026-07-28 13:03:22`) instead of the raw
   `20260728110322Z`. The block refreshes after each save. Entry reads now request
@@ -24,6 +25,10 @@ All notable changes to eDAPtor are documented here. The format follows
   was indistinguishable from a short one.
 
 ### Fixed
+
+- **A value wider than its cell now shows its start, not its end.** Long values
+  (DNs, paths) were parked at their tail behind a `◄` marker, hiding the part
+  that identifies them; they now read from the beginning.
 
 ## 1.5.3 - 2026-07-27
 

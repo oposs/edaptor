@@ -68,7 +68,10 @@ accent colour, which ASCII cannot show.)*
 
   Below the attributes, separated by a blank line, sits the **audit block**: the
   server-maintained `createTimestamp`, `creatorsName`, `modifyTimestamp` and
-  `modifiersName` of the entry. These are *operational* attributes — the
+  `modifiersName` of the entry, labelled simply `created`, `created by`,
+  `modified` and `modified by` (their real names are long, and the label column
+  is sized to the longest label in the whole form). These are *operational*
+  attributes — the
   directory maintains them, so eDAPtor shows them read-only: they take no Tab
   stop, never enter a save, and cannot be edited. Timestamps are rendered in your
   machine's local time (`2026-07-28 13:03:22`) rather than the raw LDAP
