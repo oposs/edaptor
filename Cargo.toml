@@ -21,6 +21,10 @@ ldap-types = { version = "0.7", default-features = false, features = ["chumsky"]
 chumsky = "0.12"
 oid = "0.3"
 unicode-width = "0.2"
+# Formats the entry form's operational timestamps in local time. `local-offset`
+# reads the process's UTC offset, which `time` only allows while the process is
+# single-threaded — hence the capture at the top of `main` (see workflows::gtime).
+time = { version = "0.3", features = ["local-offset"] }
 # tvision-rs is the TUI framework driving the edaptor browser (tree / leaf list / entry form).
 # 0.14.0: native InputLine masking + RevealEye/MaskedInput (replaces the local password mirror).
 

@@ -298,6 +298,9 @@ pub fn plan_combined_save(
         attrs: form
             .fields
             .iter()
+            // Mirrors `to_edit_entry`: the meta block is operational and stays out
+            // of both sides of the diff.
+            .filter(|f| !crate::workflows::form_model::is_meta_attr(&f.label))
             .map(|f| (f.label.clone(), f.baseline.clone()))
             .collect(),
     };
@@ -851,6 +854,48 @@ mod tests {
         assert!(cs.ldif.contains("cn=g2,ou=groups,dc=x"));
         assert!(cs.ldif.contains("cn=g1,ou=groups,dc=x"));
         assert_eq!(cs.own_dn, "uid=ann,ou=people,dc=x");
+    }
+
+    #[test]
+    fn meta_rows_never_reach_the_save() {
+        // The audit block is operational: it is not in the entry's MUST∪MAY, so if
+        // it reached the diff `validate` would reject the save outright, and any
+        // op emitted for it would be a write against a server-maintained attribute.
+        let mut form = user_form_own_and_memberof();
+        for (label, value) in [
+            ("createTimestamp", "2026-06-14 09:12:44"),
+            ("modifyTimestamp", "2026-07-28 11:03:22"),
+            ("creatorsName", "cn=admin,dc=x"),
+            ("modifiersName", "cn=admin,dc=x"),
+        ] {
+            let mut f = plain_field(label, vec![value], vec![value]);
+            f.editable = false;
+            form.fields.push(f);
+        }
+        let plan = plan_combined_save(
+            &user_schema(),
+            &form,
+            &[],
+            &[],
+            &[],
+            &[],
+            &Default::default(),
+        );
+        let cs = match plan {
+            PlanCombined::Ready(cs) => cs,
+            other => panic!("expected Ready (meta rows must not fail validation), got {other:?}"),
+        };
+        for m in &cs.own_mods {
+            let attr = match m {
+                ModOp::Add { attr, .. }
+                | ModOp::Delete { attr, .. }
+                | ModOp::Replace { attr, .. } => attr,
+            };
+            assert!(
+                !crate::workflows::form_model::is_meta_attr(attr),
+                "no modification may target the audit block; got {m:?}"
+            );
+        }
     }
 
     #[test]

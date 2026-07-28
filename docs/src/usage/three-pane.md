@@ -61,8 +61,20 @@ accent colour, which ASCII cannot show.)*
   form is generated from the entry's `objectClass` definitions in the live schema,
   so it always matches what the directory actually allows. It re-loads as you move
   the highlight in the entry list. The pane title shows the current DN (or
-  `New entry` while creating). Move between fields with `↑↓`; the status line
-  shows context-sensitive editing hints for the focused field.
+  `New entry` while creating); a DN too long for the pane is cut at the *end*,
+  with a `…` marking the cut, so the telling front part stays readable. Move
+  between fields with `↑↓`; the status line shows context-sensitive editing hints
+  for the focused field.
+
+  Below the attributes, separated by a blank line, sits the **audit block**: the
+  server-maintained `createTimestamp`, `creatorsName`, `modifyTimestamp` and
+  `modifiersName` of the entry. These are *operational* attributes — the
+  directory maintains them, so eDAPtor shows them read-only: they take no Tab
+  stop, never enter a save, and cannot be edited. Timestamps are rendered in your
+  machine's local time (`2026-07-28 13:03:22`) rather than the raw LDAP
+  `20260728110322Z`. The block refreshes after every save, so `modified` always
+  reflects the write you just made. Servers that do not return these attributes
+  (or a bind DN not permitted to read them) simply show no block.
 
 ## Focus and the status line
 

@@ -75,7 +75,17 @@ impl ReadFlow {
             base: dn.to_string(),
             scope: SearchScope::Base,
             filter: "(objectClass=*)".to_string(),
-            attrs: vec!["*".to_string(), "entryCSN".to_string()],
+            // `*` is *user* attributes only — every operational attribute has to
+            // be named: `entryCSN` for optimistic concurrency, the META_ATTRS for
+            // the form's audit block.
+            attrs: std::iter::once("*".to_string())
+                .chain(std::iter::once("entryCSN".to_string()))
+                .chain(
+                    crate::workflows::form_model::META_ATTRS
+                        .iter()
+                        .map(|a| a.to_string()),
+                )
+                .collect(),
             size_limit: None,
         })?;
         let show = profile.map(|p| p.show.clone()).unwrap_or_default();

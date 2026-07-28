@@ -9,7 +9,7 @@ use std::collections::BTreeMap;
 use crate::config::widget::WidgetKind;
 use crate::form::changeset::EditEntry;
 use crate::schema::{FieldKind, SchemaModel};
-use crate::workflows::form_model::{FormField, FormModel, WidgetSpec};
+use crate::workflows::form_model::{is_meta_attr, FormField, FormModel, WidgetSpec};
 
 /// One editable field.
 #[derive(Clone)]
@@ -135,10 +135,15 @@ impl EditForm {
     }
 
     /// A pure [`EditEntry`] of every field's current values, keyed by label.
+    ///
+    /// Meta rows are left out: they are operational attributes, so `validate`
+    /// would reject them as not allowed by the entry's objectClasses and no save
+    /// could ever succeed.
     pub fn to_edit_entry(&self) -> EditEntry {
         let attrs: BTreeMap<String, Vec<String>> = self
             .fields
             .iter()
+            .filter(|f| !is_meta_attr(&f.label))
             .map(|f| (f.label.clone(), f.current_values()))
             .collect();
         EditEntry {
@@ -174,6 +179,14 @@ impl EditForm {
             let key = field.label.to_lowercase();
             if key == "objectclass" {
                 field.orphaned = false;
+                continue;
+            }
+            // Meta rows are operational, so they are never in MUST∪MAY. Orphaning
+            // them would make the diff emit a Delete against a server-maintained
+            // attribute the moment the operator touches objectClass.
+            if is_meta_attr(&field.label) {
+                field.orphaned = false;
+                field.must = false;
                 continue;
             }
             let in_allowed = allowed.contains(&key);
@@ -228,6 +241,11 @@ impl EditForm {
 /// `ordered` fields (with `{n}` prefixes stripped). Shared by
 /// [`EditForm::is_dirty`] and [`EditForm::dirty_labels`].
 fn field_is_dirty(f: &EditField) -> bool {
+    // Meta rows are never edited, so values == baseline anyway — but saying so
+    // here keeps a future refresh of the block from ever reading as an edit.
+    if is_meta_attr(&f.label) {
+        return false;
+    }
     let current = f.current_values();
     if f.ordered {
         strip_ordering_seq(&current) != strip_ordering_seq(&f.baseline)
@@ -256,16 +274,20 @@ pub fn value_set_eq(a: &[String], b: &[String]) -> bool {
 
 /// Reorder a built form's fields into: `objectClass` first (pinned to the very
 /// top, right under the DN header), then mandatory, then populated-or-special
-/// (non-empty current value, secret, or widget-bound), then the rest — each
-/// bucket case-insensitive by label. Orphaned fields have empty `current_values`,
-/// so they fall into the last bucket. Neutral port of `ui::edit_form::order_fields`
-/// (the ratatui picker probe becomes `widget_binding.is_some()`).
+/// (non-empty current value, secret, or widget-bound), then the rest, and finally
+/// the read-only meta block — each bucket case-insensitive by label. Orphaned
+/// fields have empty `current_values`, so they fall into the second-to-last bucket.
+/// Neutral port of `ui::edit_form::order_fields` (the ratatui picker probe becomes
+/// `widget_binding.is_some()`), plus the meta bucket.
 pub fn order_fields(form: &mut EditForm) {
     fn is_object_class(f: &EditField) -> bool {
         f.label.eq_ignore_ascii_case("objectClass")
     }
     fn bucket(f: &EditField) -> u8 {
-        if f.orphaned {
+        if is_meta_attr(&f.label) {
+            // The audit block sits below everything, including orphans.
+            3
+        } else if f.orphaned {
             2
         } else if f.must {
             0
@@ -275,11 +297,21 @@ pub fn order_fields(form: &mut EditForm) {
             2
         }
     }
+    // Inside the meta bucket the order is META_ATTRS' (created, created by,
+    // modified, modified by), not alphabetical — which would split the two pairs.
+    // Non-meta fields all rank equal here, so the label tiebreak still decides them.
+    fn meta_rank(f: &EditField) -> usize {
+        crate::workflows::form_model::META_ATTRS
+            .iter()
+            .position(|m| m.eq_ignore_ascii_case(&f.label))
+            .unwrap_or(usize::MAX)
+    }
     form.fields.sort_by(|a, b| {
         // objectClass always sorts before every other field.
         (!is_object_class(a))
             .cmp(&!is_object_class(b))
             .then_with(|| bucket(a).cmp(&bucket(b)))
+            .then_with(|| meta_rank(a).cmp(&meta_rank(b)))
             .then_with(|| a.label.to_lowercase().cmp(&b.label.to_lowercase()))
     });
 }
@@ -364,7 +396,9 @@ pub fn build_edit_form(model: &FormModel, schema: &SchemaModel, read_only: bool)
         .fields
         .iter()
         .map(|f| {
-            let editable = !read_only && field_is_editable(f);
+            // Meta rows are the server's, not the operator's: display-only whatever
+            // the widget spec would otherwise allow.
+            let editable = !read_only && field_is_editable(f) && !is_meta_attr(&f.label);
             EditField {
                 label: f.label.clone(),
                 must: f.is_must,
@@ -704,6 +738,127 @@ mod tests {
             .find(|x| x.label.eq_ignore_ascii_case("objectClass"))
             .unwrap();
         assert!(!oc.orphaned);
+    }
+
+    /// A model with the audit block appended, as `build_form_model` produces it.
+    fn model_with_meta() -> FormModel {
+        let mut m = model();
+        for (label, value) in [
+            ("createTimestamp", "2026-06-14 09:12:44"),
+            ("creatorsName", "cn=admin,dc=example,dc=org"),
+            ("modifyTimestamp", "2026-07-28 11:03:22"),
+            ("modifiersName", "cn=admin,dc=example,dc=org"),
+        ] {
+            m.fields.push(FormField {
+                label: label.into(),
+                kind: FieldKind::Text,
+                is_must: false,
+                values: vec![value.into()],
+                widget: WidgetSpec::ReadOnlyText,
+            });
+        }
+        m
+    }
+
+    #[test]
+    fn meta_fields_are_never_editable() {
+        let f = build_edit_form(&model_with_meta(), &schema(), false);
+        assert!(
+            f.fields[0].editable,
+            "test premise: ordinary fields are editable here"
+        );
+        assert!(
+            f.fields
+                .iter()
+                .filter(|x| is_meta_attr(&x.label))
+                .all(|x| !x.editable),
+            "the audit block belongs to the server"
+        );
+    }
+
+    #[test]
+    fn meta_fields_stay_out_of_the_edited_entry() {
+        // They are operational: `validate` would reject them as not allowed by the
+        // entry's objectClasses, so no save could ever succeed.
+        let f = build_edit_form(&model_with_meta(), &schema(), false);
+        let entry = f.to_edit_entry();
+        assert!(entry.attrs.contains_key("cn"), "ordinary fields still ship");
+        for attr in crate::workflows::form_model::META_ATTRS {
+            assert!(
+                !entry.attrs.keys().any(|k| k.eq_ignore_ascii_case(attr)),
+                "{attr} must not reach the diff"
+            );
+        }
+    }
+
+    #[test]
+    fn meta_fields_are_never_dirty() {
+        let mut f = build_edit_form(&model_with_meta(), &schema(), false);
+        assert!(!f.is_dirty());
+        // Even if something rewrote a meta value (a refreshed block), that is the
+        // server talking, not an edit.
+        let idx = f
+            .fields
+            .iter()
+            .position(|x| x.label == "modifyTimestamp")
+            .unwrap();
+        f.fields[idx].values = vec!["2026-07-28 12:00:00".into()];
+        assert!(!f.is_dirty());
+        assert!(!f.dirty_labels().iter().any(|l| l == "modifyTimestamp"));
+    }
+
+    #[test]
+    fn sync_never_orphans_meta_fields() {
+        // An objectClass change runs the orphan sweep; an orphaned field emits a
+        // Delete, which against a server-maintained attribute would be a bug.
+        let mut f = form_with_ocs(&["top", "person"]);
+        f.fields.push(EditField {
+            label: "modifyTimestamp".into(),
+            must: false,
+            editable: false,
+            multi: false,
+            secret: false,
+            ordered: false,
+            orphaned: false,
+            kind: FieldKind::Text,
+            widget: WidgetSpec::ReadOnlyText,
+            widget_binding: None,
+            values: vec!["2026-07-28 11:03:22".into()],
+            baseline: vec!["2026-07-28 11:03:22".into()],
+        });
+        f.sync_schema_fields(&schema_oc());
+        let meta = f
+            .fields
+            .iter()
+            .find(|x| x.label == "modifyTimestamp")
+            .unwrap();
+        assert!(!meta.orphaned);
+        assert!(!meta.must);
+        assert_eq!(
+            f.fields.last().unwrap().label,
+            "modifyTimestamp",
+            "the audit block sorts below every other field"
+        );
+    }
+
+    #[test]
+    fn order_fields_keeps_the_meta_block_in_meta_attrs_order() {
+        let mut f = build_edit_form(&model_with_meta(), &schema(), false);
+        order_fields(&mut f);
+        let tail: Vec<&str> = f.fields[f.fields.len() - 4..]
+            .iter()
+            .map(|x| x.label.as_str())
+            .collect();
+        assert_eq!(
+            tail,
+            vec![
+                "createTimestamp",
+                "creatorsName",
+                "modifyTimestamp",
+                "modifiersName"
+            ],
+            "paired created/modified order, not alphabetical"
+        );
     }
 
     #[test]

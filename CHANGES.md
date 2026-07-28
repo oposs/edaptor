@@ -8,7 +8,20 @@ All notable changes to eDAPtor are documented here. The format follows
 
 ### New
 
+- **Audit block in the entry form.** Below the attributes, separated by a blank
+  line, the entry pane now shows the entry's server-maintained
+  `createTimestamp`, `creatorsName`, `modifyTimestamp` and `modifiersName`.
+  They are read-only — no Tab stop, never part of a save — and the timestamps are
+  rendered in local time (`2026-07-28 13:03:22`) instead of the raw
+  `20260728110322Z`. The block refreshes after each save. Entry reads now request
+  these operational attributes explicitly; a server that does not return them
+  simply shows no block.
+
 ### Changed
+
+- **A truncated DN title says so.** When the entry pane is too narrow for the
+  full DN, the title is cut at the end with a trailing `…` — previously a cut DN
+  was indistinguishable from a short one.
 
 ### Fixed
 

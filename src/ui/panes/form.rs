@@ -70,6 +70,11 @@ const ATTR_HINTS: &[(&str, &str)] = &[
     ("uid", "login name"),
     ("gecos", "full name"),
     ("mail", "email"),
+    // The read-only meta block below the form.
+    ("createtimestamp", "created"),
+    ("creatorsname", "created by"),
+    ("modifytimestamp", "modified"),
+    ("modifiersname", "modified by"),
 ];
 
 /// The hint for `attr` from [`ATTR_HINTS`], if any (case-insensitive).
@@ -222,6 +227,12 @@ pub(crate) struct FormPane {
     /// The value-view kind of each field, parallel to `value_ids`. Drives how
     /// `render` feeds the view and how navigation/activation treat the field.
     kinds: Vec<ValueKind>,
+    /// Index of the first read-only meta field (`createTimestamp`, …), if the
+    /// entry carries any. `layout_blocks` leaves one blank row above it, setting
+    /// the server-maintained audit block apart from the entry's own attributes.
+    /// Recomputed on every rebuild, from the RAW field labels (`labels` holds the
+    /// display form, which carries a `(created)`-style hint).
+    meta_start: Option<usize>,
     /// The height of each field block at the last layout, parallel to `value_ids`.
     /// Compared against freshly computed heights in `render` to relayout only when
     /// a block's line count changed.
@@ -289,6 +300,7 @@ impl FormPane {
             label_ids: Vec::new(),
             labels: Vec::new(),
             kinds: Vec::new(),
+            meta_start: None,
             block_heights: Vec::new(),
             built_dn: None,
             built_labels: Vec::new(),
@@ -419,8 +431,12 @@ impl FormPane {
     fn layout_blocks(&mut self, label_w: i32, inner_w: i32, heights: &[i32]) -> i32 {
         let mut y = 0;
         let (lids, vids) = (self.label_ids.clone(), self.value_ids.clone());
+        let first_meta = self.meta_start;
         if let Some(sg) = self.scroll_mut() {
             for (i, &h) in heights.iter().enumerate() {
+                if Some(i) == first_meta {
+                    y += 1;
+                }
                 if let Some(&lid) = lids.get(i) {
                     sg.set_logical(lid, Rect::new(0, y, label_w, y + 1));
                 }
@@ -547,6 +563,9 @@ impl FormPane {
         self.value_ids = new_vids;
         self.labels = labels;
         self.kinds = kinds;
+        self.meta_start = fields
+            .iter()
+            .position(|f| crate::workflows::form_model::is_meta_attr(&f.label));
         self.label_w = label_w;
         self.built_w = inner_w;
         // Stack the blocks at their variable heights (also records tops/heights).
@@ -1532,7 +1551,7 @@ mod tests {
             dn: "cn=a,dc=x".into(),
             mode: FormMode::Edit,
             object_classes: vec![],
-            fields: vec![ef("cn", "a", true), ef("creatorsName", "admin", false)],
+            fields: vec![ef("cn", "a", true), ef("description", "admin", false)],
             baseline_csn: None,
         });
         st.form_needs_render = true;
@@ -1896,7 +1915,7 @@ mod tests {
             source: None,
         };
         pane.handle_event(&mut ev, &mut ctx);
-        // value row 0 (cn) editable → enabled; value row 1 (creatorsName) disabled.
+        // value row 0 (cn) editable → enabled; value row 1 (description) disabled.
         assert!(!pane.value_disabled(0));
         assert!(pane.value_disabled(1));
     }
@@ -2249,7 +2268,7 @@ mod tests {
         let bg = |buf: &Buffer, x: u16, y: u16| -> Color { buf.get(x, y).style().bg };
 
         // Row layout: header rule at pane y 0; blank breathing row at y 1; field 0
-        // ("cn", the active field) at y 2; field 1 ("creatorsName", read-only,
+        // ("cn", the active field) at y 2; field 1 ("description", read-only,
         // non-selected) at y 3.
         let focused = draw(&mut pane, true);
         // Selected field's label → blue chip.
@@ -2451,6 +2470,78 @@ mod tests {
             focused_after,
             Some(pane.value_ids[2]),
             "a resize must preserve the focused field, not reset to the first"
+        );
+    }
+
+    #[test]
+    fn meta_block_is_separated_from_the_form_by_a_blank_row() {
+        // cn, then the audit block. The first meta row must sit one row lower than
+        // plain stacking would put it — that gap is what sets the server-maintained
+        // values apart from the entry's own attributes.
+        let (_shared, mut pane) = build_pane_with_form(vec![
+            ef("cn", "a", true),
+            ef("createTimestamp", "2026-07-28 11:03:22", false),
+            ef("creatorsName", "cn=admin,dc=x", false),
+        ]);
+        let mut out = VecDeque::new();
+        let mut timers = tv::timer::TimerQueue::new();
+        let mut deferred = Vec::new();
+        let mut ev = Event::Broadcast {
+            command: REFRESH,
+            source: None,
+        };
+        pane.handle_event(
+            &mut ev,
+            &mut headless_ctx(&mut out, &mut timers, &mut deferred),
+        );
+
+        assert_eq!(pane.meta_start, Some(1), "createTimestamp opens the block");
+        let row_of = |pane: &mut FormPane, i: usize| -> i32 {
+            let vid = pane.value_ids[i];
+            pane.scroll_mut()
+                .and_then(|sg| sg.logical_of(vid))
+                .unwrap()
+                .a
+                .y
+        };
+        assert_eq!(row_of(&mut pane, 0), 0, "cn is the first row");
+        assert_eq!(
+            row_of(&mut pane, 1),
+            2,
+            "one blank row between the form and the audit block"
+        );
+        assert_eq!(
+            row_of(&mut pane, 2),
+            3,
+            "the rest of the block stacks normally"
+        );
+    }
+
+    #[test]
+    fn meta_rows_are_not_tab_stops() {
+        let (_shared, mut pane) = build_pane_with_form(vec![
+            ef("cn", "a", true),
+            ef("modifyTimestamp", "2026-07-28 11:03:22", false),
+        ]);
+        let mut out = VecDeque::new();
+        let mut timers = tv::timer::TimerQueue::new();
+        let mut deferred = Vec::new();
+        let mut ev = Event::Broadcast {
+            command: REFRESH,
+            source: None,
+        };
+        pane.handle_event(
+            &mut ev,
+            &mut headless_ctx(&mut out, &mut timers, &mut deferred),
+        );
+        let focusable = pane.focusable_value_ids();
+        assert!(
+            focusable.contains(&pane.value_ids[0]),
+            "cn is reachable by Tab"
+        );
+        assert!(
+            !focusable.contains(&pane.value_ids[1]),
+            "the audit block is display-only — never a Tab stop"
         );
     }
 

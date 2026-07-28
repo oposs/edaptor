@@ -22,6 +22,35 @@ use unicode_width::UnicodeWidthStr;
 /// the label never butts directly against its value editor.
 const LABEL_GAP: i32 = 1;
 
+/// `text` cut to at most `max` display columns, with a `…` marking the cut.
+///
+/// The title is a DN, whose interesting part (`uid=alice,…`) is at the front, so
+/// the tail is what goes. Without the marker a truncated DN is indistinguishable
+/// from a short one. Cutting is width-aware: a wide glyph is dropped whole rather
+/// than split. `max < 1` yields an empty string — there is no room even for the
+/// marker.
+fn fit_with_marker(text: &str, max: i32) -> String {
+    if max < 1 {
+        return String::new();
+    }
+    if UnicodeWidthStr::width(text) as i32 <= max {
+        return text.to_string();
+    }
+    let budget = max - 1; // one column for the `…`
+    let mut out = String::new();
+    let mut w = 0i32;
+    for ch in text.chars() {
+        let cw = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0) as i32;
+        if w + cw > budget {
+            break;
+        }
+        out.push(ch);
+        w += cw;
+    }
+    out.push('…');
+    out
+}
+
 /// Which flavour of cell this is — decides alignment and emphasis.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum LabelKind {
@@ -133,7 +162,13 @@ impl View for FieldLabel {
             } else {
                 ts.fg = ctx.style(Role::Disabled).fg;
             }
-            let text_w = UnicodeWidthStr::width(self.text.as_str()) as i32;
+            // A too-long DN is cut to fit with a `…`; the budget leaves room for
+            // the blank column the text is punched through the rule with.
+            let shown = match self.kind {
+                LabelKind::Title => fit_with_marker(&self.text, size.x - VALUE_INDENT - 1),
+                LabelKind::Label => self.text.clone(),
+            };
+            let text_w = UnicodeWidthStr::width(shown.as_str()) as i32;
             let x = match self.kind {
                 // The value aligns with the other value cells' content (one column
                 // in); the `dn` caption stays right-aligned in the label column.
@@ -141,7 +176,7 @@ impl View for FieldLabel {
                 LabelKind::Label => (size.x - text_w - LABEL_GAP).max(0),
             };
             // Punch the text through the line with a blank space either side.
-            let padded = format!(" {} ", self.text);
+            let padded = format!(" {shown} ");
             ctx.put_str((x - 1).max(0), 0, &padded, ts);
             return;
         }
@@ -186,14 +221,14 @@ impl View for FieldLabel {
             style.fg = ctx.style(Role::Disabled).fg;
         }
 
-        let x = match self.kind {
-            LabelKind::Title => 0,
+        let (x, shown) = match self.kind {
+            LabelKind::Title => (0, fit_with_marker(&self.text, size.x)),
             LabelKind::Label => {
                 let text_w = UnicodeWidthStr::width(self.text.as_str()) as i32;
-                (size.x - text_w - LABEL_GAP).max(0)
+                ((size.x - text_w - LABEL_GAP).max(0), self.text.clone())
             }
         };
-        ctx.put_str(x, 0, &self.text, style);
+        ctx.put_str(x, 0, &shown, style);
     }
 }
 
@@ -289,6 +324,59 @@ mod tests {
             light_fg,
             "label text uses the lighter tone"
         );
+    }
+
+    #[test]
+    fn long_title_is_cut_at_the_end_with_a_marker() {
+        // A DN's interesting part is at the front, so the tail goes — and the `…`
+        // says that it did.
+        let w = 20u16;
+        let mut fl = FieldLabel::title(Rect::new(0, 0, w as i32, 1));
+        fl.set_value(FieldValue::Text(
+            "uid=jsmith2,ou=people,dc=example,dc=org".into(),
+        ));
+        let row: String = render_row(&mut fl, w, true)
+            .iter()
+            .map(|c| c.0.clone())
+            .collect();
+        assert_eq!(row, "uid=jsmith2,ou=peop…");
+    }
+
+    #[test]
+    fn a_title_that_fits_keeps_no_marker() {
+        let w = 20u16;
+        let mut fl = FieldLabel::title(Rect::new(0, 0, w as i32, 1));
+        fl.set_value(FieldValue::Text("cn=a,dc=x".into()));
+        let row: String = render_row(&mut fl, w, true)
+            .iter()
+            .map(|c| c.0.clone())
+            .collect();
+        assert_eq!(row.trim_end(), "cn=a,dc=x");
+    }
+
+    #[test]
+    fn a_cut_title_never_splits_a_wide_glyph() {
+        // Each 中 is two columns; in 5 columns only two fit beside the marker.
+        assert_eq!(super::fit_with_marker("中中中中", 5), "中中…");
+        assert_eq!(super::fit_with_marker("中中中中", 4), "中…");
+        assert_eq!(super::fit_with_marker("abc", 0), "");
+    }
+
+    #[test]
+    fn title_rule_cuts_to_fit_between_the_rule_and_the_edge() {
+        // The rule path punches the text through with a blank column either side,
+        // so the text budget is one column narrower than the plain path's.
+        let w = 20u16;
+        let mut fl = FieldLabel::title(Rect::new(0, 0, w as i32, 1));
+        fl.set_rule(true);
+        fl.set_value(FieldValue::Text(
+            "uid=jsmith2,ou=people,dc=example,dc=org".into(),
+        ));
+        let row: String = render_row(&mut fl, w, true)
+            .iter()
+            .map(|c| c.0.clone())
+            .collect();
+        assert_eq!(row, " uid=jsmith2,ou=pe… ");
     }
 
     #[test]
