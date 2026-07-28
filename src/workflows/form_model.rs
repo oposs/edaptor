@@ -8,6 +8,7 @@
 
 use crate::ldap::worker::LdapEntry;
 use crate::schema::{FieldKind, SchemaModel};
+use crate::workflows::gtime;
 
 /// The read-only widget the UI renders for a field, chosen by [`FieldKind`].
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -93,6 +94,29 @@ fn binary_count(entry: &LdapEntry, attr: &str) -> Option<usize> {
         .map(|(_, n)| *n)
 }
 
+/// The server-maintained audit attributes shown, in this order, in the form's
+/// meta block. They are *operational*: the server only returns them when they are
+/// named in the search's attribute list (see `ReadFlow::request_entry`), and it
+/// alone maintains them — edaptor never writes them.
+pub const META_ATTRS: [&str; 4] = [
+    "createTimestamp",
+    "creatorsName",
+    "modifyTimestamp",
+    "modifiersName",
+];
+
+/// True when `attr` is one of the [`META_ATTRS`] (case-insensitive).
+///
+/// The attribute *name* is the classifier throughout — no per-field flag. These
+/// are operational attributes: they are never in an objectClass's MUST∪MAY, so
+/// `build_form_model` can never emit them as ordinary editable fields, and a form
+/// field carrying one of these labels is therefore always a meta row. Every site
+/// that must exclude them (the save diff, `validate`, the orphan sweep, field
+/// ordering, the pane's focus/blank-row handling) asks this one question.
+pub fn is_meta_attr(attr: &str) -> bool {
+    META_ATTRS.iter().any(|m| m.eq_ignore_ascii_case(attr))
+}
+
 /// Build the ordered read-only form model.
 ///
 /// Ordering: the `profile_show` attributes present in the effective (must ∪ may)
@@ -100,6 +124,11 @@ fn binary_count(entry: &LdapEntry, attr: &str) -> Option<usize> {
 /// remaining MAY attributes. Each field's widget is chosen by
 /// [`field_widget_spec`] from the entry's first value / byte count; `is_must` is
 /// set case-insensitively from the effective MUST set. The title is the DN.
+///
+/// Finally, the [`META_ATTRS`] the entry actually carries are appended as `meta`
+/// fields, in `META_ATTRS` order, with timestamps rendered in local time. They sit
+/// outside the schema-driven ordering because they are not attributes the operator
+/// edits — the UI shows them as a separate read-only block.
 pub fn build_form_model(
     schema: &SchemaModel,
     object_classes: &[&str],
@@ -131,7 +160,7 @@ pub fn build_form_model(
         }
     }
 
-    let fields = ordered
+    let mut fields: Vec<FormField> = ordered
         .into_iter()
         .map(|attr| {
             let kind = schema.field_kind(&attr);
@@ -147,6 +176,35 @@ pub fn build_form_model(
             }
         })
         .collect();
+
+    // The audit block. A server that returns none of them (or an entry the bind
+    // DN may not see them on) simply produces no meta fields.
+    for attr in META_ATTRS {
+        let Some(values) = string_values(entry, attr) else {
+            continue;
+        };
+        if values.is_empty() {
+            continue;
+        }
+        // Format by attribute, not by schema kind: the two timestamps are times
+        // whatever a given server's subschema says (or fails to say) about them.
+        let kind = schema.field_kind(attr);
+        let values: Vec<String> = if attr.ends_with("Timestamp") {
+            values
+                .iter()
+                .map(|v| gtime::format_generalized_time(v))
+                .collect()
+        } else {
+            values.clone()
+        };
+        fields.push(FormField {
+            label: attr.to_string(),
+            kind,
+            is_must: false,
+            values,
+            widget: WidgetSpec::ReadOnlyText,
+        });
+    }
 
     FormModel {
         title: entry.dn.clone(),
@@ -248,6 +306,84 @@ mod tests {
             attrs,
             bin_attrs: BTreeMap::new(),
         }
+    }
+
+    /// The same entry plus the operational audit attributes a server returns when
+    /// they are named in the search (see `ReadFlow::request_entry`).
+    fn entry_with_meta() -> LdapEntry {
+        let mut e = entry();
+        e.attrs.insert(
+            "createTimestamp".to_string(),
+            vec!["20260614091244Z".to_string()],
+        );
+        e.attrs.insert(
+            "creatorsName".to_string(),
+            vec!["cn=admin,dc=example,dc=org".to_string()],
+        );
+        e.attrs.insert(
+            "modifyTimestamp".to_string(),
+            vec!["20260728110322Z".to_string()],
+        );
+        e.attrs.insert(
+            "modifiersName".to_string(),
+            vec!["cn=operator,dc=example,dc=org".to_string()],
+        );
+        e
+    }
+
+    #[test]
+    fn meta_fields_come_last_in_meta_attrs_order() {
+        let model = build_form_model(&schema(), &["demoPerson"], &entry_with_meta(), &[]);
+        let labels: Vec<&str> = model.fields.iter().map(|f| f.label.as_str()).collect();
+        let tail = &labels[labels.len() - 4..];
+        assert_eq!(
+            tail,
+            &[
+                "createTimestamp",
+                "creatorsName",
+                "modifyTimestamp",
+                "modifiersName"
+            ],
+            "the audit block is appended, in META_ATTRS order"
+        );
+    }
+
+    #[test]
+    fn meta_timestamps_are_formatted_and_names_pass_through() {
+        let model = build_form_model(&schema(), &["demoPerson"], &entry_with_meta(), &[]);
+        let value = |attr: &str| {
+            model
+                .fields
+                .iter()
+                .find(|f| f.label == attr)
+                .and_then(|f| f.values.first())
+                .cloned()
+                .unwrap_or_default()
+        };
+        // No local offset is captured in tests, so rendering takes the UTC path.
+        assert_eq!(value("createTimestamp"), "2026-06-14 09:12:44 UTC");
+        assert_eq!(value("modifyTimestamp"), "2026-07-28 11:03:22 UTC");
+        assert_eq!(value("creatorsName"), "cn=admin,dc=example,dc=org");
+        assert_eq!(value("modifiersName"), "cn=operator,dc=example,dc=org");
+    }
+
+    #[test]
+    fn absent_meta_attrs_produce_no_rows() {
+        // A server that does not return them (or a bind DN that may not read
+        // them) yields a form with no meta rows at all.
+        let model = build_form_model(&schema(), &["demoPerson"], &entry(), &[]);
+        assert!(
+            !model.fields.iter().any(|f| is_meta_attr(&f.label)),
+            "no audit attributes on the entry → no meta rows"
+        );
+    }
+
+    #[test]
+    fn is_meta_attr_is_case_insensitive() {
+        assert!(is_meta_attr("createtimestamp"));
+        assert!(is_meta_attr("ModifiersName"));
+        assert!(!is_meta_attr("modifyTimestampX"));
+        assert!(!is_meta_attr("cn"));
     }
 
     #[test]

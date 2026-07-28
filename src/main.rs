@@ -53,6 +53,11 @@ enum Command {
 }
 
 fn main() -> Result<()> {
+    // FIRST, before anything can spawn a thread: `time` only reads the local UTC
+    // offset while the process is single-threaded, and the entry form's timestamps
+    // are shown in local time. See `edaptor::workflows::gtime`.
+    edaptor::workflows::gtime::init_local_offset();
+
     let cli = Cli::parse();
     let Cli { config, command } = cli;
     let config_path: PathBuf = match edaptor::ui::startup::resolve_config_path(config)? {

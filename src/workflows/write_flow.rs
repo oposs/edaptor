@@ -265,6 +265,9 @@ impl WriteFlow {
             attrs: form
                 .fields
                 .iter()
+                // Mirrors `to_edit_entry`: the meta block is operational and stays
+                // out of both sides of the diff.
+                .filter(|f| !crate::workflows::form_model::is_meta_attr(&f.label))
                 .map(|f| (f.label.clone(), f.baseline.clone()))
                 .collect(),
         };

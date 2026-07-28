@@ -8,9 +8,44 @@ All notable changes to eDAPtor are documented here. The format follows
 
 ### New
 
+- **Audit block in the entry form.** Below the attributes, separated by a blank
+  line, the entry pane now shows the entry's server-maintained
+  `createTimestamp`, `creatorsName`, `modifyTimestamp` and `modifiersName`,
+  labelled `created` / `created by` / `modified` / `modified by`.
+  They are read-only — reachable and copyable like any other read-only field,
+  but never part of a save — and the timestamps are
+  rendered in local time (`2026-07-28 13:03:22`) instead of the raw
+  `20260728110322Z`. The block refreshes after each save. Entry reads now request
+  these operational attributes explicitly; a server that does not return them
+  simply shows no block.
+
 ### Changed
 
+- **Multi-value blocks scroll sideways too.** A member list, an `objectClass`
+  set or any inline multi-value editor whose values are wider than the cell can
+  now be read to the end: `←`/`→` scroll a read-only block and `Home`/`End` jump
+  to either edge, while the inline editor follows its caret. `◄`/`►` mark the
+  hidden text, and the scroll resets to the left edge when focus lands on the
+  field.
+
+- **Every field in the entry form is now selectable**, editable or not. A
+  read-only field takes focus, so its value can be scrolled (`◄`/`►` mark the
+  hidden part), selected and copied with `Ctrl+C` — previously such fields were
+  skipped by focus entirely, which made a value wider than its cell impossible to
+  read to its end. Trying to *change* one pops a dialog naming the field and the
+  reason (server-maintained, schema `NO-USER-MODIFICATION`, read-only session,
+  …). `PageUp`/`PageDown` still page the whole form, so long forms stay quick to
+  cross.
+
+- **A truncated DN title says so.** When the entry pane is too narrow for the
+  full DN, the title is cut at the end with a trailing `…` — previously a cut DN
+  was indistinguishable from a short one.
+
 ### Fixed
+
+- **A value wider than its cell now shows its start, not its end.** Long values
+  (DNs, paths) were parked at their tail behind a `◄` marker, hiding the part
+  that identifies them; they now read from the beginning.
 
 ## 1.5.3 - 2026-07-27
 

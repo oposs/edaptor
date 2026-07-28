@@ -21,18 +21,24 @@ ldap-types = { version = "0.7", default-features = false, features = ["chumsky"]
 chumsky = "0.12"
 oid = "0.3"
 unicode-width = "0.2"
+# Formats the entry form's operational timestamps in local time. `local-offset`
+# reads the process's UTC offset, which `time` only allows while the process is
+# single-threaded — hence the capture at the top of `main` (see workflows::gtime).
+time = { version = "0.3", features = ["local-offset"] }
 # tvision-rs is the TUI framework driving the edaptor browser (tree / leaf list / entry form).
-# 0.14.0: native InputLine masking + RevealEye/MaskedInput (replaces the local password mirror).
+# 0.15.0: InputLine read-only mode (focusable, scrollable, copyable, refuses edits)
+# + ValuePosition (which end of a too-wide value set_value shows). Both were
+# developed here and upstreamed — see CLAUDE.md, "Upstream framework".
 
 # tvision-rs's default `os-clipboard` feature pulls arboard -> wl-clipboard-rs ->
 # wayland-backend, which cannot compile on illumos. Dropping it leaves the OSC 52
 # rung of the clipboard chain — the one that actually works over ssh, which is how
 # edaptor is driven on illumos. Every other platform keeps the native clipboard.
 [target.'cfg(not(target_os = "illumos"))'.dependencies]
-tvision-rs = "0.14.0"
+tvision-rs = "0.15.0"
 
 [target.'cfg(target_os = "illumos")'.dependencies]
-tvision-rs = { version = "0.14.0", default-features = false }
+tvision-rs = { version = "0.15.0", default-features = false }
 
 [dev-dependencies]
 tempfile = "3"

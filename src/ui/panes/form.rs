@@ -70,6 +70,11 @@ const ATTR_HINTS: &[(&str, &str)] = &[
     ("uid", "login name"),
     ("gecos", "full name"),
     ("mail", "email"),
+    // The read-only meta block below the form.
+    ("createtimestamp", "created"),
+    ("creatorsname", "created by"),
+    ("modifytimestamp", "modified"),
+    ("modifiersname", "modified by"),
 ];
 
 /// The hint for `attr` from [`ATTR_HINTS`], if any (case-insensitive).
@@ -84,8 +89,15 @@ fn attr_hint(attr: &str) -> Option<&'static str> {
 /// The label shown in the form's label column for `attr`: the attribute name,
 /// plus a parenthesised hint when [`ATTR_HINTS`] has one (e.g. `sn (surname)`).
 /// The `*` MUST marker is NOT included here — callers append it.
+///
+/// The meta block is the exception: it shows the hint ALONE (`created by`, not
+/// `creatorsName (created by)`). Those four attribute names are long, and the
+/// label column is sized to the longest label in the *whole* form — so spelling
+/// them out squeezes every value cell on a narrow pane. The block is
+/// self-explanatory as a group, so the bare hint carries it.
 fn display_label(attr: &str) -> String {
     match attr_hint(attr) {
+        Some(hint) if crate::workflows::form_model::is_meta_attr(attr) => hint.to_string(),
         Some(hint) => format!("{attr} ({hint})"),
         None => attr.to_string(),
     }
@@ -94,11 +106,17 @@ fn display_label(attr: &str) -> String {
 /// Lines the viewport scrolls per mouse-wheel notch.
 const WHEEL_STEP: i32 = 3;
 
-/// A field's value cell is focusable when the user can interact with it:
-/// - `Text` inline-editable fields (single-value free text);
-/// - `List` inline-editor fields (multi-value, plain or XOrdered);
-/// - `Launch` modal-activated fields (objectClass, password, picker, …).
-fn cell_focusable(f: &EditField) -> bool {
+/// **Every** value cell is focusable — including the ones the operator cannot
+/// change. A cell that focus skips cannot be scrolled, so a value wider than its
+/// cell (a long DN, a path) could never be read to its end, selected, or copied.
+/// Read-only `Text` cells are therefore built `read_only` rather than `disabled`:
+/// reachable and copyable, refusing only the edits. `PageUp`/`PageDown` still
+/// page the whole viewport, so a long form stays quick to cross.
+///
+/// A cell is *editable* when [`inline_editable`] holds (single-value free text),
+/// when it is a `List` inline editor, or when it is a `Launch` field that opens a
+/// modal. Everything else is read-only.
+fn cell_editable(f: &EditField) -> bool {
     matches!(value_kind(f), ValueKind::List { .. } | ValueKind::Launch) || inline_editable(f)
 }
 
@@ -222,6 +240,12 @@ pub(crate) struct FormPane {
     /// The value-view kind of each field, parallel to `value_ids`. Drives how
     /// `render` feeds the view and how navigation/activation treat the field.
     kinds: Vec<ValueKind>,
+    /// Index of the first read-only meta field (`createTimestamp`, …), if the
+    /// entry carries any. `layout_blocks` leaves one blank row above it, setting
+    /// the server-maintained audit block apart from the entry's own attributes.
+    /// Recomputed on every rebuild, from the RAW field labels (`labels` holds the
+    /// display form, which carries a `(created)`-style hint).
+    meta_start: Option<usize>,
     /// The height of each field block at the last layout, parallel to `value_ids`.
     /// Compared against freshly computed heights in `render` to relayout only when
     /// a block's line count changed.
@@ -289,6 +313,7 @@ impl FormPane {
             label_ids: Vec::new(),
             labels: Vec::new(),
             kinds: Vec::new(),
+            meta_start: None,
             block_heights: Vec::new(),
             built_dn: None,
             built_labels: Vec::new(),
@@ -322,6 +347,19 @@ impl FormPane {
             .and_then(|sg| sg.child_mut(vid))
             .map(|c| c.state().state.disabled)
             .unwrap_or(true)
+    }
+
+    /// Test seam: is the value InputLine for field `i` read-only (reachable and
+    /// copyable, but refusing edits)?
+    #[cfg(test)]
+    pub(crate) fn value_read_only(&mut self, i: usize) -> bool {
+        let vid = self.value_ids[i];
+        self.scroll_mut()
+            .and_then(|sg| sg.child_mut(vid))
+            .and_then(|c| c.as_any_mut())
+            .and_then(|a| a.downcast_mut::<InputLine>())
+            .map(|il| il.is_read_only())
+            .unwrap_or(false)
     }
 
     /// Set the value InputLine text for field `i`, pushing it into the on-screen
@@ -419,8 +457,12 @@ impl FormPane {
     fn layout_blocks(&mut self, label_w: i32, inner_w: i32, heights: &[i32]) -> i32 {
         let mut y = 0;
         let (lids, vids) = (self.label_ids.clone(), self.value_ids.clone());
+        let first_meta = self.meta_start;
         if let Some(sg) = self.scroll_mut() {
             for (i, &h) in heights.iter().enumerate() {
+                if Some(i) == first_meta {
+                    y += 1;
+                }
                 if let Some(&lid) = lids.get(i) {
                     sg.set_logical(lid, Rect::new(0, y, label_w, y + 1));
                 }
@@ -514,7 +556,14 @@ impl FormPane {
                         // (InputNormal), non-focused fields use InputSurface (base3),
                         // and an inactive pane recedes to InputInactive (desktop).
                         let mut il = InputLine::with_limit(Rect::new(0, 0, w, 1), 1024);
-                        il.state.state.disabled = !cell_focusable(f);
+                        // Read-only, never disabled: the cell stays reachable so
+                        // its value can be scrolled and copied, and refuses edits
+                        // with a READ_ONLY_REJECTED broadcast this pane answers.
+                        il.set_read_only(!cell_editable(f));
+                        // A form value is a DN, a path, a login name — the front
+                        // identifies it. Without this, `set_value` would select-all
+                        // and park every too-wide value at its tail.
+                        il.set_value_position(tv::ValuePosition::Start);
                         il.state_mut().help_ctx = hctx;
                         sg.add_content(Box::new(il), Rect::new(0, 0, w, 1))
                     }
@@ -547,6 +596,9 @@ impl FormPane {
         self.value_ids = new_vids;
         self.labels = labels;
         self.kinds = kinds;
+        self.meta_start = fields
+            .iter()
+            .position(|f| crate::workflows::form_model::is_meta_attr(&f.label));
         self.label_w = label_w;
         self.built_w = inner_w;
         // Stack the blocks at their variable heights (also records tops/heights).
@@ -734,7 +786,18 @@ impl FormPane {
                                 // the read-only presentation (checkbox/binary) for the
                                 // rest — matching the former `widget_for(f).present(f)`.
                                 v.set_value(FieldValue::Text(text_cell_value(field)));
-                                v.state_mut().state.disabled = !cell_focusable(field);
+                                if let Some(il) =
+                                    v.as_any_mut().and_then(|a| a.downcast_mut::<InputLine>())
+                                {
+                                    // A rebuild is not guaranteed between renders
+                                    // (a field can turn read-only when its widget
+                                    // binding resolves), so keep both modes current.
+                                    // `ValuePosition::Start` is what leaves the value
+                                    // showing its head — `set_value` above already
+                                    // honoured it.
+                                    il.set_read_only(!cell_editable(field));
+                                    il.set_value_position(tv::ValuePosition::Start);
+                                }
                             }
                             ValueKind::Launch => {
                                 if let Some(lv) = v
@@ -827,13 +890,67 @@ impl FormPane {
             il.home();
         } else if let Some(lv) = any.downcast_mut::<ListValueView>() {
             // Multi-value inline editor: land on the first line so navigating into
-            // the field always opens at the top (parity with the text fields).
+            // the field always opens at the top (parity with the text fields), and
+            // at its left edge so a wide value is never met mid-scroll.
             lv.cursor_home();
+            lv.scroll_home();
+        } else if let Some(lv) = any.downcast_mut::<LaunchValueView>() {
+            // Read-only bullet block (members, objectClass): same left-edge rule.
+            lv.scroll_home();
         }
     }
 
-    /// The value-cell view ids of focusable rows (inline-editable OR modal), in
-    /// display order. Full-length — no `FORM_ROWS` cap.
+    /// Why field `idx` refuses edits, phrased for the operator, or `None` when it
+    /// is in fact editable (a stray broadcast).
+    ///
+    /// The widget only knows *that* it is read-only; the reason lives here. The
+    /// order matters — the most specific cause wins, so a server-maintained
+    /// timestamp is never explained away as "the session is read-only".
+    fn read_only_reason(&self, idx: usize) -> Option<String> {
+        use crate::config::widget::WidgetKind;
+        use crate::workflows::form_model::WidgetSpec;
+        let st = self.state.borrow();
+        let form = st.edit_form.as_ref()?;
+        let f = form.fields.get(idx)?;
+        if cell_editable(f) {
+            return None;
+        }
+        let attr = &f.label;
+        let why = if crate::workflows::form_model::is_meta_attr(attr) {
+            "the directory server maintains it — it records who last changed the \
+             entry and when"
+                .to_string()
+        } else if st.read_flow.schema().is_readonly_attr(attr) {
+            "the directory schema marks it NO-USER-MODIFICATION: only the server \
+             may write it"
+                .to_string()
+        } else if st.read_only {
+            "this session is read-only".to_string()
+        } else if f.orphaned {
+            "the entry's current objectClasses no longer allow it; save the entry \
+             to drop it"
+                .to_string()
+        } else if matches!(f.widget, WidgetSpec::BinaryNote(_)) {
+            "it holds binary data, which the form cannot edit".to_string()
+        } else if matches!(f.widget, WidgetSpec::DisabledCheckBox(_)) {
+            "boolean values are shown read-only".to_string()
+        } else if matches!(f.widget_binding, Some(WidgetKind::Readonly { .. })) {
+            "the configuration declares it read-only".to_string()
+        } else {
+            "it is not editable here".to_string()
+        };
+        Some(format!(
+            "{attr} cannot be edited: {why}.\n\nYou can still move through it, \
+             scroll it and copy from it."
+        ))
+    }
+
+    /// The value-cell view ids of every row, in display order. Full-length — no
+    /// `FORM_ROWS` cap.
+    ///
+    /// Every row is a stop, editable or not: a read-only value must be reachable
+    /// to be scrolled and copied (see [`cell_editable`]). The name is kept for
+    /// the callers that walk the focus ring.
     fn focusable_value_ids(&self) -> Vec<tv::ViewId> {
         let st = self.state.borrow();
         match st.edit_form.as_ref() {
@@ -842,7 +959,6 @@ impl FormPane {
                 .fields
                 .iter()
                 .enumerate()
-                .filter(|(_, f)| cell_focusable(f))
                 // `get(i)`, not `[i]`: stay panic-proof if the cell vector is ever
                 // momentarily out of sync with `fields` (e.g. mid objectClass
                 // resync, before `render` rebuilds the cells).
@@ -1286,6 +1402,26 @@ impl View for FormPane {
         }
         self.was_focused = focused_now;
 
+        // A read-only cell refused an edit. tvision names the cell in the
+        // broadcast source; say WHICH field and WHY, since only the form knows
+        // the reason (server-maintained, schema-locked, orphaned, …).
+        if let Event::Broadcast { command, source } = ev {
+            if *command == InputLine::READ_ONLY_REJECTED {
+                let idx = source.and_then(|id| self.value_ids.iter().position(|&v| v == id));
+                if let Some(msg) = idx.and_then(|i| self.read_only_reason(i)) {
+                    ctx.request_message_box(
+                        msg,
+                        tv::dialog::MessageBoxKind::Information,
+                        tv::dialog::MessageBoxButtons::ok(),
+                        None,
+                        None,
+                    );
+                    ev.clear();
+                    return;
+                }
+            }
+        }
+
         // A click on a field's read-only label cell focuses that field's value
         // editor. Label cells are disabled InputLines, so the inner group never
         // focuses them itself; intercept the click here and redirect focus to
@@ -1532,7 +1668,7 @@ mod tests {
             dn: "cn=a,dc=x".into(),
             mode: FormMode::Edit,
             object_classes: vec![],
-            fields: vec![ef("cn", "a", true), ef("creatorsName", "admin", false)],
+            fields: vec![ef("cn", "a", true), ef("description", "admin", false)],
             baseline_csn: None,
         });
         st.form_needs_render = true;
@@ -1639,15 +1775,15 @@ mod tests {
     #[test]
     fn updown_moves_focus_and_clamps_at_ends() {
         // Tab switches panes (consumed by the Splitter), so intra-pane field
-        // navigation uses Up/Down. Render focuses the first editable field; Up/Down
-        // cycle among editable rows, skipping read-only ones.
+        // navigation uses Up/Down. Every row is a stop — read-only ones included,
+        // so their values can be scrolled and copied — and the ends CLAMP rather
+        // than wrap.
         use crate::ldap::worker::RawSubschema;
         let schema = SchemaModel::from_raw(&RawSubschema::default());
         let structure = Structure::build("dc=x", vec![]);
         let mut st =
             UiState::new_for_test(structure, schema, "dc=x".into(), Vec::new(), Vec::new());
-        // A read-only field is neither inline-editable nor a List/Launch field,
-        // so it is skipped by focus cycling.
+        // A read-only field: reachable like the rest, but not editable.
         let cn = ef("cn", "a", false);
         st.edit_form = Some(EditForm {
             dn: "cn=a,dc=x".into(),
@@ -1673,37 +1809,37 @@ mod tests {
         let focusable = pane.focusable_value_ids();
         assert_eq!(
             focusable.len(),
-            2,
-            "cn (read-only) is not focusable; gidNumber+sn are"
+            3,
+            "all three rows are stops — cn is read-only, not unreachable"
         );
         // Focus lives inside the ScrollGroup; query it via scroll_mut().
         let cur = pane.scroll_mut().and_then(|sg| sg.current());
-        assert_eq!(
-            cur,
-            Some(focusable[0]),
-            "render focuses the first focusable field"
-        );
+        assert_eq!(cur, Some(focusable[0]), "render focuses the first field");
 
+        for want in focusable.iter().skip(1) {
+            let mut d = Event::KeyDown(tv::KeyEvent::from(tv::Key::Down));
+            pane.handle_event(&mut d, &mut ctx);
+            let cur = pane.scroll_mut().and_then(|sg| sg.current());
+            assert_eq!(cur, Some(*want), "Down → next field");
+        }
+
+        // Down on the LAST field clamps — it must NOT wrap back to the top (the
+        // reported "focus jumps back to the top from the bottom" bug).
         let mut d = Event::KeyDown(tv::KeyEvent::from(tv::Key::Down));
         pane.handle_event(&mut d, &mut ctx);
         let cur = pane.scroll_mut().and_then(|sg| sg.current());
-        assert_eq!(cur, Some(focusable[1]), "Down → next focusable field");
-
-        // Down on the LAST focusable field clamps — it must NOT wrap back to the
-        // top (the reported "focus jumps back to the top from the bottom" bug).
-        let mut d = Event::KeyDown(tv::KeyEvent::from(tv::Key::Down));
-        pane.handle_event(&mut d, &mut ctx);
-        let cur = pane.scroll_mut().and_then(|sg| sg.current());
         assert_eq!(
             cur,
-            Some(focusable[1]),
+            Some(focusable[2]),
             "Down on the last field stays put (clamp, no wrap)"
         );
 
-        let mut u = Event::KeyDown(tv::KeyEvent::from(tv::Key::Up));
-        pane.handle_event(&mut u, &mut ctx);
-        let cur = pane.scroll_mut().and_then(|sg| sg.current());
-        assert_eq!(cur, Some(focusable[0]), "Up → previous focusable field");
+        for want in focusable.iter().take(2).rev() {
+            let mut u = Event::KeyDown(tv::KeyEvent::from(tv::Key::Up));
+            pane.handle_event(&mut u, &mut ctx);
+            let cur = pane.scroll_mut().and_then(|sg| sg.current());
+            assert_eq!(cur, Some(*want), "Up → previous field");
+        }
 
         // Up on the FIRST focusable field clamps at the top too (no wrap to bottom).
         let mut u = Event::KeyDown(tv::KeyEvent::from(tv::Key::Up));
@@ -1884,7 +2020,7 @@ mod tests {
     }
 
     #[test]
-    fn editable_rows_enabled_static_rows_disabled() {
+    fn editable_rows_edit_and_static_rows_are_read_only() {
         let shared = state_with_form();
         let mut pane = FormPane::new(Rect::new(0, 0, 80, 20), shared.clone());
         let mut out = VecDeque::new();
@@ -1896,9 +2032,16 @@ mod tests {
             source: None,
         };
         pane.handle_event(&mut ev, &mut ctx);
-        // value row 0 (cn) editable → enabled; value row 1 (creatorsName) disabled.
+        // value row 0 (cn) is editable; value row 1 (description) is read-only —
+        // NOT disabled, so it still takes focus and its value can be scrolled and
+        // copied. Nothing in the form is disabled any more.
+        assert!(!pane.value_read_only(0), "cn is editable");
+        assert!(pane.value_read_only(1), "description is read-only");
         assert!(!pane.value_disabled(0));
-        assert!(pane.value_disabled(1));
+        assert!(
+            !pane.value_disabled(1),
+            "read-only must not mean disabled — a disabled cell cannot be reached"
+        );
     }
 
     #[test]
@@ -2249,7 +2392,7 @@ mod tests {
         let bg = |buf: &Buffer, x: u16, y: u16| -> Color { buf.get(x, y).style().bg };
 
         // Row layout: header rule at pane y 0; blank breathing row at y 1; field 0
-        // ("cn", the active field) at y 2; field 1 ("creatorsName", read-only,
+        // ("cn", the active field) at y 2; field 1 ("description", read-only,
         // non-selected) at y 3.
         let focused = draw(&mut pane, true);
         // Selected field's label → blue chip.
@@ -2455,6 +2598,204 @@ mod tests {
     }
 
     #[test]
+    fn meta_block_is_separated_from_the_form_by_a_blank_row() {
+        // cn, then the audit block. The first meta row must sit one row lower than
+        // plain stacking would put it — that gap is what sets the server-maintained
+        // values apart from the entry's own attributes.
+        let (_shared, mut pane) = build_pane_with_form(vec![
+            ef("cn", "a", true),
+            ef("createTimestamp", "2026-07-28 11:03:22", false),
+            ef("creatorsName", "cn=admin,dc=x", false),
+        ]);
+        let mut out = VecDeque::new();
+        let mut timers = tv::timer::TimerQueue::new();
+        let mut deferred = Vec::new();
+        let mut ev = Event::Broadcast {
+            command: REFRESH,
+            source: None,
+        };
+        pane.handle_event(
+            &mut ev,
+            &mut headless_ctx(&mut out, &mut timers, &mut deferred),
+        );
+
+        assert_eq!(pane.meta_start, Some(1), "createTimestamp opens the block");
+        let row_of = |pane: &mut FormPane, i: usize| -> i32 {
+            let vid = pane.value_ids[i];
+            pane.scroll_mut()
+                .and_then(|sg| sg.logical_of(vid))
+                .unwrap()
+                .a
+                .y
+        };
+        assert_eq!(row_of(&mut pane, 0), 0, "cn is the first row");
+        assert_eq!(
+            row_of(&mut pane, 1),
+            2,
+            "one blank row between the form and the audit block"
+        );
+        assert_eq!(
+            row_of(&mut pane, 2),
+            3,
+            "the rest of the block stacks normally"
+        );
+    }
+
+    #[test]
+    fn a_value_wider_than_its_cell_shows_its_start() {
+        // `InputLine::set_value` select-alls, parking the view at the END of the
+        // text. For a DN the front is what identifies it, so a value too wide for
+        // its cell must still read from the beginning.
+        let (_shared, mut pane) = build_pane_with_form(vec![
+            ef("cn", "a", true),
+            ef(
+                "seeAlso",
+                "cn=admin,ou=service accounts,dc=example,dc=org",
+                false,
+            ),
+        ]);
+        let mut out = VecDeque::new();
+        let mut timers = tv::timer::TimerQueue::new();
+        let mut deferred = Vec::new();
+        let mut ev = Event::Broadcast {
+            command: REFRESH,
+            source: None,
+        };
+        pane.handle_event(
+            &mut ev,
+            &mut headless_ctx(&mut out, &mut timers, &mut deferred),
+        );
+
+        use tvision_rs::{Buffer, Point};
+        let theme = crate::ui::theme::edaptor_theme();
+        let mut buf = Buffer::new(60, 10);
+        {
+            let mut dctx =
+                DrawCtx::new(&mut buf, &theme, Rect::new(0, 0, 60, 10), Point::new(0, 0));
+            <FormPane as View>::draw(&mut pane, &mut dctx);
+        }
+        // Row 3 is the second field (header rule 0, breathing row 1, cn 2).
+        let row: String = (0..60u16).map(|x| buf.get(x, 3).symbol()).collect();
+        assert!(
+            row.contains("cn=admin,ou=serv"),
+            "the value must read from its start; got {row:?}"
+        );
+        assert!(
+            !row.contains('◄'),
+            "a start-anchored value shows no left-scroll marker; got {row:?}"
+        );
+    }
+
+    #[test]
+    fn meta_rows_are_stops_but_refuse_edits() {
+        // The audit block is reachable like every other row — that is how its
+        // long DNs get scrolled and copied — but it refuses to be changed.
+        let (_shared, mut pane) = build_pane_with_form(vec![
+            ef("cn", "a", true),
+            ef("modifyTimestamp", "2026-07-28 11:03:22", false),
+        ]);
+        let mut out = VecDeque::new();
+        let mut timers = tv::timer::TimerQueue::new();
+        let mut deferred = Vec::new();
+        let mut ev = Event::Broadcast {
+            command: REFRESH,
+            source: None,
+        };
+        pane.handle_event(
+            &mut ev,
+            &mut headless_ctx(&mut out, &mut timers, &mut deferred),
+        );
+        let focusable = pane.focusable_value_ids();
+        assert!(focusable.contains(&pane.value_ids[0]), "cn is reachable");
+        assert!(
+            focusable.contains(&pane.value_ids[1]),
+            "the audit block is reachable too — otherwise it could never be read \
+             past the cell edge"
+        );
+        assert!(
+            pane.value_read_only(1),
+            "reachable, but the server owns the value"
+        );
+    }
+
+    #[test]
+    fn refusing_an_edit_pops_a_dialog_naming_the_field_and_the_reason() {
+        let (_shared, mut pane) = build_pane_with_form(vec![
+            ef("cn", "a", true),
+            ef("modifyTimestamp", "2026-07-28 11:03:22", false),
+        ]);
+        let mut out = VecDeque::new();
+        let mut timers = tv::timer::TimerQueue::new();
+        let mut deferred = Vec::new();
+        let mut ev = Event::Broadcast {
+            command: REFRESH,
+            source: None,
+        };
+        pane.handle_event(
+            &mut ev,
+            &mut headless_ctx(&mut out, &mut timers, &mut deferred),
+        );
+
+        // The widget refuses the edit and names itself; the pane explains why.
+        let mut reject = Event::Broadcast {
+            command: InputLine::READ_ONLY_REJECTED,
+            source: Some(pane.value_ids[1]),
+        };
+        let mut out2 = VecDeque::new();
+        let mut timers2 = tv::timer::TimerQueue::new();
+        let mut deferred2 = Vec::new();
+        pane.handle_event(
+            &mut reject,
+            &mut headless_ctx(&mut out2, &mut timers2, &mut deferred2),
+        );
+        let text = deferred2.iter().find_map(|d| match d {
+            tv::view::Deferred::OpenMessageBox { text, .. } => Some(text.clone()),
+            _ => None,
+        });
+        let text = text.expect("a refused edit pops a message box");
+        assert!(
+            text.contains("modifyTimestamp"),
+            "the dialog names the field: {text:?}"
+        );
+        assert!(
+            text.contains("directory server"),
+            "and says who owns it: {text:?}"
+        );
+        assert!(reject.is_nothing(), "the broadcast is consumed");
+    }
+
+    #[test]
+    fn an_editable_field_pops_no_dialog() {
+        // A stray broadcast naming an editable cell must not pop anything.
+        let (_shared, mut pane) = build_pane_with_form(vec![ef("cn", "a", true)]);
+        let mut out = VecDeque::new();
+        let mut timers = tv::timer::TimerQueue::new();
+        let mut deferred = Vec::new();
+        let mut ev = Event::Broadcast {
+            command: REFRESH,
+            source: None,
+        };
+        pane.handle_event(
+            &mut ev,
+            &mut headless_ctx(&mut out, &mut timers, &mut deferred),
+        );
+        let mut reject = Event::Broadcast {
+            command: InputLine::READ_ONLY_REJECTED,
+            source: Some(pane.value_ids[0]),
+        };
+        let mut out2 = VecDeque::new();
+        let mut timers2 = tv::timer::TimerQueue::new();
+        let mut deferred2 = Vec::new();
+        pane.handle_event(
+            &mut reject,
+            &mut headless_ctx(&mut out2, &mut timers2, &mut deferred2),
+        );
+        assert!(!deferred2
+            .iter()
+            .any(|d| matches!(d, tv::view::Deferred::OpenMessageBox { .. })));
+    }
+
+    #[test]
     fn multi_value_field_block_is_multiple_rows_tall() {
         // A 3-value plain multi field renders as one block three rows tall (List
         // kind → read-only bullet block); the next field starts below it, not one
@@ -2647,13 +2988,13 @@ mod tests {
 
     #[test]
     fn trailing_readonly_tail_scrolls_into_view() {
-        // Reported bug: read-only fields can never take focus, and the form's
-        // scroll anchors on the focused field — so a run of read-only fields
-        // BELOW the last focusable field (past the last visible row of a long
-        // form) can never be scrolled into view. Pressing Down on the last
-        // focusable field must walk the viewport through that trailing read-only
-        // tail one line at a time, instead of clamping in place.
-        let mut fields = vec![ef("cn", "z", true)]; // the only focusable field
+        // Historically read-only fields could not take focus, and the scroll
+        // anchors on the focused field — so a trailing run of read-only fields
+        // could never be brought on screen. Now every row is a stop, so Down
+        // simply walks into the tail; this pins the guarantee that survived the
+        // change: the last row is reachable AND revealed, and the reveal is not
+        // yanked back by a passive re-anchor.
+        let mut fields = vec![ef("cn", "z", true)];
         for i in 0..10 {
             fields.push(ef(&format!("ro{i}"), &format!("v{i}"), false));
         }
@@ -2674,26 +3015,29 @@ mod tests {
 
         assert_eq!(
             pane.focusable_value_ids().len(),
-            1,
-            "cn is the only focusable field; the ro* tail is read-only"
+            11,
+            "every row is a stop now, the read-only tail included"
         );
         let max_top = pane.scroll_mut().unwrap().max_top();
         assert_eq!(max_top, 5, "content (11) overflows the 6-row viewport");
 
-        // Down past the last focusable field scrolls the read-only tail into view
-        // one line at a time (before the fix this did nothing).
-        for expected_top in 1..=max_top {
+        // Walking Down reaches the bottom row and reveals it; the scroll only
+        // ever moves forward on the way there.
+        let mut last_top = pane.scroll_mut().unwrap().top_for_test();
+        for _ in 0..10 {
             let mut d = Event::KeyDown(tv::KeyEvent::from(tv::Key::Down));
             pane.handle_event(
                 &mut d,
                 &mut headless_ctx(&mut out, &mut timers, &mut deferred),
             );
-            assert_eq!(
-                pane.scroll_mut().unwrap().top_for_test(),
-                expected_top,
-                "Down scrolls the read-only tail into view one line at a time"
-            );
+            let top = pane.scroll_mut().unwrap().top_for_test();
+            assert!(top >= last_top, "Down never scrolls backwards");
+            last_top = top;
         }
+        assert_eq!(
+            last_top, max_top,
+            "the trailing rows end up on screen, not stranded below the viewport"
+        );
 
         // A passive event (a REFRESH tick) must NOT yank the scroll back to the
         // focused field: the tail stays revealed.
@@ -2745,29 +3089,45 @@ mod tests {
             &mut headless_ctx(&mut out, &mut timers, &mut deferred),
         );
 
-        assert_eq!(pane.focusable_value_ids().len(), 1, "only cn is focusable");
-        // cn is the last content row (row 10); to show it the 6-row viewport must
-        // scroll to top=5 (rows 5..11) on open — not sit at top=0 hiding it.
+        assert_eq!(
+            pane.focusable_value_ids().len(),
+            11,
+            "every row is a stop now, the read-only head included"
+        );
+        // The form opens on its FIRST row, so the head is visible from the start —
+        // it can no longer be stranded above the focused field.
+        assert_eq!(
+            pane.scroll_mut().unwrap().top_for_test(),
+            0,
+            "the form opens at its top"
+        );
+
+        // Walk to the bottom, then back up: the head comes back into view, one
+        // row at a time, and never scrolls forward on the way.
+        for _ in 0..10 {
+            let mut d = Event::KeyDown(tv::KeyEvent::from(tv::Key::Down));
+            pane.handle_event(
+                &mut d,
+                &mut headless_ctx(&mut out, &mut timers, &mut deferred),
+            );
+        }
         assert_eq!(
             pane.scroll_mut().unwrap().top_for_test(),
             5,
-            "the focused field is snapped into view on open, not hidden by the head"
+            "at the bottom"
         );
-
-        // Up past the first focusable field walks the read-only head into view one
-        // line at a time (top counts back down to 0).
-        for expected_top in (0..=4).rev() {
+        let mut last_top = 5;
+        for _ in 0..10 {
             let mut u = Event::KeyDown(tv::KeyEvent::from(tv::Key::Up));
             pane.handle_event(
                 &mut u,
                 &mut headless_ctx(&mut out, &mut timers, &mut deferred),
             );
-            assert_eq!(
-                pane.scroll_mut().unwrap().top_for_test(),
-                expected_top,
-                "Up scrolls the read-only head into view one line at a time"
-            );
+            let top = pane.scroll_mut().unwrap().top_for_test();
+            assert!(top <= last_top, "Up never scrolls forwards");
+            last_top = top;
         }
+        assert_eq!(last_top, 0, "the leading rows come back into view");
 
         // At the top, further Up is a no-op.
         let mut u = Event::KeyDown(tv::KeyEvent::from(tv::Key::Up));
@@ -3775,6 +4135,16 @@ mod tests {
             assert_eq!(display_label("uidNumber"), "uidNumber");
             assert_eq!(display_label("givenName"), "givenName");
             assert_eq!(display_label("somethingCustom"), "somethingCustom");
+        }
+
+        #[test]
+        fn meta_rows_show_the_hint_alone() {
+            // `modifiersName (modified by)` would be the longest label in the form
+            // and would size the label column for every other row.
+            assert_eq!(display_label("createTimestamp"), "created");
+            assert_eq!(display_label("creatorsName"), "created by");
+            assert_eq!(display_label("modifyTimestamp"), "modified");
+            assert_eq!(display_label("modifiersName"), "modified by");
         }
     }
 }

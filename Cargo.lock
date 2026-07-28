@@ -446,7 +446,7 @@ checksum = "75b325c5dbd37f80359721ad39aca5a29fb04c89279657cffdda8736d0c0b9d2"
 
 [[package]]
 name = "edaptor"
-version = "1.5.2"
+version = "1.5.3"
 dependencies = [
  "anyhow",
  "chumsky",
@@ -460,6 +460,7 @@ dependencies = [
  "rustls-pemfile",
  "serde",
  "tempfile",
+ "time",
  "toml",
  "tvision-rs",
  "unicode-width",
@@ -1057,6 +1058,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "071dfc062690e90b734c0b2273ce72ad0ffa95f0c74596bc250dcfd960262841"
 dependencies = [
  "autocfg",
+]
+
+[[package]]
+name = "num_threads"
+version = "0.1.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5c7398b9c8b70908f6371f47ed36737907c87c52af34c268fed0bf0ceb92ead9"
+dependencies = [
+ "libc",
 ]
 
 [[package]]
@@ -1737,7 +1747,9 @@ checksum = "743bd48c283afc0388f9b8827b976905fb217ad9e647fae3a379a9283c4def2c"
 dependencies = [
  "deranged",
  "itoa",
+ "libc",
  "num-conv",
+ "num_threads",
  "powerfmt",
  "serde_core",
  "time-core",
@@ -1894,9 +1906,9 @@ dependencies = [
 
 [[package]]
 name = "tvision-rs"
-version = "0.14.0"
+version = "0.15.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8faeee3e9928d36a862d6d928deb56b53fa9fae15b9a042d67566e2aa31c5006"
+checksum = "1c72e0613d4e8d13ac3d7c695515c75e889284249cf8f8778b70c7bc98ef3b64"
 dependencies = [
  "arboard",
  "crossterm",
@@ -1910,9 +1922,9 @@ dependencies = [
 
 [[package]]
 name = "tvision-rs-macros"
-version = "0.14.0"
+version = "0.15.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6c060e730f0b6c7295c3e1c34b16717c16549b533edbdd65ec042120e97df94c"
+checksum = "ab2e8626dab8f123a7cbe4d04de6d02d04b36f6b88e3f2e6a0831bc85fdb9165"
 dependencies = [
  "proc-macro-crate",
  "proc-macro2",

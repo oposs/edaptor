@@ -21,9 +21,14 @@
 //! | Tab | **not consumed** — reserved for pane-level focus switching |
 
 use tvision_rs::{DrawCtx, Event, HelpCtx, Key, Point, Rect, Role, SurfaceRoles, View, ViewState};
+use unicode_width::UnicodeWidthStr;
 
 use crate::ui::panes::list_model::{ListModel, Move};
 use crate::ui::panes::value_lines::VALUE_INDENT;
+
+/// Display width of an item's `"- "` bullet prefix — the left context kept on
+/// screen when the horizontal scroll walks back toward the start of a line.
+const BULLET_W: i32 = 2;
 
 /// Surface roles for the value block — mirrors `InputLine::SURFACE_ROLES` so
 /// the inline editor blends with the form palette.
@@ -56,6 +61,11 @@ pub(crate) struct ListValueView {
     help_ctx_body: HelpCtx,
     /// Help context active while the cursor sits on the reorder handle.
     help_ctx_handle: HelpCtx,
+    /// Horizontal scroll offset in display columns — how far the block is
+    /// scrolled right. Derived from the caret (scroll-follow, exactly like
+    /// `InputLine`), so a value longer than the cell can be walked to its end
+    /// instead of being cut at the edge. `◄`/`►` mark hidden text either side.
+    h_off: i32,
 }
 
 impl ListValueView {
@@ -87,6 +97,7 @@ impl ListValueView {
             boundary_exit: None,
             help_ctx_body,
             help_ctx_handle,
+            h_off: 0,
         }
     }
 
@@ -102,6 +113,31 @@ impl ListValueView {
     /// Blank items are always dropped. Delegates to [`ListModel::to_values`].
     pub(crate) fn to_values(&self) -> Vec<String> {
         self.model.to_values(self.ordered)
+    }
+
+    /// Clamp [`h_off`](Self::h_off) so the caret is on screen, then place the
+    /// hardware cursor at its scrolled column.
+    ///
+    /// The block scrolls to follow the caret rather than on its own keys: Left /
+    /// Right already walk the text, so an item wider than the cell simply carries
+    /// the view with it — the same contract `InputLine` has.
+    fn sync_cursor(&mut self) {
+        let (col, row) = self.model.cursor_xy();
+        let vis = (self.state.size.x - VALUE_INDENT).max(1);
+        if col < self.h_off + BULLET_W {
+            // Scrolling back keeps the `- ` bullet in view — it is what marks
+            // where the item starts — so Home lands the line fully home.
+            self.h_off = (col - BULLET_W).max(0);
+        } else if col >= self.h_off + vis {
+            self.h_off = col - vis + 1;
+        }
+        self.state.set_cursor(col - self.h_off + VALUE_INDENT, row);
+    }
+
+    /// Scroll the block back to its left edge. The pane calls this when focus
+    /// lands on the field, so a value is never met mid-scroll.
+    pub(crate) fn scroll_home(&mut self) {
+        self.h_off = 0;
     }
 
     /// Take and clear the pending boundary-exit signal.
@@ -305,15 +341,26 @@ impl View for ListValueView {
         let size = self.state.size;
         let color = ctx.content_surface(SURFACE_ROLES, self.state.state.focused, true);
         ctx.fill(Rect::new(0, 0, size.x, size.y), ' ', color);
+        self.sync_cursor();
+        let vis = (size.x - VALUE_INDENT).max(1);
+        let mut overflow_right = false;
         for (row, line) in self.model.display_lines().iter().enumerate() {
             if (row as i32) < size.y {
-                ctx.put_str(VALUE_INDENT, row as i32, line, color);
+                ctx.put_str_part(VALUE_INDENT, row as i32, line, self.h_off, color);
+                overflow_right |= UnicodeWidthStr::width(line.as_str()) as i32 > self.h_off + vis;
             }
         }
-        // Update the cursor position; `cursor_request` reads it on the next pump.
-        // Shift by the content indent so the caret sits over the drawn text.
-        let (col, row) = self.model.cursor_xy();
-        self.state.set_cursor(col + VALUE_INDENT, row);
+        // Mark hidden text on either side, so a cut value never looks complete.
+        if self.h_off > 0 {
+            for row in 0..size.y.min(self.model.display_lines().len() as i32) {
+                ctx.put_char(0, row, '◄', color);
+            }
+        }
+        if overflow_right {
+            for row in 0..size.y.min(self.model.display_lines().len() as i32) {
+                ctx.put_char(size.x - 1, row, '►', color);
+            }
+        }
     }
 
     fn handle_event(&mut self, ev: &mut Event, _ctx: &mut tvision_rs::Context) {
@@ -337,8 +384,7 @@ impl View for ListValueView {
         // next `draw`: the enclosing ScrollGroup reads `cursor_request()` right
         // after this event to scroll a tall block so the caret stays visible, so a
         // stale cursor would lag the scroll by a frame while arrowing through it.
-        let (col, row) = self.model.cursor_xy();
-        self.state.set_cursor(col + VALUE_INDENT, row);
+        self.sync_cursor();
     }
 
     /// Return the view-local hardware-cursor position when focused with a
@@ -391,6 +437,63 @@ mod tests {
         let mut deferred: Vec<tvision_rs::Deferred> = Vec::new();
         let mut ctx = tvision_rs::Context::new(&mut out, &mut timers, 0, &mut deferred);
         f(&mut ctx)
+    }
+
+    // --- horizontal scroll ---
+
+    /// The inline editor scrolls to follow its caret, so an item longer than the
+    /// cell can be walked (and read) to its end.
+    #[test]
+    fn the_view_follows_the_caret_past_the_right_edge() {
+        let long = "uid=alice,ou=people,dc=example,dc=org";
+        let mut v = ListValueView::new(
+            Rect::new(0, 0, 20, 1),
+            &[long.to_string()],
+            false,
+            body(),
+            handle(),
+        );
+        // Visible width is 19 (20 less the one-column indent); the caret starts
+        // after the "- " bullet, so it is on screen and nothing is scrolled.
+        v.on_key(&mut key(Key::Home));
+        v.sync_cursor();
+        assert_eq!(v.h_off, 0, "a fresh field starts at its left edge");
+
+        v.on_key(&mut key(Key::End)); // caret to the end of the item
+        v.sync_cursor();
+        assert!(
+            v.h_off > 0,
+            "the view scrolled to keep the caret visible (h_off {})",
+            v.h_off
+        );
+        let (col, _) = v.model.cursor_xy();
+        let screen_col = col - v.h_off + VALUE_INDENT;
+        assert!(
+            (VALUE_INDENT..20).contains(&screen_col),
+            "the caret lands inside the cell, not past it (col {screen_col})"
+        );
+
+        // Walking back left brings the view home again.
+        v.on_key(&mut key(Key::Home));
+        v.sync_cursor();
+        assert_eq!(v.h_off, 0, "Home scrolls the view back to the start");
+    }
+
+    #[test]
+    fn scroll_home_resets_the_offset() {
+        let long = "uid=alice,ou=people,dc=example,dc=org";
+        let mut v = ListValueView::new(
+            Rect::new(0, 0, 20, 1),
+            &[long.to_string()],
+            false,
+            body(),
+            handle(),
+        );
+        v.on_key(&mut key(Key::End));
+        v.sync_cursor();
+        assert!(v.h_off > 0);
+        v.scroll_home();
+        assert_eq!(v.h_off, 0, "focus landing resets the scroll");
     }
 
     // --- bracketed-paste ---
