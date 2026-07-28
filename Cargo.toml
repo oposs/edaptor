@@ -33,10 +33,13 @@ time = { version = "0.3", features = ["local-offset"] }
 # rung of the clipboard chain — the one that actually works over ssh, which is how
 # edaptor is driven on illumos. Every other platform keeps the native clipboard.
 [target.'cfg(not(target_os = "illumos"))'.dependencies]
-tvision-rs = "0.14.0"
+# TEMPORARY path dep while InputLine's read-only mode is developed upstream on
+# ../rstv (branch feat/inputline-read-only). Restore the published version
+# requirement once that is released — see CLAUDE.md, "Upstream framework".
+tvision-rs = { path = "../rstv" }
 
 [target.'cfg(target_os = "illumos")'.dependencies]
-tvision-rs = { version = "0.14.0", default-features = false }
+tvision-rs = { path = "../rstv", default-features = false }
 
 [dev-dependencies]
 tempfile = "3"

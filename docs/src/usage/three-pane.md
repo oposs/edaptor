@@ -63,21 +63,29 @@ accent colour, which ASCII cannot show.)*
   the highlight in the entry list. The pane title shows the current DN (or
   `New entry` while creating); a DN too long for the pane is cut at the *end*,
   with a `…` marking the cut, so the telling front part stays readable. Move
-  between fields with `↑↓`; the status line shows context-sensitive editing hints
-  for the focused field.
+  between fields with `↑↓`, or page through the form with `PageUp`/`PageDown`;
+  the status line shows context-sensitive editing hints for the focused field.
+
+  **Every field is a stop, editable or not.** A read-only field still takes
+  focus, so you can move the caret through it, scroll a value wider than its cell
+  (`◄` / `►` mark the hidden part), select it and copy it with `Ctrl+C` — without
+  that, a long DN could never be read to its end. Only *changing* it is refused:
+  typing, deleting, cutting or pasting pops a dialog naming the field and saying
+  why it will not budge (the server maintains it, the schema marks it
+  `NO-USER-MODIFICATION`, the session is read-only, and so on).
 
   Below the attributes, separated by a blank line, sits the **audit block**: the
   server-maintained `createTimestamp`, `creatorsName`, `modifyTimestamp` and
   `modifiersName` of the entry, labelled simply `created`, `created by`,
   `modified` and `modified by` (their real names are long, and the label column
   is sized to the longest label in the whole form). These are *operational*
-  attributes — the
-  directory maintains them, so eDAPtor shows them read-only: they take no Tab
-  stop, never enter a save, and cannot be edited. Timestamps are rendered in your
-  machine's local time (`2026-07-28 13:03:22`) rather than the raw LDAP
-  `20260728110322Z`. The block refreshes after every save, so `modified` always
-  reflects the write you just made. Servers that do not return these attributes
-  (or a bind DN not permitted to read them) simply show no block.
+  attributes — the directory maintains them, so eDAPtor shows them read-only:
+  reachable and copyable like any other read-only field, but never part of a
+  save. Timestamps are rendered in your machine's local time
+  (`2026-07-28 13:03:22`) rather than the raw LDAP `20260728110322Z`. The block
+  refreshes after every save, so `modified` always reflects the write you just
+  made. Servers that do not return these attributes (or a bind DN not permitted
+  to read them) simply show no block.
 
 ## Focus and the status line
 

@@ -20,6 +20,15 @@ All notable changes to eDAPtor are documented here. The format follows
 
 ### Changed
 
+- **Every field in the entry form is now selectable**, editable or not. A
+  read-only field takes focus, so its value can be scrolled (`◄`/`►` mark the
+  hidden part), selected and copied with `Ctrl+C` — previously such fields were
+  skipped by focus entirely, which made a value wider than its cell impossible to
+  read to its end. Trying to *change* one pops a dialog naming the field and the
+  reason (server-maintained, schema `NO-USER-MODIFICATION`, read-only session,
+  …). `PageUp`/`PageDown` still page the whole form, so long forms stay quick to
+  cross.
+
 - **A truncated DN title says so.** When the entry pane is too narrow for the
   full DN, the title is cut at the end with a trailing `…` — previously a cut DN
   was indistinguishable from a short one.
