@@ -12,7 +12,8 @@ All notable changes to eDAPtor are documented here. The format follows
   line, the entry pane now shows the entry's server-maintained
   `createTimestamp`, `creatorsName`, `modifyTimestamp` and `modifiersName`,
   labelled `created` / `created by` / `modified` / `modified by`.
-  They are read-only — no Tab stop, never part of a save — and the timestamps are
+  They are read-only — reachable and copyable like any other read-only field,
+  but never part of a save — and the timestamps are
   rendered in local time (`2026-07-28 13:03:22`) instead of the raw
   `20260728110322Z`. The block refreshes after each save. Entry reads now request
   these operational attributes explicitly; a server that does not return them
