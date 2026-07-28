@@ -890,8 +890,13 @@ impl FormPane {
             il.home();
         } else if let Some(lv) = any.downcast_mut::<ListValueView>() {
             // Multi-value inline editor: land on the first line so navigating into
-            // the field always opens at the top (parity with the text fields).
+            // the field always opens at the top (parity with the text fields), and
+            // at its left edge so a wide value is never met mid-scroll.
             lv.cursor_home();
+            lv.scroll_home();
+        } else if let Some(lv) = any.downcast_mut::<LaunchValueView>() {
+            // Read-only bullet block (members, objectClass): same left-edge rule.
+            lv.scroll_home();
         }
     }
 
