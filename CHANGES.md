@@ -22,9 +22,10 @@ All notable changes to eDAPtor are documented here. The format follows
 
 - **Multi-value blocks scroll sideways too.** A member list, an `objectClass`
   set or any inline multi-value editor whose values are wider than the cell can
-  now be read to the end: `←`/`→` scroll a read-only block, and the inline editor
-  follows its caret. `◄`/`►` mark the hidden text, and the scroll resets to the
-  left edge when focus lands on the field.
+  now be read to the end: `←`/`→` scroll a read-only block and `Home`/`End` jump
+  to either edge, while the inline editor follows its caret. `◄`/`►` mark the
+  hidden text, and the scroll resets to the left edge when focus lands on the
+  field.
 
 - **Every field in the entry form is now selectable**, editable or not. A
   read-only field takes focus, so its value can be scrolled (`◄`/`►` mark the

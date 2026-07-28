@@ -75,9 +75,9 @@ accent colour, which ASCII cannot show.)*
   `NO-USER-MODIFICATION`, the session is read-only, and so on).
 
   Multi-value blocks scroll the same way. In a read-only block — a group's
-  `member` list, an `objectClass` set — `←`/`→` move the whole block sideways; in
-  an inline multi-value editor the view follows the caret as you walk a long
-  value. Either way the scroll returns to the left edge when focus lands on the
+  `member` list, an `objectClass` set — `←`/`→` move the whole block sideways and
+  `Home`/`End` jump straight to either edge; in an inline multi-value editor the
+  view follows the caret as you walk a long value. Either way the scroll returns to the left edge when focus lands on the
   field, so a value is never met mid-scroll.
 
   Below the attributes, separated by a blank line, sits the **audit block**: the

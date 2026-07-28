@@ -560,6 +560,10 @@ impl FormPane {
                         // its value can be scrolled and copied, and refuses edits
                         // with a READ_ONLY_REJECTED broadcast this pane answers.
                         il.set_read_only(!cell_editable(f));
+                        // A form value is a DN, a path, a login name — the front
+                        // identifies it. Without this, `set_value` would select-all
+                        // and park every too-wide value at its tail.
+                        il.set_value_position(tv::ValuePosition::Start);
                         il.state_mut().help_ctx = hctx;
                         sg.add_content(Box::new(il), Rect::new(0, 0, w, 1))
                     }
@@ -782,21 +786,17 @@ impl FormPane {
                                 // the read-only presentation (checkbox/binary) for the
                                 // rest — matching the former `widget_for(f).present(f)`.
                                 v.set_value(FieldValue::Text(text_cell_value(field)));
-                                // `set_value` select-alls, which parks the view at
-                                // the END of the text: a value wider than its cell
-                                // then shows its tail behind a `◄` marker. For a DN
-                                // or a path the front is what identifies it, so home
-                                // every cell as it is filled. (The focused cell is
-                                // homed again below; this runs on render ticks only,
-                                // never mid-typing.)
                                 if let Some(il) =
                                     v.as_any_mut().and_then(|a| a.downcast_mut::<InputLine>())
                                 {
-                                    il.home();
                                     // A rebuild is not guaranteed between renders
                                     // (a field can turn read-only when its widget
-                                    // binding resolves), so keep the mode current.
+                                    // binding resolves), so keep both modes current.
+                                    // `ValuePosition::Start` is what leaves the value
+                                    // showing its head — `set_value` above already
+                                    // honoured it.
                                     il.set_read_only(!cell_editable(field));
+                                    il.set_value_position(tv::ValuePosition::Start);
                                 }
                             }
                             ValueKind::Launch => {

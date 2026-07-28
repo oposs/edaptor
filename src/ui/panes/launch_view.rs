@@ -89,24 +89,24 @@ impl LaunchValueView {
     /// and consumes the event.
     pub(crate) fn on_key(&mut self, ev: &mut Event) {
         let Event::KeyDown(k) = ev else { return };
-        // Left/Right scroll the block sideways while there is anything to reveal;
-        // a long member DN is otherwise unreadable past the cell edge. Once the
-        // block is back at its left edge, Left falls through to the pane so
-        // horizontal keys still leave the field when there is nothing to scroll.
+        // Left/Right scroll the block sideways while there is anything to reveal,
+        // and Home/End jump straight to either edge — a long member DN is
+        // otherwise unreadable past the cell edge. A key that would not move the
+        // scroll falls through to the pane, so horizontal keys still leave the
+        // field when there is nothing left to reveal.
         let vis = (self.state.size.x - VALUE_INDENT).max(1);
         let max_off = (self.content_width() - vis).max(0);
-        match k.key {
-            Key::Right if self.h_off < max_off => {
-                self.h_off += 1;
-                ev.clear();
-                return;
-            }
-            Key::Left if self.h_off > 0 => {
-                self.h_off -= 1;
-                ev.clear();
-                return;
-            }
-            _ => {}
+        let scrolled_to = match k.key {
+            Key::Right if self.h_off < max_off => Some(self.h_off + 1),
+            Key::Left if self.h_off > 0 => Some(self.h_off - 1),
+            Key::End if self.h_off < max_off => Some(max_off),
+            Key::Home if self.h_off > 0 => Some(0),
+            _ => None,
+        };
+        if let Some(off) = scrolled_to {
+            self.h_off = off;
+            ev.clear();
+            return;
         }
 
         let is_nav = matches!(
@@ -241,6 +241,33 @@ mod tests {
             !ev.is_nothing(),
             "nothing left to reveal: the key passes on"
         );
+    }
+
+    #[test]
+    fn home_and_end_jump_to_either_edge() {
+        let mut v = wide_view();
+        let mut ev = Event::KeyDown(KeyEvent::from(Key::End));
+        v.on_key(&mut ev);
+        assert!(
+            ev.is_nothing(),
+            "End consumes while there is more to reveal"
+        );
+        assert_eq!(v.h_off_for_test(), 39 - 19, "End jumps to the far edge");
+
+        // At the far edge End has nothing left to do and belongs to the pane.
+        let mut ev = Event::KeyDown(KeyEvent::from(Key::End));
+        v.on_key(&mut ev);
+        assert!(!ev.is_nothing());
+
+        let mut ev = Event::KeyDown(KeyEvent::from(Key::Home));
+        v.on_key(&mut ev);
+        assert!(ev.is_nothing());
+        assert_eq!(v.h_off_for_test(), 0, "Home jumps back to the start");
+
+        // And at the start, Home passes through too.
+        let mut ev = Event::KeyDown(KeyEvent::from(Key::Home));
+        v.on_key(&mut ev);
+        assert!(!ev.is_nothing());
     }
 
     #[test]
