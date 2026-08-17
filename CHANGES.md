@@ -10,7 +10,32 @@ All notable changes to eDAPtor are documented here. The format follows
 
 ### Changed
 
+- **Error messages carry the LDAP result code**, e.g. `Constraint violation
+  (LDAP 19)`. It is the one searchable identifier for a failure, and it shows at a
+  glance when a bare code is genuinely all the server sent.
+
+- **The error dialog sizes itself to the message** instead of a fixed 60×12 box,
+  so a message naming a DN and a reason is readable. Long values are wrapped, and
+  a DN with nowhere to wrap is broken rather than allowed to run past the frame.
+
+- **The test server provisions the `unique` overlay.** Its rules are filtered
+  (`ldap:///?gidNumber?sub?(objectClass=posixGroup)`) so a user-private group may
+  share its account's `gidNumber` while group gidNumbers stay unique — the
+  unfiltered form blocks every companion create. `tests/live_unique_overlay.rs`
+  pins both halves.
+
 ### Fixed
+
+- **A failed write now says what went wrong.** When a server rejects a
+  transactional create, it reports the result code at commit time with an *empty*
+  diagnostic message — schema errors are checked up front and explain themselves,
+  but overlay errors (`unique`, `ppolicy`, …) are deferred to the commit and their
+  reason is never sent. The dialog therefore read `Constraint violation` and
+  nothing else. eDAPtor now replays the rolled-back entries outside the
+  transaction to recover the server's real explanation, and shows it with the DN
+  of the entry that failed. The replay runs only after a rollback, stops at the
+  first failure, removes whatever it created, and names anything it could not
+  remove instead of leaving it behind silently.
 
 ## 1.6.0 - 2026-07-28
 

@@ -11,8 +11,10 @@ server for the gated live test suite.
 it to mirror the [`oposs.openldap`](https://github.com/oposs) Ansible role:
 
 - **Schemas:** the Samba and mail schemas.
-- **Overlays:** `memberOf`, referential integrity (`refint`), and password
-  policy (`ppolicy`).
+- **Overlays:** `memberOf`, referential integrity (`refint`), password policy
+  (`ppolicy`) and attribute uniqueness (`unique`). The uniqueness rules are
+  **filtered** so a user-private group may share its account's `gidNumber` —
+  see [Companion Entries](../configuration/companion.md).
 - **Password policies** loaded into the directory.
 - **Seed data:** roughly **600 users across 5 departments** and about **25
   groups**, generated deterministically (see `scripts/ldap-provision/`).
