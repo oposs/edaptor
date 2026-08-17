@@ -640,11 +640,130 @@ fn run_add(
     write_response(id, dn, None, conn.add(dn, entry))
 }
 
+/// What a diagnostic replay ([`diagnose_rolled_back_add`]) learned.
+struct Diagnosis {
+    /// DN and message of the entry the replay failed on, when the failure
+    /// reproduced outside the transaction.
+    culprit: Option<(String, String)>,
+    /// DNs the replay created but could NOT remove again. These are real,
+    /// unwanted entries: the message must name them so a human cleans up.
+    leftovers: Vec<String>,
+}
+
+/// Re-run a rolled-back atomic add OUTSIDE the transaction to recover the
+/// server's diagnostic message, then undo whatever the replay created.
+///
+/// # Why this exists
+///
+/// slapd checks schema in the frontend, so a schema violation's text arrives
+/// with the individual Add. Overlay checks (`unique`, `ppolicy`, …) are deferred
+/// to commit: each Add inside the transaction returns `err=0` and the EndTxn
+/// carries the failing code with an EMPTY diagnostic message. The reason exists
+/// but is never sent, leaving the user with a bare "Constraint violation".
+/// Replaying the same adds without the transaction control makes the server
+/// evaluate them immediately, and it then reports the reason in full.
+///
+/// # Safety
+///
+/// Only call this after a transaction has rolled back, so the directory holds
+/// none of the entries. The replay stops at the first failure and deletes what
+/// it created, newest first. Entries it cannot delete are returned as
+/// `leftovers` — never silently. The replay briefly creates the entries that
+/// precede the culprit, which is visible to other clients and to the audit log.
+fn diagnose_rolled_back_add(
+    conn: &mut LdapConn,
+    entries: &[(String, BTreeMap<String, Vec<String>>)],
+) -> Diagnosis {
+    let mut created: Vec<&str> = Vec::new();
+    let mut culprit = None;
+    for (dn, attrs) in entries {
+        let entry: Vec<(String, HashSet<String>)> = attrs
+            .iter()
+            .map(|(k, vs)| (k.clone(), vs.iter().cloned().collect::<HashSet<String>>()))
+            .collect();
+        match conn.add(dn, entry) {
+            Ok(r) if r.rc == 0 => created.push(dn),
+            Ok(r) => {
+                culprit = Some((dn.clone(), result_code_message(r.rc, &r.text)));
+                break;
+            }
+            Err(e) => {
+                culprit = Some((dn.clone(), format!("{e}")));
+                break;
+            }
+        }
+    }
+    let mut leftovers = Vec::new();
+    for dn in created.iter().rev() {
+        match conn.delete(dn) {
+            Ok(r) if r.rc == 0 => {}
+            _ => leftovers.push((*dn).to_string()),
+        }
+    }
+    Diagnosis { culprit, leftovers }
+}
+
+/// Compose the user-visible message for an atomic add the server rejected.
+///
+/// `outcome` is the mapped result of the failing step. `diagnosis` is present
+/// only when the server sent no reason and edaptor replayed the adds to find
+/// one. Pure, so the wording is unit-tested without a server.
+fn atomic_failure_message(
+    outcome: &str,
+    entries: &[String],
+    diagnosis: Option<&Diagnosis>,
+) -> String {
+    let mut m = format!("The server rejected the whole change and wrote nothing.\n\n{outcome}\n");
+    match diagnosis {
+        Some(d) => {
+            match &d.culprit {
+                Some((dn, why)) => {
+                    m.push_str(
+                        "\nThe server gave no reason inside the transaction, so edaptor \
+                         retried the entries outside it. Adding this entry failed:\n\n",
+                    );
+                    m.push_str(&format!("  {dn}\n\n  {why}\n"));
+                }
+                None => {
+                    m.push_str(
+                        "\nThe server gave no reason, and retrying the entries outside \
+                         the transaction did not reproduce the failure. The change \
+                         covered:\n\n",
+                    );
+                    for dn in entries {
+                        m.push_str(&format!("  {dn}\n"));
+                    }
+                }
+            }
+            if !d.leftovers.is_empty() {
+                m.push_str(
+                    "\nWARNING: edaptor could not remove these entries it created while \
+                     finding the reason. Delete them by hand:\n\n",
+                );
+                for dn in &d.leftovers {
+                    m.push_str(&format!("  {dn}\n"));
+                }
+            }
+        }
+        None => {
+            m.push_str("\nThe change covered:\n\n");
+            for dn in entries {
+                m.push_str(&format!("  {dn}\n"));
+            }
+        }
+    }
+    m
+}
+
 /// Create every entry in `entries` inside one RFC 5805 transaction: StartTxn → each
 /// Add under the transaction control → EndTxn(commit). Any Add failure (or an
 /// EndTxn/commit failure) aborts the transaction and returns [`Response::WriteError`]
 /// with nothing written. On success yields [`Response::WriteOk`] carrying the LAST
 /// entry's DN (the primary, submitted last). Confined to the worker (ldap3-only).
+///
+/// When the server rejects the transaction WITHOUT a diagnostic message, the
+/// adds are replayed outside the transaction to recover the reason — see
+/// [`diagnose_rolled_back_add`].
 fn run_add_atomic(
     conn: &mut LdapConn,
     id: u64,
@@ -681,9 +800,15 @@ fn run_add_atomic(
                     txn_id: &txn_id,
                     commit: false,
                 });
+                // The server named the failing entry here, so the DN is known
+                // and no replay is needed to place the blame.
                 return Response::WriteError {
                     id,
-                    msg: result_code_message(r.rc, &r.text),
+                    msg: format!(
+                        "The server rejected the whole change and wrote nothing.\n\n\
+                         Adding this entry failed:\n\n  {dn}\n\n  {}\n",
+                        result_code_message(r.rc, &r.text)
+                    ),
                 };
             }
             Err(e) => {
@@ -709,10 +834,23 @@ fn run_add_atomic(
             dn: last_dn,
             new_csn: None,
         },
-        Ok(ex) => Response::WriteError {
-            id,
-            msg: result_code_message(ex.1.rc, &ex.1.text),
-        },
+        Ok(ex) => {
+            // The commit failed, so the transaction rolled back and the
+            // directory holds none of these entries. Overlay rejections arrive
+            // here with an EMPTY diagnostic message; replay outside the
+            // transaction to recover the reason.
+            let outcome = result_code_message(ex.1.rc, &ex.1.text);
+            let diagnosis = if ex.1.text.is_empty() {
+                Some(diagnose_rolled_back_add(conn, entries))
+            } else {
+                None
+            };
+            let dns: Vec<String> = entries.iter().map(|(dn, _)| dn.clone()).collect();
+            Response::WriteError {
+                id,
+                msg: atomic_failure_message(&outcome, &dns, diagnosis.as_ref()),
+            }
+        }
         Err(e) => Response::WriteError {
             id,
             msg: format!("EndTransaction commit: {e}"),
@@ -1100,6 +1238,76 @@ mod tests {
     fn post_read_csn_extracts_entry_csn() {
         // No controls -> None.
         assert_eq!(post_read_csn(&[]), None);
+    }
+
+    const GROUP_DN: &str = "cn=cedric,ou=users,ou=groups,dc=carbo-link,dc=com";
+    const USER_DN: &str = "uid=cedric,ou=people,dc=carbo-link,dc=com";
+
+    fn both_dns() -> Vec<String> {
+        vec![GROUP_DN.to_string(), USER_DN.to_string()]
+    }
+
+    /// The whole point of the replay: the reason the transaction hid must reach
+    /// the user, attached to the entry it belongs to.
+    #[test]
+    fn atomic_failure_reports_the_recovered_reason_and_the_culprit() {
+        let d = Diagnosis {
+            culprit: Some((
+                GROUP_DN.to_string(),
+                "Constraint violation (LDAP 19): non-unique attributes found with \
+                 (|(gidNumber=1211))"
+                    .to_string(),
+            )),
+            leftovers: Vec::new(),
+        };
+        let m = atomic_failure_message("Constraint violation (LDAP 19)", &both_dns(), Some(&d));
+        assert!(m.contains("wrote nothing"), "m={m}");
+        assert!(m.contains(GROUP_DN), "must name the failing entry; m={m}");
+        assert!(m.contains("gidNumber=1211"), "must carry the reason; m={m}");
+    }
+
+    /// A replay that cannot clean up after itself must say so loudly — those
+    /// entries are real and someone has to delete them.
+    #[test]
+    fn atomic_failure_warns_about_entries_the_replay_left_behind() {
+        let d = Diagnosis {
+            culprit: Some((
+                USER_DN.to_string(),
+                "Constraint violation (LDAP 19)".to_string(),
+            )),
+            leftovers: vec![GROUP_DN.to_string()],
+        };
+        let m = atomic_failure_message("Constraint violation (LDAP 19)", &both_dns(), Some(&d));
+        assert!(m.contains("WARNING"), "m={m}");
+        assert!(m.contains("Delete them by hand"), "m={m}");
+        assert!(m.contains(GROUP_DN), "m={m}");
+    }
+
+    /// When the replay comes back clean edaptor must not invent a cause; it
+    /// still lists what the change covered.
+    #[test]
+    fn atomic_failure_admits_when_the_replay_found_nothing() {
+        let d = Diagnosis {
+            culprit: None,
+            leftovers: Vec::new(),
+        };
+        let m = atomic_failure_message("Constraint violation (LDAP 19)", &both_dns(), Some(&d));
+        assert!(m.contains("did not reproduce"), "m={m}");
+        assert!(m.contains(GROUP_DN) && m.contains(USER_DN), "m={m}");
+    }
+
+    /// When the server DID explain itself no replay runs, and the message is
+    /// just the outcome plus the entries.
+    #[test]
+    fn atomic_failure_without_a_replay_lists_the_entries() {
+        let m = atomic_failure_message(
+            "Object class violation (LDAP 65): missing sn",
+            &both_dns(),
+            None,
+        );
+        assert!(m.contains("missing sn"), "m={m}");
+        assert!(m.contains(GROUP_DN) && m.contains(USER_DN), "m={m}");
+        assert!(!m.contains("WARNING"), "m={m}");
     }
 
     fn make_result(rc: u32, text: &str) -> ldap3::LdapResult {

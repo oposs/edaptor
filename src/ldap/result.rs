@@ -9,6 +9,12 @@
 /// `"LDAP error <rc>: <text>"` (or without the trailing colon when `text` is
 /// empty). Code `0` (success) is included for completeness, though success is
 /// handled as `WriteOk` upstream rather than surfaced through this mapper.
+///
+/// The numeric code is always carried in the message. It is the one stable,
+/// searchable identifier for a failure, and it tells the reader whether a bare
+/// message like `"Constraint violation (LDAP 19)"` is all edaptor knows — some
+/// servers send no diagnostic text at all (see [`crate::ldap::worker`]'s
+/// transaction path).
 pub fn result_code_message(rc: u32, text: &str) -> String {
     let base = match rc {
         0 => "Success",
@@ -31,9 +37,9 @@ pub fn result_code_message(rc: u32, text: &str) -> String {
         }
     };
     if text.is_empty() {
-        base.to_string()
+        format!("{base} (LDAP {rc})")
     } else {
-        format!("{base}: {text}")
+        format!("{base} (LDAP {rc}): {text}")
     }
 }
 
@@ -45,7 +51,17 @@ mod tests {
     fn maps_no_such_object() {
         assert_eq!(
             result_code_message(32, "no such object"),
-            "No such object: no such object"
+            "No such object (LDAP 32): no such object"
+        );
+    }
+
+    /// The numeric code survives even when the server sends no text — that is
+    /// the case where the reader most needs something to look up.
+    #[test]
+    fn silent_server_still_yields_the_code() {
+        assert_eq!(
+            result_code_message(19, ""),
+            "Constraint violation (LDAP 19)"
         );
     }
 
@@ -58,7 +74,10 @@ mod tests {
 
     #[test]
     fn maps_insufficient_access() {
-        assert_eq!(result_code_message(50, ""), "Insufficient access rights");
+        assert_eq!(
+            result_code_message(50, ""),
+            "Insufficient access rights (LDAP 50)"
+        );
     }
 
     #[test]

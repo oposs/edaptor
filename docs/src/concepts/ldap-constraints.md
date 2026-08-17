@@ -65,6 +65,32 @@ between refreshes, a save can no longer assume the entry on the server matches
 what you last read — see [Optimistic Concurrency](optimistic-concurrency.md)
 for how eDAPtor detects and resolves that.
 
+## A transaction hides why it failed
+
+slapd checks the **schema** in the frontend, so a schema violation's explanation
+arrives with the individual Add. **Overlay** checks — `unique`, `ppolicy` and
+friends — are deferred to the commit. Inside an RFC 5805 transaction that means
+every Add reports `err=0` and the EndTransaction reports the real failure with an
+**empty diagnostic message**:
+
+```
+op=31 ADD dn="cn=cedric,ou=users,ou=groups,…"   err=0   text=
+op=32 ADD dn="uid=cedric,ou=people,…"           err=0   text=
+op=33 TXN END                                   err=19  text=
+```
+
+RFC 5805's `txnEndRes` carries only the failing operation's message ID, not its
+message, so there is nothing further to read out of the response. The reason
+exists on the server and is simply never sent.
+
+**Consequence:** when a transaction is rejected without a message, eDAPtor
+replays the same adds **outside** the transaction, where the server evaluates
+them immediately and explains itself. The recovered reason is shown together with
+the DN of the entry that failed. The replay only runs after a rollback, so the
+directory holds none of the entries; it stops at the first failure and removes
+whatever it created, and anything it cannot remove is named in the error rather
+than left silently behind.
+
 ```mermaid
 flowchart TD
     C1["No has-children flag"] --> D1["Eager structure load → local branch test"]
@@ -72,4 +98,5 @@ flowchart TD
     C3["Server size limits"] --> D3["{next} scan refuses on truncation"]
     C4["memberOf is overlay-maintained"] --> D4["Write member, fan out, never memberOf"]
     C5["No persistent search (RFC 4533 deferred)"] --> D5["Manual Alt+R + refresh-after-write"]
+    C6["Transaction commit hides the reason"] --> D6["Replay outside the txn, then clean up"]
 ```
