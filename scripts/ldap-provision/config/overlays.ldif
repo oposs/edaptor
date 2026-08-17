@@ -10,6 +10,7 @@ olcModulePath: /opt/bitnami/openldap/lib/openldap
 olcModuleLoad: memberof.so
 olcModuleLoad: refint.so
 olcModuleLoad: ppolicy.so
+olcModuleLoad: unique.so
 
 dn: olcOverlay=memberof,olcDatabase={2}mdb,cn=config
 objectClass: olcOverlayConfig
@@ -34,3 +35,25 @@ olcOverlay: ppolicy
 olcPPolicyDefault: cn=default,ou=policies,dc=example,dc=org
 olcPPolicyHashCleartext: TRUE
 olcPPolicyUseLockout: TRUE
+
+# The `unique` overlay rejects writes that would duplicate a value of the listed
+# attributes. Each attribute needs its own olcUniqueURI: attributes sharing one
+# URI share one namespace, which would wrongly reject the ordinary case of a
+# posixAccount whose uidNumber equals its gidNumber.
+#
+# Each URI is also FILTERED, and that part is load-bearing. An unfiltered
+# `ldap:///?gidNumber?sub` enforces gidNumber uniqueness over the whole subtree,
+# which makes user-private groups impossible: a user entry and its companion
+# group share a gidNumber by design, so edaptor's companion create is rejected
+# with a constraint violation. Restricting the gidNumber URI to posixGroup
+# entries keeps group gidNumbers unique while leaving the account's reference to
+# its private group alone. See tests/live_unique_overlay.rs, which pins both
+# halves, and keep this in sync with the oposs.openldap role.
+dn: olcOverlay=unique,olcDatabase={2}mdb,cn=config
+objectClass: olcOverlayConfig
+objectClass: olcUniqueConfig
+olcOverlay: unique
+olcUniqueURI: ldap:///?uid?sub?(objectClass=posixAccount)
+olcUniqueURI: ldap:///?uidNumber?sub?(objectClass=posixAccount)
+olcUniqueURI: ldap:///?gidNumber?sub?(objectClass=posixGroup)
+olcUniqueURI: ldap:///?mail?sub
