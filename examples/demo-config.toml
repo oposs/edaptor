@@ -3,7 +3,7 @@
 # the EDAPTOR_TEST_ADMIN_PW env var the script tells you to export.
 
 [server]
-uri          = "ldap://localhost:1389"
+uri          = "ldap://localhost:11389"
 base_dn      = "dc=example,dc=org"
 start_tls    = false
 timeout_secs = 10

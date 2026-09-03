@@ -90,7 +90,7 @@ case "$CMD" in
     # (e.g. one left behind by a readiness timeout below).
     "$ENGINE" rm -f "$NAME" >/dev/null 2>&1 || true
     "$ENGINE" run -d --rm --name "$NAME" \
-      -p 1389:1389 \
+      -p 11389:1389 \
       -e LDAP_ROOT="dc=example,dc=org" \
       -e LDAP_ADMIN_USERNAME="admin" \
       -e LDAP_ADMIN_PASSWORD="adminpassword" \
@@ -105,7 +105,7 @@ case "$CMD" in
         echo "Ready."
         provision
         echo "Provisioned. Connection hints:"
-        echo "  export EDAPTOR_TEST_LDAP_URI=ldap://localhost:1389"
+        echo "  export EDAPTOR_TEST_LDAP_URI=ldap://localhost:11389"
         echo "  export EDAPTOR_TEST_ADMIN_PW=adminpassword"
         echo "  edaptor --config examples/demo-config.toml   # explore the seed data"
         exit 0
