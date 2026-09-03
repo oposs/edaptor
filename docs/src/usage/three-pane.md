@@ -112,6 +112,28 @@ overflows the visible height.
   in the tree or entry list, and in the entry form it moves between fields,
   scrolling the form so the focused field stays on screen.
 - **Clicking a form label** moves focus to that field's input directly.
+- **Middle-clicking a field** pastes the X11 primary selection at the click
+  point, and sweeping a selection with the left button publishes it — the
+  familiar select-here, middle-click-there gesture. See below for the two cases
+  where it does not apply.
+
+### Middle-mouse paste (X11 primary selection)
+
+On X11 and Wayland, text you select anywhere — a browser, a terminal, another
+eDAPtor field — can be pasted into a form field with a **middle click**, which
+drops it at the click point. Sweeping a selection inside a field publishes it the
+same way, so the gesture works in both directions.
+
+Two limits are worth knowing:
+
+- **Over SSH it does not work**, because eDAPtor has no display to ask for the
+  selection. Use **shift+middle-click** instead: that bypasses eDAPtor entirely
+  and lets your terminal do its own paste. The same applies to an illumos build,
+  which is compiled without the native clipboard.
+- **Password fields never publish.** Sweeping a selection in a masked field
+  copies nothing to the primary selection — even while the value is revealed.
+  Revealing a password is for reading it, not for handing it to another
+  application. Pasting *into* a password field is fine.
 
 Moving focus off the form pane while it has unsaved edits opens the dirty-guard
 (see [Creating, Editing, Renaming, Deleting](crud.md)).

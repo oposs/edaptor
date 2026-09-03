@@ -8,6 +8,19 @@ All notable changes to eDAPtor are documented here. The format follows
 
 ### New
 
+- **Middle-mouse paste (X11 primary selection).** Middle-clicking a form field
+  pastes the primary selection at the click point, and sweeping a selection with
+  the left button publishes it — so the usual select-here, middle-click-there
+  gesture now works between eDAPtor and the rest of the desktop.
+
+  It needs a display: over SSH (and on illumos, built without the native
+  clipboard) a middle click does nothing, and **shift+middle-click** is the
+  fallback — that bypasses eDAPtor and lets the terminal paste on its own.
+
+  **A masked field never publishes cleartext**, revealed or not: revealing a
+  password is for reading it, not for handing it to another application. Pasting
+  into a password field still works.
+
 ### Changed
 
 ### Fixed

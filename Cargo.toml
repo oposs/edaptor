@@ -26,19 +26,20 @@ unicode-width = "0.2"
 # single-threaded — hence the capture at the top of `main` (see workflows::gtime).
 time = { version = "0.3", features = ["local-offset"] }
 # tvision-rs is the TUI framework driving the edaptor browser (tree / leaf list / entry form).
-# 0.15.0: InputLine read-only mode (focusable, scrollable, copyable, refuses edits)
-# + ValuePosition (which end of a too-wide value set_value shows). Both were
-# developed here and upstreamed — see CLAUDE.md, "Upstream framework".
+# 0.16.0: X11/Wayland PRIMARY selection — middle-click pastes it into a field, and
+# finishing a mouse selection publishes it (a masked field never publishes
+# cleartext). Developed here and upstreamed, like 0.15.0's InputLine read-only mode
+# and ValuePosition — see CLAUDE.md, "Upstream framework".
 
 # tvision-rs's default `os-clipboard` feature pulls arboard -> wl-clipboard-rs ->
 # wayland-backend, which cannot compile on illumos. Dropping it leaves the OSC 52
 # rung of the clipboard chain — the one that actually works over ssh, which is how
 # edaptor is driven on illumos. Every other platform keeps the native clipboard.
 [target.'cfg(not(target_os = "illumos"))'.dependencies]
-tvision-rs = "0.15.0"
+tvision-rs = "0.16.0"
 
 [target.'cfg(target_os = "illumos")'.dependencies]
-tvision-rs = { version = "0.15.0", default-features = false }
+tvision-rs = { version = "0.16.0", default-features = false }
 
 [dev-dependencies]
 tempfile = "3"

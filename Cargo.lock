@@ -446,7 +446,7 @@ checksum = "75b325c5dbd37f80359721ad39aca5a29fb04c89279657cffdda8736d0c0b9d2"
 
 [[package]]
 name = "edaptor"
-version = "1.6.0"
+version = "1.6.1"
 dependencies = [
  "anyhow",
  "chumsky",
@@ -1906,9 +1906,9 @@ dependencies = [
 
 [[package]]
 name = "tvision-rs"
-version = "0.15.0"
+version = "0.16.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1c72e0613d4e8d13ac3d7c695515c75e889284249cf8f8778b70c7bc98ef3b64"
+checksum = "9fb4b67050a8e8edb5fb9121219fbd7804cef51429617cc2fb9134c236ab3aae"
 dependencies = [
  "arboard",
  "crossterm",
@@ -1922,9 +1922,9 @@ dependencies = [
 
 [[package]]
 name = "tvision-rs-macros"
-version = "0.15.0"
+version = "0.16.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ab2e8626dab8f123a7cbe4d04de6d02d04b36f6b88e3f2e6a0831bc85fdb9165"
+checksum = "283311c1fe31814352b7c6c036a5692f872efd939ece8cf9f1f950f79c1a3dba"
 dependencies = [
  "proc-macro-crate",
  "proc-macro2",
