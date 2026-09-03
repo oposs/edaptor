@@ -8,6 +8,14 @@ All notable changes to eDAPtor are documented here. The format follows
 
 ### New
 
+### Changed
+
+### Fixed
+
+## 1.7.0 - 2026-09-03
+
+### New
+
 - **Middle-mouse paste (X11 primary selection).** Middle-clicking a form field
   pastes the primary selection at the click point, and sweeping a selection with
   the left button publishes it — so the usual select-here, middle-click-there
@@ -20,7 +28,6 @@ All notable changes to eDAPtor are documented here. The format follows
   **A masked field never publishes cleartext**, revealed or not: revealing a
   password is for reading it, not for handing it to another application. Pasting
   into a password field still works.
-
 ### Changed
 
 ### Fixed
