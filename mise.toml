@@ -1,5 +1,4 @@
 [tools]
-rust = "latest"
 # mdBook's release archive ships a lowercase `mdbook` binary, but the repo is
 # `mdBook`; ubi needs the explicit exe name or it looks for `mdBook*` and fails.
 "ubi:rust-lang/mdBook"        = { version = "0.5.2", exe = "mdbook" }
