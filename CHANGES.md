@@ -12,6 +12,11 @@ All notable changes to eDAPtor are documented here. The format follows
 
 ### Fixed
 
+- **The manual now describes `{next:MIN-MAX}` correctly.** It said the lowest
+  unused number is picked; eDAPtor actually takes one above the highest number in
+  range and never refills gaps. The page also notes that a `gidNumber` range sees
+  the `gidNumber` of user accounts too.
+
 ## 1.7.0 - 2026-09-03
 
 ### New

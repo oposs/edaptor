@@ -55,8 +55,8 @@ label          = "{cn} ({uid})"               # e.g. "Bob Baker (bob)"
 # overwritten). Value kinds:
 #   literal             -> a fixed string
 #   "/home/{uid}"       -> template; {attr} is substituted from another field
-#   "{next:MIN-MAX}"    -> auto-number; the next free value in [MIN,MAX] across
-#                          the whole directory (refuses if the scan is truncated
+#   "{next:MIN-MAX}"    -> auto-number; one above the highest value in [MIN,MAX]
+#                          across the whole directory (gaps are not reused) (refuses if the scan is truncated
 #                          by a server size limit — bind with a high-limit identity)
 #   "{auto:sambaSID}"   -> computed; sambaSID derived from uidNumber + the Samba
 #                          domain, filled once uidNumber resolves

@@ -30,7 +30,7 @@ than pretending to know in advance.
 OpenLDAP's `olcSizeLimit` (default 500) silently truncates large result sets for
 non-rootdn binds. That matters most for the `{next:MIN-MAX}` auto-number
 [default](../configuration/defaults.md), which must scan existing values to find
-the next free one.
+the highest one in use.
 
 **Consequence:** the auto-number scan **refuses to guess from a truncated
 result.** If it detects that the directory scan was cut short by a size limit,
