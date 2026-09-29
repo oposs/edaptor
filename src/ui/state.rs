@@ -1629,18 +1629,22 @@ fn samba_in_use(widgets: &[crate::config::widget::ResolvedWidget]) -> bool {
 }
 
 /// Whether startup must look up the Samba domain: a `sambaSID` widget, an
-/// `{auto:sambaSID}` default, or any profile whose object classes include
-/// `sambaSamAccount` (the built-in bundle then gives `sambaSID` a SID widget).
+/// `{auto:sambaSID}` default, or — with detection enabled — any profile whose
+/// object classes include `sambaSamAccount` (the built-in bundle then gives
+/// `sambaSID` a SID widget). With detection off only the first two count, so
+/// `[detect] enabled = false` keeps the pre-detection startup exactly.
 pub(crate) fn samba_needed(
     profiles: &[EntryProfile],
     widgets: &[crate::config::widget::ResolvedWidget],
+    detect_enabled: bool,
 ) -> bool {
     samba_in_use(widgets)
         || profiles.iter().any(|p| {
             crate::config::defaults::uses_computed_samba_sid(&p.defaults)
-                || p.object_classes
-                    .iter()
-                    .any(|oc| oc.eq_ignore_ascii_case("sambaSamAccount"))
+                || (detect_enabled
+                    && p.object_classes
+                        .iter()
+                        .any(|oc| oc.eq_ignore_ascii_case("sambaSamAccount")))
         })
 }
 
@@ -1713,7 +1717,7 @@ pub(crate) fn bootstrap(config: Config, password: String) -> Result<UiState> {
     let scan_attrs = structure_scan_attrs(&label_rules, &tree_rules);
     // Prefer a live sambaDomain entry when the Samba domain SID is needed; fall
     // back to the static config domain_sid (or no samba at all).
-    let samba_domain = if samba_needed(&profiles, &resolved_widgets) {
+    let samba_domain = if samba_needed(&profiles, &resolved_widgets, inputs.detect_enabled) {
         discover_samba_domain(&worker, &base_dn).or(samba_from_config)
     } else {
         samba_from_config
@@ -1806,9 +1810,16 @@ mod tests {
     fn samba_lookup_runs_for_a_samba_profile_without_widget_or_default() {
         let mut p = crate::workflows::test_fixtures::bare_profile("user");
         p.object_classes = vec!["inetOrgPerson".into(), "sambaSamAccount".into()];
-        assert!(super::samba_needed(&[p], &[]));
+        assert!(super::samba_needed(&[p], &[], true));
         let q = crate::workflows::test_fixtures::bare_profile("group");
-        assert!(!super::samba_needed(&[q], &[]));
+        assert!(!super::samba_needed(&[q], &[], true));
+    }
+
+    #[test]
+    fn samba_profile_alone_does_not_trigger_the_lookup_with_detection_off() {
+        let mut p = crate::workflows::test_fixtures::bare_profile("user");
+        p.object_classes = vec!["inetOrgPerson".into(), "sambaSamAccount".into()];
+        assert!(!super::samba_needed(&[p], &[], false));
     }
 
     #[test]
