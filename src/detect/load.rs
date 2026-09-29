@@ -296,7 +296,25 @@ mod tests {
         );
     }
 
-    /// The same after a sample cut short by the limits.
+    /// Containers only truncated at SAMPLE_SIZE still yield their profiles: a
+    /// mistyped candidate stays fatal.
+    #[test]
+    fn a_truncated_but_complete_sample_keeps_an_unknown_candidate_fatal() {
+        let mut sample = demo_sample();
+        for c in &mut sample.containers {
+            c.partial = true;
+        }
+        let bad = NEEDS_DETECTED.replace("user-users", "user-usrs");
+        let err = assemble(schema(), &inputs(&bad, true), Some(Ok(sample)))
+            .err()
+            .expect("a mistyped candidate is a load error");
+        assert!(
+            err.to_string().contains("unknown candidate profile"),
+            "{err}"
+        );
+    }
+
+    /// The same after a sample that skipped containers.
     #[test]
     fn a_partial_sample_disables_a_widget_naming_a_missing_profile() {
         let sample = Sample {

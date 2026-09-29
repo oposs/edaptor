@@ -108,8 +108,10 @@ Two details help when you suppress parts:
   after the merge. When a config block renames a detected profile, references
   by the detected name no longer resolve; write the config name in `candidate`.
 - A `candidate` naming a profile that does not exist stops eDAPtor with
-  `unknown candidate profile`. When detection failed or was cut short, the
-  profile may simply not have been detected this time: eDAPtor then starts
+  `unknown candidate profile`. When detection failed, or containers were
+  left unsampled (time budget used up, more than 100 containers, a container
+  that could not be read), the profile may simply not have been detected this
+  time: eDAPtor then starts
   without that widget, prints a `warning:` line and says so in the status line
   (`Profile detection failed: …; 1 config widget disabled, see the startup
   warnings`).
@@ -136,7 +138,8 @@ are routine; the TUI sums them up in one line, ``note: 2 detection notes; run
 `edaptor profiles` to see them``, and `edaptor profiles` prints each as a
 `note:` line.
 When detection failed, or detected parts were dropped, the TUI also says so in
-the status line; the message stays until the first key press or mouse click.
+the status line; the message stays until the first key press or a click in
+one of the panes.
 With detection enabled, a profile that includes `sambaSamAccount` also triggers
 the Samba domain lookup on its own, so `sambaSID` gets its generator without
 `[samba] domain_sid`.

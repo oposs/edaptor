@@ -201,7 +201,6 @@ pub fn sample(s: &mut dyn Searcher, base_dn: &str, budget: &Budget) -> Result<Sa
             },
             None => partial = true,
         }
-        out.incomplete |= partial;
         out.containers.push(ContainerSample {
             dn: dn.clone(),
             entries,
@@ -375,8 +374,8 @@ mod tests {
         let c = &s.containers[0];
         assert!(c.partial, "size-limited sample is partial");
         assert!(
-            s.incomplete,
-            "a partial container makes the sample incomplete"
+            !s.incomplete,
+            "a truncated container still yields its profile: not incomplete"
         );
         assert!(c.present["uid=u1,ou=p,dc=x"].contains("jpegphoto"));
         let values = f
