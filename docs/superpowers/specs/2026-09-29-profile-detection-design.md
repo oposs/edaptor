@@ -26,8 +26,11 @@ connection settings plus **overrides** of what detection got wrong or should not
 starting point.
 
 Non-goals: reading `cn=config` (Part 3), making `base_dn` optional (Part 1), changing the
-tree scan, changing how forms, pickers or companions work once a profile exists. The one
-consumer that changes is number allocation, which learns detected ranges (§2C).
+tree scan, changing how forms, pickers or companions work once a profile exists.
+Consumers that do change, each for a stated reason: startup order and `load_profiles`
+(§1.4), `tui-create` resolving by name, `passwd` searching account profiles only, the
+profile chooser, the Samba trigger (§2B4), container scope and case-insensitive profile
+names (§2A, §3), and number allocation, which learns detected ranges (§2C).
 
 ## Decisions (settled in brainstorming)
 
