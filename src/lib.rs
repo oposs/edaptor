@@ -169,7 +169,7 @@ fn search_object_classes(
 
 /// Resolve the `passwd` argument to a concrete `(dn, objectClass values)`. A DN
 /// argument is base-read to confirm it exists; a bare username is searched across
-/// every configured profile's `search_base`, requiring a single match.
+/// every account profile's `search_base`, requiring a single match.
 fn resolve_passwd_target(
     worker: &WorkerHandle,
     profiles: &[crate::config::EntryProfile],
@@ -205,7 +205,7 @@ fn resolve_passwd_target(
             Ok((dn, ocs))
         }
         passwd::Resolution::NotFound => Err(anyhow!(
-            "no entry found for username \"{arg}\" in any configured profile; \
+            "no entry found for username \"{arg}\" in any account profile; \
              pass a full DN instead"
         )),
         passwd::Resolution::Ambiguous(dns) => Err(anyhow!(
@@ -240,15 +240,15 @@ pub fn run_passwd(
         ));
     }
 
-    // Profiles are needed for username resolution after `config` moves into the
-    // worker, so capture them first.
-    let profiles = config.profiles.clone();
+    // Inputs are captured before `config` moves into the worker.
+    let inputs = crate::detect::load::ProfileInputs::from_config(&config);
     let worker = WorkerHandle::spawn(config, bind_password)?;
+    let loaded = crate::detect::load::load_profiles(&worker, &inputs)?;
 
     // Resolve the target to a concrete DN (and its objectClass values, used for
     // samba detection) BEFORE prompting for the new password, so an unknown or
     // ambiguous username fails fast instead of after two password entries.
-    let (target_dn, object_classes) = resolve_passwd_target(&worker, &profiles, target_arg)?;
+    let (target_dn, object_classes) = resolve_passwd_target(&worker, &loaded.profiles, target_arg)?;
     let is_samba = is_samba_account(&object_classes);
 
     // Now that the target is known, prompt for the new password.

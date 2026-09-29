@@ -2,7 +2,7 @@
 //!
 //! The CLI argument is either a full DN (`uid=andy,ou=people,dc=example,dc=org`)
 //! or a bare username (`andy`). A username is resolved to a DN by searching every
-//! configured profile's `search_base` for `(<rdn_attr>=<username>)`. This module
+//! account profile's `search_base` for `(<rdn_attr>=<username>)`. This module
 //! holds the pure decision logic; the LDAP round-trips live in `run_passwd`.
 
 use crate::config::EntryProfile;
@@ -14,14 +14,33 @@ pub fn looks_like_dn(arg: &str) -> bool {
     arg.contains('=')
 }
 
-/// The per-profile searches that resolve `username` to a DN: one `(base, filter)`
-/// per profile with a non-empty `search_base`, matching the profile's `rdn_attr`
+/// An account profile: it carries a password widget, either its own
+/// `[profile.widget.*] kind = "password"` or one of the built-in bundle's
+/// (person, inetOrgPerson, posixAccount, sambaSamAccount -> userPassword).
+pub fn is_account_profile(p: &EntryProfile) -> bool {
+    use crate::config::WidgetSpecCfg;
+    p.widgets
+        .values()
+        .any(|w| matches!(w, WidgetSpecCfg::Password { .. }))
+        || p.object_classes.iter().any(|oc| {
+            crate::config::builtin::builtin_schema()
+                .get(&oc.to_lowercase())
+                .is_some_and(|m| {
+                    m.values()
+                        .any(|w| matches!(w, WidgetSpecCfg::Password { .. }))
+                })
+        })
+}
+
+/// The per-account-profile searches that resolve `username` to a DN: one
+/// `(base, filter)` per account profile with a non-empty `search_base`, matching the profile's `rdn_attr`
 /// against the (filter-escaped) username. Run each with subtree scope. Profiles
 /// with an empty `search_base` or empty `rdn_attr` are skipped.
 pub fn username_searches(profiles: &[EntryProfile], username: &str) -> Vec<(String, String)> {
     let value = escape_filter(username);
     profiles
         .iter()
+        .filter(|p| is_account_profile(p))
         .filter(|p| !p.search_base.is_empty() && !p.rdn_attr.is_empty())
         .map(|p| (p.search_base.clone(), format!("({}={})", p.rdn_attr, value)))
         .collect()
@@ -68,6 +87,7 @@ mod tests {
             name: name.to_string(),
             rdn_attr: rdn.to_string(),
             search_base: base.to_string(),
+            object_classes: vec!["inetOrgPerson".to_string()],
             ..Default::default()
         }
     }
@@ -88,7 +108,7 @@ mod tests {
     fn username_searches_one_per_profile_with_base() {
         let profiles = [
             profile("user", "uid", "ou=people,dc=example,dc=org"),
-            profile("group", "cn", "ou=groups,dc=example,dc=org"),
+            profile("admin", "cn", "ou=admins,dc=example,dc=org"),
         ];
         assert_eq!(
             username_searches(&profiles, "andy"),
@@ -98,10 +118,54 @@ mod tests {
                     "(uid=andy)".to_string()
                 ),
                 (
-                    "ou=groups,dc=example,dc=org".to_string(),
+                    "ou=admins,dc=example,dc=org".to_string(),
                     "(cn=andy)".to_string()
                 ),
             ]
+        );
+    }
+
+    #[test]
+    fn only_account_profiles_are_searched() {
+        let mut user = profile("user", "uid", "ou=people,dc=example,dc=org");
+        user.object_classes = vec!["inetOrgPerson".into()];
+        let mut group = profile("group", "cn", "ou=groups,dc=example,dc=org");
+        group.object_classes = vec!["posixGroup".into()];
+        let mut own = profile("svc", "cn", "ou=svc,dc=example,dc=org");
+        own.object_classes = vec!["applicationProcess".into()];
+        own.widgets.insert(
+            "userPassword".into(),
+            crate::config::WidgetSpecCfg::Password { samba: false },
+        );
+        assert_eq!(
+            username_searches(&[user, group, own], "andy"),
+            vec![
+                (
+                    "ou=people,dc=example,dc=org".to_string(),
+                    "(uid=andy)".to_string()
+                ),
+                (
+                    "ou=svc,dc=example,dc=org".to_string(),
+                    "(cn=andy)".to_string()
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn argus_user_is_not_ambiguous_with_its_private_group() {
+        let d = crate::detect::infer::detect(
+            &crate::detect::fixtures::schema(),
+            &crate::detect::fixtures::argus_sample(),
+        );
+        let m = crate::detect::merge::merge(&crate::detect::fixtures::schema(), &d.profiles, &[]);
+        let searches = username_searches(&m.profiles, "u01");
+        assert_eq!(
+            searches,
+            vec![(
+                "ou=people,dc=argus,dc=ch".to_string(),
+                "(cn=u01)".to_string()
+            )]
         );
     }
 
