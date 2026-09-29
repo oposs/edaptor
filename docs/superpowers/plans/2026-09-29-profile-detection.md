@@ -22,6 +22,7 @@
 - Detected profile names are always `<base>-<container RDN value>` (`user-people`, `posixgroup-groups`); slug = lowercase, runs outside `[a-z0-9]` → one `-`, trimmed; collisions add parent RDN values. Names compare **case-insensitively everywhere**.
 - Detection never stops eDAPtor: only the user's own config can cause a load error. `[detect] enabled = false` restores today's behaviour exactly.
 - Detection is on by default, also for existing configs, and adds detected parts to matched hand-written profiles.
+- Too little data (§2D, rule D): an empty number space allocates from `{next:10000-60000}` (LDAP starts at **10000** because client machines give 1000+ to local users); 1–2 numbers use the normal block rule (the 3-entry threshold counts only for exceptions); private groups are assumed for every final `posixAccount` profile — config-only ones included — unless sampled users contradict it. Assumptions run after the merge, never override config or detected values, have provenance `assumed`, are suppressible, and are off with `[detect] enabled = false`.
 - Gates: `CARGO_BUILD_JOBS=4 make check` (fmt + clippy `-D warnings` + tests). Every cargo invocation uses `-j4` (shared 128-core machine, max 4 cores).
 - Live tests run against the podman demo server (`scripts/test-ldap.sh start`, `ldap://localhost:11389`, base `dc=example,dc=org`, admin `cn=admin,dc=example,dc=org`, `EDAPTOR_TEST_ADMIN_PW=adminpassword`, gate env `EDAPTOR_TEST_LDAP_URI`). Tests that read a whole directory (number scans, sampling) run under `systemd-run --user --scope -p MemoryMax=2G -- cargo test …`.
 - Comments, identifiers, docs in English. Commit messages end with the line `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`.
@@ -33,7 +34,7 @@
 1. **DNs with escaped commas or multi-valued RDNs** (`cn=Smith\, John,ou=people,…`, `cn=a+uid=b,…`): a person expects the entry to land in `ou=people`, not in a phantom ` John,ou=people` container, and names/parents to be computed on unescaped commas only. Pinned in Task 1 (`dn_components`, `SampleEntry::parent`) and Task 2 (naming).
 2. **Mixed-case attribute and class names from the server** (`objectclass: posixaccount`, `UIDNumber`): detection must behave exactly as for canonical spelling. Pinned in Task 1 (`SampleEntry` accessors) and Task 6 (lower-case fixture still yields `user-…` with private groups).
 3. **Garbage in number attributes** (`uidNumber: abc`, empty, multi-valued, negative): the range rule must ignore unparsable values, never panic, and still compute a range from the rest. Pinned in Task 4.
-4. **An ACL-restricted or anonymous bind that sees no containers at all**: a person expects the config profiles and no error or status-line alarm, not "Profile detection failed". Pinned in Task 9 (sampler returns an empty `Sample`) and Task 10 (`assemble` yields config profiles, no `detection_error`).
+4. **An ACL-restricted or anonymous bind that sees no containers at all**: a person expects the config profiles and no error or status-line alarm, not "Profile detection failed". Pinned in Task 10 (sampler returns an empty `Sample`) and Task 11 (`assemble` yields config profiles, no `detection_error`).
 5. **A config block that matches a detected profile by name but sets its own `search_base`**: the merged profile must create in the config's container, and its detected number range must count values in that container. Pinned in Task 8.
 
 ---
@@ -68,7 +69,7 @@ New files:
 
 Modified: `src/lib.rs`, `src/main.rs`, `src/passwd.rs`, `src/schema/model.rs`, `src/config/mod.rs`, `src/config/defaults.rs`, `src/config/widget.rs`, `src/config/resolver.rs`, `src/ldap/worker.rs`, `src/workflows/create.rs`, `src/workflows/alloc_flow.rs`, `src/workflows/save.rs`, `src/ui/mod.rs`, `src/ui/app.rs`, `src/ui/state.rs`, every test file that builds a `Config` or `EntryProfile` literal, `CHANGES.md`, `README.md`, `docs/src/SUMMARY.md`, `docs/src/configuration/overview.md`, `docs/src/configuration/full-example.md`, `examples/config.toml`.
 
-Task order and dependencies: 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 → 9 → 10 → 11/12/13 (independent of each other, all need 10) → 14 → 15. Each task ends green (`CARGO_BUILD_JOBS=4 make check`).
+Task order and dependencies: 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 → 9 → 10 → 11 → 12/13/14 (independent of each other, all need 11) → 15 → 16. Each task ends green (`CARGO_BUILD_JOBS=4 make check`).
 
 ---
 
@@ -567,6 +568,8 @@ pub struct Sample {
     pub accounts: Vec<SampleEntry>,
     /// Set when a cross-container lookup failed; dependent rules are skipped.
     pub lookup_error: Option<String>,
+    /// `ou=groups,<base_dn>` when that entry exists (rule D's fallback companion base).
+    pub group_ou: Option<String>,
     pub notes: Vec<String>,
 }
 
@@ -594,6 +597,10 @@ pub struct DetectedProfile {
     pub companion: Option<Detected<CompanionSpec>>,
     /// Rule B2 applied: users here have user-private groups.
     pub private_groups: bool,
+    /// posixAccount profiles: how many sampled users have no private group
+    /// (§2B2 predicate). `None` = not evaluated (not a user profile, or the
+    /// private-group lookup failed). Contrary evidence for rule D.
+    pub users_without_private_group: Option<usize>,
     pub notes: Vec<String>,
     /// The sampled entries of this group (input to the pattern rules; never printed).
     pub entries: Vec<SampleEntry>,
@@ -978,6 +985,7 @@ mod tests {
             widgets: Default::default(),
             companion: None,
             private_groups: false,
+            users_without_private_group: None,
             notes: vec![],
             entries: vec![],
         }
@@ -1423,6 +1431,7 @@ fn build_profile(
         widgets: BTreeMap::new(),
         companion: None,
         private_groups: false,
+        users_without_private_group: None,
         notes: Vec::new(),
         entries: entries.iter().map(|e| (*e).clone()).collect(),
     }
@@ -1554,7 +1563,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 **Interfaces:**
 - Consumes: Task 1/2 types; `crate::config::defaults::{parse_default_value, resolve_template, DefaultValue, Seg}`; `SchemaModel::is_single_value`.
 - Produces:
-  - `DefaultValue::to_config_string(&self) -> String` (inverse of `parse_default_value`; used by Task 8 and Task 13)
+  - `DefaultValue::to_config_string(&self) -> String` (inverse of `parse_default_value`; used by Task 8 and Task 14)
   - `patterns::templates::infer_defaults(schema: &SchemaModel, entries: &[SampleEntry], rdn_attr: &str) -> (BTreeMap<String, Detected<DefaultValue>>, Vec<String>)` — second value: notes about dropped templates
   - `patterns::templates::NEVER_LITERAL: &[&str]`
   - `patterns::apply(schema: &SchemaModel, sample: &Sample, profiles: &mut [DetectedProfile], notes: &mut Vec<String>)` (Task 6 replaces its body)
@@ -1952,7 +1961,8 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
   - `private::is_private_group(group: &SampleEntry, user: &SampleEntry) -> bool`
   - `private::PrivateIndex<'a>` with `new(entries: impl IntoIterator<Item = &'a SampleEntry>) -> Self`, `private_group_of(&self, user: &SampleEntry) -> Option<&'a SampleEntry>`, `is_private(&self, group: &SampleEntry) -> bool`
   - `range::RangeSpec { attr, container, structural: String, unified, exclude_private: bool }` (`Debug, Clone, PartialEq, Eq`)
-  - `range::RangeReport { min, max, next, lowest_in_use, highest_in_use: u64, next_block: Option<u64>, exhausted: bool, evidence: Evidence }` with `template(&self) -> String` and `describe(&self) -> String`
+  - `range::RangeReport { min, max, next: u64, in_use: Option<(u64, u64)>, next_block: Option<u64>, exhausted: bool, evidence: Evidence }` with `template(&self) -> String` and `describe(&self) -> String` (`in_use = None`: no numbers in the space, rule D start)
+  - `range::{ASSUMED_MIN: u64 = 10000, OPEN_END: u64 = 60000}`
   - `range::detect_range(spec: &RangeSpec, entries: &[SampleEntry]) -> Result<RangeReport, String>`
   - `range::allocate(spec: &RangeSpec, entries: &[SampleEntry]) -> Result<(u64, Evidence), String>`
   - `range::SCAN_FILTER: &str = "(|(uidNumber=*)(gidNumber=*))"`, `range::SCAN_ATTRS: &[&str] = &["objectClass", "cn", "uid", "uidNumber", "gidNumber"]`
@@ -2079,10 +2089,33 @@ mod tests {
     }
 
     #[test]
-    fn too_few_values_refuse_with_a_hint() {
-        let v = vec![acct(1, "10000"), acct(2, "10001")];
-        let err = detect_range(&spec("uidNumber", "ou=p,dc=x", "inetOrgPerson", false, false), &v).unwrap_err();
-        assert!(err.contains("{next:MIN-MAX}"), "{err}");
+    fn an_empty_space_starts_useradd_style_at_10000() {
+        let r = detect_range(&spec("uidNumber", "ou=p,dc=x", "inetOrgPerson", true, false), &[]).unwrap();
+        assert_eq!((r.min, r.max, r.next), (10000, 60000, 10000));
+        assert_eq!(r.in_use, None);
+        assert_eq!(r.template(), "{next:10000-60000}");
+        assert!(r.describe().contains("no numbers in use"), "{}", r.describe());
+        assert_eq!(allocate(&spec("gidNumber", "ou=g,dc=x", "posixGroup", true, true), &[]).unwrap().0, 10000);
+    }
+
+    #[test]
+    fn one_or_two_values_continue_their_block() {
+        // argus-like start: one user at 5000 → 5001, not 10000.
+        let r = detect_range(&spec("uidNumber", "ou=p,dc=x", "inetOrgPerson", false, false), &[acct(1, "5000")]).unwrap();
+        assert_eq!((r.min, r.max, r.next), (5000, 60000, 5001));
+        // Two values in different blocks: no exceptions below the 3-entry threshold.
+        let v = vec![acct(1, "5000"), acct(2, "9000")];
+        let r = detect_range(&spec("uidNumber", "ou=p,dc=x", "inetOrgPerson", false, false), &v).unwrap();
+        assert_eq!((r.min, r.next), (5000, 5001));
+        assert!(r.evidence.exceptions.is_empty());
+    }
+
+    #[test]
+    fn a_profile_without_own_values_uses_the_fullest_block() {
+        // New group profile; the unified space already holds user numbers 5000, 5001.
+        let v = vec![acct(1, "5000"), acct(2, "5001")];
+        let r = detect_range(&spec("gidNumber", "ou=g,dc=x", "posixGroup", true, true), &v).unwrap();
+        assert_eq!((r.min, r.next), (5000, 5002), "100 is the accounts' gid, counted in a unified space");
     }
 
     #[test]
@@ -2191,6 +2224,9 @@ use crate::detect::{dn_eq, MIN_SAMPLE};
 
 /// Neighbouring values more than this apart start a new block.
 pub const BLOCK_GAP: u64 = 1000;
+/// Rule D (§2D): first number when the space is empty. Client machines hand out
+/// 1000 and up to local users, so LDAP numbers start higher.
+pub const ASSUMED_MIN: u64 = 10000;
 /// Upper end of the highest block: `max(OPEN_END, MIN + 9999)`.
 pub const OPEN_END: u64 = 60000;
 /// The allocation scan (subtree under `base_dn`, no size limit).
@@ -2217,8 +2253,9 @@ pub struct RangeReport {
     pub min: u64,
     pub max: u64,
     pub next: u64,
-    pub lowest_in_use: u64,
-    pub highest_in_use: u64,
+    /// Lowest and highest number in use in the chosen block; `None` when the
+    /// space is empty (rule D start).
+    pub in_use: Option<(u64, u64)>,
     pub next_block: Option<u64>,
     pub exhausted: bool,
     pub evidence: Evidence,
@@ -2232,7 +2269,10 @@ impl RangeReport {
 
     /// `in use 5000-5016; next block at 8000[; pool exhausted]`.
     pub fn describe(&self) -> String {
-        let mut s = format!("in use {}-{}", self.lowest_in_use, self.highest_in_use);
+        let Some((lo, hi)) = self.in_use else {
+            return format!("no numbers in use; useradd-style start at {ASSUMED_MIN}");
+        };
+        let mut s = format!("in use {lo}-{hi}");
         match self.next_block {
             Some(b) => s.push_str(&format!("; next block at {b}")),
             None => s.push_str("; no higher block"),
@@ -2285,25 +2325,45 @@ pub fn detect_range(spec: &RangeSpec, entries: &[SampleEntry]) -> Result<RangeRe
         .filter(|e| !(spec.exclude_private && index.is_private(e)))
         .flat_map(|e| nums(e, &spec.attr).into_iter().map(move |n| (n, e.dn.as_str())))
         .collect();
-    if mine.len() < MIN_SAMPLE {
-        return Err(format!(
-            "only {} existing {} value(s) in {}; too few to detect a range — set {} = \"{{next:MIN-MAX}}\" in [profile.defaults]",
-            mine.len(), spec.attr, spec.container, spec.attr
-        ));
+    if space.is_empty() {
+        // Rule D: nothing in use yet.
+        return Ok(RangeReport {
+            min: ASSUMED_MIN,
+            max: OPEN_END,
+            next: ASSUMED_MIN,
+            in_use: None,
+            next_block: None,
+            exhausted: false,
+            evidence: Evidence::new(0, 0).with_note("no numbers in use; useradd-style start"),
+        });
     }
     let blocks = split_blocks(&space);
-    let count = |b: &(u64, u64)| mine.iter().filter(|(n, _)| *n >= b.0 && *n <= b.1).count();
+    // The profile's block holds most of its own values; a profile without values
+    // yet takes the block holding most numbers of the space. Ties: the lower block.
+    let in_block = |vals: &mut dyn Iterator<Item = u64>, b: &(u64, u64)| vals.filter(|n| *n >= b.0 && *n <= b.1).count();
+    let count = |b: &(u64, u64)| {
+        if mine.is_empty() {
+            in_block(&mut space.iter().copied(), b)
+        } else {
+            in_block(&mut mine.iter().map(|(n, _)| *n), b)
+        }
+    };
     let (bi, block) = blocks
         .iter()
         .enumerate()
         .max_by(|(_, a), (_, b)| count(a).cmp(&count(b)).then_with(|| b.0.cmp(&a.0)))
         .map(|(i, b)| (i, *b))
-        .ok_or_else(|| format!("no {} values found", spec.attr))?;
-    let exceptions: Vec<String> = mine
-        .iter()
-        .filter(|(n, _)| *n < block.0 || *n > block.1)
-        .map(|(_, dn)| dn.to_string())
-        .collect();
+        .expect("the space is not empty, so there is a block");
+    // The 3-entry threshold counts only for exceptions (§2D).
+    let exceptions: Vec<String> = if mine.len() >= MIN_SAMPLE {
+        mine.iter()
+            .filter(|(n, _)| *n < block.0 || *n > block.1)
+            .map(|(_, dn)| dn.to_string())
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let matched = mine.iter().filter(|(n, _)| *n >= block.0 && *n <= block.1).count();
     let min = block.0 / 1000 * 1000;
     let next_block = blocks.get(bi + 1).map(|b| b.0);
     let max = match next_block {
@@ -2315,11 +2375,10 @@ pub fn detect_range(spec: &RangeSpec, entries: &[SampleEntry]) -> Result<RangeRe
         min,
         max,
         next,
-        lowest_in_use: block.0,
-        highest_in_use: block.1,
+        in_use: Some(block),
         next_block,
         exhausted: next > max,
-        evidence: Evidence::new(count(&block), mine.len()).with_exceptions(exceptions),
+        evidence: Evidence::new(matched, mine.len()).with_exceptions(exceptions),
     })
 }
 
@@ -2337,7 +2396,7 @@ pub fn allocate(spec: &RangeSpec, entries: &[SampleEntry]) -> Result<(u64, Evide
 - [ ] **Step 4: Run tests**
 
 Run: `cargo test -j4 --lib detect::private detect::range`
-Expected: PASS (2 + 8 tests).
+Expected: PASS (2 + 10 tests).
 
 - [ ] **Step 5: Gate and commit**
 
@@ -2694,6 +2753,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
   - `posix::is_user_profile(p: &DetectedProfile) -> bool`, `posix::is_group_profile(p: &DetectedProfile) -> bool`
   - `posix::non_private(p: &DetectedProfile, index: &PrivateIndex) -> Vec<SampleEntry>`
   - `posix::apply_private_group(p: &mut DetectedProfile, index: &PrivateIndex) -> bool` (B2), `posix::apply_shared_gid(p: &mut DetectedProfile)` (B3 + the "no private groups" note)
+  - `posix::count_without_private(p: &DetectedProfile, index: &PrivateIndex) -> usize`; the orchestrator stores it in `p.users_without_private_group` for every user profile (any size) when the lookups succeeded — rule D (Task 9) reads it
   - `samba::apply(p: &mut DetectedProfile)`, `pickers::apply(profiles: &mut [DetectedProfile])`, `ranges::apply(profiles: &mut [DetectedProfile])`
 
 - [ ] **Step 1: Write the failing tests**
@@ -2778,6 +2838,15 @@ mod tests {
         let all = super::posix::all_posix_entries(&s);
         let idx = crate::detect::private::PrivateIndex::new(all.iter());
         assert_eq!(super::posix::non_private(g, &idx).len(), 4);
+    }
+
+    #[test]
+    fn contrary_evidence_is_counted_for_every_user_profile() {
+        let d = detect(&schema(), &argus_sample());
+        assert_eq!(p(&d, "user-people").users_without_private_group, Some(0));
+        let d = detect(&schema(), &demo_sample());
+        assert_eq!(p(&d, "user-users").users_without_private_group, Some(3));
+        assert_eq!(p(&d, "posixgroup-groups").users_without_private_group, None);
     }
 
     #[test]
@@ -2868,6 +2937,11 @@ pub fn all_posix_entries(sample: &Sample) -> Vec<SampleEntry> {
         .filter(|e| seen.insert(e.dn.to_lowercase()))
         .cloned()
         .collect()
+}
+
+/// Sampled users of `p` without a private group (evaluated at any sample size).
+pub fn count_without_private(p: &DetectedProfile, index: &PrivateIndex) -> usize {
+    p.entries.iter().filter(|u| index.private_group_of(u).is_none()).count()
 }
 
 /// The profile's groups that are nobody's private group.
@@ -3155,8 +3229,13 @@ pub fn apply(schema: &SchemaModel, sample: &Sample, profiles: &mut [DetectedProf
         let (defaults, dropped) = templates::infer_defaults(schema, &b1_entries, &p.rdn_attr.value);
         p.notes.extend(dropped);
         p.defaults.extend(defaults);
-        if posix::is_user_profile(p) && !(lookups_ok && posix::apply_private_group(p, &index)) {
-            posix::apply_shared_gid(p);
+        if posix::is_user_profile(p) {
+            if lookups_ok {
+                p.users_without_private_group = Some(posix::count_without_private(p, &index));
+            }
+            if !(lookups_ok && posix::apply_private_group(p, &index)) {
+                posix::apply_shared_gid(p);
+            }
         }
         samba::apply(p);
     }
@@ -3535,7 +3614,8 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
   - `DetectedProfile::to_entry_profile(&self) -> EntryProfile` (scope `Exact`)
   - `merge::Source { Config, Detected(Evidence), ConfigOverDetected { detected: String, evidence: Evidence } }`
   - `merge::Origin { Config, Detected { container, sampled, partial }, Merged { detected, container, sampled, partial } }`
-  - `merge::Provenance { name, origin, fields: BTreeMap<String, Source>, suppressed: Vec<String>, notes: Vec<String> }`
+  - `merge::Provenance { name, origin, fields: BTreeMap<String, Source>, suppressed: Vec<String>, pending_suppress: Vec<String>, notes: Vec<String> }`
+  - `merge::merge_core(..) -> Merged` (pending suppress paths kept) and `merge::flush_pending(m: &mut Merged)`, both `pub(crate)`; `merge` = `merge_core` + `flush_pending`
   - `merge::Merged { profiles: Vec<EntryProfile>, provenance: Vec<Provenance>, disabled: Vec<String>, warnings: Vec<String>, dropped: Vec<String> }`
   - `merge::merge(schema: &SchemaModel, detected: &[DetectedProfile], overrides: &[ProfileOverride]) -> Merged`
   - `merge::validate(m: &mut Merged) -> Result<(), String>`
@@ -3797,6 +3877,9 @@ pub struct Provenance {
     pub origin: Origin,
     pub fields: BTreeMap<String, Source>,
     pub suppressed: Vec<String>,
+    /// `suppress` paths that matched nothing yet. Rule D (Task 9) may still add
+    /// the part; `flush_pending` retries them and warns about the rest.
+    pub pending_suppress: Vec<String>,
     pub notes: Vec<String>,
 }
 
@@ -3922,12 +4005,7 @@ fn take_ci<V>(map: &mut BTreeMap<String, V>, key: &str) -> Option<(String, V)> {
     map.remove(&k).map(|v| (k, v))
 }
 
-fn merge_one(
-    d: &DetectedProfile,
-    o: &ProfileOverride,
-    rename: &HashMap<String, String>,
-    warnings: &mut Vec<String>,
-) -> (EntryProfile, Provenance) {
+fn merge_one(d: &DetectedProfile, o: &ProfileOverride, rename: &HashMap<String, String>) -> (EntryProfile, Provenance) {
     let mut p = d.to_entry_profile();
     rewrite_candidates(&mut p.widgets, rename);
     let mut fields = detected_fields(d);
@@ -4003,11 +4081,12 @@ fn merge_one(
         },
         fields,
         suppressed: Vec::new(),
+        pending_suppress: Vec::new(),
         notes: d.notes.clone(),
     };
     for path in &o.suppress {
-        if let Err(w) = suppress(&mut p, &mut prov, path) {
-            warnings.push(w);
+        if suppress(&mut p, &mut prov, path).is_err() {
+            prov.pending_suppress.push(path.clone());
         }
     }
     (p, prov)
@@ -4061,8 +4140,28 @@ fn suppress(p: &mut EntryProfile, prov: &mut Provenance, path: &str) -> Result<(
     Ok(())
 }
 
-/// Merge (spec §3 "Matching", "Merge rules", §2A "Order").
+/// Merge (spec §3 "Matching", "Merge rules", §2A "Order"). Suppress paths that
+/// matched nothing become warnings.
 pub fn merge(schema: &SchemaModel, detected: &[DetectedProfile], overrides: &[ProfileOverride]) -> Merged {
+    let mut m = merge_core(schema, detected, overrides);
+    flush_pending(&mut m);
+    m
+}
+
+/// Retry every pending suppress path; the ones that still match nothing (or name
+/// an unknown path) become warnings.
+pub(crate) fn flush_pending(m: &mut Merged) {
+    for (p, prov) in m.profiles.iter_mut().zip(m.provenance.iter_mut()) {
+        for path in std::mem::take(&mut prov.pending_suppress) {
+            if let Err(w) = suppress(p, prov, &path) {
+                m.warnings.push(w);
+            }
+        }
+    }
+}
+
+/// The merge without the final suppress flush (rule D runs in between).
+pub(crate) fn merge_core(schema: &SchemaModel, detected: &[DetectedProfile], overrides: &[ProfileOverride]) -> Merged {
     let mut out = Merged::default();
     let mut taken: Vec<Option<usize>> = vec![None; overrides.len()];
     let mut owner: Vec<Option<usize>> = vec![None; detected.len()];
@@ -4123,7 +4222,7 @@ pub fn merge(schema: &SchemaModel, detected: &[DetectedProfile], overrides: &[Pr
         }
         match taken[oi] {
             Some(di) => {
-                let (p, prov) = merge_one(&detected[di], o, &rename, &mut out.warnings);
+                let (p, prov) = merge_one(&detected[di], o, &rename);
                 out.profiles.push(p);
                 out.provenance.push(prov);
             }
@@ -4134,12 +4233,13 @@ pub fn merge(schema: &SchemaModel, detected: &[DetectedProfile], overrides: &[Pr
                         origin: Origin::Config,
                         fields: config_fields(&p),
                         suppressed: Vec::new(),
+                        pending_suppress: Vec::new(),
                         notes: Vec::new(),
                     };
                     let mut p = p;
                     for path in &o.suppress {
-                        if let Err(w) = suppress(&mut p, &mut prov, path) {
-                            out.warnings.push(w);
+                        if suppress(&mut p, &mut prov, path).is_err() {
+                            prov.pending_suppress.push(path.clone());
                         }
                     }
                     out.profiles.push(p);
@@ -4164,6 +4264,7 @@ pub fn merge(schema: &SchemaModel, detected: &[DetectedProfile], overrides: &[Pr
             origin: Origin::Detected { container: d.container.clone(), sampled: d.sampled, partial: d.partial },
             fields: detected_fields(d),
             suppressed: Vec::new(),
+            pending_suppress: Vec::new(),
             notes: d.notes.clone(),
         });
         out.profiles.push(p);
@@ -4238,7 +4339,365 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 
 ---
 
-### Task 9: Sampling — worker request and sampler
+### Task 9: Rule D — useradd-style assumptions after the merge
+
+**Files:**
+- Create: `src/detect/assume.rs`; Modify: `src/detect/mod.rs` (`pub mod assume;`)
+- Modify: `src/detect/merge.rs` (`Source::Assumed`, `suppress` and `validate` accept assumed parts)
+
+**Interfaces:**
+- Consumes: Task 8 (`merge_core`, `flush_pending`, `Merged`, `Provenance`, `Origin`, `Source`), Task 6 (`DetectedProfile::users_without_private_group`), Task 4 (`RangeSpec`), `SchemaModel::structural_class`.
+- Produces:
+  - `merge::Source::Assumed(String)` — the reason, printed by the dump as `# assumed: <reason>`
+  - `assume::merge_with_assumptions(schema: &SchemaModel, detected: &[DetectedProfile], overrides: &[ProfileOverride], group_ou: Option<&str>) -> Merged` (used by `load::assemble`, Task 11)
+  - `assume::apply(schema: &SchemaModel, detected: &[DetectedProfile], group_ou: Option<&str>, m: &mut Merged)`
+  - `assume::{NO_GROUP_CONTAINER, REASON_NO_USERS, REASON_FEW_USERS}: &str`
+
+Rule (spec §2D), over every final profile whose `object_classes` include `posixAccount`:
+- **Contrary evidence** = the profile came from a detected group with ≥ 3 sampled users (B2/B3 decided), or with `users_without_private_group != Some(0)` (a user lacks a private group, or the lookup failed so it is unknown). A config-only profile (no detected group) has none.
+- **Private groups:** without contrary evidence, and only when the profile has **neither** a `gidNumber` default **nor** a companion: add `gidNumber = "{uidNumber}"` and the companion `{ posixGroup, rdn cn, cn = "{uid}", gidNumber = "{uidNumber}", memberUid = "{uid}" }`. Companion base: the `search_base` of the posix-group profile among the merged profiles (most sampled entries, ties by name), else `group_ou`, else skip with the note `no group container for private groups`.
+- **Ranges:** a user profile without a `uidNumber` default gets `DetectedRange { uidNumber, unified = gidNumber default is "{uidNumber}" }`; an existing detected user range becomes unified when private groups were assumed. A posix-group profile without a `gidNumber` default gets `DetectedRange { gidNumber, exclude_private: true, unified = any user profile has gidNumber = "{uidNumber}" }`.
+- Assumed parts get `Source::Assumed(reason)`; pending `suppress` paths are retried afterwards (`flush_pending`), so `suppress = ["companion"]` removes an assumed companion without a warning.
+
+- [ ] **Step 1: Write the failing tests** (bottom of `src/detect/assume.rs`)
+
+```rust
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::detect::fixtures::{container, e, schema};
+    use crate::detect::infer::detect;
+    use crate::detect::model::Sample;
+
+    fn overrides(toml: &str) -> Vec<ProfileOverride> {
+        #[derive(serde::Deserialize)]
+        struct W {
+            #[serde(default)]
+            profile: Vec<ProfileOverride>,
+        }
+        toml::from_str::<W>(toml).unwrap().profile
+    }
+    const CFG_USER: &str = "[[profile]]\nname = \"user\"\nobject_classes = [\"inetOrgPerson\", \"posixAccount\"]\nrdn_attr = \"uid\"\nsearch_base = \"ou=people,dc=x\"\n";
+    fn get<'a>(m: &'a Merged, name: &str) -> (&'a EntryProfile, &'a Provenance) {
+        let i = m.profiles.iter().position(|p| p.name == name).unwrap_or_else(|| panic!("no {name}"));
+        (&m.profiles[i], &m.provenance[i])
+    }
+    fn dflt(p: &EntryProfile, attr: &str) -> Option<String> {
+        p.defaults.entries.get(attr).map(|d| d.to_config_string())
+    }
+
+    #[test]
+    fn empty_directory_config_user_gets_private_groups_and_a_range() {
+        let m = merge_with_assumptions(&schema(), &[], &overrides(CFG_USER), Some("ou=groups,dc=x"));
+        let (p, prov) = get(&m, "user");
+        assert_eq!(dflt(p, "gidNumber").as_deref(), Some("{uidNumber}"));
+        let c = p.companion.as_ref().unwrap();
+        assert_eq!(c.search_base, "ou=groups,dc=x");
+        assert_eq!(c.attributes["memberUid"], "{uid}");
+        match &p.defaults.entries["uidNumber"] {
+            DefaultValue::DetectedRange(s) => assert!(s.unified && s.container == "ou=people,dc=x"),
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(prov.fields["companion"], Source::Assumed(REASON_NO_USERS.into()));
+        assert!(matches!(prov.fields["defaults.uidNumber"], Source::Assumed(_)));
+        assert!(m.warnings.is_empty(), "{:?}", m.warnings);
+    }
+
+    #[test]
+    fn companion_base_prefers_the_posix_group_profile() {
+        let o = format!("{CFG_USER}[[profile]]\nname = \"grp\"\nobject_classes = [\"posixGroup\"]\nsearch_base = \"ou=unix,dc=x\"\n");
+        let m = merge_with_assumptions(&schema(), &[], &overrides(&o), Some("ou=groups,dc=x"));
+        assert_eq!(get(&m, "user").0.companion.as_ref().unwrap().search_base, "ou=unix,dc=x");
+        match &get(&m, "grp").0.defaults.entries["gidNumber"] {
+            DefaultValue::DetectedRange(s) => assert!(s.unified && s.exclude_private),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    fn two_users(private: bool) -> Sample {
+        let users = (1..=2u64)
+            .map(|i| {
+                let uid = format!("u{i}");
+                let num = (5000 + i).to_string();
+                let gid = if private { num.clone() } else { "100".to_string() };
+                e(&format!("uid={uid},ou=people,dc=x"), &[
+                    ("objectClass", &["inetOrgPerson", "posixAccount"]), ("uid", &[uid.as_str()]), ("cn", &[uid.as_str()]),
+                    ("sn", &["s"]), ("uidNumber", &[num.as_str()]), ("gidNumber", &[gid.as_str()])])
+            })
+            .collect();
+        let groups = if private {
+            (1..=2u64)
+                .map(|i| {
+                    let cn = format!("u{i}");
+                    let num = (5000 + i).to_string();
+                    e(&format!("cn={cn},ou=groups,dc=x"), &[("objectClass", &["posixGroup"]), ("cn", &[cn.as_str()]), ("gidNumber", &[num.as_str()])])
+                })
+                .collect()
+        } else {
+            vec![e("cn=staff,ou=groups,dc=x", &[("objectClass", &["posixGroup"]), ("cn", &["staff"]), ("gidNumber", &["100"])])]
+        };
+        Sample {
+            containers: vec![container("ou=people,dc=x", users), container("ou=groups,dc=x", groups)],
+            group_ou: Some("ou=groups,dc=x".into()),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn two_users_with_private_groups_are_assumed() {
+        let d = detect(&schema(), &two_users(true)).profiles;
+        let m = merge_with_assumptions(&schema(), &d, &[], Some("ou=groups,dc=x"));
+        let (p, prov) = get(&m, "user-people");
+        assert_eq!(dflt(p, "gidNumber").as_deref(), Some("{uidNumber}"));
+        assert_eq!(p.companion.as_ref().unwrap().search_base, "ou=groups,dc=x");
+        assert_eq!(prov.fields["companion"], Source::Assumed(REASON_FEW_USERS.into()));
+        match &p.defaults.entries["uidNumber"] {
+            DefaultValue::DetectedRange(s) => assert!(s.unified, "assumed private groups unify the space"),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn two_users_sharing_gid_100_block_the_assumption() {
+        let d = detect(&schema(), &two_users(false)).profiles;
+        let m = merge_with_assumptions(&schema(), &d, &[], Some("ou=groups,dc=x"));
+        let (p, _) = get(&m, "user-people");
+        assert!(p.companion.is_none());
+        assert!(!p.defaults.entries.contains_key("gidNumber"), "B3 needs 3 users");
+    }
+
+    #[test]
+    fn no_group_container_is_noted() {
+        let m = merge_with_assumptions(&schema(), &[], &overrides(CFG_USER), None);
+        let (p, prov) = get(&m, "user");
+        assert!(p.companion.is_none() && !p.defaults.entries.contains_key("gidNumber"));
+        assert!(prov.notes.iter().any(|n| n == NO_GROUP_CONTAINER));
+        match &p.defaults.entries["uidNumber"] {
+            DefaultValue::DetectedRange(s) => assert!(!s.unified),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_assumed_companion_can_be_suppressed() {
+        let o = format!("{CFG_USER}suppress = [\"companion\"]\n");
+        let m = merge_with_assumptions(&schema(), &[], &overrides(&o), Some("ou=groups,dc=x"));
+        let (p, prov) = get(&m, "user");
+        assert!(p.companion.is_none());
+        assert_eq!(prov.suppressed, vec!["companion"]);
+        assert!(m.warnings.is_empty(), "{:?}", m.warnings);
+    }
+
+    #[test]
+    fn config_values_are_never_overridden() {
+        let o = format!("{CFG_USER}[profile.defaults]\ngidNumber = \"100\"\nuidNumber = \"{{next:2000-2999}}\"\n");
+        let m = merge_with_assumptions(&schema(), &[], &overrides(&o), Some("ou=groups,dc=x"));
+        let (p, _) = get(&m, "user");
+        assert_eq!(dflt(p, "gidNumber").as_deref(), Some("100"));
+        assert_eq!(dflt(p, "uidNumber").as_deref(), Some("{next:2000-2999}"));
+        assert!(p.companion.is_none());
+    }
+}
+```
+
+- [ ] **Step 2: Run to verify failure** — `cargo test -j4 --lib detect::assume` → FAIL to compile (`merge_with_assumptions` / `Source::Assumed` missing).
+
+- [ ] **Step 3: Implement**
+
+In `src/detect/merge.rs`: add the variant
+
+```rust
+    /// Filled by rule D (§2D); the string says why.
+    Assumed(String),
+```
+
+to `Source`; in `suppress` change the check to
+
+```rust
+    if !matches!(prov.fields.get(&key), Some(Source::Detected(_) | Source::Assumed(_))) {
+```
+
+and in `validate` both origin checks to `Some(Source::Detected(_) | Source::Assumed(_))`.
+
+Prepend to `src/detect/assume.rs`:
+
+```rust
+//! Rule D (spec §2D): when there is too little data, assume what Ubuntu's
+//! useradd does (numbers from a fixed start, user-private groups), with LDAP
+//! numbers starting at 10000. Runs after the merge; fills only what is missing.
+
+use crate::config::defaults::{parse_default_value, DefaultValue};
+use crate::config::{CompanionSpec, EntryProfile, ProfileOverride};
+use crate::detect::merge::{flush_pending, merge_core, Merged, Origin, Provenance, Source};
+use crate::detect::model::DetectedProfile;
+use crate::detect::range::RangeSpec;
+use crate::detect::MIN_SAMPLE;
+use crate::schema::SchemaModel;
+
+pub const NO_GROUP_CONTAINER: &str = "no group container for private groups";
+pub const REASON_NO_USERS: &str = "no users yet; useradd-style private group";
+pub const REASON_FEW_USERS: &str = "fewer than 3 users, all with a private group; useradd-style private group";
+
+/// Merge, apply rule D, then resolve `suppress` paths (which may name assumed parts).
+pub fn merge_with_assumptions(
+    schema: &SchemaModel,
+    detected: &[DetectedProfile],
+    overrides: &[ProfileOverride],
+    group_ou: Option<&str>,
+) -> Merged {
+    let mut m = merge_core(schema, detected, overrides);
+    apply(schema, detected, group_ou, &mut m);
+    flush_pending(&mut m);
+    m
+}
+
+fn has_class(p: &EntryProfile, oc: &str) -> bool {
+    p.object_classes.iter().any(|c| c.eq_ignore_ascii_case(oc))
+}
+
+fn has_default(p: &EntryProfile, attr: &str) -> bool {
+    p.defaults.entries.keys().any(|k| k.eq_ignore_ascii_case(attr))
+}
+
+fn gid_follows_uid(p: &EntryProfile) -> bool {
+    p.defaults
+        .entries
+        .iter()
+        .any(|(k, v)| k.eq_ignore_ascii_case("gidNumber") && v.to_config_string().eq_ignore_ascii_case("{uidNumber}"))
+}
+
+fn sampled_of(prov: &Provenance) -> usize {
+    match &prov.origin {
+        Origin::Detected { sampled, .. } | Origin::Merged { sampled, .. } => *sampled,
+        Origin::Config => 0,
+    }
+}
+
+fn detected_of<'a>(prov: &Provenance, detected: &'a [DetectedProfile]) -> Option<&'a DetectedProfile> {
+    let name = match &prov.origin {
+        Origin::Detected { .. } => prov.name.as_str(),
+        Origin::Merged { detected, .. } => detected.as_str(),
+        Origin::Config => return None,
+    };
+    detected.iter().find(|d| d.name.eq_ignore_ascii_case(name))
+}
+
+fn structural(schema: &SchemaModel, p: &EntryProfile) -> String {
+    schema
+        .structural_class(&p.object_classes)
+        .or_else(|| p.object_classes.first().cloned())
+        .unwrap_or_default()
+}
+
+fn range_reason(attr: &str) -> String {
+    format!("no {attr} range configured or detected; useradd-style numbering")
+}
+
+pub fn apply(schema: &SchemaModel, detected: &[DetectedProfile], group_ou: Option<&str>, m: &mut Merged) {
+    // §2B5 "posix-group profile", over the merged profiles.
+    let group_base: Option<String> = m
+        .profiles
+        .iter()
+        .zip(&m.provenance)
+        .filter(|(p, _)| has_class(p, "posixGroup") && !p.search_base.is_empty())
+        .max_by(|(a, pa), (b, pb)| sampled_of(pa).cmp(&sampled_of(pb)).then_with(|| b.name.cmp(&a.name)))
+        .map(|(p, _)| p.search_base.clone())
+        .or_else(|| group_ou.map(str::to_string));
+    // Users first: group ranges need to know whether any user space is unified.
+    for i in 0..m.profiles.len() {
+        if !has_class(&m.profiles[i], "posixAccount") {
+            continue;
+        }
+        let d = detected_of(&m.provenance[i], detected);
+        let contrary = d.is_some_and(|d| d.entries.len() >= MIN_SAMPLE || d.users_without_private_group != Some(0));
+        let reason = if d.is_none() { REASON_NO_USERS } else { REASON_FEW_USERS };
+        let (p, prov) = (&mut m.profiles[i], &mut m.provenance[i]);
+        let mut assumed_private = false;
+        if !contrary && !has_default(p, "gidNumber") && p.companion.is_none() {
+            match &group_base {
+                Some(base) => {
+                    p.defaults.entries.insert("gidNumber".into(), parse_default_value("{uidNumber}").expect("template"));
+                    p.companion = Some(CompanionSpec {
+                        object_classes: vec!["posixGroup".into()],
+                        rdn_attr: "cn".into(),
+                        search_base: base.clone(),
+                        attributes: [("cn", "{uid}"), ("gidNumber", "{uidNumber}"), ("memberUid", "{uid}")]
+                            .into_iter()
+                            .map(|(k, v)| (k.to_string(), v.to_string()))
+                            .collect(),
+                    });
+                    prov.fields.insert("defaults.gidNumber".into(), Source::Assumed(reason.into()));
+                    prov.fields.insert("companion".into(), Source::Assumed(reason.into()));
+                    assumed_private = true;
+                }
+                None => prov.notes.push(NO_GROUP_CONTAINER.to_string()),
+            }
+        }
+        let unified = gid_follows_uid(p);
+        if !has_default(p, "uidNumber") {
+            let spec = RangeSpec {
+                attr: "uidNumber".into(),
+                container: p.search_base.clone(),
+                structural: structural(schema, p),
+                unified,
+                exclude_private: false,
+            };
+            p.defaults.entries.insert("uidNumber".into(), DefaultValue::DetectedRange(spec));
+            prov.fields.insert("defaults.uidNumber".into(), Source::Assumed(range_reason("uidNumber")));
+        } else if assumed_private {
+            for (k, v) in p.defaults.entries.iter_mut() {
+                if let (true, DefaultValue::DetectedRange(s)) = (k.eq_ignore_ascii_case("uidNumber"), v) {
+                    s.unified = true;
+                }
+            }
+        }
+    }
+    let unified_any = m.profiles.iter().any(|p| has_class(p, "posixAccount") && gid_follows_uid(p));
+    for (p, prov) in m.profiles.iter_mut().zip(m.provenance.iter_mut()) {
+        if !has_class(p, "posixGroup") {
+            continue;
+        }
+        if has_default(p, "gidNumber") {
+            // A detected group range joins a space that assumed private groups unified.
+            for (k, v) in p.defaults.entries.iter_mut() {
+                if let (true, DefaultValue::DetectedRange(s)) = (k.eq_ignore_ascii_case("gidNumber"), v) {
+                    s.unified |= unified_any;
+                }
+            }
+            continue;
+        }
+        let spec = RangeSpec {
+            attr: "gidNumber".into(),
+            container: p.search_base.clone(),
+            structural: structural(schema, p),
+            unified: unified_any,
+            exclude_private: true,
+        };
+        p.defaults.entries.insert("gidNumber".into(), DefaultValue::DetectedRange(spec));
+        prov.fields.insert("defaults.gidNumber".into(), Source::Assumed(range_reason("gidNumber")));
+    }
+}
+```
+
+Note: `structural(schema, p)` borrows `p` immutably while `p` is `&mut` — compute it into a local before building `RangeSpec` if the borrow checker complains (`let st = structural(schema, p);`).
+
+- [ ] **Step 4: Run tests** — `cargo test -j4 --lib detect::` → PASS (7 new tests; Task 8's tests unchanged because `merge` does not assume).
+
+- [ ] **Step 5: Gate and commit** — `CARGO_BUILD_JOBS=4 make check` → `All checks passed!`
+
+```bash
+git add src/detect/
+git commit -m "feat(detect): useradd-style assumptions when there is too little data (rule D)
+
+Every posixAccount profile without contrary evidence gets private groups and
+a number range starting at 10000; assumed parts are marked and suppressible.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+```
+
+---
+
+### Task 10: Sampling — worker request and sampler
 
 **Files:**
 - Modify: `src/ldap/worker.rs` (new `SampleParams`, `Request::SampleSearch`, worker-loop arm, `run_sample_search`)
@@ -4254,6 +4713,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
   - `sample::Budget { new(total: Duration) -> Self, remaining(&self) -> Option<Duration> }`
   - `sample::sample(s: &mut dyn Searcher, base_dn: &str, budget: &Budget) -> Result<Sample, String>` — `Err` only when no container list could be obtained at all
   - `sample::{HAS_SUBORDINATES_FILTER, FALLBACK_FILTER}`
+  - `Sample.group_ou` is filled: `Some("ou=groups,<base_dn>")` when that entry exists (seen in a sample, or confirmed by one base-scope search) — rule D's fallback companion base
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -4354,6 +4814,18 @@ mod tests {
         let mut f = fake(|_| Ok((vec![], false)));
         assert!(sample(&mut f, "dc=x", &Budget::new(std::time::Duration::ZERO)).is_err());
         assert!(f.calls.is_empty());
+    }
+
+    #[test]
+    fn an_empty_groups_ou_is_found_by_a_base_read() {
+        let mut f = fake(|q| match (q.filter.as_str(), q.scope) {
+            (HAS_SUBORDINATES_FILTER, _) => Ok((vec![], false)),
+            (_, SearchScope::Base) if q.base == "ou=groups,dc=x" => Ok((vec![e("ou=groups,dc=x", &[])], false)),
+            _ => Ok((vec![], false)),
+        });
+        assert_eq!(sample(&mut f, "dc=x", &budget()).unwrap().group_ou.as_deref(), Some("ou=groups,dc=x"));
+        let mut none = fake(|_| Ok((vec![], false)));
+        assert_eq!(sample(&mut none, "dc=x", &budget()).unwrap().group_ou, None);
     }
 
     #[test]
@@ -4573,8 +5045,26 @@ pub fn sample(s: &mut dyn Searcher, base_dn: &str, budget: &Budget) -> Result<Sa
         }
         out.containers.push(ContainerSample { dn: dn.clone(), entries, present, partial });
     }
+    out.group_ou = find_group_ou(s, &out, base_dn, budget);
     lookups(s, &mut out, budget);
     Ok(out)
+}
+
+/// `ou=groups` directly under the base, if it exists. An empty OU has no
+/// subordinates, so it is not a sampled container; look for it among the
+/// sampled entries first, then with one base-scope read.
+fn find_group_ou(s: &mut dyn Searcher, out: &Sample, base_dn: &str, budget: &Budget) -> Option<String> {
+    let want = format!("ou=groups,{base_dn}");
+    let seen = out.containers.iter().any(|c| crate::detect::dn_eq(&c.dn, &want))
+        || out.containers.iter().flat_map(|c| c.entries.iter()).any(|e| crate::detect::dn_eq(&e.dn, &want));
+    if seen {
+        return Some(want);
+    }
+    let t = budget.remaining()?;
+    match s.search(&params(&want, SearchScope::Base, "(objectClass=*)", vec!["1.1".to_string()], None, false, t)) {
+        Ok((found, _)) if !found.is_empty() => Some(want),
+        _ => None,
+    }
 }
 
 /// Forward (`posixGroup` by sampled `uid`) and reverse (`posixAccount` by
@@ -4629,7 +5119,7 @@ fn lookups(s: &mut dyn Searcher, out: &mut Sample, budget: &Budget) {
 }
 ```
 
-- [ ] **Step 5: Run tests** — `cargo test -j4 --lib ldap::worker detect::sample` → PASS (1 + 7).
+- [ ] **Step 5: Run tests** — `cargo test -j4 --lib ldap::worker detect::sample` → PASS (1 + 8).
 
 - [ ] **Step 6: Gate and commit** — `CARGO_BUILD_JOBS=4 make check` → `All checks passed!`
 
@@ -4642,7 +5132,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 
 ---
 
-### Task 10: `load_profiles`, bootstrap reorder, Samba trigger
+### Task 11: `load_profiles`, bootstrap reorder, Samba trigger
 
 **Files:**
 - Create: `src/detect/load.rs`; Modify: `src/detect/mod.rs` (`pub mod load;`)
@@ -4708,6 +5198,19 @@ mod tests {
     }
 
     #[test]
+    fn an_empty_directory_gets_useradd_style_assumptions() {
+        let posix = "[[profile]]\nname = \"user\"\nobject_classes = [\"inetOrgPerson\", \"posixAccount\"]\nsearch_base = \"ou=people,dc=example,dc=org\"\n";
+        let sample = Sample { group_ou: Some("ou=groups,dc=example,dc=org".into()), ..Default::default() };
+        let l = assemble(schema(), &inputs(posix, true), Some(Ok(sample))).unwrap();
+        let p = &l.profiles[0];
+        assert!(p.companion.is_some());
+        assert!(matches!(p.defaults.entries["uidNumber"], crate::config::defaults::DefaultValue::DetectedRange(_)));
+        // Detection off: no assumptions.
+        let off = assemble(schema(), &inputs(posix, false), None).unwrap();
+        assert!(off.profiles[0].companion.is_none() && off.profiles[0].defaults.entries.is_empty());
+    }
+
+    #[test]
     fn a_config_widget_error_is_still_a_load_error() {
         let bad = format!("{USER}[profile.widget.member]\nkind = \"picker\"\ncandidate = \"ghost\"\n");
         assert!(assemble(schema(), &inputs(&bad, true), Some(Ok(demo_sample()))).is_err());
@@ -4741,7 +5244,8 @@ Prepend to `src/detect/load.rs`:
 use anyhow::{anyhow, Result};
 
 use crate::config::{Config, EntryProfile, ProfileOverride};
-use crate::detect::merge::{merge, validate, Origin, Provenance};
+use crate::detect::assume::merge_with_assumptions;
+use crate::detect::merge::{validate, Origin, Provenance};
 use crate::detect::model::{DetectedProfile, Sample};
 use crate::detect::sample::{sample, Budget, WorkerSearcher};
 use crate::detect::DETECT_BUDGET;
@@ -4802,7 +5306,7 @@ pub fn assemble(schema: SchemaModel, inputs: &ProfileInputs, sampled: Option<Res
         let provenance = inputs
             .config_profiles
             .iter()
-            .map(|p| Provenance { name: p.name.clone(), origin: Origin::Config, fields: Default::default(), suppressed: vec![], notes: vec![] })
+            .map(|p| Provenance { name: p.name.clone(), origin: Origin::Config, fields: Default::default(), suppressed: vec![], pending_suppress: vec![], notes: vec![] })
             .collect();
         crate::config::widget::resolve_widgets(&inputs.config_profiles).map_err(|e| anyhow!("widget config error: {e}"))?;
         return Ok(LoadedProfiles {
@@ -4817,16 +5321,17 @@ pub fn assemble(schema: SchemaModel, inputs: &ProfileInputs, sampled: Option<Res
             detection_error: None,
         });
     };
-    let (detected, containers_sampled, mut notes, detection_error) = match sampled {
+    let (detected, containers_sampled, mut notes, detection_error, group_ou) = match sampled {
         Ok(s) => {
             let d = crate::detect::infer::detect(&schema, &s);
             let mut notes = s.notes.clone();
             notes.extend(d.notes);
-            (d.profiles, s.containers.len(), notes, None)
+            (d.profiles, s.containers.len(), notes, None, s.group_ou.clone())
         }
-        Err(e) => (Vec::new(), 0, Vec::new(), Some(e)),
+        Err(e) => (Vec::new(), 0, Vec::new(), Some(e), None),
     };
-    let mut merged = merge(&schema, &detected, &inputs.overrides);
+    // Rule D runs whenever detection is enabled, also after a failed sample.
+    let mut merged = merge_with_assumptions(&schema, &detected, &inputs.overrides, group_ou.as_deref());
     validate(&mut merged).map_err(|e| anyhow!("profile config error: {e}"))?;
     crate::config::widget::resolve_widgets(&merged.profiles).map_err(|e| anyhow!("widget config error: {e}"))?;
     notes.extend(merged.warnings.iter().cloned());
@@ -4929,7 +5434,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 
 ---
 
-### Task 11: `tui-create` by name and chooser filtering
+### Task 12: `tui-create` by name and chooser filtering
 
 **Files:**
 - Modify: `src/ui/mod.rs:61-95` (`StartupRequest`, `resolve_startup`, `run`)
@@ -5158,7 +5663,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 
 ---
 
-### Task 12: `edaptor passwd` searches account profiles only
+### Task 13: `edaptor passwd` searches account profiles only
 
 **Files:**
 - Modify: `src/passwd.rs:17-27` and tests; `src/lib.rs:180-245` (`resolve_passwd_target` message, `run_passwd`)
@@ -5243,7 +5748,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 
 ---
 
-### Task 13: `edaptor profiles` — TOML dump with provenance
+### Task 14: `edaptor profiles` — TOML dump with provenance
 
 **Files:**
 - Create: `src/detect/dump.rs`, `src/detect/testdata/argus-profiles.toml` (generated); Modify: `src/detect/mod.rs` (`pub mod dump;`)
@@ -5310,6 +5815,19 @@ mod tests {
         assert!(t.contains("# suppressed by config: widget.gidNumber"));
         assert!(t.contains("loginShell = \"/bin/sh\"  # config (detected \"/bin/bash\", 11/12)"));
         assert!(t.contains("# profile \"posixgroup-groups\" disabled by config (enabled = false)"));
+    }
+
+    #[test]
+    fn assumed_values_carry_their_reason() {
+        #[derive(serde::Deserialize)]
+        struct W { profile: Vec<crate::config::ProfileOverride> }
+        let o = toml::from_str::<W>("[[profile]]\nname = \"user\"\nobject_classes = [\"inetOrgPerson\", \"posixAccount\"]\nsearch_base = \"ou=people,dc=x\"\n").unwrap().profile;
+        let m = crate::detect::assume::merge_with_assumptions(&schema(), &[], &o, Some("ou=groups,dc=x"));
+        let ranges = compute_ranges(&m.profiles, &[], false);
+        let t = render(&m.profiles, &m.provenance, &m.disabled, &header_line(true, 0, 0), &ranges);
+        assert!(t.contains("gidNumber = \"{uidNumber}\"  # assumed: no users yet; useradd-style private group"), "{t}");
+        assert!(t.contains("uidNumber = \"{next:10000-60000}\"  # assumed: no uidNumber range configured or detected; useradd-style numbering; at dump time: no numbers in use; useradd-style start at 10000"), "{t}");
+        assert!(t.contains("object_classes = [\"posixGroup\"]  # assumed: no users yet; useradd-style private group"), "{t}");
     }
 
     #[test]
@@ -5418,6 +5936,7 @@ fn src(prov: &Provenance, k: &str) -> String {
     match prov.fields.get(k) {
         None => String::new(),
         Some(Source::Config) => "# config".to_string(),
+        Some(Source::Assumed(reason)) => format!("# assumed: {reason}"),
         Some(Source::Detected(ev)) => format!("# detected: {}", ev_text(ev)),
         Some(Source::ConfigOverDetected { detected, evidence }) => format!("# config (detected {detected}, {})", evidence.ratio()),
     }
@@ -5525,7 +6044,11 @@ pub fn render(
                     DefaultValue::DetectedRange(_) => match ranges.get(&(p.name.to_lowercase(), attr.to_lowercase())) {
                         Some(RangeOutcome { result: Ok(r), uncertain }) => {
                             let unc = if *uncertain { "; uncertain (the number scan hit a server limit)" } else { "" };
-                            line(&mut out, &key(attr), &q(&r.template()), &format!("# detected at dump time: {}{unc}", r.describe()));
+                            let lead = match prov.fields.get(&format!("defaults.{attr}")) {
+                                Some(Source::Assumed(reason)) => format!("# assumed: {reason}; at dump time: "),
+                                _ => "# detected at dump time: ".to_string(),
+                            };
+                            line(&mut out, &key(attr), &q(&r.template()), &format!("{lead}{}{unc}", r.describe()));
                             if !r.evidence.exceptions.is_empty() {
                                 trailer.push(format!("# exceptions (defaults.{attr} range): {}", list(&r.evidence.exceptions)));
                             }
@@ -5559,7 +6082,7 @@ pub fn render(
         for (field, s) in &prov.fields {
             let ev = match s {
                 Source::Detected(ev) | Source::ConfigOverDetected { evidence: ev, .. } => ev,
-                Source::Config => continue,
+                Source::Config | Source::Assumed(_) => continue,
             };
             if !ev.exceptions.is_empty() {
                 out.push_str(&format!("# exceptions ({field}): {}\n", list(&ev.exceptions)));
@@ -5682,7 +6205,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 
 ---
 
-### Task 14: Live test against the demo server
+### Task 15: Live test against the demo server
 
 **Files:**
 - Create: `tests/live_profile_detection.rs`, `tests/golden/profiles-demo.toml` (generated)
@@ -5868,7 +6391,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 
 ---
 
-### Task 15: Documentation, examples, changelog
+### Task 16: Documentation, examples, changelog
 
 **Files:**
 - Create: `docs/src/configuration/detection.md`
@@ -5913,6 +6436,25 @@ uses `MIN` = that block's lowest number rounded down to a multiple of 1000 and
 one above the highest number in use in the block. With user-private groups, user
 and group numbers share one space. A `{next:MIN-MAX}` in the config replaces the
 detected range.
+
+### When there is too little data
+
+A new or nearly empty directory gets what Ubuntu's `useradd` does, with one
+change: LDAP numbers start at **10000**, because every client machine hands out
+1000 and up to its own local users, and an LDAP account must not share a number
+with them.
+
+- With no numbers in use, users and groups are numbered from `{next:10000-60000}`.
+  With one or two numbers in use, the block rule above continues from them.
+- Every user profile — also one written only in your config — gets a private
+  group (`gidNumber = "{uidNumber}"` and a companion `posixGroup` named after the
+  user, in the posix-group profile's container or else in `ou=groups` directly
+  under `base_dn`), unless the users already in the directory show otherwise
+  (for example two users sharing group 100).
+
+These values never replace anything from your config or from detection.
+`edaptor profiles` marks them `# assumed: …`; `suppress` removes them like any
+detected part, and `[detect] enabled = false` turns them off.
 
 ### Limits
 
@@ -6054,6 +6596,16 @@ Under `### New`:
   it) or taken from the config; `--detected-only` shows detection alone.
 ```
 
+and, as its own entry:
+
+```markdown
+- **A new, empty directory gets useradd-style defaults.** With no users yet,
+  eDAPtor numbers users and groups from 10000 up (client machines use 1000 and
+  up for their local users) and gives every new user a private group, placed in
+  `ou=groups` when there is no group profile. `edaptor profiles` marks these
+  values `# assumed`, and `suppress` removes them.
+```
+
 Under `### Changed`:
 
 ```markdown
@@ -6104,6 +6656,6 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 
 ## Self-review notes (for the executor)
 
-- Spec coverage: §1.1 sampling → Task 9; §1.2 detect → Tasks 2, 3, 6; §1.3 merge → Task 8; §1.4 startup/consumers → Tasks 10 (TUI, samba), 11 (tui-create, chooser), 12 (passwd), 13 (profiles); `check`/`schema` unchanged but still validate companions offline → Task 7; §2A → Task 2 (+ scope Task 7, order Task 8, infrastructure Task 11); §2B1–5 → Tasks 3, 6; §2C → Tasks 4, 5, 6, 13; §3 → Tasks 7, 8, 13; §4 errors table → Tasks 8, 9, 10, 13; §5 tests 1–7 → spread as listed in each task; §6 docs → Task 15.
-- Member-target pickers (B5) take the target container from the member DNs' parents; no extra LDAP lookup is needed for them, so Task 9 only implements the private-group lookups.
+- Spec coverage: §1.1 sampling → Task 10; §1.2 detect → Tasks 2, 3, 6; §1.3 merge → Task 8; §1.4 startup/consumers → Tasks 11 (TUI, samba), 12 (tui-create, chooser), 13 (passwd), 14 (profiles); `check`/`schema` unchanged but still validate companions offline → Task 7; §2A → Task 2 (+ scope Task 7, order Task 8, infrastructure Task 12); §2B1–5 → Tasks 3, 6; §2C → Tasks 4, 5, 6, 14; §2D (assumptions) → Task 4 (empty and 1–2-value ranges), Task 6 (contrary-evidence count), Task 9 (rule D), Task 10 (`ou=groups` fact), Task 11 (wiring), Task 14 (dump), Task 16 (docs); §3 → Tasks 7, 8, 14; §4 errors table → Tasks 8, 10, 11, 14; §5 tests 1–7 → spread as listed in each task; §6 docs → Task 16.
+- Member-target pickers (B5) take the target container from the member DNs' parents; no extra LDAP lookup is needed for them, so Task 10 only implements the private-group lookups and the `ou=groups` existence check.
 - `make check` itself runs `cargo test` without `-j`; always invoke it as `CARGO_BUILD_JOBS=4 make check`.
