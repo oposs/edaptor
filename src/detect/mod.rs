@@ -12,6 +12,7 @@ pub mod names;
 pub mod patterns;
 pub mod private;
 pub mod range;
+pub mod sample;
 
 use std::time::Duration;
 
