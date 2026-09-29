@@ -32,6 +32,9 @@ pub enum DefaultValue {
     /// `{auto:NAME}` — filled asynchronously once its inputs resolve (see
     /// [`ComputedKind`]); never filled by the synchronous defaults pass.
     Computed(ComputedKind),
+    /// A number range detected from the directory (spec §2C); resolved at create
+    /// time by a full number scan. Never written in a config file.
+    DetectedRange(crate::detect::range::RangeSpec),
 }
 
 /// Per-target live-template latch (see the live-templated-defaults spec). `segs`
@@ -54,8 +57,19 @@ pub struct ProfileDefaults {
 /// A planned action for one defaulted attribute (see `plan_defaults`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Resolution {
-    Fill { attr: String, value: String },
-    NeedsAutonumber { attr: String, min: u64, max: u64 },
+    Fill {
+        attr: String,
+        value: String,
+    },
+    NeedsAutonumber {
+        attr: String,
+        min: u64,
+        max: u64,
+    },
+    NeedsDetectedRange {
+        attr: String,
+        spec: crate::detect::range::RangeSpec,
+    },
 }
 
 /// Parse one config value string into a `DefaultValue`.
@@ -144,6 +158,8 @@ impl DefaultValue {
                 .collect(),
             DefaultValue::AutoNumber { min, max } => format!("{{next:{min}-{max}}}"),
             DefaultValue::Computed(ComputedKind::SambaSid) => "{auto:sambaSID}".to_string(),
+            // Only ever shown in comments; not parseable on purpose.
+            DefaultValue::DetectedRange(s) => format!("(detected {} range)", s.attr),
         }
     }
 }
@@ -239,6 +255,10 @@ pub fn plan_defaults(
             // Computed defaults are filled asynchronously once their inputs resolve
             // (see `computed_defaults` + the alloc hook), not by this pass.
             DefaultValue::Computed(_) => {}
+            DefaultValue::DetectedRange(spec) => out.push(Resolution::NeedsDetectedRange {
+                attr: attr.clone(),
+                spec: spec.clone(),
+            }),
         }
     }
     out
@@ -573,6 +593,60 @@ mod tests {
                 max: 60000
             }]
         );
+    }
+
+    #[test]
+    fn detected_range_surfaces_as_needs_detected_range() {
+        let spec = crate::detect::range::RangeSpec {
+            attr: "uidNumber".into(),
+            container: "ou=p,dc=x".into(),
+            structural: "inetOrgPerson".into(),
+            unified: false,
+            exclude_private: false,
+        };
+        let mut d = ProfileDefaults::default();
+        d.entries.insert(
+            "uidNumber".into(),
+            DefaultValue::DetectedRange(spec.clone()),
+        );
+        assert_eq!(
+            plan_defaults(&d, &cur(&[("uidNumber", "")])),
+            vec![Resolution::NeedsDetectedRange {
+                attr: "uidNumber".into(),
+                spec
+            }]
+        );
+        assert!(plan_defaults(&d, &cur(&[("uidNumber", "12")])).is_empty());
+    }
+
+    /// `gidNumber = "{uidNumber}"` next to an allocated `uidNumber`: the target
+    /// follows the source through the `‹allocating…›` placeholder to the number.
+    #[test]
+    fn templated_gid_follows_the_allocated_uid() {
+        let mut states = live_templates(&{
+            let mut d = ProfileDefaults::default();
+            d.entries.insert(
+                "gidNumber".into(),
+                parse_default_value("{uidNumber}").unwrap(),
+            );
+            d
+        });
+        // Nothing yet: the source is empty, so the target stays empty.
+        assert!(
+            recompute_live(&mut states, &cur(&[("uidNumber", ""), ("gidNumber", "")])).is_empty()
+        );
+        // The scan lands: uidNumber = 5003 and gidNumber still shows what we last wrote.
+        let placeholder = "\u{2039}allocating\u{2026}\u{203a}";
+        let changes = recompute_live(
+            &mut states,
+            &cur(&[("uidNumber", placeholder), ("gidNumber", "")]),
+        );
+        let last = changes.last().map(|(_, v)| v.clone()).unwrap_or_default();
+        let changes = recompute_live(
+            &mut states,
+            &cur(&[("uidNumber", "5003"), ("gidNumber", &last)]),
+        );
+        assert_eq!(changes, vec![("gidNumber".to_string(), "5003".to_string())]);
     }
 
     // --- live templated defaults ---

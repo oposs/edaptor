@@ -167,7 +167,8 @@ pub fn detect_range(spec: &RangeSpec, entries: &[SampleEntry]) -> Result<RangeRe
     let max = match next_block {
         Some(lo) => lo / 1000 * 1000 - 1,
         None => OPEN_END.max(min + 9999),
-    };
+    }
+    .min(u64::from(u32::MAX));
     let next = block.1 + 1;
     Ok(RangeReport {
         min,
@@ -479,5 +480,26 @@ mod tests {
         )
         .unwrap();
         assert_eq!((r.min, r.next), (ASSUMED_MIN, ASSUMED_MIN));
+    }
+
+    #[test]
+    fn allocation_never_exceeds_u32_max() {
+        let v = vec![
+            acct(1, "4294967293"),
+            acct(2, "4294967294"),
+            acct(3, "4294967295"),
+        ];
+        let s = spec("uidNumber", "ou=p,dc=x", "inetOrgPerson", false, false);
+        let r = detect_range(&s, &v).unwrap();
+        assert!(r.max <= u64::from(u32::MAX), "max {} above u32::MAX", r.max);
+        assert!(r.exhausted, "the pool ends at u32::MAX");
+        assert!(allocate(&s, &v).is_err());
+        // One below the top still allocates the last valid id.
+        let v = vec![
+            acct(1, "4294967292"),
+            acct(2, "4294967293"),
+            acct(3, "4294967294"),
+        ];
+        assert_eq!(allocate(&s, &v).unwrap().0, u64::from(u32::MAX));
     }
 }

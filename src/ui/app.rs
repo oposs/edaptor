@@ -538,11 +538,11 @@ fn open_create(state: &Shared, profile_idx: usize, container: &str) {
     };
     let (mut form, autonum) = form_and_reqs;
     // Set placeholder text in each autonumber field before installing the form.
-    for (attr, _, _) in &autonum {
+    for req in &autonum {
         if let Some(f) = form
             .fields
             .iter_mut()
-            .find(|f| f.label.eq_ignore_ascii_case(attr))
+            .find(|f| f.label.eq_ignore_ascii_case(req.attr()))
         {
             f.values = vec![crate::ui::state::ALLOC_PLACEHOLDER.to_string()];
         }
@@ -591,8 +591,15 @@ fn open_create(state: &Shared, profile_idx: usize, container: &str) {
             worker, alloc_flow, ..
         } = &mut *st;
         if let Some(w) = worker.as_ref() {
-            for (attr, min, max) in &autonum {
-                let _ = alloc_flow.request(w, &base_dn, attr, *min, *max);
+            for req in &autonum {
+                let _ = match req {
+                    crate::workflows::create::AllocRequest::Range { attr, min, max } => {
+                        alloc_flow.request(w, &base_dn, attr, *min, *max)
+                    }
+                    crate::workflows::create::AllocRequest::Detected { attr, spec } => {
+                        alloc_flow.request_detected(w, &base_dn, attr, spec.clone())
+                    }
+                };
             }
         }
     }

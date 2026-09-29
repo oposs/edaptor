@@ -153,6 +153,11 @@ pub fn compose_renamed_dn(old_dn: &str, new_rdn: &str) -> String {
     }
 }
 
+/// Why an allocation refuses a truncated number scan (shared by every allocator).
+pub const TRUNCATED_SCAN_MSG: &str =
+    "refusing to allocate: the number scan hit a server size limit \
+     (bind with a higher-limit identity or configure a counter)";
+
 /// Decide an allocation from a (possibly truncated) directory scan. Refuses when
 /// the scan was truncated by a server limit — never allocates over a partial set
 /// (a silent duplicate would be worse than a constraint violation).
@@ -163,11 +168,7 @@ pub fn decide_allocation(
     max: u64,
 ) -> Result<u64, String> {
     if truncated {
-        return Err(
-            "refusing to allocate: the number scan hit a server size limit \
-             (bind with a higher-limit identity or configure a counter)"
-                .to_string(),
-        );
+        return Err(TRUNCATED_SCAN_MSG.to_string());
     }
     crate::config::defaults::next_in_range(values, min, max)
 }
