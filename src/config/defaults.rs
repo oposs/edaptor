@@ -203,7 +203,11 @@ fn is_empty(current: &BTreeMap<String, Vec<String>>, attr: &str) -> bool {
         .unwrap_or(true)
 }
 
-/// Resolve a template against a values map; `None` if any `{field}` is empty. Pure.
+/// Placeholder text set in autonumber fields while the background scan is pending.
+pub const ALLOC_PLACEHOLDER: &str = "‹allocating…›";
+
+/// Resolve a template against a values map; `None` if any `{field}` is empty or
+/// still shows the allocation placeholder. Pure.
 /// Reused by `plan_defaults` (create-form defaults) and `create::plan_companion`.
 pub fn resolve_template(segs: &[Seg], current: &BTreeMap<String, Vec<String>>) -> Option<String> {
     let mut out = String::new();
@@ -216,7 +220,7 @@ pub fn resolve_template(segs: &[Seg], current: &BTreeMap<String, Vec<String>>) -
                     .find(|(k, _)| k.eq_ignore_ascii_case(name))
                     .and_then(|(_, v)| v.first())
                     .map(|s| s.trim())
-                    .filter(|s| !s.is_empty())?;
+                    .filter(|s| !s.is_empty() && *s != ALLOC_PLACEHOLDER)?;
                 out.push_str(v);
             }
         }
@@ -681,6 +685,26 @@ mod tests {
         assert_eq!(changes, vec![("cn".to_string(), "John Doe".to_string())]);
         assert_eq!(states["cn"].last_written, "John Doe");
         assert!(states["cn"].auto);
+    }
+
+    /// While `uidNumber` still shows the allocation placeholder, a template that
+    /// reads it stays empty; it fills once the number lands.
+    #[test]
+    fn recompute_treats_the_alloc_placeholder_as_missing() {
+        let mut states = live_templates(&defs(&[
+            ("gidNumber", "{uidNumber}"),
+            ("homeDirectory", "/home/{uidNumber}"),
+        ]));
+        let changes = recompute_live(&mut states, &cur(&[("uidNumber", ALLOC_PLACEHOLDER)]));
+        assert!(changes.is_empty(), "{changes:?}");
+        let changes = recompute_live(&mut states, &cur(&[("uidNumber", "10001")]));
+        assert_eq!(
+            changes,
+            vec![
+                ("gidNumber".to_string(), "10001".to_string()),
+                ("homeDirectory".to_string(), "/home/10001".to_string()),
+            ]
+        );
     }
 
     #[test]

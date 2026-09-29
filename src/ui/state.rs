@@ -19,8 +19,7 @@ use crate::workflows::search_flow::{SearchFlow, SearchOutcome};
 use crate::workflows::structure::{Structure, StructureInput};
 use crate::workflows::write_flow::{WriteFlow, WriteOutcome, STAGED_PASSWORD_SENTINEL};
 
-/// Placeholder text set in autonumber fields while the background scan is pending.
-pub const ALLOC_PLACEHOLDER: &str = "‹allocating…›";
+pub use crate::config::defaults::ALLOC_PLACEHOLDER;
 
 /// A dirty-blocked navigation awaiting the guard's decision.
 #[derive(Debug, Clone, PartialEq, Eq)]

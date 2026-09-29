@@ -96,6 +96,15 @@ widget needs a concrete `uidNumber`. Skipping it is fine: the value is still
 allocated automatically at save. The field stays editable, so you can also type a
 number by hand to override.
 
+### While the number is being allocated
+
+While the scan runs, the field shows `‹allocating…›`. Templates that read it,
+such as `gidNumber = "{uidNumber}"` or a companion group's `gidNumber`, stay
+empty until the number arrives. Pressing **`Alt+S`** in that moment saves
+nothing and the status line reads `Still allocating uidNumber; save again in a
+moment.` If the scan cannot be started, the field is left empty and the status
+line reads `Could not allocate uidNumber: …`.
+
 ### Size-limit caveat
 
 The auto-number scan is only safe if it sees **every** existing value. OpenLDAP

@@ -1277,6 +1277,24 @@ mod tests {
         assert!(err.to_lowercase().contains("cn") || err.to_lowercase().contains("rdn"));
     }
 
+    /// A companion template must never copy the allocation placeholder: a
+    /// source still showing `‹allocating…›` counts as missing, so a string
+    /// attribute stays unset instead of storing the placeholder text.
+    #[test]
+    fn plan_companion_treats_the_alloc_placeholder_as_missing() {
+        let mut spec = companion_spec();
+        spec.attributes.insert("gidNumber".into(), "10001".into());
+        spec.attributes
+            .insert("memberUid".into(), "{uidNumber}".into());
+        let mut primary = primary_attrs_with("alice", None);
+        primary.insert(
+            "uidNumber".into(),
+            vec![crate::config::defaults::ALLOC_PLACEHOLDER.into()],
+        );
+        let add = plan_companion(&spec, &primary, &group_schema()).expect("plans");
+        assert_eq!(add.attrs.get("memberUid"), None, "{:?}", add.attrs);
+    }
+
     #[test]
     fn plan_companion_errors_when_must_attr_missing() {
         // No gidNumber on the primary → posixGroup MUST gidNumber missing → validation error.
