@@ -18,6 +18,8 @@ pub enum Source {
         detected: String,
         evidence: Evidence,
     },
+    /// A config default replaced a detected number range.
+    ConfigOverDetectedRange,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -323,6 +325,13 @@ fn merge_one(
         p.label = Some(v.clone());
     }
     if let Some(defs) = &o.defaults {
+        let ranges: Vec<String> = p
+            .defaults
+            .entries
+            .iter()
+            .filter(|(_, dv)| matches!(dv, DefaultValue::DetectedRange(_)))
+            .map(|(k, _)| k.to_lowercase())
+            .collect();
         merge_attrs(
             &mut p.defaults.entries,
             &defs.entries,
@@ -330,6 +339,15 @@ fn merge_one(
             "defaults",
             |dv| format!("{:?}", dv.to_config_string()),
         );
+        // A detected range has no config spelling worth quoting.
+        for (k, src) in fields.iter_mut() {
+            let over_range = k
+                .strip_prefix("defaults.")
+                .is_some_and(|a| ranges.contains(&a.to_lowercase()));
+            if over_range && matches!(src, Source::ConfigOverDetected { .. }) {
+                *src = Source::ConfigOverDetectedRange;
+            }
+        }
     }
     if let Some(ws) = &o.widgets {
         merge_attrs(&mut p.widgets, ws, &mut fields, "widget", |w| {

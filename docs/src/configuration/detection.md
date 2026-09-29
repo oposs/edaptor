@@ -137,7 +137,8 @@ the Samba domain lookup on its own, so `sambaSID` gets its generator without
 
 Prints the profiles in effect as TOML, ready to paste into a config. Each value
 carries a comment saying where it came from (`# detected: 12/12`, `# config`,
-`# config (detected "/bin/bash", 11/12)`); suppressed parts and exceptions are
+`# config (detected "/bin/bash", 11/12)`, `# config (overrides a detected
+uidNumber range)`); suppressed parts and exceptions are
 listed as comments. `--detected-only` shows detection before the merge. Notes
 and warnings go to stderr.
 

@@ -101,11 +101,17 @@ fn line(out: &mut String, k: &str, v: &str, comment: &str) {
     }
 }
 
+/// `matched/sampled`, or `None` for evidence that counts no entries (rule C).
+fn ratio(ev: &Evidence) -> Option<String> {
+    (ev.sampled > 0).then(|| ev.ratio())
+}
+
 fn ev_text(ev: &Evidence) -> String {
-    match &ev.note {
-        Some(n) => format!("{} {n}", ev.ratio()),
-        None => ev.ratio(),
-    }
+    [ratio(ev), ev.note.clone()]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn src(prov: &Provenance, k: &str) -> String {
@@ -114,8 +120,13 @@ fn src(prov: &Provenance, k: &str) -> String {
         Some(Source::Config) => "# config".to_string(),
         Some(Source::Assumed(reason)) => format!("# assumed: {reason}"),
         Some(Source::Detected(ev)) => format!("# detected: {}", ev_text(ev)),
-        Some(Source::ConfigOverDetected { detected, evidence }) => {
-            format!("# config (detected {detected}, {})", evidence.ratio())
+        Some(Source::ConfigOverDetected { detected, evidence }) => match ratio(evidence) {
+            Some(r) => format!("# config (detected {detected}, {r})"),
+            None => format!("# config (detected {detected})"),
+        },
+        Some(Source::ConfigOverDetectedRange) => {
+            let attr = k.rsplit_once('.').map_or(k, |(_, a)| a);
+            format!("# config (overrides a detected {attr} range)")
         }
     }
 }
@@ -377,7 +388,7 @@ pub fn render(
         for (field, s) in &prov.fields {
             let ev = match s {
                 Source::Detected(ev) | Source::ConfigOverDetected { evidence: ev, .. } => ev,
-                Source::Config | Source::Assumed(_) => continue,
+                Source::Config | Source::Assumed(_) | Source::ConfigOverDetectedRange => continue,
             };
             if !ev.exceptions.is_empty() {
                 out.push_str(&format!(
@@ -459,6 +470,28 @@ mod tests {
         ))
         .expect("the dump must be pasteable");
         assert!(cfg.overrides.iter().any(|o| o.name == "user-people"));
+    }
+
+    /// A config `{next:…}` over a detected range says so plainly, with no
+    /// quoted placeholder text and no `0/0` ratio.
+    #[test]
+    fn a_config_range_over_a_detected_range_is_described_plainly() {
+        let s = argus_sample();
+        let d = crate::detect::infer::detect(&schema(), &s);
+        let o = overrides("[[profile]]\nname = \"user-people\"\n[profile.defaults]\nuidNumber = \"{next:2000-2999}\"\n");
+        let m = crate::detect::merge::merge(&schema(), &d.profiles, &o);
+        let t = render(
+            &m.profiles,
+            &m.provenance,
+            &m.disabled,
+            "# h",
+            &BTreeMap::new(),
+        );
+        assert!(
+            t.contains("uidNumber = \"{next:2000-2999}\"  # config (overrides a detected uidNumber range)\n"),
+            "{t}"
+        );
+        assert!(!t.contains("0/0"), "{t}");
     }
 
     #[test]
