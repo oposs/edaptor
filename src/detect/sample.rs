@@ -77,6 +77,19 @@ fn params(
 
 const NO_BUDGET: &str = "the detection budget was used up before the container search";
 
+/// The base is absent or unreadable for this bind (anonymous or ACL-restricted
+/// view, spec §4): LDAP result 32 or 50. The worker's messages always carry
+/// `(LDAP <rc>)` (see `result_code_message`), which is what this matches.
+fn nothing_visible(msg: &str) -> bool {
+    msg.contains("(LDAP 32)") || msg.contains("(LDAP 50)")
+}
+
+fn invisible(mut out: Sample, msg: &str) -> Sample {
+    out.notes
+        .push(format!("nothing visible under the base ({msg})"));
+    out
+}
+
 pub fn sample(s: &mut dyn Searcher, base_dn: &str, budget: &Budget) -> Result<Sample, String> {
     let mut out = Sample {
         base_dn: base_dn.to_string(),
@@ -84,7 +97,7 @@ pub fn sample(s: &mut dyn Searcher, base_dn: &str, budget: &Budget) -> Result<Sa
     };
     let t = budget.remaining().ok_or(NO_BUDGET)?;
     let one = vec!["1.1".to_string()];
-    let (found, partial) = match s.search(&params(
+    let first = s.search(&params(
         base_dn,
         SearchScope::Subtree,
         HAS_SUBORDINATES_FILTER,
@@ -92,14 +105,16 @@ pub fn sample(s: &mut dyn Searcher, base_dn: &str, budget: &Budget) -> Result<Sa
         None,
         false,
         t,
-    )) {
+    ));
+    let (found, partial) = match first {
         Ok(r) => r,
+        Err(e) if nothing_visible(&e) => return Ok(invisible(out, &e)),
         Err(e) => {
             out.notes.push(format!(
                 "container search {HAS_SUBORDINATES_FILTER} failed ({e}); used the objectClass fallback"
             ));
             let t = budget.remaining().ok_or(NO_BUDGET)?;
-            s.search(&params(
+            match s.search(&params(
                 base_dn,
                 SearchScope::Subtree,
                 FALLBACK_FILTER,
@@ -107,8 +122,11 @@ pub fn sample(s: &mut dyn Searcher, base_dn: &str, budget: &Budget) -> Result<Sa
                 None,
                 false,
                 t,
-            ))
-            .map_err(|e| format!("container search failed: {e}"))?
+            )) {
+                Ok(r) => r,
+                Err(e) if nothing_visible(&e) => return Ok(invisible(out, &e)),
+                Err(e) => return Err(format!("container search failed: {e}")),
+            }
         }
     };
     if partial {
@@ -432,6 +450,34 @@ mod tests {
         let s = sample(&mut f, "dc=x", &budget()).unwrap();
         assert_eq!(s.containers.len(), 1);
         assert!(s.notes.iter().any(|n| n.contains("fallback")));
+    }
+
+    #[test]
+    fn no_such_object_or_no_access_on_the_base_is_an_empty_sample() {
+        for msg in [
+            "searching dc=x: No such object (LDAP 32)",
+            "searching dc=x: Insufficient access rights (LDAP 50)",
+        ] {
+            let mut f = fake(move |_| Err(msg.to_string()));
+            let s = sample(&mut f, "dc=x", &budget()).expect("nothing visible is not an error");
+            assert!(s.containers.is_empty());
+            assert!(
+                s.notes.iter().any(|n| n.contains("nothing visible")),
+                "{msg}"
+            );
+        }
+        // The fallback filter hitting the same wall is the same outcome.
+        let mut f = fake(|q| match q.filter.as_str() {
+            HAS_SUBORDINATES_FILTER => Err("unwilling to perform".into()),
+            _ => Err("No such object (LDAP 32)".into()),
+        });
+        assert!(sample(&mut f, "dc=x", &budget())
+            .unwrap()
+            .containers
+            .is_empty());
+        // Anything else stays an error.
+        let mut f = fake(|_| Err("Can't contact LDAP server".into()));
+        assert!(sample(&mut f, "dc=x", &budget()).is_err());
     }
 
     #[test]
