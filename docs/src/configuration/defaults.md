@@ -66,15 +66,24 @@ displayName = "{givenName} {sn}"
 
 ## Auto-number
 
-The expression `"{next:MIN-MAX}"` allocates the **next free value in the inclusive
-range `[MIN, MAX]`** across the whole directory:
+The expression `"{next:MIN-MAX}"` allocates **one above the highest value in the
+inclusive range `[MIN, MAX]`** across the whole directory:
 
 ```toml
 uidNumber = "{next:10000-60000}"
 ```
 
-To compute the next free value, eDAPtor scans the directory for existing values
-of the attribute and picks the lowest unused number in range.
+To compute it, eDAPtor scans the directory for existing values of the attribute
+and takes the highest one inside `[MIN, MAX]`, plus one; with no value in range it
+takes `MIN`. Values outside the range are ignored. Gaps below the highest value are
+**not** reused: a number freed by deleting an entry is handed out again only if it
+was the highest in range. Once
+`MAX` is in use, the allocation fails with `number pool MIN-MAX is exhausted`.
+
+The scan covers every entry that carries the attribute, whatever its object class.
+A `gidNumber` range therefore also sees the `gidNumber` of user accounts, not only
+that of groups. Give each kind of number its own range, e.g. user-private groups
+in `5000-5999` and shared groups in `8000-9999`.
 
 ### Allocating during create (Enter to allocate)
 
