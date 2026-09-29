@@ -14,6 +14,8 @@ All notable changes to eDAPtor are documented here. The format follows
 
 ### Fixed
 
+- **`edaptor tui-create <profile>` now accepts detected profile names such as `user-people`,** and no longer opens the wrong form when detected profiles precede the configured ones. The profile chooser hides detected organizational-unit and domain profiles unless the container is exactly theirs.
+
 - **The manual now describes `{next:MIN-MAX}` correctly.** It said the lowest
   unused number is picked; eDAPtor actually takes one above the highest number in
   range and never refills gaps. The page also notes that a `gidNumber` range sees

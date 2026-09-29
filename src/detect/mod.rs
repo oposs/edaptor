@@ -58,6 +58,17 @@ pub const INFRASTRUCTURE_CLASSES: &[&str] = &[
     "pwdPolicy",
 ];
 
+/// A detected-only profile of an infrastructure class (OU, domain, ...). Such a
+/// profile is hidden from the all-profiles chooser outside its container.
+pub fn is_infrastructure(p: &crate::config::EntryProfile) -> bool {
+    p.scope == crate::config::ContainerScope::Exact
+        && p.object_classes.first().is_some_and(|oc| {
+            INFRASTRUCTURE_CLASSES
+                .iter()
+                .any(|i| i.eq_ignore_ascii_case(oc))
+        })
+}
+
 /// `matched` is more than half of `of` (and `of` is not zero).
 pub fn more_than_half(matched: usize, of: usize) -> bool {
     of > 0 && matched * 2 > of

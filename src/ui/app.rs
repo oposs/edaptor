@@ -397,12 +397,15 @@ pub(crate) fn dispatch(prog: &mut Program, cmd: Command, state: &Shared) {
                 open_create(state, profile_idx, &container);
             }
             Some(StartupAction::ChooseThenCreate { container }) => {
-                let names: Vec<String> = state
-                    .borrow()
-                    .profiles
-                    .iter()
-                    .map(|p| p.name.clone())
-                    .collect();
+                let (idxs, names): (Vec<usize>, Vec<String>) = {
+                    let st = state.borrow();
+                    let idxs = crate::workflows::create::chooser_profiles(
+                        &st.profiles,
+                        container.as_deref(),
+                    );
+                    let names = idxs.iter().map(|i| st.profiles[*i].name.clone()).collect();
+                    (idxs, names)
+                };
                 if names.is_empty() {
                     state.borrow_mut().status = "No profiles configured.".into();
                     return;
@@ -410,7 +413,7 @@ pub(crate) fn dispatch(prog: &mut Program, cmd: Command, state: &Shared) {
                 let (view, focus) = crate::ui::dialog::profile_chooser::build(names, state.clone());
                 if prog.exec_view_focused(view, focus) == Command::OK {
                     let chosen = state.borrow_mut().chosen_profile.take();
-                    if let Some(idx) = chosen {
+                    if let Some(idx) = chosen.and_then(|rel| idxs.get(rel).copied()) {
                         let dn = container
                             .clone()
                             .unwrap_or_else(|| state.borrow().profiles[idx].search_base.clone());

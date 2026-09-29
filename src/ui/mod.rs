@@ -78,15 +78,140 @@ use tvision_rs::{self as tv, CrosstermBackend};
 
 use crate::config::Config;
 
+/// What `edaptor tui-create` asked for, before profiles exist (names are
+/// resolved against the merged profiles after `bootstrap`).
+#[derive(Debug, Clone)]
+pub enum StartupRequest {
+    Create {
+        profile: String,
+        container: Option<String>,
+    },
+    Choose {
+        container: Option<String>,
+    },
+}
+
+/// Resolve a startup request against the merged profiles (case-insensitive).
+pub fn resolve_startup(
+    profiles: &[crate::config::EntryProfile],
+    req: StartupRequest,
+) -> Result<StartupAction, String> {
+    match req {
+        StartupRequest::Choose { container } => Ok(StartupAction::ChooseThenCreate { container }),
+        StartupRequest::Create { profile, container } => {
+            let idx = crate::workflows::create::resolve_profile_arg(profiles, Some(&profile))?
+                .expect("Some(name) resolves to Some(idx) or an error");
+            let dn = container.unwrap_or_else(|| profiles[idx].search_base.clone());
+            if dn.trim().is_empty() {
+                return Err(format!(
+                    "profile '{}' has no search_base; pass --container",
+                    profiles[idx].name
+                ));
+            }
+            Ok(StartupAction::Create {
+                profile_idx: idx,
+                container: dn,
+            })
+        }
+    }
+}
+
 /// Spawn the worker, fetch schema + structure, then run the TUI. `startup` runs a
 /// one-shot action (e.g. open a create form) once the loop starts; `None` = normal browse.
-pub fn run(config: Config, password: String, startup: Option<StartupAction>) -> Result<()> {
+pub fn run(config: Config, password: String, startup: Option<StartupRequest>) -> Result<()> {
     let mut booted = state::bootstrap(config, password)?;
-    booted.pending_startup = startup;
+    // Resolved before the screen takeover, so an unknown name is reported on the terminal.
+    booted.pending_startup = startup
+        .map(|r| resolve_startup(&booted.profiles, r))
+        .transpose()
+        .map_err(|e| anyhow::anyhow!(e))?;
     let state: Shared = Rc::new(RefCell::new(booted));
     let backend = Box::new(CrosstermBackend::new()?);
     let mut program = app::build_program(backend, state.clone());
     let dispatch_state = state.clone();
     program.run_app(move |prog, cmd| app::dispatch(prog, cmd, &dispatch_state));
     Ok(())
+}
+
+#[cfg(test)]
+mod startup_tests {
+    use super::*;
+    use crate::config::EntryProfile;
+
+    fn profiles() -> Vec<EntryProfile> {
+        vec![
+            EntryProfile {
+                name: "user".into(),
+                search_base: "ou=people,dc=example,dc=org".into(),
+                ..Default::default()
+            },
+            EntryProfile {
+                name: "user-people".into(),
+                search_base: "ou=people,dc=example,dc=org".into(),
+                ..Default::default()
+            },
+            EntryProfile {
+                name: "NoBase".into(),
+                ..Default::default()
+            },
+        ]
+    }
+
+    #[test]
+    fn create_resolves_a_merged_name_to_its_index() {
+        let req = StartupRequest::Create {
+            profile: "USER-PEOPLE".into(),
+            container: None,
+        };
+        match resolve_startup(&profiles(), req).unwrap() {
+            StartupAction::Create {
+                profile_idx,
+                container,
+            } => {
+                assert_eq!(profile_idx, 1);
+                assert_eq!(container, "ou=people,dc=example,dc=org");
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn container_override_wins() {
+        let req = StartupRequest::Create {
+            profile: "user".into(),
+            container: Some("ou=x,dc=example,dc=org".into()),
+        };
+        let a = resolve_startup(&profiles(), req).unwrap();
+        assert!(
+            matches!(a, StartupAction::Create { container, .. } if container == "ou=x,dc=example,dc=org")
+        );
+    }
+
+    #[test]
+    fn unknown_profile_lists_valid_names() {
+        let req = StartupRequest::Create {
+            profile: "Admins".into(),
+            container: None,
+        };
+        let e = resolve_startup(&profiles(), req).unwrap_err();
+        assert!(e.contains("Admins") && e.contains("user-people"), "{e}");
+    }
+
+    #[test]
+    fn empty_search_base_without_container_errors() {
+        let req = StartupRequest::Create {
+            profile: "nobase".into(),
+            container: None,
+        };
+        let e = resolve_startup(&profiles(), req).unwrap_err();
+        assert!(e.contains("search_base"));
+    }
+
+    #[test]
+    fn choose_passes_through() {
+        assert!(matches!(
+            resolve_startup(&profiles(), StartupRequest::Choose { container: None }).unwrap(),
+            StartupAction::ChooseThenCreate { container: None }
+        ));
+    }
 }

@@ -141,17 +141,6 @@ fn is_samba_account(object_classes: &[String]) -> bool {
         .any(|oc| oc.eq_ignore_ascii_case("sambaSamAccount"))
 }
 
-/// Set a synced Unix + Samba password on `target_dn` (spec §9/§10).
-///
-/// TLS-gated: refuses with an `Err` (before any network I/O) when the server
-/// connection is not encrypted (`!samba::password::is_secure`). Then binds,
-/// reads the target's `objectClass` to detect a `sambaSamAccount`, builds the
-/// synced mod-set (`userPassword` always; `sambaNTPassword` + `sambaPwdLastSet`
-/// for samba accounts), applies it in one atomic MODIFY, and re-reads the entry
-/// to confirm (no silent success). Returns a human confirmation string.
-///
-/// Factored out of `main` (no `rpassword`, no terminal) so the live test can drive
-/// it with a known password.
 /// Search `base` (subtree/base scope per `scope`) for `filter`, returning the
 /// matching entries with their `objectClass` values. The shared LDAP round-trip
 /// behind both passwd-target resolution branches.
@@ -226,6 +215,17 @@ fn resolve_passwd_target(
     }
 }
 
+/// Set a synced Unix + Samba password on `target_dn` (spec §9/§10).
+///
+/// TLS-gated: refuses with an `Err` (before any network I/O) when the server
+/// connection is not encrypted (`!samba::password::is_secure`). Then binds,
+/// reads the target's `objectClass` to detect a `sambaSamAccount`, builds the
+/// synced mod-set (`userPassword` always; `sambaNTPassword` + `sambaPwdLastSet`
+/// for samba accounts), applies it in one atomic MODIFY, and re-reads the entry
+/// to confirm (no silent success). Returns a human confirmation string.
+///
+/// Factored out of `main` (no `rpassword`, no terminal) so the live test can drive
+/// it with a known password.
 pub fn run_passwd(
     config: Config,
     bind_password: String,

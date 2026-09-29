@@ -358,6 +358,21 @@ pub fn resolve_create_container(current_branch: &str, search_base: &str) -> Crea
     CreateContainer::Unambiguous(cur.to_string())
 }
 
+/// Indices of the profiles the all-profiles chooser (`tui-create` without a
+/// profile) offers: everything except detected infrastructure profiles, which
+/// appear only when `container` is exactly theirs. Pure.
+pub fn chooser_profiles(profiles: &[EntryProfile], container: Option<&str>) -> Vec<usize> {
+    profiles
+        .iter()
+        .enumerate()
+        .filter(|(_, p)| {
+            !crate::detect::is_infrastructure(p)
+                || container.is_some_and(|c| crate::detect::dn_eq(c, &p.search_base))
+        })
+        .map(|(i, _)| i)
+        .collect()
+}
+
 /// Resolve the optional `<profile>` argument of `tui-create` against the configured
 /// profiles. `Some(name)` → the matching index (case-insensitive), or an error listing
 /// the valid names when unknown. `None` → `Ok(None)` (the caller shows the chooser).
@@ -377,7 +392,7 @@ pub fn resolve_profile_arg(
     }
     let valid: Vec<&str> = profiles.iter().map(|p| p.name.as_str()).collect();
     Err(format!(
-        "unknown profile '{name}'. Configured profiles: {}",
+        "unknown profile '{name}'. Available profiles: {}",
         if valid.is_empty() {
             "(none)".to_string()
         } else {
@@ -1161,6 +1176,27 @@ mod tests {
         let ps = vec![named("Users"), named("Groups")];
         assert_eq!(resolve_profile_arg(&ps, Some("users")), Ok(Some(0)));
         assert_eq!(resolve_profile_arg(&ps, Some("GROUPS")), Ok(Some(1)));
+    }
+
+    #[test]
+    fn chooser_hides_detected_infrastructure_outside_its_container() {
+        let mut ou = prof("dc=example,dc=org");
+        ou.name = "organizationalunit-example".into();
+        ou.object_classes = vec!["organizationalUnit".into()];
+        ou.scope = crate::config::ContainerScope::Exact;
+        let mut cfg_ou = ou.clone();
+        cfg_ou.scope = crate::config::ContainerScope::Boundary;
+        let user = prof("ou=people,dc=example,dc=org");
+        let ps = vec![ou, cfg_ou, user];
+        assert_eq!(chooser_profiles(&ps, None), vec![1, 2]);
+        assert_eq!(
+            chooser_profiles(&ps, Some("ou=people,dc=example,dc=org")),
+            vec![1, 2]
+        );
+        assert_eq!(
+            chooser_profiles(&ps, Some("DC=example,dc=org")),
+            vec![0, 1, 2]
+        );
     }
 
     #[test]
