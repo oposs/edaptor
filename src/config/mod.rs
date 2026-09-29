@@ -526,8 +526,13 @@ impl Config {
     pub fn load(path: &Path) -> Result<Config> {
         let text = std::fs::read_to_string(path)
             .with_context(|| format!("reading config {}", path.display()))?;
+        Self::from_toml_str(&text, &path.display().to_string())
+    }
+
+    /// Parse and check config text; `origin` names it in a parse error.
+    pub fn from_toml_str(text: &str, origin: &str) -> Result<Config> {
         let config: Config =
-            toml::from_str(&text).with_context(|| format!("parsing config {}", path.display()))?;
+            toml::from_str(text).with_context(|| format!("parsing config {origin}"))?;
         validate_companions(&config.overrides)?;
         Ok(config)
     }
@@ -1386,12 +1391,7 @@ mod meta_tests {
     }
 
     fn parse_config_str(toml: &str) -> anyhow::Result<Config> {
-        let dir = std::env::temp_dir();
-        let path = dir.join(format!("edaptor-cfg-test-{}.toml", toml.len()));
-        std::fs::write(&path, toml)?;
-        let cfg = Config::load(&path);
-        let _ = std::fs::remove_file(&path);
-        cfg
+        Config::from_toml_str(toml, "test")
     }
 
     #[test]
