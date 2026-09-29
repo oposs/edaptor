@@ -15,7 +15,7 @@ All notable changes to eDAPtor are documented here. The format follows
 
 ### Changed
 
-- **Detection is on for existing configs too and adds to hand-written profiles.** Creating a user may now also write a second entry, its user-private group, because a `[[profile]]` matching a detected profile receives the detected defaults, widgets and companion it does not set itself. Remove one part with `suppress = ["companion"]`, a whole profile with `enabled = false`, or all detection with `[detect] enabled = false`.
+- **Detection is on for existing configs too and adds to hand-written profiles.** Creating a user may now also write a second entry, its user-private group, because a `[[profile]]` matching a detected profile receives the detected defaults, widgets and companion it does not set itself. Remove one part with `suppress = ["companion"]`, a whole profile with `enabled = false`, or all detection with `[detect] enabled = false`; `edaptor profiles` shows what was added.
 - **The profile chooser of `edaptor tui-create` hides detected organizational-unit and domain profiles** unless `--container` is exactly their container.
 - **`edaptor passwd <user>` prints `detecting profiles…` on stderr and searches only profiles with a password field or a password-bearing object class.** A user whose private group has the same name no longer fails with "matches multiple entries".
 - **Any profile that includes `sambaSamAccount` now looks up the Samba domain,** so the `sambaSID` field generates the SID without `[samba] domain_sid`; it stays off with `[detect] enabled = false`.

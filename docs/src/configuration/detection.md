@@ -51,7 +51,7 @@ with them.
   (for example two users sharing group 100).
 
 These values never replace anything from your config or from detection.
-`edaptor profiles` marks them `# assumed: ...`; `suppress` removes them like any
+`edaptor profiles` marks them `# assumed: <reason>`; `suppress` removes them like any
 detected part, and `[detect] enabled = false` turns them off.
 
 ### Limits
@@ -113,7 +113,7 @@ assumed.
 
 ## Startup messages
 
-Startup prints `detecting profiles...` and, for anything worth knowing, lines
+Startup prints `detecting profiles…` and, for anything worth knowing, lines
 starting with `warning:` on stderr: a container that could not be read, a
 sample cut short by the limits, or a `[[profile]]` block that matches nothing.
 With detection enabled, a profile that includes `sambaSamAccount` also triggers
@@ -143,6 +143,6 @@ uidNumber = "{next:10000-60000}"  # detected at dump time: in use 10000-10599; n
 
 ## `edaptor passwd`
 
-`edaptor passwd <user>` prints `detecting profiles...` on stderr on every run.
+`edaptor passwd <user>` prints `detecting profiles…` on stderr on every run.
 It searches only profiles that have a password widget or a password-bearing
 object class, so a private group with the user's name is never a second match.
