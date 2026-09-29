@@ -218,7 +218,10 @@ fn resolve_passwd_target(
 /// `edaptor profiles` output: TOML for stdout, notes for stderr.
 pub struct ProfilesReport {
     pub toml: String,
+    /// Sampling and detection notes (`note:` on stderr).
     pub notes: Vec<String>,
+    /// Config-caused messages (`warning:` on stderr).
+    pub warnings: Vec<String>,
 }
 
 /// Load (and detect) the profiles, run the number scan for detected ranges,
@@ -271,11 +274,12 @@ pub fn run_profiles(
     let header = dump::header_line(
         inputs.detect_enabled,
         loaded.containers_sampled,
-        loaded.notes.len(),
+        loaded.notes.len() + loaded.warnings.len(),
     );
     Ok(ProfilesReport {
         toml: dump::render(&profiles, &provenance, &disabled, &header, &ranges),
         notes: loaded.notes,
+        warnings: loaded.warnings,
     })
 }
 

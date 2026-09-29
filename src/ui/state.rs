@@ -1721,9 +1721,9 @@ pub(crate) fn bootstrap(config: Config, password: String) -> Result<UiState> {
     // Schema first: detection needs it, and every derived table below is
     // computed once from the merged profiles.
     let loaded = crate::detect::load::load_profiles(&worker, &inputs)?;
-    // Startup warnings go to stderr while the terminal is still ours.
-    for note in &loaded.notes {
-        eprintln!("warning: {note}");
+    // Startup messages go to stderr while the terminal is still ours.
+    for line in loaded.startup_lines() {
+        eprintln!("{line}");
     }
     let startup_notice = loaded.status_line();
     let crate::detect::load::LoadedProfiles {

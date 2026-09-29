@@ -109,6 +109,9 @@ fn main() -> Result<()> {
         }
         Some(Command::Profiles { detected_only }) => {
             let report = edaptor::run_profiles(config, password, detected_only)?;
+            for w in &report.warnings {
+                eprintln!("warning: {w}");
+            }
             for n in &report.notes {
                 eprintln!("note: {n}");
             }

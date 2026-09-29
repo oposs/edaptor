@@ -45,17 +45,37 @@ pub struct LoadedProfiles {
     pub disabled: Vec<String>,
     pub detected: Vec<DetectedProfile>,
     pub containers_sampled: usize,
-    /// Startup warnings (sampling, detection, merge): shown before the TUI starts.
+    /// Sampling and detection notes: routine, printed as `note:`.
     pub notes: Vec<String>,
-    /// Detected parts dropped by validation (also in `notes`).
+    /// Config-caused messages (merge, `suppress`, dropped parts): `warning:`.
+    pub warnings: Vec<String>,
+    /// Detected parts dropped by validation (also in `warnings`).
     pub dropped: Vec<String>,
     /// Config widgets disabled because an incomplete detection missed their
-    /// candidate profile (also in `notes`).
+    /// candidate profile (also in `warnings`).
     pub config_dropped: Vec<String>,
     pub detection_error: Option<String>,
 }
 
 impl LoadedProfiles {
+    /// What the TUI prints on stderr before it starts: every warning, then one
+    /// line summing up the routine notes (`edaptor profiles` lists them).
+    pub fn startup_lines(&self) -> Vec<String> {
+        let mut out: Vec<String> = self
+            .warnings
+            .iter()
+            .map(|w| format!("warning: {w}"))
+            .collect();
+        match self.notes.len() {
+            0 => {}
+            1 => out.push("note: 1 detection note; run `edaptor profiles` to see it".into()),
+            n => out.push(format!(
+                "note: {n} detection notes; run `edaptor profiles` to see them"
+            )),
+        }
+        out
+    }
+
     /// The TUI status line after startup, when detection has something to say.
     pub fn status_line(&self) -> Option<String> {
         let disabled = match self.config_dropped.len() {
@@ -102,22 +122,23 @@ pub fn assemble(
             detected: Vec::new(),
             containers_sampled: 0,
             notes: Vec::new(),
+            warnings: Vec::new(),
             dropped: Vec::new(),
             config_dropped: Vec::new(),
             detection_error: None,
         });
     };
-    let (detected, containers_sampled, mut notes, detection_error, group_ou, incomplete) =
-        match sampled {
-            Ok(s) => {
-                let d = crate::detect::infer::detect(&schema, &s);
-                let mut notes = s.notes;
-                notes.extend(d.notes);
-                let n = s.containers.len();
-                (d.profiles, n, notes, None, s.group_ou, s.incomplete)
-            }
-            Err(e) => (Vec::new(), 0, Vec::new(), Some(e), None, false),
-        };
+    let (detected, containers_sampled, notes, detection_error, group_ou, incomplete) = match sampled
+    {
+        Ok(s) => {
+            let d = crate::detect::infer::detect(&schema, &s);
+            let mut notes = s.notes;
+            notes.extend(d.notes);
+            let n = s.containers.len();
+            (d.profiles, n, notes, None, s.group_ou, s.incomplete)
+        }
+        Err(e) => (Vec::new(), 0, Vec::new(), Some(e), None, false),
+    };
     // Rule D runs whenever detection is enabled, also after a failed sample.
     let mut merged = merge_with_assumptions(
         &schema,
@@ -132,7 +153,6 @@ pub fn assemble(
     };
     validate(&mut merged, why.as_deref()).map_err(|e| anyhow!("profile config error: {e}"))?;
     let widgets = widgets_of(&merged.profiles)?;
-    notes.extend(merged.warnings);
     Ok(LoadedProfiles {
         schema,
         profiles: merged.profiles,
@@ -142,6 +162,7 @@ pub fn assemble(
         detected,
         containers_sampled,
         notes,
+        warnings: merged.warnings,
         dropped: merged.dropped,
         config_dropped: merged.config_dropped,
         detection_error,
@@ -290,6 +311,28 @@ mod tests {
                 "Profile detection incomplete; 1 config widget disabled, see the startup warnings"
             )
         );
+    }
+
+    /// Routine sampling notes are `note:` (one summary line in the TUI start);
+    /// config-caused messages stay `warning:`.
+    #[test]
+    fn sampling_notes_and_config_warnings_are_kept_apart() {
+        let ghost = "[[profile]]\nname = \"ghost\"\nsearch_base = \"ou=nowhere,dc=example,dc=org\"\nobject_classes = [\"inetOrgPerson\"]\nsuppress = [\"companion\"]\n";
+        let sample = Sample {
+            notes: vec!["nothing visible under the base (LDAP 32)".into()],
+            ..Default::default()
+        };
+        let l = assemble(schema(), &inputs(ghost, true), Some(Ok(sample))).unwrap();
+        assert_eq!(l.notes, vec!["nothing visible under the base (LDAP 32)"]);
+        assert!(!l.warnings.is_empty(), "the bad suppress is config-caused");
+        let lines = l.startup_lines();
+        assert_eq!(
+            lines.last().map(String::as_str),
+            Some("note: 1 detection note; run `edaptor profiles` to see it")
+        );
+        assert!(lines[..lines.len() - 1]
+            .iter()
+            .all(|l| l.starts_with("warning: ")));
     }
 
     #[test]

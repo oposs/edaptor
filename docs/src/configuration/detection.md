@@ -124,9 +124,14 @@ assumed.
 
 ## Startup messages
 
-Startup prints `detecting profiles…` and, for anything worth knowing, lines
-starting with `warning:` on stderr: a container that could not be read, a
-sample cut short by the limits, or a `[[profile]]` block that matches nothing.
+Startup prints `detecting profiles…` on stderr, then a `warning:` line for each
+problem in your config as detection sees it: a `[[profile]]` block that matches
+nothing, a `suppress` path that matches nothing, a part dropped because it does
+not validate. Notes about the sample itself (a container that could not be
+read, a sample cut short by the limits, nothing visible to an anonymous bind)
+are routine; the TUI sums them up in one line, ``note: 2 detection notes; run
+`edaptor profiles` to see them``, and `edaptor profiles` prints each as a
+`note:` line.
 When detection failed, or detected parts were dropped, the TUI also says so in
 the status line; the message stays until the first key press or mouse click.
 With detection enabled, a profile that includes `sambaSamAccount` also triggers
@@ -139,8 +144,8 @@ Prints the profiles in effect as TOML, ready to paste into a config. Each value
 carries a comment saying where it came from (`# detected: 12/12`, `# config`,
 `# config (detected "/bin/bash", 11/12)`, `# config (overrides a detected
 uidNumber range)`); suppressed parts and exceptions are
-listed as comments. `--detected-only` shows detection before the merge. Notes
-and warnings go to stderr.
+listed as comments. `--detected-only` shows detection before the merge.
+`warning:` and `note:` lines go to stderr.
 
 An excerpt from the demo server:
 
