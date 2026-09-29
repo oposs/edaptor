@@ -10,6 +10,8 @@ All notable changes to eDAPtor are documented here. The format follows
 
 ### Changed
 
+- **Profile names in widget `candidate` settings are matched without regard to case.** `candidate = "PosixGroup"` now finds the profile `posixgroup` instead of failing with `unknown candidate profile`.
+
 ### Fixed
 
 - **The manual now describes `{next:MIN-MAX}` correctly.** It said the lowest

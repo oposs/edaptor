@@ -88,7 +88,7 @@ fn resolve_candidate(
     match c {
         CandidateRef::Profile(name) => profiles
             .iter()
-            .find(|p| &p.name == name)
+            .find(|p| p.name.eq_ignore_ascii_case(name))
             .map(crate::config::relation::scope_of)
             .ok_or_else(|| format!("unknown candidate profile \"{name}\"")),
         CandidateRef::Inline(s) => Ok(crate::config::relation::CandidateScope {
@@ -372,6 +372,23 @@ impl ChoiceWidget {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn candidate_profile_names_are_case_insensitive() {
+        let mut target = crate::workflows::test_fixtures::bare_profile("posixgroup");
+        target.search_base = "ou=g,dc=x".into();
+        let mut owner = crate::workflows::test_fixtures::bare_profile("user");
+        owner.object_classes = vec!["posixAccount".into()];
+        owner.widgets.insert(
+            "gidNumber".into(),
+            crate::config::WidgetSpecCfg::Lookup {
+                candidate: crate::config::CandidateRef::Profile("PosixGroup".into()),
+                store: "gidNumber".into(),
+                label: None,
+            },
+        );
+        assert!(resolve_widgets(&[owner, target]).is_ok());
+    }
+
     use super::*;
     use crate::config::{CandidateRef, ChoiceOption, EntryProfile, WidgetSpecCfg};
 

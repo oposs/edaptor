@@ -270,6 +270,16 @@ pub(crate) fn demo_sample() -> Sample {
     }
 }
 
+/// Parse a TOML snippet of `[[profile]]` blocks into override blocks.
+pub(crate) fn overrides(toml: &str) -> Vec<crate::config::ProfileOverride> {
+    #[derive(serde::Deserialize)]
+    struct W {
+        #[serde(default)]
+        profile: Vec<crate::config::ProfileOverride>,
+    }
+    toml::from_str::<W>(toml).expect("overrides parse").profile
+}
+
 #[test]
 fn fixture_schema_parses_cleanly() {
     let s = schema();

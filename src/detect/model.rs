@@ -188,6 +188,35 @@ pub struct DetectedProfile {
     pub entries: Vec<SampleEntry>,
 }
 
+impl DetectedProfile {
+    /// This profile as an `EntryProfile` (detected-only: `Exact` scope).
+    pub fn to_entry_profile(&self) -> crate::config::EntryProfile {
+        crate::config::EntryProfile {
+            name: self.name.clone(),
+            object_classes: self.object_classes.value.clone(),
+            rdn_attr: self.rdn_attr.value.clone(),
+            search_base: self.container.clone(),
+            show: self.show.clone(),
+            search_attrs: self.search_attrs.clone(),
+            defaults: crate::config::defaults::ProfileDefaults {
+                entries: self
+                    .defaults
+                    .iter()
+                    .map(|(k, d)| (k.clone(), d.value.clone()))
+                    .collect(),
+            },
+            widgets: self
+                .widgets
+                .iter()
+                .map(|(k, d)| (k.clone(), d.value.clone()))
+                .collect(),
+            label: self.label.clone(),
+            companion: self.companion.as_ref().map(|c| c.value.clone()),
+            scope: crate::config::ContainerScope::Exact,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
