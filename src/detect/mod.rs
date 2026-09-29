@@ -2,6 +2,7 @@
 //! merge the config over them. `infer`, `patterns`, `range`, `merge` and `dump`
 //! are pure; `sample` and `load` talk to the LDAP worker.
 
+pub mod assume;
 #[cfg(test)]
 pub(crate) mod fixtures;
 pub mod infer;

@@ -12,6 +12,8 @@ use crate::schema::SchemaModel;
 pub enum Source {
     Config,
     Detected(Evidence),
+    /// Filled by rule D (§2D); the string says why.
+    Assumed(String),
     ConfigOverDetected {
         detected: String,
         evidence: Evidence,
@@ -375,7 +377,10 @@ fn suppress(p: &mut EntryProfile, prov: &mut Provenance, path: &str) -> Result<(
             }
         },
     };
-    if !matches!(prov.fields.get(&key), Some(Source::Detected(_))) {
+    if !matches!(
+        prov.fields.get(&key),
+        Some(Source::Detected(_) | Source::Assumed(_))
+    ) {
         return Err(nothing(&who, path));
     }
     match key.split_once('.') {
@@ -554,7 +559,7 @@ pub fn validate(m: &mut Merged) -> Result<(), String> {
             }
             if matches!(
                 prov.fields.get(&format!("widget.{attr}")),
-                Some(Source::Detected(_))
+                Some(Source::Detected(_) | Source::Assumed(_))
             ) {
                 drop.push((
                     attr.clone(),
@@ -577,7 +582,10 @@ pub fn validate(m: &mut Merged) -> Result<(), String> {
         if let Some(c) = &p.companion {
             let who = format!("profile '{}' companion", p.name);
             if let Err(e) = crate::config::check_companion(&who, c) {
-                if matches!(prov.fields.get("companion"), Some(Source::Detected(_))) {
+                if matches!(
+                    prov.fields.get("companion"),
+                    Some(Source::Detected(_) | Source::Assumed(_))
+                ) {
                     let note = format!("dropped detected companion: {e}");
                     p.companion = None;
                     prov.fields.remove("companion");
