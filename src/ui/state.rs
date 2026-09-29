@@ -177,6 +177,11 @@ pub struct UiState {
     pub read_only: bool,
     /// Transient status text (e.g. "Saved.").
     pub status: String,
+    /// What startup had to report (a failed profile detection, dropped detected
+    /// parts). Shown while `status` is empty, until the operator's first key or
+    /// mouse event: the automatic first-frame selections clear `status` but must
+    /// not hide this.
+    pub startup_notice: Option<String>,
     /// True when a pane must re-render the form from `edit_form`.
     pub form_needs_render: bool,
     /// One-shot: a freshly-opened create form wants pane-level focus moved to the
@@ -290,6 +295,7 @@ impl UiState {
             search_truncated: false,
             read_only: false,
             status: String::new(),
+            startup_notice: None,
             form_needs_render: false,
             focus_form_request: false,
             guard_target: None,
@@ -859,6 +865,21 @@ impl UiState {
     /// "Saved." (fixed in `c016f2a`).
     pub fn begin_operator_action(&mut self) {
         self.status.clear();
+    }
+
+    /// The status line text: the current `status`, else the startup notice.
+    pub fn status_text(&self) -> &str {
+        if self.status.is_empty() {
+            self.startup_notice.as_deref().unwrap_or("")
+        } else {
+            &self.status
+        }
+    }
+
+    /// The operator pressed a key or used the mouse: the startup notice has been
+    /// seen.
+    pub fn dismiss_startup_notice(&mut self) {
+        self.startup_notice = None;
     }
 
     /// Public wrapper around the private `reread` for the dispatch closure.
@@ -1705,7 +1726,7 @@ pub(crate) fn bootstrap(config: Config, password: String) -> Result<UiState> {
     for note in &loaded.notes {
         eprintln!("warning: {note}");
     }
-    let status = loaded.status_line().unwrap_or_default();
+    let startup_notice = loaded.status_line();
     let crate::detect::load::LoadedProfiles {
         schema,
         profiles,
@@ -1773,7 +1794,8 @@ pub(crate) fn bootstrap(config: Config, password: String) -> Result<UiState> {
         lookup_cache: std::collections::HashMap::new(),
         search_truncated: false,
         read_only: false,
-        status,
+        status: String::new(),
+        startup_notice,
         form_needs_render: false,
         focus_form_request: false,
         guard_target: None,
@@ -3394,6 +3416,31 @@ mod tests {
     /// `status` must not pin the status line forever: switching containers,
     /// typing a find query, or committing a field edit is a new operator action,
     /// so any status left over from a previous one is cleared.
+    /// The startup notice (a failed detection, dropped detected parts) must
+    /// survive the programmatic first-frame selections: the tree's initial
+    /// `request_branch` and the leaf pane's auto-follow are not operator actions.
+    /// Only real input dismisses it.
+    #[test]
+    fn startup_notice_survives_the_automatic_first_selection() {
+        let structure = Structure::build("dc=x", vec![si("dc=x", None), si("ou=p,dc=x", None)]);
+        let schema = SchemaModel::from_raw(&RawSubschema::default());
+        let mut st =
+            UiState::new_for_test(structure, schema, "dc=x".into(), Vec::new(), Vec::new());
+        st.startup_notice = Some("Profile detection failed: timeout".into());
+
+        st.request_branch("ou=p,dc=x".into());
+        st.reconcile_branch();
+        st.reconcile_selection();
+
+        assert_eq!(st.status_text(), "Profile detection failed: timeout");
+        // A status set by a later action takes precedence while it lasts.
+        st.status = "Saved.".into();
+        assert_eq!(st.status_text(), "Saved.");
+        st.status.clear();
+        st.dismiss_startup_notice();
+        assert_eq!(st.status_text(), "");
+    }
+
     #[test]
     fn commit_branch_clears_a_stale_status() {
         let structure = Structure::build("dc=x", vec![si("dc=x", None), si("ou=p,dc=x", None)]);

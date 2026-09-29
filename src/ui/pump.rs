@@ -17,8 +17,12 @@ pub(crate) struct PumpView {
 
 impl PumpView {
     pub(crate) fn new(state: Shared) -> Self {
+        let mut vs = tv::ViewState::new(tv::Rect::new(0, 0, 0, 0));
+        // Pre-process: see every key before the focused view, so the first key
+        // press dismisses the startup notice.
+        vs.options.pre_process = true;
         PumpView {
-            vs: tv::ViewState::new(tv::Rect::new(0, 0, 0, 0)),
+            vs,
             state,
             armed: false,
             fullscreen_applied: false,
@@ -72,6 +76,14 @@ impl View for PumpView {
                 std::time::Duration::from_millis(50),
                 Some(std::time::Duration::from_millis(50)),
             );
+        }
+        // Real operator input (keys, paste, wheel; clicks are caught by the
+        // panes) dismisses the startup notice. Timers and posted commands do not.
+        if matches!(
+            ev,
+            Event::KeyDown(_) | Event::Paste(_) | Event::MouseWheel(_)
+        ) {
+            self.state.borrow_mut().dismiss_startup_notice();
         }
         if matches!(ev, Event::Timer(_)) {
             self.apply_fullscreen_once(ctx);
@@ -183,6 +195,40 @@ mod tests {
             refresh_count, 1,
             "pump must broadcast exactly one REFRESH on a clean branch switch"
         );
+    }
+
+    /// The startup notice survives timer ticks and posted commands (the
+    /// tui-create `STARTUP`), and goes on the first key press. The pump
+    /// pre-processes so it sees keys before the focused view.
+    #[test]
+    fn a_key_press_dismisses_the_startup_notice_a_timer_does_not() {
+        use std::time::Duration;
+        let structure = Structure::build("dc=x", Vec::new());
+        let schema = SchemaModel::from_raw(&crate::ldap::worker::RawSubschema::default());
+        let mut state = crate::ui::state::UiState::new_for_test(
+            structure,
+            schema,
+            "dc=x".into(),
+            Vec::new(),
+            Vec::new(),
+        );
+        state.startup_notice = Some("Profile detection failed: timeout".into());
+        let shared: Shared = Rc::new(RefCell::new(state));
+        let mut pump = PumpView::new(shared.clone());
+        assert!(pump.state().options.pre_process);
+
+        let mut out = VecDeque::new();
+        let mut timers = tv::timer::TimerQueue::new();
+        let mut deferred: Vec<tv::Deferred> = Vec::new();
+        let timer_id = timers.set_timer(0, Duration::from_millis(50), None);
+        let mut ctx = headless(&mut out, &mut timers, &mut deferred);
+        pump.handle_event(&mut Event::Timer(timer_id), &mut ctx);
+        pump.handle_event(&mut Event::Command(crate::ui::STARTUP), &mut ctx);
+        assert!(shared.borrow().startup_notice.is_some());
+
+        let key = tv::KeyEvent::new(tv::Key::Down, tv::KeyModifiers::default());
+        pump.handle_event(&mut Event::KeyDown(key), &mut ctx);
+        assert!(shared.borrow().startup_notice.is_none());
     }
 
     /// The pump posts `Command::FULLSCREEN` exactly once (Off → Desktop); the

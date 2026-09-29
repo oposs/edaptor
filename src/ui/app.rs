@@ -41,7 +41,7 @@ fn init_status_line(r: Rect, state: Shared) -> Option<Box<dyn View>> {
         // it across the `hint_for` call below.
         match state.try_borrow() {
             Ok(st) => {
-                let status = st.status.clone();
+                let status = st.status_text().to_string();
                 drop(st);
                 status_or_hint(&status, ctx)
             }

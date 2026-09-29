@@ -116,6 +116,8 @@ assumed.
 Startup prints `detecting profiles…` and, for anything worth knowing, lines
 starting with `warning:` on stderr: a container that could not be read, a
 sample cut short by the limits, or a `[[profile]]` block that matches nothing.
+When detection failed, or detected parts were dropped, the TUI also says so in
+the status line; the message stays until the first key press or mouse click.
 With detection enabled, a profile that includes `sambaSamAccount` also triggers
 the Samba domain lookup on its own, so `sambaSID` gets its generator without
 `[samba] domain_sid`.

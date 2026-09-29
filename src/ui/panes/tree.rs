@@ -290,6 +290,7 @@ impl View for TreePane {
     }
 
     fn handle_event(&mut self, ev: &mut Event, ctx: &mut Context) {
+        super::dismiss_notice_on_click(&self.state, ev);
         // Only scroll on the wheel when the cursor is over this pane — tvision
         // delivers the wheel non-positionally, so otherwise the outline would grab
         // a wheel meant for a sibling pane. Left unconsumed, it propagates.
