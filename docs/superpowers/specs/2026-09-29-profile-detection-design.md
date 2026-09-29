@@ -26,7 +26,8 @@ connection settings plus **overrides** of what detection got wrong or should not
 starting point.
 
 Non-goals: reading `cn=config` (Part 3), making `base_dn` optional (Part 1), changing the
-tree scan, changing how forms, pickers, create or companions work once a profile exists.
+tree scan, changing how forms, pickers or companions work once a profile exists. The one
+consumer that changes is number allocation, which learns detected ranges (§2C).
 
 ## Decisions (settled in brainstorming)
 
@@ -39,9 +40,17 @@ tree scan, changing how forms, pickers, create or companions work once a profile
   exceptions in the dump.
 - Detected profiles are **named**; a config `[[profile]]` **merges over** the matching
   detected profile. Whole profiles or single detected parts can be suppressed.
-- Detection is **on by default**, also for existing configs. `[detect] enabled = false`
-  restores today's behaviour exactly.
+- Detection is **on by default**, also for existing configs, and it **adds** detected
+  parts (defaults, companion, widgets) to matched hand-written profiles too. This is
+  deliberate: the goal is that users can drop their custom profiles. The dump makes every
+  addition visible; one `suppress` line removes it; `[detect] enabled = false` restores
+  today's behaviour exactly. (Pushback item 7, option a.)
+- Detected profile names **always** carry their container: `<name>-<container RDN
+  value>` (`user-people`, `posixgroup-groups`). Longer, but a name never changes when
+  another container appears. (Pushback item 6, option a.)
 - Number ranges detect both `MIN` and `MAX` (rule C below).
+- **Detection never stops eDAPtor.** A detected part that fails validation is dropped
+  with a note; only the user's own config can cause a load error.
 
 ## 1. Architecture and data flow
 
@@ -75,25 +84,31 @@ tree scan, changing how forms, pickers, create or companions work once a profile
      containers (private groups, `member` targets), targeted searches for exactly the
      sampled keys, e.g. `(&(objectClass=posixGroup)(|(cn=sw)(cn=hwang)…))` under
      `base_dn`, batched at 50 keys per filter.
-   - **Number blocks:** for rule C, one search per numeric attribute
-     (`(uidNumber=*)`, `(gidNumber=*)`) fetching that attribute only, paged. This is the
-     same scan number allocation already does at create time; if it is truncated, the
-     range is marked `uncertain` (allocation still refuses on its own truncated scan).
+   - **Limits:** at most `MAX_CONTAINERS = 100` containers are sampled (in server order;
+     the rest are listed in a note), and the whole sampling step has a budget of
+     `DETECT_BUDGET = 10 s`. On budget exhaustion detection continues with what it has,
+     marked `partial`.
+   - **No number scan at startup.** Rule C needs every value of `uidNumber`/`gidNumber`,
+     which is a full-directory read. It runs at create time instead, inside number
+     allocation (§2C); `edaptor profiles` runs it eagerly so the dump shows the range.
 2. **Detect** (`src/detect/infer.rs` + `src/detect/patterns/*.rs`, pure): input is the
    `SchemaModel` and the `Sample`; output is `Vec<DetectedProfile>`. Every detected value
    carries `Evidence { matched: usize, sampled: usize, exceptions: Vec<Dn>, note:
    Option<String> }`. No LDAP, no UI — testable with fixture data.
 3. **Merge** (`src/detect/merge.rs`, pure): detected profiles + config `[[profile]]`
    blocks → `Vec<EntryProfile>` (the existing type) plus a `Provenance` map used only by
-   the dump. Everything downstream (forms, resolver, pickers, create, companion) is
-   unchanged.
-4. **When it runs:**
-   - **TUI:** after bind and schema load, on the worker, in parallel with the tree scan.
-     Until it finishes, `New` reports `Detecting profiles…` in the status line and
-     pickers fall back as they do today without a profile. When it lands, the merged
-     profiles replace `st.profiles`.
-   - **`edaptor profiles`, `edaptor tui-create`:** synchronous, before any screen
-     takeover, so errors print on the terminal (same rule `tui-create` follows today).
+   the dump. Everything downstream (forms, resolver, pickers, create, companion) keeps
+   consuming `EntryProfile`.
+4. **When it runs: synchronously during startup, before anything is derived from the
+   profiles.** In the TUI that is inside `bootstrap` (`src/ui/state.rs`), after the
+   worker is spawned and before `resolve_widgets`, `label_rules`,
+   `structure_scan_attrs` and the Samba `samba_needed` check. All four are then computed
+   from the merged profiles once, so nothing goes stale, and the tree scan fetches the
+   attributes the detected labels need. `bootstrap` is already blocking, so there is no
+   new async state and no second connection. The same path serves `edaptor profiles`,
+   `edaptor tui-create` and `edaptor passwd` (which resolves a bare user name through
+   the profiles' `search_base`), so errors print on the terminal before any screen
+   takeover. Startup cost is bounded by the limits in step 1.
 
 ## 2. Detection rules
 
@@ -112,10 +127,24 @@ at least one entry becomes a `DetectedProfile`:
 | `show` | `rdn_attr`, then MUST attributes, then MAY attributes present in > half the group ordered by frequency; operational (`NO-USER-MODIFICATION`) and binary-syntax attributes excluded |
 | `search_attrs` | `rdn_attr` plus those of `cn`, `uid`, `sn`, `mail`, `description` present in > half the group |
 | `label` | `{cn} ({uid})` when both are present and differ in > half the group, else `{<rdn_attr>}` |
-| `name` | the pattern's name (`user`, `posixgroup`, `group`) or the structural class lowercased; if two containers yield the same name, **all** of them get `-<container RDN value>` appended (demo: `user-users`, `user-people`) |
+| `name` | `<base>-<container RDN value>`, where `<base>` is the pattern's name (`user`, `posixgroup`, `group`) or the structural class lowercased: `user-people`, `posixgroup-groups`, demo `user-users` + `user-people`. Always suffixed, so names are stable. |
 
 Groups below the 3-entry threshold still become profiles (a create template from one
-example is useful) but no pattern rule (B/C) is applied to them.
+example is useful). Pattern **guards and names** apply regardless of size (a 2-entry
+`posixAccount` group is still `user-…`, and its B5 widgets still apply), but no
+**value-inferring** rule (B1–B3, C) runs on fewer than 3 entries.
+
+**Container scope.** A detected profile applies to **its own container only**
+(DN-equal), not to ancestors or descendants as `profiles_for_container` does for config
+profiles today. Otherwise a profile detected at `base_dn` (e.g. `organizationalunit-…`,
+`sambadomain-…` on the demo) would be offered on every New anywhere in the tree. Config
+profiles keep today's boundary match.
+
+**Order.** Several lookups take the *first* matching profile (`profile_for`,
+`label_rules`, the `_posix_group_`/`_any_` sentinels in `resolver.rs`). The merged list
+is ordered: config-only profiles in file order, then matched and detected profiles by
+**number of object classes, descending**, then by name. So `user-people`
+(with `sambaSamAccount`) is tried before `user-users` (without) for an entry that has it.
 
 ### B. Known patterns
 
@@ -146,7 +175,9 @@ Each pattern has a guard (the classes it needs) and adds values with evidence.
    `[widget.userPassword] kind = "password", samba = true`. The Samba-domain lookup at
    startup must run when a **merged** profile carries either — this also fixes the
    existing gap where the built-in `sambaSID` widget alone never triggers the lookup.
-5. **Picker targets.** `posixGroup.memberUid` → picker over the posix-user profile,
+5. **Picker targets.** "The posix-user profile" is the detected `posixAccount` profile
+   with the most sampled entries (ties: name order); same for "the posix-group profile".
+   `posixGroup.memberUid` → picker over the posix-user profile,
    `store = "uid"`. `groupOfNames.member` / `groupOfUniqueNames.uniqueMember` → picker
    over the profile whose container holds the majority of sampled member DNs.
    `posixAccount.gidNumber` → `lookup` over the posix-group profile, `store =
@@ -154,18 +185,36 @@ Each pattern has a guard (the classes it needs) and adds values with evidence.
 
 ### C. Number ranges
 
+Rule C runs **at create time, inside number allocation**, not at startup (it needs every
+value). A detected profile gets the default `uidNumber`/`gidNumber` =
+`DefaultValue::DetectedRange { space }` instead of a fixed `{next:MIN-MAX}`. When a
+create form opens, the allocation step scans the space's attributes (DN, `objectClass`,
+`cn`, `uidNumber`, `gidNumber`) under `base_dn`, computes the blocks with the pure rule
+below, and allocates `max(in use in block) + 1`. A truncated scan refuses exactly as
+today. `edaptor profiles` runs the same scan and prints the resulting `{next:MIN-MAX}`.
+A `{next:…}` in the config replaces the detected range as usual. (The allocation search
+itself is not paged today, `src/workflows/alloc_flow.rs:57-64`; this spec does not
+change that.)
+
 For each profile carrying `uidNumber` (posix users) or `gidNumber` (posix groups that
 are **not** private groups):
 
 - **Number space.** When rule B2 applied, `uidNumber` and all `gidNumber` values form
-  **one** space (they must not collide); otherwise each attribute is its own space.
-  Private groups are excluded from the shared-group profile's values.
+  **one** space (they must not collide); otherwise each attribute is its own space, and
+  a `posixAccount`'s `gidNumber` (a reference, not an allocation) is not counted.
+- **Private and shared groups in one profile.** On argus both live in `ou=groups` with
+  the same structural class, so they form one `posixgroup-groups` profile. That profile
+  is used to create **shared** groups (private groups come from the companion), so its
+  B1 defaults and its rule-C block are computed from the **non-private** groups only; the
+  private groups still count as used numbers in the space.
 - **Blocks.** Sort all values of the space; split into blocks where two neighbours are
   more than 1000 apart.
 - **This profile's block** is the one holding the majority of its values. Values of the
   profile outside it are exceptions (argus: `staff` at 5001 for the shared groups).
 - `MIN` = the block's lowest value rounded down to a multiple of 1000.
-- `MAX` = one below the `MIN` of the next higher block in the space, else `60000`.
+- `MAX` = one below the `MIN` of the next higher block in the space; if there is none,
+  `max(60000, MIN + 9999)` (so blocks at or above 60000 — `nobody` = 65534, idmap or
+  AD-synced ranges — never yield `MIN > MAX`).
 - Emit `"{next:MIN-MAX}"`. If `max(in use) + 1 > MAX`, emit it anyway with the note
   `pool exhausted` (allocation will then refuse with its existing message).
 
@@ -173,14 +222,36 @@ Argus result: users `{next:5000-7999}`, shared groups `{next:8000-60000}`.
 
 ## 3. Merge, suppression, dump
 
+### Override type
+
+A `[[profile]]` block is parsed into a new `ProfileOverride` type in which **every
+field is optional** (`Option<…>`), so "not set" differs from "empty" and a block with
+only `name` + `enabled`/`suppress` parses. Today `object_classes` is required
+(`src/config/mod.rs:195`) and the others default to empty. After the merge the result
+converts to `EntryProfile`. An **unmatched** override becomes a profile only if it has
+`object_classes` (as today); otherwise it is dropped with a warning
+`profile "<name>" matches no detected profile`.
+
 ### Matching
 
 A config `[[profile]]` matches a detected profile when the **names** are equal
-(case-insensitive), **or** both `search_base` (DN-boundary equal) and the structural
-class are equal. The second rule keeps existing configs from producing duplicates (demo
-config `user` ≙ detected `user-people`). The merged profile keeps the **config's name**.
+(case-insensitive), **or** both `search_base` (DN-equal) and the structural class are
+equal. The second rule keeps existing configs from producing duplicates (demo config
+`user` ≙ detected `user-people`). The merged profile keeps the **config's name**.
 An unmatched config profile is added unchanged. An unmatched detected profile is added
 as detected.
+
+**Renames.** When a match renames a detected profile, every detected reference to the
+old name (B2 companion, B5 picker/lookup `candidate`) is rewritten through a rename map
+during the merge. Profile-name comparison becomes **case-insensitive everywhere**,
+including candidate resolution (today exact: `src/config/widget.rs:90`,
+`src/config/resolver.rs:194`).
+
+**Validation.** The merged profiles are validated as today, but per origin: a **detected**
+part that fails (unknown candidate, `{next:…}` with `MIN > MAX`, companion without its
+RDN attribute) is dropped and noted in the dump and status line; only a failing
+**config** part is a load error. `bootstrap`'s `widget config error` therefore can no
+longer be caused by detection.
 
 ### Merge rules
 
@@ -197,7 +268,7 @@ as detected.
 enabled = true            # default; false = today's behaviour, no sampling at all
 
 [[profile]]
-name     = "user"
+name     = "user-people"
 enabled  = false          # drop this (detected or matched) profile entirely
 suppress = ["companion", "defaults.loginShell", "widget.gidNumber"]
 ```
@@ -217,13 +288,13 @@ comment; suppressed parts appear commented out:
 ```toml
 # detection: 4 containers sampled (up to 200 entries each); notes: none
 [[profile]]
-name        = "user"                     # detected: 12 entries in ou=people
+name        = "user-people"              # detected: 12 entries in ou=people
 search_base = "ou=people,dc=cloud,dc=argus-space,dc=ch"
 rdn_attr    = "cn"                       # detected: 12/12
 [profile.defaults]
 uid         = "{cn}"                     # detected: 12/12
 gidNumber   = "{uidNumber}"              # detected: 12/12 have a private group
-uidNumber   = "{next:5000-7999}"         # detected: in use 5000-5016; next block at 8000
+uidNumber   = "{next:5000-7999}"         # detected at dump time: in use 5000-5016; next block at 8000
 loginShell  = "/bin/sh"                  # config (detected "/bin/bash", 11/12)
 # exceptions: cn=legacy,ou=people,… loginShell=/bin/tcsh
 # suppressed by config: widget.gidNumber
@@ -242,6 +313,9 @@ Detection never stops eDAPtor.
 | a container sample truncated | use it; `# partial` note on that profile |
 | a cross-container lookup fails (ACL, timeout) | skip the dependent rule; note says why |
 | number-block scan truncated | emit the range, marked `uncertain` |
+| sampling exceeds `DETECT_BUDGET` or `MAX_CONTAINERS` | continue with what was sampled; `partial` note |
+| a detected part fails validation | drop that part; note in dump + status line |
+| a config block matches nothing and has no `object_classes` | warning, block dropped |
 | detection fails as a whole | config profiles only; status line `Profile detection failed: <reason>`; `edaptor profiles` prints the reason and exits non-zero |
 | anonymous or ACL-restricted view | detect from what is visible; nothing visible = no detected profiles, not an error |
 | bad `suppress` path / nothing to suppress | warning, not an error |
@@ -264,6 +338,12 @@ Detection never stops eDAPtor.
    shows in review.
 5. **Samba lookup:** a profile with only the detected `sambaSID` default triggers the
    domain lookup.
+6. **Pushback regressions:** override block with only `name` + `enabled = false`
+   parses; a rename rewrites detected picker candidates (no `widget config error`); a
+   detected profile at `base_dn` is not offered in `ou=people`; merged order puts
+   `user-people` before `user-users`; a block starting at 65534 yields a valid range;
+   `edaptor passwd <uid>` resolves with a connection-only config; case-insensitive
+   candidate names.
 
 ## 6. Documentation
 
@@ -274,5 +354,8 @@ Detection never stops eDAPtor.
 - `README.md` skeleton example shortened accordingly.
 - `examples/config.toml` + `full-example.md`: `[detect]` and `suppress` shown, kept
   identical.
-- `CHANGES.md`: new feature, plus a note that detection is on for existing configs and
-  `[detect] enabled = false` restores the old behaviour.
+- `CHANGES.md`: new feature, plus a note that detection is on for existing configs,
+  that it **adds** detected defaults and a detected companion to hand-written profiles
+  (so a create may write a second entry), how to see it (`edaptor profiles`), how to
+  remove one part (`suppress`), and that `[detect] enabled = false` restores the old
+  behaviour.
