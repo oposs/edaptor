@@ -4,7 +4,8 @@ This is the complete annotated `examples/config.toml` — a copy-pasteable
 starting point that exercises every supported option. Replace the
 `dc=example,dc=com` base, the object classes, and the search bases with whatever
 your directory actually uses; eDAPtor introspects `cn=subschema`, so the forms
-adapt to your schema automatically.
+adapt to your schema automatically. The `[detect]` table and the last
+`[[profile]]` block show how to work with [Profile Detection](detection.md).
 
 ```toml
 # edaptor configuration reference
@@ -40,6 +41,13 @@ bind_dn         = "cn=ldapmanager,dc=example,dc=com"
 #   "command:some cmd"  -> run a command and read its stdout
 password_source = "prompt"
 
+# Profile detection (on by default). eDAPtor derives profiles from the
+# directory; the [[profile]] blocks below override what it detects.
+# `edaptor profiles` prints the result. `enabled = false` restores the old
+# behaviour, where every [[profile]] needs name and object_classes.
+[detect]
+enabled = true
+
 # ---------------------------------------------------------------------------
 # Entry profiles: what a "user", "group", and "posixgroup" mean here.
 # ---------------------------------------------------------------------------
@@ -47,8 +55,8 @@ password_source = "prompt"
 # it falls back to `show`, then to ["cn"] when omitted.
 #
 # This "user" is a full posix (+optional Samba) account template: multiple object
-# classes, defaulted/templated/auto-numbered fields, a set-password popup,
-# and picker bindings that pull values from (or fan out to) other profiles.
+# classes, defaulted/templated/auto-numbered fields, a set-password widget, and
+# picker bindings that pull values from (or fan out to) other profiles.
 [[profile]]
 name           = "user"
 object_classes = ["inetOrgPerson", "posixAccount", "shadowAccount"]
@@ -70,6 +78,9 @@ label          = "{cn} ({uid})"               # e.g. "Bob Baker (bob)"
 #   "{auto:sambaSID}"   -> computed; sambaSID derived from uidNumber + the Samba
 #                          domain, filled once uidNumber resolves
 [profile.defaults]
+# In create mode these fill live from givenName/sn until you edit them.
+cn            = "{givenName} {sn}"
+displayName   = "{givenName} {sn}"
 loginShell    = "/bin/bash"
 homeDirectory = "/home/{uid}"
 uidNumber     = "{next:10000-60000}"
@@ -106,27 +117,28 @@ options = [
   { value = "/sbin/nologin", label = "No login" },
 ]
 
-# Picker widget: `[profile.widget.<attr>]` with `kind = "picker"` populates an
-# attribute from a live candidate search. Key options:
+# Picker widgets: `[profile.widget.<attr>]` with `kind = "picker"`/`"membership"`
+# declare how an attribute's field is populated from a live candidate search.
+#   kind        (required) — "picker" stores picked value(s) in this entry's attr;
+#                 "membership" fans this entry's DN out into a back-ref attr.
 #   candidate   (required) — a [[profile]] `name` (or sentinel: _posix_group_,
 #                 _posix_account_, _any_) supplying the candidate search scope.
-#   store       (default "dn") — "dn" stores the candidate's DN; any other value is
-#                 an attribute name whose scalar is stored.
-#   select      (default "auto") — cardinality: "auto" derives from the attribute's
-#                 schema arity; "single" or "multi" override it.
-#
-# Membership widget: `[profile.widget.<attr>]` with `kind = "membership"` fans
-# this entry's DN into `via` on each picked candidate. The field itself is
-# overlay-maintained and never written directly by edaptor.
+#   store       (picker, default "dn") — "dn" stores the candidate's DN; any other
+#                 value is an attribute name whose scalar is stored.
+#   select      (picker, default "auto") — cardinality: "auto" derives from the
+#                 attribute's schema arity; "single" or "multi" override it.
+#   via         (membership, required) — the back-ref attribute; this entry's DN is
+#                 added/removed in `via` on each picked candidate.
 
-# gidNumber: auto-configured for posixAccount (picks the first posixGroup profile
-# via the _posix_group_ sentinel). Declare here to pin the candidate to a
-# specific profile name or to customise store/select.
+# gidNumber: shown in the form as "<number> (<group name>)" and edited via an
+# editable-combobox popup — type a number freely or filter the posixgroup list
+# and pick one. The lookup kind resolves the friendly name from the candidate
+# profile's `store` attribute without requiring a separate search.
 [profile.widget.gidNumber]
-kind      = "picker"
+kind      = "lookup"
 candidate = "posixgroup"
 store     = "gidNumber"
-select    = "single"
+label     = "{cn}"
 
 # memberOf: the auto-config marks memberOf as `readonly` (overlay-maintained).
 # Declare it as `membership` here to make it an interactive group-membership
@@ -192,6 +204,13 @@ label          = "{cn}"
 kind      = "picker"
 candidate = "user"
 store     = "uid"
+
+# Change a detected profile without restating it: drop single detected parts
+# (companion, defaults.<attr>, widget.<attr>, label, show, search_attrs), or
+# the whole profile with `enabled = false`.
+[[profile]]
+name     = "posixgroup-groups"
+suppress = ["widget.memberUid"]
 ```
 
 ## Walk-through

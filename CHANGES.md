@@ -8,16 +8,22 @@ All notable changes to eDAPtor are documented here. The format follows
 
 ### New
 
+- **eDAPtor works out users, groups and their rules from the directory.** A config with only `[server]` and `[auth]` can now browse, edit and create entries: at startup eDAPtor samples each container and detects object classes, naming, defaults such as `homeDirectory = "/home/{uid}"`, user-private groups, pickers and free `uidNumber`/`gidNumber` ranges. Startup prints `detecting profiles…` and can take up to 10 seconds longer on a slow server.
 - **`edaptor profiles` prints the profiles in effect as TOML you can paste into the config.** Each value carries a comment saying whether it was detected (with how many entries agree), assumed, or set by the config; `--detected-only` shows detection before the config is applied. Notes go to stderr, and no password values are ever printed.
+- **A new, empty directory gets useradd-style defaults.** With no users yet, eDAPtor numbers users and groups from 10000 up (client machines use 1000 and up for their local users) and gives every new user a private group, placed in `ou=groups` when there is no group profile. `edaptor profiles` marks these values `# assumed`, and `suppress` removes them.
+- **Startup prints a `warning:` line on stderr** for problems found during detection, such as a container it could not read, a sample cut short, or a `[[profile]]` block that matches no detected profile.
 
 ### Changed
 
+- **Detection is on for existing configs too and adds to hand-written profiles.** Creating a user may now also write a second entry, its user-private group, because a `[[profile]]` matching a detected profile receives the detected defaults, widgets and companion it does not set itself. Remove one part with `suppress = ["companion"]`, a whole profile with `enabled = false`, or all detection with `[detect] enabled = false`.
+- **The profile chooser of `edaptor tui-create` hides detected organizational-unit and domain profiles** unless `--container` is exactly their container.
+- **`edaptor passwd <user>` prints `detecting profiles…` on stderr and searches only profiles with a password field or a password-bearing object class.** A user whose private group has the same name no longer fails with "matches multiple entries".
+- **Any profile that includes `sambaSamAccount` now looks up the Samba domain,** so the `sambaSID` field generates the SID without `[samba] domain_sid`; it stays off with `[detect] enabled = false`.
 - **Profile names in widget `candidate` settings are matched without regard to case.** `candidate = "PosixGroup"` now finds the profile `posixgroup` instead of failing with `unknown candidate profile`.
 
 ### Fixed
 
-- **`edaptor tui-create <profile>` now accepts detected profile names such as `user-people`,** and no longer opens the wrong form when detected profiles precede the configured ones. The profile chooser hides detected organizational-unit and domain profiles unless the container is exactly theirs.
-
+- **`edaptor tui-create <profile>` now accepts detected profile names such as `user-people`,** and no longer opens the wrong form when detected profiles precede the configured ones.
 - **The manual now describes `{next:MIN-MAX}` correctly.** It said the lowest
   unused number is picked; eDAPtor actually takes one above the highest number in
   range and never refills gaps. The page also notes that a `gidNumber` range sees

@@ -84,25 +84,16 @@ method          = "simple"
 bind_dn         = "cn=ldapmanager,dc=example,dc=com"
 # Password is NEVER stored here. Sources: "prompt", "env:VAR", "command:cmd"
 password_source = "prompt"
-
-[[profile]]
-name           = "user"
-object_classes = ["inetOrgPerson", "posixAccount", "shadowAccount"]
-rdn_attr       = "uid"
-search_base    = "ou=people,dc=example,dc=com"
-show           = ["uid", "cn", "sn", "mail", "uidNumber", "gidNumber"]
-# Defaults fill empty fields on create; widgets give fields a richer editor
-# (passwords, choice lists, candidate/membership pickers).
-[profile.defaults]
-homeDirectory = "/home/{uid}"
-uidNumber     = "{next:10000-60000}"
-[profile.widget.userPassword]
-kind = "password"
 ```
+
+eDAPtor detects users, groups and their rules from the directory; `[[profile]]`
+blocks only override what it got wrong, and `edaptor profiles` shows what it
+detected.
 
 This README intentionally stops here — the full, annotated reference lives in
 the documentation rather than being duplicated:
 
+- **[Profile Detection](https://oposs.github.io/edaptor/configuration/detection.html)**
 - **[Entry Profiles](https://oposs.github.io/edaptor/configuration/entry-profiles.html)**
   and **[Defaults](https://oposs.github.io/edaptor/configuration/defaults.html)**
 - **[Widgets](https://oposs.github.io/edaptor/configuration/widgets.html)** — the
