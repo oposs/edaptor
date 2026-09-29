@@ -487,6 +487,7 @@ mod tests {
             &[],
             &o,
             Some("ou=groups,dc=x"),
+            false,
         );
         let ranges = compute_ranges(&m.profiles, &[], false);
         let t = render(

@@ -133,6 +133,13 @@ pub fn dn_eq(a: &str, b: &str) -> bool {
     normalize_dn(a) == normalize_dn(b)
 }
 
+/// `dn` equals `base` or lies below it (component boundary, after
+/// [`normalize_dn`]): `ou=people2,dc=x` is not within `ou=people,dc=x`.
+pub fn dn_within(dn: &str, base: &str) -> bool {
+    let (dn, base) = (normalize_dn(dn), normalize_dn(base));
+    dn == base || dn.ends_with(&format!(",{base}"))
+}
+
 /// The most frequent item (compared case-insensitively; the first spelling seen
 /// is kept) and its count. Ties: the lexicographically smallest lowercased item.
 pub fn most_common<'a>(items: impl IntoIterator<Item = &'a str>) -> Option<(String, usize)> {
@@ -192,6 +199,14 @@ mod tests {
             "ou=people,dc=example,dc=org"
         ));
         assert!(!dn_eq("ou=people2,dc=x", "ou=people,dc=x"));
+    }
+
+    #[test]
+    fn dn_within_matches_at_a_component_boundary() {
+        assert!(dn_within("ou=People, dc=X", "dc=x"));
+        assert!(dn_within("ou=people,dc=x", "ou=people,dc=x"));
+        assert!(!dn_within("ou=people2,dc=x", "ou=people,dc=x"));
+        assert!(!dn_within("dc=x", "ou=people,dc=x"));
     }
 
     #[test]

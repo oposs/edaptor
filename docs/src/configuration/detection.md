@@ -47,8 +47,13 @@ with them.
 - Every user profile, also one written only in your config, gets a private
   group (`gidNumber = "{uidNumber}"` and a companion `posixGroup` named after the
   user, in the posix-group profile's container or else in `ou=groups` directly
-  under `base_dn`), unless the users already in the directory show otherwise
-  (for example two users sharing group 100).
+  under `base_dn`), unless the users already in the directory show otherwise.
+  For a profile written only in your config, these are the users sampled in
+  its `search_base` or below it: three or more such users, or any one without
+  a private group (for example two users sharing group 100), mean no private
+  group is assumed.
+- When detection fails as a whole (the server times out or refuses the
+  sample), no private group is assumed; the number ranges still are.
 
 These values never replace anything from your config or from detection.
 `edaptor profiles` marks them `# assumed: <reason>`; `suppress` removes them like any

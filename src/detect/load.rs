@@ -105,8 +105,13 @@ pub fn assemble(
         Err(e) => (Vec::new(), 0, Vec::new(), Some(e), None),
     };
     // Rule D runs whenever detection is enabled, also after a failed sample.
-    let mut merged =
-        merge_with_assumptions(&schema, &detected, &inputs.overrides, group_ou.as_deref());
+    let mut merged = merge_with_assumptions(
+        &schema,
+        &detected,
+        &inputs.overrides,
+        group_ou.as_deref(),
+        detection_error.is_some(),
+    );
     validate(&mut merged).map_err(|e| anyhow!("profile config error: {e}"))?;
     let widgets = widgets_of(&merged.profiles)?;
     notes.extend(merged.warnings);
@@ -213,6 +218,17 @@ mod tests {
         // Detection off: no assumptions.
         let off = assemble(schema(), &inputs(posix, false), None).unwrap();
         assert!(off.profiles[0].companion.is_none() && off.profiles[0].defaults.entries.is_empty());
+    }
+
+    /// Spec §4: a detection that failed as a whole yields the config profiles
+    /// only; rule D must not add a private group it has no evidence for.
+    #[test]
+    fn a_failed_detection_adds_no_private_group() {
+        let posix = "[[profile]]\nname = \"user\"\nobject_classes = [\"inetOrgPerson\", \"posixAccount\"]\nsearch_base = \"ou=people,dc=example,dc=org\"\n";
+        let l = assemble(schema(), &inputs(posix, true), Some(Err("timeout".into()))).unwrap();
+        let p = &l.profiles[0];
+        assert!(p.companion.is_none());
+        assert!(!p.defaults.entries.contains_key("gidNumber"));
     }
 
     #[test]

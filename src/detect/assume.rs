@@ -22,9 +22,10 @@ pub fn merge_with_assumptions(
     detected: &[DetectedProfile],
     overrides: &[ProfileOverride],
     group_ou: Option<&str>,
+    detection_failed: bool,
 ) -> Merged {
     let mut m = merge_core(schema, detected, overrides);
-    apply(schema, detected, group_ou, &mut m);
+    apply(schema, detected, group_ou, detection_failed, &mut m);
     flush_pending(&mut m);
     m
 }
@@ -75,6 +76,21 @@ fn detected_of<'a>(
     detected.iter().find(|d| d.name.eq_ignore_ascii_case(name))
 }
 
+/// The detected user profiles sampled at or below `base`: the evidence rule D
+/// weighs for a config-only profile. An empty `base` covers everything.
+fn users_under<'a>(base: &str, detected: &'a [DetectedProfile]) -> Vec<&'a DetectedProfile> {
+    detected
+        .iter()
+        .filter(|d| {
+            d.object_classes
+                .value
+                .iter()
+                .any(|c| c.eq_ignore_ascii_case("posixAccount"))
+                && (base.trim().is_empty() || crate::detect::dn_within(&d.container, base))
+        })
+        .collect()
+}
+
 fn structural(schema: &SchemaModel, p: &EntryProfile) -> String {
     schema
         .structural_class(&p.object_classes)
@@ -90,6 +106,7 @@ pub fn apply(
     schema: &SchemaModel,
     detected: &[DetectedProfile],
     group_ou: Option<&str>,
+    detection_failed: bool,
     m: &mut Merged,
 ) {
     // §2B5 "posix-group profile", over the merged profiles.
@@ -110,10 +127,16 @@ pub fn apply(
         if !has_class(&m.profiles[i], "posixAccount") {
             continue;
         }
-        let d = detected_of(&m.provenance[i], detected);
-        let contrary =
-            d.is_some_and(|d| d.sampled >= MIN_SAMPLE || d.users_without_private_group != Some(0));
-        let reason = if d.is_none() {
+        let evidence: Vec<&DetectedProfile> = match detected_of(&m.provenance[i], detected) {
+            Some(d) => vec![d],
+            None => users_under(&m.profiles[i].search_base, detected),
+        };
+        let sampled: usize = evidence.iter().map(|d| d.sampled).sum();
+        let contrary = sampled >= MIN_SAMPLE
+            || evidence
+                .iter()
+                .any(|d| d.users_without_private_group != Some(0));
+        let reason = if sampled == 0 {
             REASON_NO_USERS
         } else {
             REASON_FEW_USERS
@@ -121,7 +144,9 @@ pub fn apply(
         let st = structural(schema, &m.profiles[i]);
         let (p, prov) = (&mut m.profiles[i], &mut m.provenance[i]);
         let mut assumed_private = false;
-        if !contrary && !has_default(p, "gidNumber") && p.companion.is_none() {
+        // A failed detection saw nothing, so it cannot tell whether users here
+        // have private groups: assume none rather than flip on a timeout.
+        if !detection_failed && !contrary && !has_default(p, "gidNumber") && p.companion.is_none() {
             match &group_base {
                 Some(base) => {
                     p.defaults.entries.insert(
@@ -211,8 +236,13 @@ mod tests {
 
     #[test]
     fn empty_directory_config_user_gets_private_groups_and_a_range() {
-        let m =
-            merge_with_assumptions(&schema(), &[], &overrides(CFG_USER), Some("ou=groups,dc=x"));
+        let m = merge_with_assumptions(
+            &schema(),
+            &[],
+            &overrides(CFG_USER),
+            Some("ou=groups,dc=x"),
+            false,
+        );
         let (p, prov) = get(&m, "user");
         assert_eq!(dflt(p, "gidNumber").as_deref(), Some("{uidNumber}"));
         let c = p.companion.as_ref().unwrap();
@@ -236,7 +266,13 @@ mod tests {
     #[test]
     fn companion_base_prefers_the_posix_group_profile() {
         let o = format!("{CFG_USER}[[profile]]\nname = \"grp\"\nobject_classes = [\"posixGroup\"]\nsearch_base = \"ou=unix,dc=x\"\n");
-        let m = merge_with_assumptions(&schema(), &[], &overrides(&o), Some("ou=groups,dc=x"));
+        let m = merge_with_assumptions(
+            &schema(),
+            &[],
+            &overrides(&o),
+            Some("ou=groups,dc=x"),
+            false,
+        );
         assert_eq!(
             get(&m, "user").0.companion.as_ref().unwrap().search_base,
             "ou=unix,dc=x"
@@ -308,7 +344,7 @@ mod tests {
     #[test]
     fn two_users_with_private_groups_are_assumed() {
         let d = detect(&schema(), &two_users(true)).profiles;
-        let m = merge_with_assumptions(&schema(), &d, &[], Some("ou=groups,dc=x"));
+        let m = merge_with_assumptions(&schema(), &d, &[], Some("ou=groups,dc=x"), false);
         let (p, prov) = get(&m, "user-people");
         assert_eq!(dflt(p, "gidNumber").as_deref(), Some("{uidNumber}"));
         assert_eq!(p.companion.as_ref().unwrap().search_base, "ou=groups,dc=x");
@@ -327,7 +363,7 @@ mod tests {
     #[test]
     fn two_users_sharing_gid_100_block_the_assumption() {
         let d = detect(&schema(), &two_users(false)).profiles;
-        let m = merge_with_assumptions(&schema(), &d, &[], Some("ou=groups,dc=x"));
+        let m = merge_with_assumptions(&schema(), &d, &[], Some("ou=groups,dc=x"), false);
         let (p, _) = get(&m, "user-people");
         assert!(p.companion.is_none());
         assert!(
@@ -336,9 +372,71 @@ mod tests {
         );
     }
 
+    /// A config-only user profile whose base covers sampled users sharing gid
+    /// 100 must not gain a private group: those users are contrary evidence.
+    #[test]
+    fn config_only_profile_takes_contrary_evidence_from_users_under_its_base() {
+        let d = detect(&schema(), &two_users(false)).profiles;
+        // Structural class differs from the detected one, so pass 2 cannot match.
+        let o = "[[profile]]\nname = \"user\"\nobject_classes = [\"person\", \"posixAccount\"]\nsearch_base = \"dc=x\"\n";
+        let m = merge_with_assumptions(&schema(), &d, &overrides(o), Some("ou=groups,dc=x"), false);
+        let (p, _) = get(&m, "user");
+        assert!(p.companion.is_none(), "users under dc=x share gid 100");
+        assert!(!p.defaults.entries.contains_key("gidNumber"));
+    }
+
+    /// Two sampled users under the base, both with private groups: too few to
+    /// contradict, so the assumption holds with the "few users" reason.
+    #[test]
+    fn config_only_profile_over_few_private_group_users_is_assumed() {
+        let d = detect(&schema(), &two_users(true)).profiles;
+        let o = "[[profile]]\nname = \"user\"\nobject_classes = [\"person\", \"posixAccount\"]\nsearch_base = \"dc=x\"\n";
+        let m = merge_with_assumptions(&schema(), &d, &overrides(o), Some("ou=groups,dc=x"), false);
+        let (p, prov) = get(&m, "user");
+        assert!(p.companion.is_some());
+        assert_eq!(
+            prov.fields["companion"],
+            Source::Assumed(REASON_FEW_USERS.into())
+        );
+    }
+
+    /// Users sampled in a sibling container are not evidence for this base.
+    #[test]
+    fn users_outside_the_base_are_not_evidence() {
+        let d = detect(&schema(), &two_users(false)).profiles;
+        let o = "[[profile]]\nname = \"user\"\nobject_classes = [\"person\", \"posixAccount\"]\nsearch_base = \"ou=people2,dc=x\"\n";
+        let m = merge_with_assumptions(&schema(), &d, &overrides(o), Some("ou=groups,dc=x"), false);
+        let (p, prov) = get(&m, "user");
+        assert!(p.companion.is_some());
+        assert_eq!(
+            prov.fields["companion"],
+            Source::Assumed(REASON_NO_USERS.into())
+        );
+    }
+
+    /// Detection failed as a whole: no evidence either way, so no private group
+    /// is assumed. The number range is still assumed (it scans at create time).
+    #[test]
+    fn a_failed_detection_assumes_no_private_group() {
+        let m = merge_with_assumptions(
+            &schema(),
+            &[],
+            &overrides(CFG_USER),
+            Some("ou=groups,dc=x"),
+            true,
+        );
+        let (p, _) = get(&m, "user");
+        assert!(p.companion.is_none());
+        assert!(!p.defaults.entries.contains_key("gidNumber"));
+        assert!(matches!(
+            p.defaults.entries["uidNumber"],
+            DefaultValue::DetectedRange(_)
+        ));
+    }
+
     #[test]
     fn no_group_container_is_noted() {
-        let m = merge_with_assumptions(&schema(), &[], &overrides(CFG_USER), None);
+        let m = merge_with_assumptions(&schema(), &[], &overrides(CFG_USER), None, false);
         let (p, prov) = get(&m, "user");
         assert!(p.companion.is_none() && !p.defaults.entries.contains_key("gidNumber"));
         assert!(prov.notes.iter().any(|n| n == NO_GROUP_CONTAINER));
@@ -351,7 +449,13 @@ mod tests {
     #[test]
     fn an_assumed_companion_can_be_suppressed() {
         let o = format!("{CFG_USER}suppress = [\"companion\"]\n");
-        let m = merge_with_assumptions(&schema(), &[], &overrides(&o), Some("ou=groups,dc=x"));
+        let m = merge_with_assumptions(
+            &schema(),
+            &[],
+            &overrides(&o),
+            Some("ou=groups,dc=x"),
+            false,
+        );
         let (p, prov) = get(&m, "user");
         assert!(p.companion.is_none());
         assert_eq!(prov.suppressed, vec!["companion"]);
@@ -361,7 +465,13 @@ mod tests {
     #[test]
     fn config_values_are_never_overridden() {
         let o = format!("{CFG_USER}[profile.defaults]\ngidNumber = \"100\"\nuidNumber = \"{{next:2000-2999}}\"\n");
-        let m = merge_with_assumptions(&schema(), &[], &overrides(&o), Some("ou=groups,dc=x"));
+        let m = merge_with_assumptions(
+            &schema(),
+            &[],
+            &overrides(&o),
+            Some("ou=groups,dc=x"),
+            false,
+        );
         let (p, _) = get(&m, "user");
         assert_eq!(dflt(p, "gidNumber").as_deref(), Some("100"));
         assert_eq!(dflt(p, "uidNumber").as_deref(), Some("{next:2000-2999}"));
