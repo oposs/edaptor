@@ -2,6 +2,7 @@
 //! browser (tree / leaf list / entry form).
 
 pub mod config;
+pub mod detect;
 pub mod form;
 pub mod ldap;
 pub mod passwd;
