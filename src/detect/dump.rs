@@ -363,6 +363,10 @@ pub fn render(
                             ),
                         }
                     }
+                    _ if crate::detect::is_secret_attr(attr) => comment_line(
+                        &mut out,
+                        &format!("# {} = (set by config, value not shown)", key(attr)),
+                    ),
                     other => line(
                         &mut out,
                         &key(attr),
@@ -498,6 +502,27 @@ mod tests {
         assert!(!cfg.overrides.is_empty());
         assert!(
             t.contains("# note: server said: bad = \"value\"  [oops]\n"),
+            "{t}"
+        );
+    }
+
+    /// A config default for a password attribute is named, never printed.
+    #[test]
+    fn a_config_secret_default_is_not_echoed() {
+        let s = argus_sample();
+        let d = crate::detect::infer::detect(&schema(), &s);
+        let o = overrides("[[profile]]\nname = \"user-people\"\n[profile.defaults]\nuserPassword = \"{SSHA}hunter2\"\n");
+        let m = crate::detect::merge::merge(&schema(), &d.profiles, &o);
+        let t = render(
+            &m.profiles,
+            &m.provenance,
+            &m.disabled,
+            "# h",
+            &BTreeMap::new(),
+        );
+        assert!(!t.contains("hunter2"), "{t}");
+        assert!(
+            t.contains("# userPassword = (set by config, value not shown)\n"),
             "{t}"
         );
     }

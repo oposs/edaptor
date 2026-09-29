@@ -5,7 +5,7 @@ name = "user-people"  # detected: 200 entries in ou=people,dc=example,dc=org (pa
 object_classes = ["inetOrgPerson", "posixAccount", "sambaSamAccount", "shadowAccount"]  # detected: 200/200
 rdn_attr = "uid"  # detected: 200/200
 search_base = "ou=people,dc=example,dc=org"  # detected: 200/200
-show = ["uid", "cn", "gidNumber", "homeDirectory", "sambaSID", "sn", "uidNumber", "departmentNumber", "givenName", "loginShell", "mail", "ou", "sambaAcctFlags", "sambaNTPassword", "sambaPwdLastSet"]  # detected: 200/200
+show = ["uid", "cn", "gidNumber", "homeDirectory", "sambaSID", "sn", "uidNumber", "departmentNumber", "givenName", "loginShell", "mail", "ou", "sambaAcctFlags", "sambaPwdLastSet"]  # detected: 200/200
 search_attrs = ["uid", "cn", "sn", "mail"]  # detected: 200/200
 label = "{cn} ({uid})"  # detected: 200/200
 [profile.defaults]

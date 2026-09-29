@@ -63,7 +63,10 @@ detected part, and `[detect] enabled = false` turns them off.
 
 Sampling reads at most 200 entries per container and 100 containers, and stops
 after 10 seconds; a cut-short sample is marked `partial`. It never reads
-`userPassword` or other secrets.
+`userPassword` or other secrets, and never puts `userPassword`,
+`sambaNTPassword`, `sambaLMPassword` or `sambaPasswordHistory` into a detected
+`show` list. `edaptor profiles` prints a config default for one of these as
+`# userPassword = (set by config, value not shown)`.
 
 ## Overriding detection
 

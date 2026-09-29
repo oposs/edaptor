@@ -176,7 +176,8 @@ fn common_rdn_attr(entries: &[&SampleEntry]) -> Detected<String> {
 }
 
 /// `rdn_attr`, then MUST attributes, then MAY attributes present in more than
-/// half the group (by frequency, then name); operational and binary excluded.
+/// half the group (by frequency, then name); operational, binary and secret
+/// attributes excluded.
 fn show_list(
     schema: &SchemaModel,
     object_classes: &[String],
@@ -186,6 +187,7 @@ fn show_list(
 ) -> Vec<String> {
     let excluded = |a: &str| {
         a.eq_ignore_ascii_case("objectClass")
+            || crate::detect::is_secret_attr(a)
             || schema.is_readonly_attr(a)
             || schema.field_kind(a) == FieldKind::Binary
     };
@@ -235,6 +237,24 @@ mod tests {
                     d.profiles.iter().map(|p| &p.name).collect::<Vec<_>>()
                 )
             })
+    }
+
+    /// Password hashes are never proposed for `show`, however common: the
+    /// names would pull the hash fields to the top of every form.
+    #[test]
+    fn show_never_lists_secret_attributes() {
+        let ocs: Vec<String> = ["inetOrgPerson", "posixAccount", "sambaSamAccount"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let show = show_list(&schema(), &ocs, "uid", 10, &|_| 10);
+        for secret in ["userPassword", "sambaNTPassword"] {
+            assert!(
+                !show.iter().any(|a| a.eq_ignore_ascii_case(secret)),
+                "{secret} in {show:?}"
+            );
+        }
+        assert!(show.iter().any(|a| a == "sambaAcctFlags"), "{show:?}");
     }
 
     #[test]

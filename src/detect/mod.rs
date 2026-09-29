@@ -48,6 +48,19 @@ pub const SAMPLE_ATTRS: &[&str] = &[
     "sambaSID",
     "description",
 ];
+/// Attributes that hold passwords or password hashes. Detection never proposes
+/// them and `edaptor profiles` never prints their values.
+pub const SECRET_ATTRS: &[&str] = &[
+    "userPassword",
+    "sambaNTPassword",
+    "sambaLMPassword",
+    "sambaPasswordHistory",
+];
+
+pub fn is_secret_attr(attr: &str) -> bool {
+    SECRET_ATTRS.iter().any(|s| s.eq_ignore_ascii_case(attr))
+}
+
 /// Structural classes whose detected profiles are hidden from the all-profiles
 /// chooser unless the current container is exactly theirs.
 pub const INFRASTRUCTURE_CLASSES: &[&str] = &[
