@@ -6,6 +6,7 @@ pub mod assume;
 #[cfg(test)]
 pub(crate) mod fixtures;
 pub mod infer;
+pub mod load;
 pub mod merge;
 pub mod model;
 pub mod names;

@@ -96,7 +96,7 @@ impl Provenance {
         Provenance::new(&p.name, origin, fields, d.notes.clone())
     }
 
-    fn config(p: &EntryProfile) -> Self {
+    pub(crate) fn config(p: &EntryProfile) -> Self {
         Provenance::new(&p.name, Origin::Config, config_fields(p), Vec::new())
     }
 }
