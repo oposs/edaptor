@@ -275,6 +275,7 @@ fn apply_suppress(p: &mut EntryProfile, prov: &mut Provenance, o: &ProfileOverri
 }
 
 fn merge_one(
+    schema: &SchemaModel,
     d: &DetectedProfile,
     o: &ProfileOverride,
     rename: &HashMap<String, String>,
@@ -362,10 +363,19 @@ fn merge_one(
         );
         p.companion = Some(c.clone());
     }
+    // A detected range counts the values of the profile's own container and
+    // structural class; follow the config's choice of both.
     let base = p.search_base.clone();
+    let structural = o
+        .object_classes
+        .as_ref()
+        .and_then(|ocs| schema.structural_class(ocs));
     for dv in p.defaults.entries.values_mut() {
         if let DefaultValue::DetectedRange(spec) = dv {
             spec.container = base.clone();
+            if let Some(st) = &structural {
+                spec.structural = st.clone();
+            }
         }
     }
     let mut prov = Provenance::merged(&p, d, fields);
@@ -525,7 +535,7 @@ pub(crate) fn merge_core(
         }
         match taken[oi] {
             Some(di) => {
-                let (p, prov) = merge_one(&detected[di], o, &rename);
+                let (p, prov) = merge_one(schema, &detected[di], o, &rename);
                 out.profiles.push(p);
                 out.provenance.push(prov);
             }
@@ -831,6 +841,18 @@ mod tests {
         assert_eq!(p.search_base, "ou=staff,dc=example,dc=org");
         match &p.defaults.entries["uidNumber"] {
             DefaultValue::DetectedRange(s) => assert_eq!(s.container, "ou=staff,dc=example,dc=org"),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// A config `object_classes` changes the class the range counts as the
+    /// profile's own: new entries are created with the config's classes.
+    #[test]
+    fn config_object_classes_move_the_range_to_the_new_structural_class() {
+        let m = merge(&schema(), &demo(), &overrides("[[profile]]\nname = \"user-people\"\nobject_classes = [\"person\", \"posixAccount\"]\n"));
+        let (p, _) = get(&m, "user-people");
+        match &p.defaults.entries["uidNumber"] {
+            DefaultValue::DetectedRange(s) => assert_eq!(s.structural, "person"),
             other => panic!("{other:?}"),
         }
     }
