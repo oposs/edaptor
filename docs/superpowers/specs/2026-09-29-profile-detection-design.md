@@ -52,6 +52,8 @@ names (§2A, §3), and number allocation, which learns detected ranges (§2C).
   value>` (`user-people`, `posixgroup-groups`). Longer, but a name never changes when
   another container appears. (Pushback item 6, option a.)
 - Number ranges detect both `MIN` and `MAX` (rule C below).
+- Too little data (no or 1–2 users): assume useradd-style numbering starting at 10000
+  and **private groups** (rule D below) — good practice, owner decision 2026-09-29.
 - **Detection never stops eDAPtor.** A detected part that fails validation is dropped
   with a note; only the user's own config can cause a load error.
 
@@ -308,6 +310,40 @@ are **not** private groups):
   `pool exhausted` (allocation will then refuse with its existing message).
 
 Argus result: users `{next:5000-7999}`, shared groups `{next:8000-60000}`.
+
+### D. Assumptions when there is too little data (useradd-style)
+
+Detection can only infer from entries that exist. A new or nearly empty directory
+gets the defaults Ubuntu's `useradd` uses (`/etc/login.defs`: `UID_MIN 1000`,
+`UID_MAX 60000`, `USERGROUPS_ENAB yes`), with one change: LDAP numbers start at
+**10000**, because every client machine hands out 1000 and up to its local users and
+an LDAP account must not share a number with them.
+
+These rules run **after the merge**, on every final profile whose `object_classes`
+include `posixAccount` — also a profile written only in the config, since an empty
+container has no children and yields no detected profile at all. They never replace a
+value from the config or from detection; they only fill what is still missing, and
+`suppress` removes them like any detected part. Provenance is `assumed`, and the dump
+says why (`# assumed: no users yet; useradd-style private group`).
+
+1. **Range.** If the profile has no `uidNumber` default, it gets a `DetectedRange` whose
+   allocation uses these rules at create time:
+   - **no numbers in use** in the space → `{next:10000-60000}`;
+   - **1 or 2 numbers in use** → the block rule of §2C applies unchanged to the values
+     that exist (argus-like start at 5000 continues at 5001, not 10000). The 3-entry
+     threshold of §2A counts only for **exceptions**, not for forming a block.
+   The same applies to a posix-group profile's `gidNumber`.
+2. **Private groups.** If B2 found **no contrary evidence** — fewer than 3 users were
+   sampled and none of them lacks a private group (§2B2 predicate), or there are no
+   users — the profile gets what B2 would add: `gidNumber = "{uidNumber}"` and the
+   companion `{ cn = "{uid}", gidNumber = "{uidNumber}", memberUid = "{uid}" }`, and the
+   number space is **unified** (§2C). The companion's `search_base` is the posix-group
+   profile's `search_base` (§2B5 definition, over the merged profiles); if there is
+   none, a container `ou=groups` directly under `base_dn` if it exists; otherwise the
+   assumption is skipped with the note `no group container for private groups`.
+   Users that **do** contradict (e.g. 2 of 2 share gid 100) block the assumption, and
+   B3 applies as usual.
+3. `[detect] enabled = false` disables these assumptions too.
 
 ## 3. Merge, suppression, dump
 
