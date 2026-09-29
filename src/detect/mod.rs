@@ -7,6 +7,7 @@ pub(crate) mod fixtures;
 pub mod infer;
 pub mod model;
 pub mod names;
+pub mod patterns;
 
 use std::time::Duration;
 

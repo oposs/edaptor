@@ -25,6 +25,7 @@ pub fn detect(schema: &SchemaModel, sample: &Sample) -> Detection {
         profiles.extend(group_container(schema, c, &mut notes));
     }
     names::assign_names(&mut profiles);
+    crate::detect::patterns::apply(schema, sample, &mut profiles, &mut notes);
     Detection { profiles, notes }
 }
 

@@ -130,6 +130,24 @@ pub fn parse_default_value(s: &str) -> Result<DefaultValue, String> {
     Ok(DefaultValue::Template(segs))
 }
 
+impl DefaultValue {
+    /// The config spelling of this value (inverse of [`parse_default_value`]).
+    pub fn to_config_string(&self) -> String {
+        match self {
+            DefaultValue::Literal(s) => s.clone(),
+            DefaultValue::Template(segs) => segs
+                .iter()
+                .map(|s| match s {
+                    Seg::Lit(l) => l.clone(),
+                    Seg::Field(f) => format!("{{{f}}}"),
+                })
+                .collect(),
+            DefaultValue::AutoNumber { min, max } => format!("{{next:{min}-{max}}}"),
+            DefaultValue::Computed(ComputedKind::SambaSid) => "{auto:sambaSID}".to_string(),
+        }
+    }
+}
+
 impl<'de> Deserialize<'de> for ProfileDefaults {
     fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
         let raw: BTreeMap<String, String> = BTreeMap::deserialize(d)?;
@@ -323,6 +341,21 @@ pub fn recompute_live(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn to_config_string_round_trips() {
+        for s in [
+            "/bin/bash",
+            "/home/{uid}",
+            "{givenName} {sn}",
+            "{next:5000-7999}",
+            "{auto:sambaSID}",
+        ] {
+            let v = parse_default_value(s).unwrap();
+            assert_eq!(v.to_config_string(), s, "round trip of {s}");
+            assert_eq!(parse_default_value(&v.to_config_string()).unwrap(), v);
+        }
+    }
 
     #[test]
     fn parses_auto_samba_sid() {

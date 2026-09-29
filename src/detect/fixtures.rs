@@ -1,8 +1,6 @@
 //! `#[cfg(test)]` fixtures: a schema with the classes the rules know, plus an
 //! argus-like and a demo-like sample (spec §5.1).
 
-// Consumed by the detector tasks that follow; unused until they land.
-#![allow(dead_code)]
 use std::collections::BTreeMap;
 
 use crate::detect::model::{ContainerSample, Sample, SampleEntry};
