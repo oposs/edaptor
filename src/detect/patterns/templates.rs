@@ -184,7 +184,8 @@ fn literal_candidates(
 
 fn common_literal(entries: &[SampleEntry], attr: &str) -> Option<Detected<DefaultValue>> {
     let (value, matched) = most_common(entries.iter().filter_map(|e| e.first(attr)))?;
-    if !rule_applies(matched, entries.len()) {
+    // `{` would make the pasted default a template (or a parse error).
+    if value.contains('{') || !rule_applies(matched, entries.len()) {
         return None;
     }
     let exceptions = entries
@@ -202,6 +203,21 @@ fn common_literal(entries: &[SampleEntry], attr: &str) -> Option<Detected<Defaul
 mod tests {
     use super::*;
     use crate::detect::fixtures::{argus_sample, demo_sample, e, schema};
+
+    /// A literal with `{` would read back as a template (or not parse), so it
+    /// is never proposed as a default.
+    #[test]
+    fn a_literal_with_a_brace_is_not_proposed() {
+        let es: Vec<SampleEntry> = (1..=3)
+            .map(|i| {
+                e(
+                    &format!("cn=g{i},ou=g,dc=x"),
+                    &[("description", &["{legacy}"])],
+                )
+            })
+            .collect();
+        assert!(common_literal(&es, "description").is_none());
+    }
 
     fn entries_of(sample: &crate::detect::model::Sample, container: &str) -> Vec<SampleEntry> {
         sample
