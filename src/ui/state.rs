@@ -1828,6 +1828,7 @@ mod tests {
             widgets: Default::default(),
             label: None,
             companion: None,
+            scope: Default::default(),
         };
         let profiles = vec![p.clone()];
         assert!(profile_for(&profiles, &["inetOrgPerson".into(), "top".into()]).is_some());

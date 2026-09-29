@@ -290,13 +290,22 @@ pub fn apply_static_defaults(
 /// Indices of profiles whose `search_base` matches `container_dn` at a DN-component
 /// boundary: equal, or one is a proper suffix of the other (case-insensitive). So
 /// `ou=people,…` matches but `ou=people2,…` does not. Profiles with an empty
-/// `search_base` never match. Pure.
+/// `search_base` never match, and `Exact`-scoped profiles only match their own
+/// container. Pure.
 pub fn profiles_for_container(profiles: &[EntryProfile], container_dn: &str) -> Vec<usize> {
     profiles
         .iter()
         .enumerate()
         .filter(|(_, p)| {
-            !p.search_base.is_empty() && dn_boundary_match(&p.search_base, container_dn)
+            !p.search_base.is_empty()
+                && match p.scope {
+                    crate::config::ContainerScope::Boundary => {
+                        dn_boundary_match(&p.search_base, container_dn)
+                    }
+                    crate::config::ContainerScope::Exact => {
+                        crate::detect::dn_eq(&p.search_base, container_dn)
+                    }
+                }
         })
         .map(|(i, _)| i)
         .collect()
@@ -588,6 +597,7 @@ mod tests {
             widgets: Default::default(),
             label: None,
             companion: None,
+            scope: Default::default(),
         }
     }
 
@@ -751,6 +761,15 @@ mod tests {
         );
         // A parent container offers all profiles whose search_base is under it.
         assert_eq!(profiles_for_container(&ps, "dc=example,dc=org"), vec![0, 1]);
+    }
+
+    #[test]
+    fn exact_scope_matches_only_its_own_container() {
+        let mut p = prof("dc=example,dc=org");
+        p.scope = crate::config::ContainerScope::Exact;
+        let ps = vec![p];
+        assert_eq!(profiles_for_container(&ps, "DC=Example, dc=org"), vec![0]);
+        assert!(profiles_for_container(&ps, "ou=people,dc=example,dc=org").is_empty());
     }
 
     #[test]
@@ -995,6 +1014,7 @@ mod tests {
             widgets: Default::default(),
             label: None,
             companion: None,
+            scope: Default::default(),
         };
         let (form, autonum) =
             build_create_form(&schema, &profile, 0, "ou=people,dc=example,dc=org");
