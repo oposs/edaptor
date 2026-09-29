@@ -8,6 +8,8 @@ pub mod infer;
 pub mod model;
 pub mod names;
 pub mod patterns;
+pub mod private;
+pub mod range;
 
 use std::time::Duration;
 
