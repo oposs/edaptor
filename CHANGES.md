@@ -8,6 +8,8 @@ All notable changes to eDAPtor are documented here. The format follows
 
 ### New
 
+- **`edaptor profiles` prints the profiles in effect as TOML you can paste into the config.** Each value carries a comment saying whether it was detected (with how many entries agree), assumed, or set by the config; `--detected-only` shows detection before the config is applied. Notes go to stderr, and no password values are ever printed.
+
 ### Changed
 
 - **Profile names in widget `candidate` settings are matched without regard to case.** `candidate = "PosixGroup"` now finds the profile `posixgroup` instead of failing with `unknown candidate profile`.

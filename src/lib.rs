@@ -215,6 +215,70 @@ fn resolve_passwd_target(
     }
 }
 
+/// `edaptor profiles` output: TOML for stdout, notes for stderr.
+pub struct ProfilesReport {
+    pub toml: String,
+    pub notes: Vec<String>,
+}
+
+/// Load (and detect) the profiles, run the number scan for detected ranges,
+/// and render the dump. A failed detection is an error (non-zero exit).
+pub fn run_profiles(
+    config: Config,
+    password: String,
+    detected_only: bool,
+) -> Result<ProfilesReport> {
+    use crate::detect::{dump, model::SampleEntry, range};
+    let inputs = crate::detect::load::ProfileInputs::from_config(&config);
+    let worker = WorkerHandle::spawn(config, password)?;
+    let loaded = crate::detect::load::load_profiles(&worker, &inputs)?;
+    if let Some(e) = &loaded.detection_error {
+        return Err(anyhow!("profile detection failed: {e}"));
+    }
+    let (profiles, provenance, disabled) = if detected_only {
+        let m = crate::detect::merge::merge(&loaded.schema, &loaded.detected, &[]);
+        (m.profiles, m.provenance, Vec::new())
+    } else {
+        (loaded.profiles, loaded.provenance, loaded.disabled)
+    };
+    let needs_scan = profiles.iter().any(|p| {
+        p.defaults
+            .entries
+            .values()
+            .any(|d| matches!(d, crate::config::defaults::DefaultValue::DetectedRange(_)))
+    });
+    let ranges = if !needs_scan {
+        Default::default()
+    } else {
+        match worker.request(Request::Search {
+            id: 1,
+            base: inputs.base_dn.clone(),
+            scope: SearchScope::Subtree,
+            filter: range::SCAN_FILTER.to_string(),
+            attrs: range::SCAN_ATTRS.iter().map(|s| s.to_string()).collect(),
+            size_limit: None,
+        })? {
+            Response::Entries {
+                entries, truncated, ..
+            } => {
+                let scan: Vec<SampleEntry> = entries.iter().map(SampleEntry::from).collect();
+                dump::compute_ranges(&profiles, &scan, truncated)
+            }
+            Response::SearchError { msg, .. } => dump::failed_ranges(&profiles, &msg),
+            other => dump::failed_ranges(&profiles, describe_response(&other)),
+        }
+    };
+    let header = dump::header_line(
+        inputs.detect_enabled,
+        loaded.containers_sampled,
+        loaded.notes.len(),
+    );
+    Ok(ProfilesReport {
+        toml: dump::render(&profiles, &provenance, &disabled, &header, &ranges),
+        notes: loaded.notes,
+    })
+}
+
 /// Set a synced Unix + Samba password on `target_dn` (spec §9/§10).
 ///
 /// TLS-gated: refuses with an `Err` (before any network I/O) when the server

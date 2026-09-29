@@ -41,6 +41,13 @@ enum Command {
         /// against the configured profiles' search bases.
         user: String,
     },
+    /// Print the profiles in effect as TOML: detected values with their evidence,
+    /// config values, suppressed parts. Notes go to stderr.
+    Profiles {
+        /// Show detection before merging the config.
+        #[arg(long)]
+        detected_only: bool,
+    },
     /// Launch the TUI straight into a profile's create form. With no `<profile>` a
     /// chooser is shown first. `--container` defaults to the profile's `search_base`.
     TuiCreate {
@@ -99,6 +106,13 @@ fn main() -> Result<()> {
                 prompt_new_password()
             })?;
             println!("{confirmation}");
+        }
+        Some(Command::Profiles { detected_only }) => {
+            let report = edaptor::run_profiles(config, password, detected_only)?;
+            for n in &report.notes {
+                eprintln!("note: {n}");
+            }
+            print!("{}", report.toml);
         }
         Some(Command::TuiCreate { profile, container }) => {
             let req = build_startup_request(profile, container)?;

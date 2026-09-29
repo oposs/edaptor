@@ -3,6 +3,7 @@
 //! are pure; `sample` and `load` talk to the LDAP worker.
 
 pub mod assume;
+pub mod dump;
 #[cfg(test)]
 pub(crate) mod fixtures;
 pub mod infer;
