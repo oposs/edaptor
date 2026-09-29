@@ -93,11 +93,23 @@ fn key(k: &str) -> String {
     }
 }
 
+/// `s` with every line break turned into a space, so free text (server
+/// diagnostics, DNs, notes) cannot leave the `#` comment it is put into.
+fn one_line(s: &str) -> String {
+    s.replace(['\r', '\n'], " ")
+}
+
+/// Append a whole-line `#` comment.
+fn comment_line(out: &mut String, text: &str) {
+    out.push_str(&one_line(text));
+    out.push('\n');
+}
+
 fn line(out: &mut String, k: &str, v: &str, comment: &str) {
     if comment.is_empty() {
         out.push_str(&format!("{k} = {v}\n"));
     } else {
-        out.push_str(&format!("{k} = {v}  {comment}\n"));
+        out.push_str(&format!("{k} = {v}  {}\n", one_line(comment)));
     }
 }
 
@@ -261,10 +273,10 @@ pub fn render(
     out.push_str(header);
     out.push('\n');
     for name in disabled {
-        out.push_str(&format!(
-            "# profile {} disabled by config (enabled = false)\n",
-            q(name)
-        ));
+        comment_line(
+            &mut out,
+            &format!("# profile {} disabled by config (enabled = false)", q(name)),
+        );
     }
     for (p, prov) in profiles.iter().zip(provenance) {
         out.push_str("\n[[profile]]\n");
@@ -341,11 +353,14 @@ pub fn render(
                                     ));
                                 }
                             }
-                            Some(RangeOutcome { result: Err(e), .. }) => {
-                                out.push_str(&format!("# {attr} = (no range detected: {e})\n"))
-                            }
-                            None => out
-                                .push_str(&format!("# {attr} = (range detected at create time)\n")),
+                            Some(RangeOutcome { result: Err(e), .. }) => comment_line(
+                                &mut out,
+                                &format!("# {attr} = (no range detected: {e})"),
+                            ),
+                            None => comment_line(
+                                &mut out,
+                                &format!("# {attr} = (range detected at create time)"),
+                            ),
                         }
                     }
                     other => line(
@@ -391,21 +406,20 @@ pub fn render(
                 Source::Config | Source::Assumed(_) | Source::ConfigOverDetectedRange => continue,
             };
             if !ev.exceptions.is_empty() {
-                out.push_str(&format!(
-                    "# exceptions ({field}): {}\n",
-                    list(&ev.exceptions)
-                ));
+                comment_line(
+                    &mut out,
+                    &format!("# exceptions ({field}): {}", list(&ev.exceptions)),
+                );
             }
         }
         for t in trailer {
-            out.push_str(&t);
-            out.push('\n');
+            comment_line(&mut out, &t);
         }
         for s in &prov.suppressed {
-            out.push_str(&format!("# suppressed by config: {s}\n"));
+            comment_line(&mut out, &format!("# suppressed by config: {s}"));
         }
         for n in &prov.notes {
-            out.push_str(&format!("# note: {n}\n"));
+            comment_line(&mut out, &format!("# note: {n}"));
         }
     }
     out
@@ -453,6 +467,39 @@ mod tests {
         assert!(t.contains("uidNumber = \"{next:5000-7999}\"  # detected at dump time: in use 5000-5020; next block at 8000"));
         assert!(t.contains("gidNumber = \"{next:8000-60000}\""));
         assert!(t.contains("# exceptions (defaults.loginShell): cn=u12,ou=people,dc=argus,dc=ch"));
+    }
+
+    /// Server diagnostics and odd DNs can carry line breaks; interpolated into
+    /// a `#` comment they must not push text out of the comment.
+    #[test]
+    fn line_breaks_in_free_text_stay_inside_comments() {
+        let s = argus_sample();
+        let d = crate::detect::infer::detect(&schema(), &s);
+        let mut m = crate::detect::merge::merge(&schema(), &d.profiles, &[]);
+        m.provenance[0]
+            .notes
+            .push("server said:\nbad = \"value\"\r\n[oops]".into());
+        let mut ranges = BTreeMap::new();
+        ranges.insert(
+            (
+                m.profiles[0].name.to_lowercase(),
+                "uidNumber".to_lowercase(),
+            ),
+            RangeOutcome {
+                result: Err("timeout\n[boom]".into()),
+                uncertain: false,
+            },
+        );
+        let t = render(&m.profiles, &m.provenance, &m.disabled, "# h", &ranges);
+        let cfg: crate::config::Config = toml::from_str(&format!(
+            "[server]\nuri = \"ldap://x\"\nbase_dn = \"dc=argus,dc=ch\"\n[auth]\nbind_dn = \"cn=a\"\n{t}"
+        ))
+        .unwrap_or_else(|e| panic!("{e}\n{t}"));
+        assert!(!cfg.overrides.is_empty());
+        assert!(
+            t.contains("# note: server said: bad = \"value\"  [oops]\n"),
+            "{t}"
+        );
     }
 
     #[test]
