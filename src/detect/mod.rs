@@ -4,7 +4,9 @@
 
 #[cfg(test)]
 pub(crate) mod fixtures;
+pub mod infer;
 pub mod model;
+pub mod names;
 
 use std::time::Duration;
 
