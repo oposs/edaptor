@@ -19,6 +19,7 @@ All notable changes to eDAPtor are documented here. The format follows
 - **The profile chooser of `edaptor tui-create` hides detected organizational-unit and domain profiles** unless `--container` is exactly their container.
 - **`edaptor passwd <user>` prints `detecting profiles…` on stderr and searches only profiles with a password field or a password-bearing object class.** A user whose private group has the same name no longer fails with "matches multiple entries".
 - **Any profile that includes `sambaSamAccount` now looks up the Samba domain,** so the `sambaSID` field generates the SID without `[samba] domain_sid`; it stays off with `[detect] enabled = false`.
+- **A widget whose `candidate` names a detected profile is switched off, not fatal, when detection fails or is cut short.** eDAPtor starts without that widget, prints a `warning:` line, and the status line reads `Profile detection failed: …; 1 config widget disabled, see the startup warnings`; with a complete detection an unknown candidate still stops startup.
 - **Profile names in widget `candidate` settings are matched without regard to case.** `candidate = "PosixGroup"` now finds the profile `posixgroup` instead of failing with `unknown candidate profile`.
 
 ### Fixed

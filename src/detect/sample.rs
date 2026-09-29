@@ -130,6 +130,7 @@ pub fn sample(s: &mut dyn Searcher, base_dn: &str, budget: &Budget) -> Result<Sa
         }
     };
     if partial {
+        out.incomplete = true;
         out.notes
             .push("the container search hit a limit; some containers may be missing".to_string());
     }
@@ -140,6 +141,7 @@ pub fn sample(s: &mut dyn Searcher, base_dn: &str, budget: &Budget) -> Result<Sa
         }
     }
     if dns.len() > MAX_CONTAINERS {
+        out.incomplete = true;
         out.notes.push(format!(
             "sampled the first {MAX_CONTAINERS} containers; {} more containers skipped",
             dns.len() - MAX_CONTAINERS
@@ -149,6 +151,7 @@ pub fn sample(s: &mut dyn Searcher, base_dn: &str, budget: &Budget) -> Result<Sa
     let attrs: Vec<String> = SAMPLE_ATTRS.iter().map(|a| a.to_string()).collect();
     for (i, dn) in dns.iter().enumerate() {
         let Some(t) = budget.remaining() else {
+            out.incomplete = true;
             out.notes.push(format!(
                 "detection budget used up; skipped {} containers (partial)",
                 dns.len() - i
@@ -166,6 +169,7 @@ pub fn sample(s: &mut dyn Searcher, base_dn: &str, budget: &Budget) -> Result<Sa
         )) {
             Ok(r) => r,
             Err(e) => {
+                out.incomplete = true;
                 out.notes.push(format!("sampling {dn} failed: {e}"));
                 continue;
             }
@@ -197,6 +201,7 @@ pub fn sample(s: &mut dyn Searcher, base_dn: &str, budget: &Budget) -> Result<Sa
             },
             None => partial = true,
         }
+        out.incomplete |= partial;
         out.containers.push(ContainerSample {
             dn: dn.clone(),
             entries,
@@ -369,6 +374,10 @@ mod tests {
         assert_eq!(s.containers.len(), 1);
         let c = &s.containers[0];
         assert!(c.partial, "size-limited sample is partial");
+        assert!(
+            s.incomplete,
+            "a partial container makes the sample incomplete"
+        );
         assert!(c.present["uid=u1,ou=p,dc=x"].contains("jpegphoto"));
         let values = f
             .calls
@@ -438,6 +447,10 @@ mod tests {
         let s = sample(&mut g, "dc=x", &b).unwrap();
         assert!(s.containers.is_empty());
         assert!(s.notes.iter().any(|n| n.contains("budget")));
+        assert!(
+            s.incomplete,
+            "skipped containers make the sample incomplete"
+        );
     }
 
     #[test]

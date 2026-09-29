@@ -49,14 +49,25 @@ pub struct LoadedProfiles {
     pub notes: Vec<String>,
     /// Detected parts dropped by validation (also in `notes`).
     pub dropped: Vec<String>,
+    /// Config widgets disabled because an incomplete detection missed their
+    /// candidate profile (also in `notes`).
+    pub config_dropped: Vec<String>,
     pub detection_error: Option<String>,
 }
 
 impl LoadedProfiles {
     /// The TUI status line after startup, when detection has something to say.
     pub fn status_line(&self) -> Option<String> {
+        let disabled = match self.config_dropped.len() {
+            0 => String::new(),
+            1 => "; 1 config widget disabled, see the startup warnings".to_string(),
+            n => format!("; {n} config widgets disabled, see the startup warnings"),
+        };
         if let Some(e) = &self.detection_error {
-            return Some(format!("Profile detection failed: {e}"));
+            return Some(format!("Profile detection failed: {e}{disabled}"));
+        }
+        if !disabled.is_empty() {
+            return Some(format!("Profile detection incomplete{disabled}"));
         }
         (!self.dropped.is_empty()).then(|| {
             format!(
@@ -92,18 +103,21 @@ pub fn assemble(
             containers_sampled: 0,
             notes: Vec::new(),
             dropped: Vec::new(),
+            config_dropped: Vec::new(),
             detection_error: None,
         });
     };
-    let (detected, containers_sampled, mut notes, detection_error, group_ou) = match sampled {
-        Ok(s) => {
-            let d = crate::detect::infer::detect(&schema, &s);
-            let mut notes = s.notes;
-            notes.extend(d.notes);
-            (d.profiles, s.containers.len(), notes, None, s.group_ou)
-        }
-        Err(e) => (Vec::new(), 0, Vec::new(), Some(e), None),
-    };
+    let (detected, containers_sampled, mut notes, detection_error, group_ou, incomplete) =
+        match sampled {
+            Ok(s) => {
+                let d = crate::detect::infer::detect(&schema, &s);
+                let mut notes = s.notes;
+                notes.extend(d.notes);
+                let n = s.containers.len();
+                (d.profiles, n, notes, None, s.group_ou, s.incomplete)
+            }
+            Err(e) => (Vec::new(), 0, Vec::new(), Some(e), None, false),
+        };
     // Rule D runs whenever detection is enabled, also after a failed sample.
     let mut merged = merge_with_assumptions(
         &schema,
@@ -112,7 +126,11 @@ pub fn assemble(
         group_ou.as_deref(),
         detection_error.is_some(),
     );
-    validate(&mut merged).map_err(|e| anyhow!("profile config error: {e}"))?;
+    let why = match &detection_error {
+        Some(e) => Some(format!("profile detection failed: {e}")),
+        None => incomplete.then(|| "profile detection incomplete".to_string()),
+    };
+    validate(&mut merged, why.as_deref()).map_err(|e| anyhow!("profile config error: {e}"))?;
     let widgets = widgets_of(&merged.profiles)?;
     notes.extend(merged.warnings);
     Ok(LoadedProfiles {
@@ -125,6 +143,7 @@ pub fn assemble(
         containers_sampled,
         notes,
         dropped: merged.dropped,
+        config_dropped: merged.config_dropped,
         detection_error,
     })
 }
@@ -229,6 +248,48 @@ mod tests {
         let p = &l.profiles[0];
         assert!(p.companion.is_none());
         assert!(!p.defaults.entries.contains_key("gidNumber"));
+    }
+
+    const NEEDS_DETECTED: &str = "[[profile]]\nname = \"grp\"\nobject_classes = [\"posixGroup\"]\nsearch_base = \"ou=groups,dc=example,dc=org\"\n[profile.widget.memberUid]\nkind = \"picker\"\ncandidate = \"user-users\"\n";
+
+    /// A config that names a detected profile starts after a failed detection:
+    /// the widget is dropped and the status line names the failure.
+    #[test]
+    fn a_failed_detection_disables_a_widget_naming_a_detected_profile() {
+        assert!(assemble(
+            schema(),
+            &inputs(NEEDS_DETECTED, true),
+            Some(Ok(demo_sample()))
+        )
+        .is_ok());
+        let l = assemble(
+            schema(),
+            &inputs(NEEDS_DETECTED, true),
+            Some(Err("timeout".into())),
+        )
+        .expect("detection failure never stops eDAPtor");
+        assert!(!l.profiles[0].widgets.contains_key("memberUid"));
+        assert_eq!(
+            l.status_line().as_deref(),
+            Some("Profile detection failed: timeout; 1 config widget disabled, see the startup warnings")
+        );
+    }
+
+    /// The same after a sample cut short by the limits.
+    #[test]
+    fn a_partial_sample_disables_a_widget_naming_a_missing_profile() {
+        let sample = Sample {
+            incomplete: true,
+            ..Default::default()
+        };
+        let l = assemble(schema(), &inputs(NEEDS_DETECTED, true), Some(Ok(sample))).unwrap();
+        assert!(!l.profiles[0].widgets.contains_key("memberUid"));
+        assert_eq!(
+            l.status_line().as_deref(),
+            Some(
+                "Profile detection incomplete; 1 config widget disabled, see the startup warnings"
+            )
+        );
     }
 
     #[test]

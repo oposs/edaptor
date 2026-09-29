@@ -153,6 +153,9 @@ pub struct Sample {
     /// `ou=groups,<base_dn>` when that entry exists (rule D's fallback companion base).
     pub group_ou: Option<String>,
     pub notes: Vec<String>,
+    /// Containers may be missing or cut short (a limit hit, containers skipped
+    /// or unreadable), so a profile the config names may not have been detected.
+    pub incomplete: bool,
 }
 
 /// One detected profile before the merge.

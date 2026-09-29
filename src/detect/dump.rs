@@ -409,7 +409,7 @@ mod tests {
         let s = argus_sample();
         let d = crate::detect::infer::detect(&schema(), &s);
         let mut m = crate::detect::merge::merge(&schema(), &d.profiles, &[]);
-        crate::detect::merge::validate(&mut m).unwrap();
+        crate::detect::merge::validate(&mut m, None).unwrap();
         let scan: Vec<SampleEntry> = s
             .containers
             .iter()

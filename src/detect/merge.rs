@@ -58,6 +58,9 @@ pub struct Merged {
     pub warnings: Vec<String>,
     /// Detected parts dropped by `validate` (also in `warnings`).
     pub dropped: Vec<String>,
+    /// Config widgets dropped by `validate` because their candidate was not
+    /// detected by an incomplete detection (also in `warnings`).
+    pub config_dropped: Vec<String>,
 }
 
 impl Provenance {
@@ -545,11 +548,15 @@ pub(crate) fn merge_core(
 }
 
 /// Per-origin validation (spec §3 "Validation"): a failing detected part is
-/// dropped and noted; a failing config part is an error.
-pub fn validate(m: &mut Merged) -> Result<(), String> {
+/// dropped and noted; a failing config part is an error. `incomplete` names why
+/// detection may have missed profiles (failed, cut short); then a config widget
+/// whose candidate is unknown is dropped with a warning instead, because the
+/// same config is valid whenever detection completes.
+pub fn validate(m: &mut Merged, incomplete: Option<&str>) -> Result<(), String> {
     let names: Vec<String> = m.profiles.iter().map(|p| p.name.to_lowercase()).collect();
     for (p, prov) in m.profiles.iter_mut().zip(m.provenance.iter_mut()) {
         let mut drop: Vec<(String, String)> = Vec::new();
+        let mut config_drop: Vec<(String, String)> = Vec::new();
         for (attr, spec) in &p.widgets {
             let Some(name) = candidate_name(spec) else {
                 continue;
@@ -565,6 +572,11 @@ pub fn validate(m: &mut Merged) -> Result<(), String> {
                     attr.clone(),
                     format!("profile \"{}\": dropped detected widget.{attr}: unknown candidate profile \"{name}\"", p.name),
                 ));
+            } else if let Some(why) = incomplete {
+                config_drop.push((
+                    attr.clone(),
+                    format!("profile \"{}\": disabled [profile.widget.{attr}]: unknown candidate profile \"{name}\" ({why})", p.name),
+                ));
             } else {
                 return Err(format!(
                     "profile \"{}\" [profile.widget.{attr}]: unknown candidate profile \"{name}\"",
@@ -578,6 +590,13 @@ pub fn validate(m: &mut Merged) -> Result<(), String> {
             prov.notes.push(note.clone());
             m.warnings.push(note.clone());
             m.dropped.push(note);
+        }
+        for (attr, note) in config_drop {
+            p.widgets.remove(&attr);
+            prov.fields.remove(&format!("widget.{attr}"));
+            prov.notes.push(note.clone());
+            m.warnings.push(note.clone());
+            m.config_dropped.push(note);
         }
         if let Some(c) = &p.companion {
             let who = format!("profile '{}' companion", p.name);
@@ -692,7 +711,7 @@ mod tests {
             } => assert_eq!(n, "people"),
             other => panic!("{other:?}"),
         }
-        validate(&mut m).unwrap();
+        validate(&mut m, None).unwrap();
         crate::config::widget::resolve_widgets(&m.profiles).expect("no widget config error");
     }
 
@@ -817,7 +836,7 @@ mod tests {
             ),
         );
         let mut m = merge(&schema(), &d, &[]);
-        validate(&mut m).unwrap();
+        validate(&mut m, None).unwrap();
         assert!(!get(&m, "posixgroup-groups")
             .0
             .widgets
@@ -826,8 +845,30 @@ mod tests {
         let mut bad = merge(&schema(), &demo(), &overrides(
             "[[profile]]\nname = \"x\"\nobject_classes = [\"posixGroup\"]\n[profile.widget.memberUid]\nkind = \"picker\"\ncandidate = \"ghost\"\n",
         ));
-        assert!(validate(&mut bad)
+        assert!(validate(&mut bad, None)
             .unwrap_err()
             .contains("unknown candidate profile \"ghost\""));
+    }
+
+    /// After an incomplete detection, a config widget naming a profile that was
+    /// not detected this time is dropped with a warning naming the cause, not a
+    /// fatal error: the same config works when detection completes.
+    #[test]
+    fn an_incomplete_detection_drops_an_unknown_config_candidate() {
+        let mut m = merge(&schema(), &[], &overrides(
+            "[[profile]]\nname = \"x\"\nobject_classes = [\"posixGroup\"]\n[profile.widget.memberUid]\nkind = \"picker\"\ncandidate = \"user-people\"\n",
+        ));
+        validate(&mut m, Some("profile detection failed: timeout")).unwrap();
+        let (p, _) = get(&m, "x");
+        assert!(!p.widgets.contains_key("memberUid"));
+        assert_eq!(m.config_dropped.len(), 1);
+        let w = &m.config_dropped[0];
+        assert!(
+            w.contains("[profile.widget.memberUid]")
+                && w.contains("\"user-people\"")
+                && w.contains("profile detection failed: timeout"),
+            "{w}"
+        );
+        assert!(m.warnings.contains(w));
     }
 }

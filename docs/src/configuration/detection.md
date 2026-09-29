@@ -104,6 +104,12 @@ Two details help when you suppress parts:
 - A widget that points at a detected profile must use the name the profile has
   after the merge. When a config block renames a detected profile, references
   by the detected name no longer resolve; write the config name in `candidate`.
+- A `candidate` naming a profile that does not exist stops eDAPtor with
+  `unknown candidate profile`. When detection failed or was cut short, the
+  profile may simply not have been detected this time: eDAPtor then starts
+  without that widget, prints a `warning:` line and says so in the status line
+  (`Profile detection failed: …; 1 config widget disabled, see the startup
+  warnings`).
 
 To switch detection off:
 
