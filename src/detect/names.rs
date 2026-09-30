@@ -125,6 +125,7 @@ mod tests {
             defaults: Default::default(),
             widgets: Default::default(),
             companion: None,
+            assumed: Default::default(),
             private_groups: false,
             users_without_private_group: None,
             notes: vec![],

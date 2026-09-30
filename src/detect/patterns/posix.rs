@@ -106,6 +106,9 @@ pub fn apply_private_group(p: &mut DetectedProfile, index: &PrivateIndex) -> boo
     true
 }
 
+/// Provenance of a `loginShell` choice no sampled entry supports.
+pub const REASON_NO_SHELLS: &str = "no login shells in the sample; built-in list";
+
 /// At most this many shells in use are added to the built-in `loginShell` options.
 const MAX_EXTRA_SHELLS: usize = 10;
 
@@ -128,6 +131,7 @@ fn shell_label(path: &str) -> String {
 /// The `loginShell` choice of a user profile: the built-in options plus the
 /// shells in use (most frequent first, at most [`MAX_EXTRA_SHELLS`]), the
 /// detected default first. Entries whose shell is left out are exceptions.
+/// Without any shell in the sample the built-in list is proposed as assumed.
 pub fn apply_login_shell(p: &mut DetectedProfile) {
     let Some(WidgetSpecCfg::Choice { options, .. }) = crate::config::builtin::builtin_schema()
         .get("posixaccount")
@@ -169,6 +173,12 @@ pub fn apply_login_shell(p: &mut DetectedProfile) {
                 exceptions.push(u.dn.clone());
             }
         }
+    }
+    if matched == 0 && exceptions.is_empty() {
+        p.assumed.insert(
+            "widget.loginShell".to_string(),
+            REASON_NO_SHELLS.to_string(),
+        );
     }
     let ev = Evidence::new(matched, p.entries.len())
         .with_exceptions(exceptions)

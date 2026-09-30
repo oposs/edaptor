@@ -182,6 +182,9 @@ pub struct DetectedProfile {
     pub defaults: BTreeMap<String, Detected<DefaultValue>>,
     pub widgets: BTreeMap<String, Detected<WidgetSpecCfg>>,
     pub companion: Option<Detected<CompanionSpec>>,
+    /// Parts proposed without evidence from the sample (field key such as
+    /// `widget.loginShell` → reason); their provenance is `assumed`.
+    pub assumed: BTreeMap<String, String>,
     /// Rule B2 applied: users here have user-private groups.
     pub private_groups: bool,
     /// posixAccount profiles: how many sampled users have no private group

@@ -5,6 +5,7 @@ use std::collections::{BTreeMap, HashMap};
 use crate::config::defaults::DefaultValue;
 use crate::config::{CandidateRef, ContainerScope, EntryProfile, ProfileOverride, WidgetSpecCfg};
 use crate::detect::dn_eq;
+use crate::detect::infer::{password_fields, place_password_fields};
 use crate::detect::model::{DetectedProfile, Evidence};
 use crate::schema::SchemaModel;
 
@@ -199,6 +200,11 @@ fn detected_fields(d: &DetectedProfile) -> BTreeMap<String, Source> {
             Source::Detected(c.evidence.clone()),
         );
     }
+    for (k, reason) in &d.assumed {
+        if f.contains_key(k) {
+            f.insert(k.clone(), Source::Assumed(reason.clone()));
+        }
+    }
     f
 }
 
@@ -266,9 +272,14 @@ fn merge_attrs<V: Clone>(
 }
 
 /// Apply every `suppress` path of `o`; the ones matching nothing (yet) stay pending.
-fn apply_suppress(p: &mut EntryProfile, prov: &mut Provenance, o: &ProfileOverride) {
+fn apply_suppress(
+    schema: &SchemaModel,
+    p: &mut EntryProfile,
+    prov: &mut Provenance,
+    o: &ProfileOverride,
+) {
     for path in &o.suppress {
-        if suppress(p, prov, path).is_err() {
+        if suppress(schema, p, prov, path).is_err() {
             prov.pending_suppress.push(path.clone());
         }
     }
@@ -378,8 +389,24 @@ fn merge_one(
             }
         }
     }
+    // A detected `show` places the password fields of the effective widgets.
+    if o.show.is_none() {
+        let detected = password_fields(
+            &d.object_classes.value,
+            d.widgets.iter().map(|(k, w)| (k, &w.value)),
+        );
+        p.show.retain(|a| !detected.contains(&a.to_lowercase()));
+        let effective = password_fields(&p.object_classes, &p.widgets);
+        place_password_fields(
+            schema,
+            &mut p.show,
+            &p.object_classes,
+            &p.rdn_attr,
+            &effective,
+        );
+    }
     let mut prov = Provenance::merged(&p, d, fields);
-    apply_suppress(&mut p, &mut prov, o);
+    apply_suppress(schema, &mut p, &mut prov, o);
     (p, prov)
 }
 
@@ -388,7 +415,12 @@ fn nothing(who: &str, path: &str) -> String {
 }
 
 /// Remove one detected part. Config parts are never removed.
-fn suppress(p: &mut EntryProfile, prov: &mut Provenance, path: &str) -> Result<(), String> {
+fn suppress(
+    schema: &SchemaModel,
+    p: &mut EntryProfile,
+    prov: &mut Provenance,
+    path: &str,
+) -> Result<(), String> {
     let who = p.name.clone();
     let key = match path {
         "companion" | "label" | "show" | "search_attrs" => path.to_string(),
@@ -401,7 +433,7 @@ fn suppress(p: &mut EntryProfile, prov: &mut Provenance, path: &str) -> Result<(
                 Some(k) => format!("widget.{k}"),
                 None => return Err(nothing(&who, path)),
             },
-            Some(("companion", attr)) => return suppress_companion_attr(p, prov, path, attr),
+            Some(("companion", attr)) => return suppress_companion_attr(schema, p, prov, path, attr),
             _ => {
                 return Err(format!(
                     "profile \"{who}\": unknown suppress path \"{path}\" (use companion, companion.<attr>, label, show, search_attrs, defaults.<attr> or widget.<attr>)"
@@ -436,8 +468,10 @@ fn suppress(p: &mut EntryProfile, prov: &mut Provenance, path: &str) -> Result<(
 }
 
 /// Remove one attribute of a detected or assumed companion; the companion
-/// itself stays. A config companion is never touched.
+/// itself stays. A config companion is never touched, and the RDN attribute
+/// and the MUST attributes of the companion's classes are refused.
 fn suppress_companion_attr(
+    schema: &SchemaModel,
     p: &mut EntryProfile,
     prov: &mut Provenance,
     path: &str,
@@ -458,6 +492,14 @@ fn suppress_companion_attr(
     else {
         return Err(nothing(&p.name, path));
     };
+    let refs: Vec<&str> = c.object_classes.iter().map(String::as_str).collect();
+    let must = schema.effective_attributes(&refs).must;
+    if k.eq_ignore_ascii_case(&c.rdn_attr) || must.iter().any(|m| m.eq_ignore_ascii_case(&k)) {
+        return Err(format!(
+            "profile \"{}\": suppress \"{path}\" refused: the companion's {k} is required (its RDN attribute or a MUST attribute of its object classes); use \"companion\" to drop the whole companion",
+            p.name
+        ));
+    }
     c.attributes.remove(&k);
     prov.suppressed.push(path.to_string());
     Ok(())
@@ -471,16 +513,16 @@ pub fn merge(
     overrides: &[ProfileOverride],
 ) -> Merged {
     let mut m = merge_core(schema, detected, overrides);
-    flush_pending(&mut m);
+    flush_pending(schema, &mut m);
     m
 }
 
 /// Retry every pending suppress path; the ones that still match nothing (or name
 /// an unknown path) become warnings.
-pub(crate) fn flush_pending(m: &mut Merged) {
+pub(crate) fn flush_pending(schema: &SchemaModel, m: &mut Merged) {
     for (p, prov) in m.profiles.iter_mut().zip(m.provenance.iter_mut()) {
         for path in std::mem::take(&mut prov.pending_suppress) {
-            if let Err(w) = suppress(p, prov, &path) {
+            if let Err(w) = suppress(schema, p, prov, &path) {
                 m.warnings.push(w);
             }
         }
@@ -571,7 +613,7 @@ pub(crate) fn merge_core(
             None => match o.to_entry_profile() {
                 Some(mut p) => {
                     let mut prov = Provenance::config(&p);
-                    apply_suppress(&mut p, &mut prov, o);
+                    apply_suppress(schema, &mut p, &mut prov, o);
                     out.profiles.push(p);
                     out.provenance.push(prov);
                 }
@@ -873,6 +915,83 @@ mod tests {
             "{:?}",
             m.warnings
         );
+    }
+
+    /// The companion's RDN attribute and the MUST attributes of its classes
+    /// cannot be suppressed one by one; the part stays and the warning points
+    /// at `companion`.
+    #[test]
+    fn suppress_refuses_required_companion_attributes() {
+        let d = detect(&schema(), &argus_sample()).profiles;
+        let m = merge(&schema(), &d, &overrides(
+            "[[profile]]\nname = \"user-people\"\nsuppress = [\"companion.cn\", \"companion.gidNumber\"]\n",
+        ));
+        let (p, prov) = get(&m, "user-people");
+        let c = p.companion.as_ref().unwrap();
+        assert_eq!(c.attributes["cn"], "{uid}");
+        assert_eq!(c.attributes["gidNumber"], "{uidNumber}");
+        assert!(prov.suppressed.is_empty(), "{:?}", prov.suppressed);
+        for path in ["companion.cn", "companion.gidNumber"] {
+            assert!(
+                m.warnings.iter().any(|w| w.contains(&format!("\"{path}\""))
+                    && w.contains("required")
+                    && w.contains("\"companion\"")),
+                "{path}: {:?}",
+                m.warnings
+            );
+        }
+    }
+
+    /// With no login shell in the sample the built-in list is still proposed,
+    /// marked assumed rather than detected 0/N.
+    #[test]
+    fn a_login_shell_choice_without_sampled_shells_is_assumed() {
+        let mut s = argus_sample();
+        for c in &mut s.containers {
+            for en in &mut c.entries {
+                en.attrs.remove("loginShell");
+            }
+        }
+        let d = detect(&schema(), &s).profiles;
+        let m = merge(&schema(), &d, &[]);
+        let (p, prov) = get(&m, "user-people");
+        assert!(p.widgets.contains_key("loginShell"));
+        assert_eq!(
+            prov.fields["widget.loginShell"],
+            Source::Assumed("no login shells in the sample; built-in list".into())
+        );
+        let m = merge(
+            &schema(),
+            &d,
+            &overrides("[[profile]]\nname = \"user-people\"\nsuppress = [\"widget.loginShell\"]\n"),
+        );
+        assert!(!get(&m, "user-people").0.widgets.contains_key("loginShell"));
+    }
+
+    /// The password field follows the effective widgets: a config widget of
+    /// another kind keeps `userPassword` out of the detected `show`, and a
+    /// config password widget on another attribute is placed the same way.
+    #[test]
+    fn password_fields_in_show_follow_config_widgets() {
+        let d = detect(&schema(), &argus_sample()).profiles;
+        let m = merge(&schema(), &d, &overrides(
+            "[[profile]]\nname = \"user-people\"\n[profile.widget.userPassword]\nkind = \"readonly\"\n",
+        ));
+        let show = &get(&m, "user-people").0.show;
+        assert!(!show.iter().any(|a| a == "userPassword"), "{show:?}");
+        let m = merge(&schema(), &d, &overrides(
+            "[[profile]]\nname = \"user-people\"\n[profile.widget.description]\nkind = \"password\"\n",
+        ));
+        let show = &get(&m, "user-people").0.show;
+        let g = show.iter().position(|a| a == "givenName").unwrap();
+        let mut next: Vec<&str> = show[g + 1..g + 3].iter().map(String::as_str).collect();
+        next.sort();
+        assert_eq!(next, vec!["description", "userPassword"], "{show:?}");
+        // A config `show` is never touched.
+        let m = merge(&schema(), &d, &overrides(
+            "[[profile]]\nname = \"user-people\"\nshow = [\"cn\"]\n[profile.widget.description]\nkind = \"password\"\n",
+        ));
+        assert_eq!(get(&m, "user-people").0.show, vec!["cn"]);
     }
 
     #[test]

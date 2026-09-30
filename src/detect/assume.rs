@@ -26,7 +26,7 @@ pub fn merge_with_assumptions(
 ) -> Merged {
     let mut m = merge_core(schema, detected, overrides);
     apply(schema, detected, group_ou, detection_failed, &mut m);
-    flush_pending(&mut m);
+    flush_pending(schema, &mut m);
     m
 }
 

@@ -112,6 +112,7 @@ fn build_profile(
         defaults: BTreeMap::new(),
         widgets: BTreeMap::new(),
         companion: None,
+        assumed: BTreeMap::new(),
         private_groups: false,
         users_without_private_group: None,
         notes: Vec::new(),
@@ -176,33 +177,80 @@ fn common_rdn_attr(entries: &[&SampleEntry]) -> Detected<String> {
     Detected::new(attr, Evidence::new(matched, n).with_exceptions(exceptions))
 }
 
-/// Attributes that come right before a password field in `show`.
-const NAMING_ATTRS: &[&str] = &["uid", "cn", "sn", "givenName", "displayName", "mail"];
+/// Identity attributes a password field follows in `show` (with `rdn_attr`).
+const IDENTITY_ATTRS: &[&str] = &["uid", "cn", "sn", "givenName", "displayName"];
 
-/// Attributes the built-in widget bundle turns into a password field for these
-/// classes (classes in name order, the last match wins, as in the resolver).
-fn password_widget_attrs(object_classes: &[String]) -> Vec<String> {
-    let mut classes: Vec<String> = object_classes.iter().map(|c| c.to_lowercase()).collect();
-    classes.sort();
-    let mut kinds: BTreeMap<&str, bool> = BTreeMap::new();
-    let bundle = crate::config::builtin::builtin_schema();
-    for oc in &classes {
-        for (attr, spec) in bundle.get(oc).into_iter().flatten() {
-            kinds.insert(attr, matches!(spec, WidgetSpecCfg::Password { .. }));
+/// Classes whose profiles get the built-in password field: accounts, not
+/// every `person` (a password policy entry is one too).
+const ACCOUNT_CLASSES: &[&str] = &["posixAccount", "inetOrgPerson", "sambaSamAccount"];
+
+/// Lowercased attributes the effective widgets turn into a password field: the
+/// built-in bundle for account classes (classes in name order, the last match
+/// wins, as in the resolver), overlaid by the profile's own `widgets`.
+pub(crate) fn password_fields<'a>(
+    object_classes: &[String],
+    widgets: impl IntoIterator<Item = (&'a String, &'a WidgetSpecCfg)>,
+) -> Vec<String> {
+    let mut kinds: BTreeMap<String, bool> = BTreeMap::new();
+    let account = object_classes
+        .iter()
+        .any(|c| ACCOUNT_CLASSES.iter().any(|a| a.eq_ignore_ascii_case(c)));
+    if account {
+        let mut classes: Vec<String> = object_classes.iter().map(|c| c.to_lowercase()).collect();
+        classes.sort();
+        let bundle = crate::config::builtin::builtin_schema();
+        for oc in &classes {
+            for (attr, spec) in bundle.get(oc).into_iter().flatten() {
+                kinds.insert(attr.clone(), matches!(spec, WidgetSpecCfg::Password { .. }));
+            }
         }
+    }
+    for (attr, spec) in widgets {
+        kinds.insert(
+            attr.to_lowercase(),
+            matches!(spec, WidgetSpecCfg::Password { .. }),
+        );
     }
     kinds
         .into_iter()
         .filter(|(_, pw)| *pw)
-        .map(|(a, _)| a.to_string())
+        .map(|(a, _)| a)
         .collect()
+}
+
+/// Put every attribute of `passwords` (lowercased) the classes allow right
+/// after the last identity attribute of `show` (else after the first
+/// entry), moving it there when `show` already lists it.
+pub(crate) fn place_password_fields(
+    schema: &SchemaModel,
+    show: &mut Vec<String>,
+    object_classes: &[String],
+    rdn_attr: &str,
+    passwords: &[String],
+) {
+    show.retain(|a| !passwords.contains(&a.to_lowercase()));
+    let mut at = show
+        .iter()
+        .rposition(|a| {
+            a.eq_ignore_ascii_case(rdn_attr)
+                || IDENTITY_ATTRS.iter().any(|n| n.eq_ignore_ascii_case(a))
+        })
+        .map_or(show.len().min(1), |i| i + 1);
+    let refs: Vec<&str> = object_classes.iter().map(String::as_str).collect();
+    let resolved = schema.effective_attributes(&refs);
+    for a in resolved.must.iter().chain(&resolved.may) {
+        let is_password = passwords.contains(&a.to_lowercase());
+        if is_password && !show.iter().any(|s| s.eq_ignore_ascii_case(a)) {
+            show.insert(at, a.clone());
+            at += 1;
+        }
+    }
 }
 
 /// `rdn_attr`, then MUST attributes, then MAY attributes present in more than
 /// half the group (by frequency, then name); operational, binary and secret
-/// attributes excluded. A password field (the built-in password widget) the
-/// classes allow follows the last naming attribute, whether or not entries
-/// reveal it.
+/// attributes excluded. The built-in password field of an account profile
+/// follows the identity attributes, whether or not entries reveal it.
 fn show_list(
     schema: &SchemaModel,
     object_classes: &[String],
@@ -243,18 +291,8 @@ fn show_list(
     for (_, a) in may {
         push(&mut show, &a);
     }
-    let passwords = password_widget_attrs(object_classes);
-    let mut at = show
-        .iter()
-        .rposition(|a| NAMING_ATTRS.iter().any(|n| n.eq_ignore_ascii_case(a)))
-        .map_or(show.len().min(1), |i| i + 1);
-    for a in resolved.must.iter().chain(&resolved.may) {
-        let is_password = passwords.iter().any(|p| p.eq_ignore_ascii_case(a));
-        if is_password && !show.iter().any(|s| s.eq_ignore_ascii_case(a)) {
-            show.insert(at, a.clone());
-            at += 1;
-        }
-    }
+    let passwords = password_fields(object_classes, []);
+    place_password_fields(schema, &mut show, object_classes, rdn_attr, &passwords);
     show
 }
 
@@ -303,12 +341,22 @@ mod tests {
         let pw = show.iter().position(|a| a == "userPassword");
         let last_name = show
             .iter()
-            .rposition(|a| {
-                ["uid", "cn", "sn", "givenName", "displayName", "mail"].contains(&a.as_str())
-            })
+            .rposition(|a| ["uid", "cn", "sn", "givenName", "displayName"].contains(&a.as_str()))
             .unwrap();
         assert_eq!(pw, Some(last_name + 1), "{show:?}");
         assert_eq!(show.iter().filter(|a| *a == "userPassword").count(), 1);
+        // After the identity attributes, not after mail or loginShell.
+        let mail = show.iter().position(|a| a == "mail").unwrap();
+        assert!(pw.unwrap() < mail, "{show:?}");
+    }
+
+    /// Only account profiles get the built-in password field: a `person`
+    /// entry such as a password policy does not.
+    #[test]
+    fn show_has_no_password_field_for_a_person_only_profile() {
+        let ocs = vec!["person".to_string()];
+        let show = show_list(&schema(), &ocs, "cn", 10, &|_| 10);
+        assert!(!show.iter().any(|a| a == "userPassword"), "{show:?}");
     }
 
     /// Only a password widget brings a password attribute into `show`: a class
