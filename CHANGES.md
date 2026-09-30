@@ -24,6 +24,7 @@ All notable changes to eDAPtor are documented here. The format follows
 
 ### Fixed
 
+- **Picking a login shell for a user whose shell is not in the list now saves the pick.** For a user with `/bin/tcsh`, choosing "Zsh" or "Disabled (nologin)" kept `/bin/tcsh`; the same held for any single-choice field with a value outside its options. An unchanged value outside the options is still kept as it is.
 - **Saving a new entry while its `uidNumber` is still being allocated no longer writes the text `‹allocating…›` to the server.** The save is refused with `Still allocating uidNumber; save again in a moment.`, and fields filled from the number, such as `gidNumber = "{uidNumber}"` or the private group's `gidNumber`, stay empty until it arrives. If the allocation cannot start, the field is emptied and the status line says `Could not allocate uidNumber: …`.
 - **The manual now describes `{next:MIN-MAX}` correctly.** It said the lowest
   unused number is picked; eDAPtor actually takes one above the highest number in

@@ -328,6 +328,11 @@ impl ChoiceWidget {
     /// per `checked`. For single-select, `checked` holds at most one value.
     pub fn commit_value(&self, current: &str, checked: &[String]) -> String {
         let mut set = self.parse(current);
+        // A plain value holds one token: a picked option replaces an off-list
+        // value instead of competing with it in `serialize`.
+        if matches!(self.format, ChoiceFormat::Plain) && !checked.is_empty() {
+            set.clear();
+        }
         if matches!(self.select, Cardinality::Single) {
             for o in &self.options {
                 set.remove(&o.value);
@@ -533,6 +538,36 @@ mod tests {
         );
         assert_eq!(w.present_summary("/bin/sh"), "POSIX sh");
         assert_eq!(w.present_summary("/bin/zsh"), "/bin/zsh");
+    }
+
+    /// A stored value outside the options is kept until an option is picked,
+    /// and then replaced whatever its sort order relative to the pick.
+    #[test]
+    fn plain_single_pick_replaces_an_off_list_value() {
+        let w = ChoiceWidget {
+            select: crate::config::relation::Cardinality::Single,
+            format: ChoiceFormat::Plain,
+            options: vec![
+                ChoiceOption {
+                    value: "/bin/bash".into(),
+                    label: "Bash".into(),
+                },
+                ChoiceOption {
+                    value: "/sbin/nologin".into(),
+                    label: "Disabled (nologin)".into(),
+                },
+            ],
+        };
+        assert!(w.seed_checked("/bin/tcsh").is_empty());
+        assert_eq!(w.commit_value("/bin/tcsh", &[]), "/bin/tcsh");
+        assert_eq!(
+            w.commit_value("/bin/tcsh", &["/sbin/nologin".to_string()]),
+            "/sbin/nologin"
+        );
+        assert_eq!(
+            w.commit_value("/bin/tcsh", &["/bin/bash".to_string()]),
+            "/bin/bash"
+        );
     }
 
     #[test]
