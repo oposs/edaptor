@@ -85,6 +85,8 @@ fn nothing_visible(msg: &str) -> bool {
 }
 
 fn invisible(mut out: Sample, msg: &str) -> Sample {
+    // No container was sampled: a profile the config names may still exist.
+    out.incomplete = true;
     out.notes
         .push(format!("nothing visible under the base ({msg})"));
     out
@@ -477,6 +479,8 @@ mod tests {
                 s.notes.iter().any(|n| n.contains("nothing visible")),
                 "{msg}"
             );
+            // Nothing was sampled, so a profile the config names may exist.
+            assert!(s.incomplete, "{msg}");
         }
         // The fallback filter hitting the same wall is the same outcome.
         let mut f = fake(|q| match q.filter.as_str() {

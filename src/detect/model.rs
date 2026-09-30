@@ -155,7 +155,7 @@ pub struct Sample {
     pub notes: Vec<String>,
     /// Containers were not sampled at all (the container search hit a limit,
     /// the budget ran out, more than `MAX_CONTAINERS`, a container search
-    /// failed), so a profile the config names may not have been detected. A
+    /// failed, nothing visible to the bind), so a profile the config names may not have been detected. A
     /// container cut at `SAMPLE_SIZE` still yields its profile and does not count.
     pub incomplete: bool,
 }

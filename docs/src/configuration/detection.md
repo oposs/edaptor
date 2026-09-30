@@ -110,7 +110,7 @@ Two details help when you suppress parts:
 - A `candidate` naming a profile that does not exist stops eDAPtor with
   `unknown candidate profile`. When detection failed, or containers were
   left unsampled (time budget used up, more than 100 containers, a container
-  that could not be read), the profile may simply not have been detected this
+  that could not be read, nothing visible to the bind), the profile may simply not have been detected this
   time: eDAPtor then starts
   without that widget, prints a `warning:` line and says so in the status line
   (`Profile detection failed: …; 1 config widget disabled, see the startup
