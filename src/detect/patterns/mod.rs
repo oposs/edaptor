@@ -168,13 +168,30 @@ mod tests {
 
     #[test]
     fn companion_builder_is_shared() {
-        let c = super::posix::private_group_companion("ou=groups,dc=x", true);
+        let c = super::posix::private_group_companion("ou=groups,dc=x");
         assert_eq!(c.object_classes, vec!["posixGroup"]);
         assert_eq!(c.rdn_attr, "cn");
         assert_eq!(c.search_base, "ou=groups,dc=x");
         assert_eq!(c.attributes["memberUid"], "{uid}");
-        let c = super::posix::private_group_companion("ou=groups,dc=x", false);
-        assert!(!c.attributes.contains_key("memberUid"));
+    }
+
+    /// Private groups without their user as `memberUid` still get a companion
+    /// that writes it: the hand-written configs all do.
+    #[test]
+    fn detected_companion_writes_member_uid_by_default() {
+        let mut s = argus_sample();
+        for c in &mut s.containers {
+            for en in &mut c.entries {
+                en.attrs.remove("memberUid");
+            }
+        }
+        let d = detect(&schema(), &s);
+        let c = &p(&d, "user-people")
+            .companion
+            .as_ref()
+            .expect("companion")
+            .value;
+        assert_eq!(c.attributes["memberUid"], "{uid}");
     }
 
     #[test]

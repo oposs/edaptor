@@ -153,7 +153,7 @@ pub fn apply(
                         "gidNumber".into(),
                         parse_default_value("{uidNumber}").expect("template"),
                     );
-                    p.companion = Some(private_group_companion(base, true));
+                    p.companion = Some(private_group_companion(base));
                     prov.fields
                         .insert("defaults.gidNumber".into(), Source::Assumed(reason.into()));
                     prov.fields
@@ -459,6 +459,25 @@ mod tests {
         let (p, prov) = get(&m, "user");
         assert!(p.companion.is_none());
         assert_eq!(prov.suppressed, vec!["companion"]);
+        assert!(m.warnings.is_empty(), "{:?}", m.warnings);
+    }
+
+    #[test]
+    fn one_attribute_of_an_assumed_companion_can_be_suppressed() {
+        let o = format!("{CFG_USER}suppress = [\"companion.memberUid\"]\n");
+        let m = merge_with_assumptions(
+            &schema(),
+            &[],
+            &overrides(&o),
+            Some("ou=groups,dc=x"),
+            false,
+        );
+        let (p, prov) = get(&m, "user");
+        let c = p.companion.as_ref().expect("the companion stays");
+        assert!(!c.attributes.contains_key("memberUid"));
+        assert_eq!(c.attributes["cn"], "{uid}");
+        assert!(matches!(prov.fields["companion"], Source::Assumed(_)));
+        assert_eq!(prov.suppressed, vec!["companion.memberUid"]);
         assert!(m.warnings.is_empty(), "{:?}", m.warnings);
     }
 

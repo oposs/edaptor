@@ -6,7 +6,7 @@ use crate::config::defaults::{parse_default_value, DefaultValue};
 use crate::config::{ChoiceOption, CompanionSpec, WidgetSpecCfg};
 use crate::detect::model::{Detected, DetectedProfile, Evidence, Sample, SampleEntry};
 use crate::detect::private::PrivateIndex;
-use crate::detect::{more_than_half, most_common, rule_applies, MIN_SAMPLE};
+use crate::detect::{most_common, rule_applies, MIN_SAMPLE};
 
 fn has_class(p: &DetectedProfile, oc: &str) -> bool {
     p.object_classes
@@ -58,21 +58,18 @@ fn template(s: &str) -> DefaultValue {
 }
 
 /// The posixGroup companion a user profile with private groups creates: cn =
-/// uid, gidNumber = uidNumber, optionally the user as memberUid. Shared with
-/// rule D (assumed defaults) so both build the same companion.
-pub fn private_group_companion(search_base: &str, member_uid: bool) -> CompanionSpec {
-    let mut attributes = BTreeMap::from([
-        ("cn".to_string(), "{uid}".to_string()),
-        ("gidNumber".to_string(), "{uidNumber}".to_string()),
-    ]);
-    if member_uid {
-        attributes.insert("memberUid".to_string(), "{uid}".to_string());
-    }
+/// uid, gidNumber = uidNumber, the user as memberUid. Shared with rule D
+/// (assumed defaults) so both build the same companion.
+pub fn private_group_companion(search_base: &str) -> CompanionSpec {
     CompanionSpec {
         object_classes: vec!["posixGroup".to_string()],
         rdn_attr: "cn".to_string(),
         search_base: search_base.to_string(),
-        attributes,
+        attributes: BTreeMap::from([
+            ("cn".to_string(), "{uid}".to_string()),
+            ("gidNumber".to_string(), "{uidNumber}".to_string()),
+            ("memberUid".to_string(), "{uid}".to_string()),
+        ]),
     }
 }
 
@@ -99,17 +96,7 @@ pub fn apply_private_group(p: &mut DetectedProfile, index: &PrivateIndex) -> boo
     let base = most_common(pairs.iter().filter_map(|(_, g)| g.parent()))
         .map(|(b, _)| b)
         .unwrap_or_default();
-    let with_member = pairs
-        .iter()
-        .filter(|(u, g)| {
-            u.first("uid").is_some_and(|uid| {
-                g.values("memberUid")
-                    .iter()
-                    .any(|m| m.trim().eq_ignore_ascii_case(uid))
-            })
-        })
-        .count();
-    let companion = private_group_companion(&base, more_than_half(with_member, pairs.len()));
+    let companion = private_group_companion(&base);
     p.defaults.insert(
         "gidNumber".to_string(),
         Detected::new(template("{uidNumber}"), ev.clone()),

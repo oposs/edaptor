@@ -401,9 +401,10 @@ fn suppress(p: &mut EntryProfile, prov: &mut Provenance, path: &str) -> Result<(
                 Some(k) => format!("widget.{k}"),
                 None => return Err(nothing(&who, path)),
             },
+            Some(("companion", attr)) => return suppress_companion_attr(p, prov, path, attr),
             _ => {
                 return Err(format!(
-                    "profile \"{who}\": unknown suppress path \"{path}\" (use companion, label, show, search_attrs, defaults.<attr> or widget.<attr>)"
+                    "profile \"{who}\": unknown suppress path \"{path}\" (use companion, companion.<attr>, label, show, search_attrs, defaults.<attr> or widget.<attr>)"
                 ))
             }
         },
@@ -430,6 +431,34 @@ fn suppress(p: &mut EntryProfile, prov: &mut Provenance, path: &str) -> Result<(
         },
     }
     prov.fields.remove(&key);
+    prov.suppressed.push(path.to_string());
+    Ok(())
+}
+
+/// Remove one attribute of a detected or assumed companion; the companion
+/// itself stays. A config companion is never touched.
+fn suppress_companion_attr(
+    p: &mut EntryProfile,
+    prov: &mut Provenance,
+    path: &str,
+    attr: &str,
+) -> Result<(), String> {
+    let generated = matches!(
+        prov.fields.get("companion"),
+        Some(Source::Detected(_) | Source::Assumed(_))
+    );
+    let Some(c) = p.companion.as_mut().filter(|_| generated) else {
+        return Err(nothing(&p.name, path));
+    };
+    let Some(k) = c
+        .attributes
+        .keys()
+        .find(|k| k.eq_ignore_ascii_case(attr))
+        .cloned()
+    else {
+        return Err(nothing(&p.name, path));
+    };
+    c.attributes.remove(&k);
     prov.suppressed.push(path.to_string());
     Ok(())
 }
@@ -819,6 +848,48 @@ mod tests {
         let (p, prov) = get(&m, "user-people");
         assert!(!p.widgets.contains_key("loginShell"));
         assert_eq!(prov.suppressed, vec!["widget.loginShell"]);
+    }
+
+    #[test]
+    fn suppress_removes_one_detected_companion_attribute() {
+        let d = detect(&schema(), &argus_sample()).profiles;
+        let m = merge(&schema(), &d, &overrides(
+            "[[profile]]\nname = \"user-people\"\nsuppress = [\"companion.MEMBERUID\", \"companion.nope\"]\n",
+        ));
+        let (p, prov) = get(&m, "user-people");
+        let c = p.companion.as_ref().expect("the companion stays");
+        assert!(
+            !c.attributes.contains_key("memberUid"),
+            "{:?}",
+            c.attributes
+        );
+        assert_eq!(c.attributes["cn"], "{uid}");
+        assert!(matches!(prov.fields["companion"], Source::Detected(_)));
+        assert_eq!(prov.suppressed, vec!["companion.MEMBERUID"]);
+        assert!(
+            m.warnings
+                .iter()
+                .any(|w| w.contains("\"companion.nope\" matches nothing detected")),
+            "{:?}",
+            m.warnings
+        );
+    }
+
+    #[test]
+    fn suppress_never_removes_a_config_companion_attribute() {
+        let d = detect(&schema(), &argus_sample()).profiles;
+        let m = merge(&schema(), &d, &overrides(
+            "[[profile]]\nname = \"user-people\"\nsuppress = [\"companion.memberUid\"]\n[profile.companion]\nobject_classes = [\"posixGroup\"]\nrdn_attr = \"cn\"\nsearch_base = \"ou=groups,dc=argus,dc=ch\"\n[profile.companion.attributes]\ncn = \"{uid}\"\nmemberUid = \"{uid}\"\n",
+        ));
+        let (p, _) = get(&m, "user-people");
+        assert_eq!(
+            p.companion.as_ref().unwrap().attributes["memberUid"],
+            "{uid}"
+        );
+        assert!(m
+            .warnings
+            .iter()
+            .any(|w| w.contains("\"companion.memberUid\" matches nothing detected")));
     }
 
     #[test]
