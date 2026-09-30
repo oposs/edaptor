@@ -206,8 +206,8 @@ candidate = "user"
 store     = "uid"
 
 # Change a detected profile without restating it: drop single detected parts
-# (companion, defaults.<attr>, widget.<attr>, label, show, search_attrs), or
-# the whole profile with `enabled = false`.
+# (companion, companion.<attr>, defaults.<attr>, widget.<attr>, label, show,
+# search_attrs), or the whole profile with `enabled = false`.
 [[profile]]
 name     = "posixgroup-groups"
 suppress = ["widget.memberUid"]

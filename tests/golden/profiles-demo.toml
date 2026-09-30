@@ -5,7 +5,7 @@ name = "user-people"  # detected: 200 entries in ou=people,dc=example,dc=org (pa
 object_classes = ["inetOrgPerson", "posixAccount", "sambaSamAccount", "shadowAccount"]  # detected: 200/200
 rdn_attr = "uid"  # detected: 200/200
 search_base = "ou=people,dc=example,dc=org"  # detected: 200/200
-show = ["uid", "cn", "gidNumber", "homeDirectory", "sambaSID", "sn", "uidNumber", "departmentNumber", "givenName", "loginShell", "mail", "ou", "sambaAcctFlags", "sambaPwdLastSet"]  # detected: 200/200
+show = ["uid", "cn", "gidNumber", "homeDirectory", "sambaSID", "sn", "uidNumber", "departmentNumber", "givenName", "loginShell", "mail", "userPassword", "ou", "sambaAcctFlags", "sambaPwdLastSet"]  # detected: 200/200
 search_attrs = ["uid", "cn", "sn", "mail"]  # detected: 200/200
 label = "{cn} ({uid})"  # detected: 200/200
 [profile.defaults]
@@ -19,13 +19,18 @@ kind = "lookup"  # detected: 200/200 posix-group profile
 candidate = "posixgroup-groups"
 store = "gidNumber"
 label = "{cn}"
+[profile.widget.loginShell]
+kind = "choice"  # detected: 200/200 login shells in use
+select = "single"
+format = "plain"
+options = [{ value = "/bin/bash", label = "Bash" }, { value = "/bin/sh", label = "POSIX sh" }, { value = "/bin/zsh", label = "Zsh" }, { value = "/bin/false", label = "Disabled (false)" }, { value = "/sbin/nologin", label = "Disabled (nologin)" }]
 
 [[profile]]
 name = "user-users"  # detected: 2 entries in ou=users,dc=example,dc=org
 object_classes = ["inetOrgPerson", "posixAccount", "shadowAccount"]  # detected: 2/2
 rdn_attr = "cn"  # detected: 2/2
 search_base = "ou=users,dc=example,dc=org"  # detected: 2/2
-show = ["cn", "gidNumber", "homeDirectory", "sn", "uid", "uidNumber"]  # detected: 2/2
+show = ["cn", "gidNumber", "homeDirectory", "sn", "uid", "userPassword", "uidNumber"]  # detected: 2/2
 search_attrs = ["cn", "uid", "sn"]  # detected: 2/2
 label = "{cn} ({uid})"  # detected: 2/2
 [profile.defaults]
@@ -35,6 +40,11 @@ kind = "lookup"  # detected: 2/2 posix-group profile
 candidate = "posixgroup-groups"
 store = "gidNumber"
 label = "{cn}"
+[profile.widget.loginShell]
+kind = "choice"  # detected: 0/2 login shells in use
+select = "single"
+format = "plain"
+options = [{ value = "/bin/bash", label = "Bash" }, { value = "/bin/sh", label = "POSIX sh" }, { value = "/bin/zsh", label = "Zsh" }, { value = "/bin/false", label = "Disabled (false)" }, { value = "/sbin/nologin", label = "Disabled (nologin)" }]
 
 [[profile]]
 name = "organizationalrole-services"  # detected: 3 entries in ou=services,dc=example,dc=org
@@ -50,7 +60,7 @@ name = "person-policies"  # detected: 2 entries in ou=policies,dc=example,dc=org
 object_classes = ["person", "pwdPolicy"]  # detected: 2/2
 rdn_attr = "cn"  # detected: 2/2
 search_base = "ou=policies,dc=example,dc=org"  # detected: 2/2
-show = ["cn", "pwdAttribute", "sn", "pwdAllowUserChange", "pwdCheckQuality", "pwdExpireWarning", "pwdGraceAuthNLimit", "pwdInHistory", "pwdLockout", "pwdLockoutDuration", "pwdMaxAge", "pwdMaxFailure", "pwdMinAge", "pwdMinLength", "pwdSafeModify"]  # detected: 2/2
+show = ["cn", "pwdAttribute", "sn", "userPassword", "pwdAllowUserChange", "pwdCheckQuality", "pwdExpireWarning", "pwdGraceAuthNLimit", "pwdInHistory", "pwdLockout", "pwdLockoutDuration", "pwdMaxAge", "pwdMaxFailure", "pwdMinAge", "pwdMinLength", "pwdSafeModify"]  # detected: 2/2
 search_attrs = ["cn", "sn"]  # detected: 2/2
 label = "{cn}"  # detected: 2/2
 

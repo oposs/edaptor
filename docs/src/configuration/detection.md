@@ -12,17 +12,42 @@ and `[auth]` can browse, edit and create.
 |---|---|
 | object classes | classes carried by more than half of the group |
 | `rdn_attr` | the most common RDN attribute |
-| `show`, `search_attrs`, `label` | MUST attributes and the optional attributes most entries carry; `label = "{cn} ({uid})"` when the two differ |
+| `show`, `search_attrs`, `label` | MUST attributes and the optional attributes most entries carry; `label = "{cn} ({uid})"` when the two differ. The password field (`userPassword` for `person`, `inetOrgPerson`, `posixAccount` and `sambaSamAccount` profiles) is always in `show`, right after the name fields (`uid`, `cn`, `sn`, `givenName`, `displayName`, `mail`) |
 | defaults | templates such as `uid = "{cn}"`, `cn = "{givenName} {sn}"`, `homeDirectory = "/home/{uid}"`, and shared values such as `loginShell = "/bin/bash"` |
-| user-private groups | when users have a `posixGroup` named after them with `gidNumber = uidNumber`: `gidNumber = "{uidNumber}"` and a companion group |
+| user-private groups | when users have a `posixGroup` named after them with `gidNumber = uidNumber`: `gidNumber = "{uidNumber}"` and a companion group with `cn = "{uid}"`, `gidNumber = "{uidNumber}"` and `memberUid = "{uid}"` |
 | shared primary group | when most users share one `gidNumber`, that value |
 | Samba | `sambaSID = "{auto:sambaSID}"` for `sambaSamAccount` profiles |
 | pickers | `memberUid`, `member`, `uniqueMember` pickers and a `gidNumber` lookup, pointing at the matching detected profiles |
+| login shell | a `loginShell` choice for `posixAccount` profiles (see below) |
 | number ranges | `uidNumber` / `gidNumber` ranges, computed when you create an entry (see below) |
 
 A rule applies when **more than half** of the sampled entries follow it and at
 least **3** entries were sampled. Entries that break an applied rule are listed
 as exceptions by `edaptor profiles`.
+
+### Login shell
+
+A `posixAccount` profile gets a single-choice `loginShell` field. It lists the
+detected default shell first, then the built-in shells (Bash, POSIX sh, Zsh,
+`/bin/false`, `/sbin/nologin`), then up to 10 other shells the sampled users
+have, most common first, each labelled after its file name (`/bin/tcsh` shows
+as "Tcsh"). Values that are not an absolute path, or contain blanks, are left
+out. A user whose shell is not in the list keeps it until you pick another one.
+
+```toml
+[profile.widget.loginShell]
+kind = "choice"  # detected: 200/200 login shells in use (a directory where most users have tcsh)
+select = "single"
+format = "plain"
+options = [
+  { value = "/bin/tcsh",     label = "Tcsh" },
+  { value = "/bin/bash",     label = "Bash" },
+  { value = "/bin/sh",       label = "POSIX sh" },
+  { value = "/bin/zsh",      label = "Zsh" },
+  { value = "/bin/false",    label = "Disabled (false)" },
+  { value = "/sbin/nologin", label = "Disabled (nologin)" },
+]
+```
 
 ### Number ranges
 
@@ -63,9 +88,10 @@ detected part, and `[detect] enabled = false` turns them off.
 
 Sampling reads at most 200 entries per container and 100 containers, and stops
 after 10 seconds; a cut-short sample is marked `partial`. It never reads
-`userPassword` or other secrets, and never puts `userPassword`,
-`sambaNTPassword`, `sambaLMPassword` or `sambaPasswordHistory` into a detected
-`show` list. `edaptor profiles` prints a config default for one of these as
+`userPassword` or other secrets: whether an entry has a password is not
+sampled, and the password field is in `show` regardless. The hash attributes
+`sambaNTPassword`, `sambaLMPassword` and `sambaPasswordHistory` never go into a
+detected `show` list. `edaptor profiles` prints a config default for one of these as
 `# userPassword = (set by config, value not shown)`.
 
 ## Overriding detection
@@ -79,7 +105,7 @@ merged profile keeps the config's name. Keys you set replace the detected ones;
 ```toml
 [[profile]]
 name     = "user-people"
-suppress = ["companion", "defaults.loginShell", "widget.gidNumber"]
+suppress = ["companion.memberUid", "defaults.loginShell", "widget.gidNumber"]
 
 [profile.defaults]
 uidNumber = "{next:10000-19999}"
@@ -89,8 +115,10 @@ name    = "organizationalunit-example"
 enabled = false
 ```
 
-`suppress` removes single detected parts: `companion`, `defaults.<attr>`,
-`widget.<attr>`, `label`, `show`, `search_attrs`. `enabled = false` removes a
+`suppress` removes single detected parts: `companion`, `companion.<attr>`,
+`defaults.<attr>`, `widget.<attr>`, `label`, `show`, `search_attrs`.
+`companion.memberUid` keeps the private group but stops adding the user to it
+as `memberUid`; `companion` drops the group as a whole. `enabled = false` removes a
 whole profile. A block that matches no detected profile and has no
 `object_classes` is ignored with a warning.
 
