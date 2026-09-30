@@ -12,7 +12,7 @@ and `[auth]` can browse, edit and create.
 |---|---|
 | object classes | classes carried by more than half of the group |
 | `rdn_attr` | the most common RDN attribute |
-| `show`, `search_attrs`, `label` | MUST attributes and the optional attributes most entries carry; `label = "{cn} ({uid})"` when the two differ. The password field (`userPassword` for `person`, `inetOrgPerson`, `posixAccount` and `sambaSamAccount` profiles) is always in `show`, right after the name fields (`uid`, `cn`, `sn`, `givenName`, `displayName`, `mail`) |
+| `show`, `search_attrs`, `label` | MUST attributes and the optional attributes most entries carry; `label = "{cn} ({uid})"` when the two differ. Account profiles (`posixAccount`, `inetOrgPerson` or `sambaSamAccount`) always have the password field (`userPassword`) in `show`, right after the identity fields (the RDN attribute, `uid`, `cn`, `sn`, `givenName`, `displayName`); so does any attribute your config gives a `password` widget, and a config widget of another kind on `userPassword` keeps it out |
 | defaults | templates such as `uid = "{cn}"`, `cn = "{givenName} {sn}"`, `homeDirectory = "/home/{uid}"`, and shared values such as `loginShell = "/bin/bash"` |
 | user-private groups | when users have a `posixGroup` named after them with `gidNumber = uidNumber`: `gidNumber = "{uidNumber}"` and a companion group with `cn = "{uid}"`, `gidNumber = "{uidNumber}"` and `memberUid = "{uid}"` |
 | shared primary group | when most users share one `gidNumber`, that value |
@@ -33,6 +33,8 @@ detected default shell first, then the built-in shells (Bash, POSIX sh, Zsh,
 have, most common first, each labelled after its file name (`/bin/tcsh` shows
 as "Tcsh"). Values that are not an absolute path, or contain blanks, are left
 out. A user whose shell is not in the list keeps it until you pick another one.
+When no sampled user has a shell, the built-in list is still offered and
+`edaptor profiles` marks it `# assumed: no login shells in the sample; built-in list`.
 
 ```toml
 [profile.widget.loginShell]
@@ -118,7 +120,10 @@ enabled = false
 `suppress` removes single detected parts: `companion`, `companion.<attr>`,
 `defaults.<attr>`, `widget.<attr>`, `label`, `show`, `search_attrs`.
 `companion.memberUid` keeps the private group but stops adding the user to it
-as `memberUid`; `companion` drops the group as a whole. `enabled = false` removes a
+as `memberUid`; `companion` drops the group as a whole. The companion's RDN
+attribute and the attributes its object classes require (`companion.cn`,
+`companion.gidNumber` for a `posixGroup`) cannot be removed one by one: eDAPtor
+keeps them and warns. `enabled = false` removes a
 whole profile. A block that matches no detected profile and has no
 `object_classes` is ignored with a warning.
 
