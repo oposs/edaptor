@@ -6,6 +6,7 @@ use anyhow::{anyhow, Result};
 use crate::config::tree_label::CompiledTreeRule;
 use crate::config::{Config, EntryProfile};
 use crate::ldap::worker::{Request, Response, SearchScope, WorkerHandle};
+#[cfg(test)]
 use crate::schema::SchemaModel;
 use crate::workflows::alloc_flow::{AllocFlow, AllocOutcome};
 use crate::workflows::edit_form::{build_edit_form, EditForm};
@@ -18,8 +19,7 @@ use crate::workflows::search_flow::{SearchFlow, SearchOutcome};
 use crate::workflows::structure::{Structure, StructureInput};
 use crate::workflows::write_flow::{WriteFlow, WriteOutcome, STAGED_PASSWORD_SENTINEL};
 
-/// Placeholder text set in autonumber fields while the background scan is pending.
-pub const ALLOC_PLACEHOLDER: &str = "‹allocating…›";
+pub use crate::config::defaults::ALLOC_PLACEHOLDER;
 
 /// A dirty-blocked navigation awaiting the guard's decision.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -176,6 +176,11 @@ pub struct UiState {
     pub read_only: bool,
     /// Transient status text (e.g. "Saved.").
     pub status: String,
+    /// What startup had to report (a failed profile detection, dropped detected
+    /// parts). Shown while `status` is empty, until the operator's first key or
+    /// mouse event: the automatic first-frame selections clear `status` but must
+    /// not hide this.
+    pub startup_notice: Option<String>,
     /// True when a pane must re-render the form from `edit_form`.
     pub form_needs_render: bool,
     /// One-shot: a freshly-opened create form wants pane-level focus moved to the
@@ -289,6 +294,7 @@ impl UiState {
             search_truncated: false,
             read_only: false,
             status: String::new(),
+            startup_notice: None,
             form_needs_render: false,
             focus_form_request: false,
             guard_target: None,
@@ -858,6 +864,21 @@ impl UiState {
     /// "Saved." (fixed in `c016f2a`).
     pub fn begin_operator_action(&mut self) {
         self.status.clear();
+    }
+
+    /// The status line text: the current `status`, else the startup notice.
+    pub fn status_text(&self) -> &str {
+        if self.status.is_empty() {
+            self.startup_notice.as_deref().unwrap_or("")
+        } else {
+            &self.status
+        }
+    }
+
+    /// The operator pressed a key or used the mouse: the startup notice has been
+    /// seen.
+    pub fn dismiss_startup_notice(&mut self) {
+        self.startup_notice = None;
     }
 
     /// Public wrapper around the private `reread` for the dispatch closure.
@@ -1627,6 +1648,26 @@ fn samba_in_use(widgets: &[crate::config::widget::ResolvedWidget]) -> bool {
         .any(|w| matches!(w.kind, WidgetKind::SambaSid))
 }
 
+/// Whether startup must look up the Samba domain: a `sambaSID` widget, an
+/// `{auto:sambaSID}` default, or — with detection enabled — any profile whose
+/// object classes include `sambaSamAccount` (the built-in bundle then gives
+/// `sambaSID` a SID widget). With detection off only the first two count, so
+/// `[detect] enabled = false` keeps the pre-detection startup exactly.
+pub(crate) fn samba_needed(
+    profiles: &[EntryProfile],
+    widgets: &[crate::config::widget::ResolvedWidget],
+    detect_enabled: bool,
+) -> bool {
+    samba_in_use(widgets)
+        || profiles.iter().any(|p| {
+            crate::config::defaults::uses_computed_samba_sid(&p.defaults)
+                || (detect_enabled
+                    && p.object_classes
+                        .iter()
+                        .any(|oc| oc.eq_ignore_ascii_case("sambaSamAccount")))
+        })
+}
+
 /// Discover the samba domain context from a live `sambaDomain` entry under
 /// `base` (best-effort). Returns the first entry that parses via
 /// [`crate::samba::sid::parse_samba_domain`]; `None` when none is found, the
@@ -1672,37 +1713,35 @@ pub fn profile_for<'a>(profiles: &'a [EntryProfile], ocs: &[String]) -> Option<&
 pub(crate) fn bootstrap(config: Config, password: String) -> Result<UiState> {
     use crate::workflows::labels::{label_rules, structure_inputs, structure_scan_attrs};
     let base_dn = config.server.base_dn.clone();
-    let profiles = config.profiles.clone();
-    let resolved_widgets = crate::config::widget::resolve_widgets(&profiles)
-        .map_err(|e| anyhow!("widget config error: {e}"))?;
-    let label_rules = label_rules(&profiles);
+    let inputs = crate::detect::load::ProfileInputs::from_config(&config);
     let tree_rules = crate::config::tree_label::compile_tree_rules(&config.tree);
-    // Fetch the attributes the label/tree templates reference, so labels render.
-    let scan_attrs = structure_scan_attrs(&label_rules, &tree_rules);
-
     let connection_encrypted = config.is_encrypted();
     let samba_from_config = samba_info_from_config(&config);
     let worker = WorkerHandle::spawn(config, password)?;
-    // M5c: prefer a live sambaDomain entry when the Samba domain SID is actually
-    // needed — either a `sambaSID` widget OR a `{auto:sambaSID}` computed default
-    // (the computed default derives the SID from the domain too, so it must trigger
-    // discovery just like the widget). Fall back to the static config domain_sid
-    // (or no samba at all).
-    let samba_needed = samba_in_use(&resolved_widgets)
-        || profiles
-            .iter()
-            .any(|p| crate::config::defaults::uses_computed_samba_sid(&p.defaults));
-    let samba_domain = if samba_needed {
+    // Schema first: detection needs it, and every derived table below is
+    // computed once from the merged profiles.
+    let loaded = crate::detect::load::load_profiles(&worker, &inputs)?;
+    // Startup messages go to stderr while the terminal is still ours.
+    for line in loaded.startup_lines() {
+        eprintln!("{line}");
+    }
+    let startup_notice = loaded.status_line();
+    let crate::detect::load::LoadedProfiles {
+        schema,
+        profiles,
+        widgets: resolved_widgets,
+        ..
+    } = loaded;
+    let label_rules = label_rules(&profiles);
+    // Fetch the attributes the label/tree templates reference, so labels render.
+    let scan_attrs = structure_scan_attrs(&label_rules, &tree_rules);
+    // Prefer a live sambaDomain entry when the Samba domain SID is needed; fall
+    // back to the static config domain_sid (or no samba at all).
+    let samba_domain = if samba_needed(&profiles, &resolved_widgets, inputs.detect_enabled) {
         discover_samba_domain(&worker, &base_dn).or(samba_from_config)
     } else {
         samba_from_config
     };
-
-    let raw = match worker.request(Request::FetchSubschema)? {
-        Response::Subschema(raw) => raw,
-        other => return Err(anyhow!("FetchSubschema: unexpected {other:?}")),
-    };
-    let schema = SchemaModel::from_raw(&raw);
 
     // Tolerant capability probe: a failed/absent root DSE just means "no
     // support" for txn / assertion (never fail bootstrap over it).
@@ -1755,6 +1794,7 @@ pub(crate) fn bootstrap(config: Config, password: String) -> Result<UiState> {
         search_truncated: false,
         read_only: false,
         status: String::new(),
+        startup_notice,
         form_needs_render: false,
         focus_form_request: false,
         guard_target: None,
@@ -1786,6 +1826,22 @@ mod tests {
     use super::*;
     use crate::ldap::worker::RawSubschema;
     use std::collections::BTreeMap;
+
+    #[test]
+    fn samba_lookup_runs_for_a_samba_profile_without_widget_or_default() {
+        let mut p = crate::workflows::test_fixtures::bare_profile("user");
+        p.object_classes = vec!["inetOrgPerson".into(), "sambaSamAccount".into()];
+        assert!(super::samba_needed(&[p], &[], true));
+        let q = crate::workflows::test_fixtures::bare_profile("group");
+        assert!(!super::samba_needed(&[q], &[], true));
+    }
+
+    #[test]
+    fn samba_profile_alone_does_not_trigger_the_lookup_with_detection_off() {
+        let mut p = crate::workflows::test_fixtures::bare_profile("user");
+        p.object_classes = vec!["inetOrgPerson".into(), "sambaSamAccount".into()];
+        assert!(!super::samba_needed(&[p], &[], false));
+    }
 
     #[test]
     fn samba_in_use_true_only_with_samba_sid_widget() {
@@ -1828,6 +1884,7 @@ mod tests {
             widgets: Default::default(),
             label: None,
             companion: None,
+            scope: Default::default(),
         };
         let profiles = vec![p.clone()];
         assert!(profile_for(&profiles, &["inetOrgPerson".into(), "top".into()]).is_some());
@@ -3358,6 +3415,31 @@ mod tests {
     /// `status` must not pin the status line forever: switching containers,
     /// typing a find query, or committing a field edit is a new operator action,
     /// so any status left over from a previous one is cleared.
+    /// The startup notice (a failed detection, dropped detected parts) must
+    /// survive the programmatic first-frame selections: the tree's initial
+    /// `request_branch` and the leaf pane's auto-follow are not operator actions.
+    /// Only real input dismisses it.
+    #[test]
+    fn startup_notice_survives_the_automatic_first_selection() {
+        let structure = Structure::build("dc=x", vec![si("dc=x", None), si("ou=p,dc=x", None)]);
+        let schema = SchemaModel::from_raw(&RawSubschema::default());
+        let mut st =
+            UiState::new_for_test(structure, schema, "dc=x".into(), Vec::new(), Vec::new());
+        st.startup_notice = Some("Profile detection failed: timeout".into());
+
+        st.request_branch("ou=p,dc=x".into());
+        st.reconcile_branch();
+        st.reconcile_selection();
+
+        assert_eq!(st.status_text(), "Profile detection failed: timeout");
+        // A status set by a later action takes precedence while it lasts.
+        st.status = "Saved.".into();
+        assert_eq!(st.status_text(), "Saved.");
+        st.status.clear();
+        st.dismiss_startup_notice();
+        assert_eq!(st.status_text(), "");
+    }
+
     #[test]
     fn commit_branch_clears_a_stale_status() {
         let structure = Structure::build("dc=x", vec![si("dc=x", None), si("ou=p,dc=x", None)]);

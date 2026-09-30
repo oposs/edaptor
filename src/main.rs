@@ -41,10 +41,18 @@ enum Command {
         /// against the configured profiles' search bases.
         user: String,
     },
+    /// Print the profiles in effect as TOML: detected values with their evidence,
+    /// config values, suppressed parts. Notes go to stderr.
+    Profiles {
+        /// Show detection before merging the config.
+        #[arg(long)]
+        detected_only: bool,
+    },
     /// Launch the TUI straight into a profile's create form. With no `<profile>` a
     /// chooser is shown first. `--container` defaults to the profile's `search_base`.
     TuiCreate {
-        /// Profile name to create (case-insensitive). Omit to pick from a chooser.
+        /// Profile name to create (case-insensitive; detected names such as `user-people` work too).
+        /// Omit to pick from a chooser.
         profile: Option<String>,
         /// Container DN for the new object. Defaults to the profile's search_base.
         #[arg(long, value_name = "DN")]
@@ -99,9 +107,19 @@ fn main() -> Result<()> {
             })?;
             println!("{confirmation}");
         }
+        Some(Command::Profiles { detected_only }) => {
+            let report = edaptor::run_profiles(config, password, detected_only)?;
+            for w in &report.warnings {
+                eprintln!("warning: {w}");
+            }
+            for n in &report.notes {
+                eprintln!("note: {n}");
+            }
+            print!("{}", report.toml);
+        }
         Some(Command::TuiCreate { profile, container }) => {
-            let action = build_startup_action(&config.profiles, profile.as_deref(), container)?;
-            run_tui(config, password, Some(action))?;
+            let req = build_startup_request(profile, container)?;
+            run_tui(config, password, Some(req))?;
         }
     }
     Ok(())
@@ -119,40 +137,23 @@ fn prompt_new_password() -> Result<String> {
     Ok(first)
 }
 
-/// Turn the `tui-create` arguments into a [`edaptor::ui::StartupAction`], resolving the
-/// profile name and container *before* the TUI launches so errors surface on the
-/// terminal (never after a screen takeover). A blank `--container`, an unknown profile,
-/// or a profile with no `search_base` and no `--container` are all errors.
-fn build_startup_action(
-    profiles: &[edaptor::config::EntryProfile],
-    profile: Option<&str>,
+/// Turn the `tui-create` arguments into a [`edaptor::ui::StartupRequest`]. Only
+/// the container is checked here; the profile name is resolved after the
+/// profiles are loaded, still before the screen takeover.
+fn build_startup_request(
+    profile: Option<String>,
     container: Option<String>,
-) -> Result<edaptor::ui::StartupAction> {
-    use edaptor::ui::StartupAction;
-
+) -> Result<edaptor::ui::StartupRequest> {
+    use edaptor::ui::StartupRequest;
     if let Some(c) = &container {
         if c.trim().is_empty() {
             return Err(anyhow::anyhow!("--container must not be empty"));
         }
     }
-    match edaptor::workflows::create::resolve_profile_arg(profiles, profile)
-        .map_err(|e| anyhow::anyhow!(e))?
-    {
-        Some(idx) => {
-            let dn = container.unwrap_or_else(|| profiles[idx].search_base.clone());
-            if dn.trim().is_empty() {
-                return Err(anyhow::anyhow!(
-                    "profile '{}' has no search_base; pass --container",
-                    profiles[idx].name
-                ));
-            }
-            Ok(StartupAction::Create {
-                profile_idx: idx,
-                container: dn,
-            })
-        }
-        None => Ok(StartupAction::ChooseThenCreate { container }),
-    }
+    Ok(match profile {
+        Some(profile) => StartupRequest::Create { profile, container },
+        None => StartupRequest::Choose { container },
+    })
 }
 
 /// Launch the three-pane tvision TUI. The event loop, state, rendering and the
@@ -161,7 +162,7 @@ fn build_startup_action(
 fn run_tui(
     config: Config,
     password: String,
-    startup: Option<edaptor::ui::StartupAction>,
+    startup: Option<edaptor::ui::StartupRequest>,
 ) -> Result<()> {
     edaptor::ui::run(config, password, startup)
 }
@@ -191,84 +192,26 @@ fn print_schema(report: &SchemaReport) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use edaptor::config::EntryProfile;
-    use edaptor::ui::StartupAction;
-
-    fn profiles() -> Vec<EntryProfile> {
-        vec![
-            EntryProfile {
-                name: "Users".into(),
-                search_base: "ou=people,dc=example,dc=org".into(),
-                ..Default::default()
-            },
-            EntryProfile {
-                name: "Groups".into(),
-                search_base: "ou=groups,dc=example,dc=org".into(),
-                ..Default::default()
-            },
-        ]
-    }
-
-    #[test]
-    fn named_profile_defaults_container_to_search_base() {
-        let a = build_startup_action(&profiles(), Some("users"), None).expect("ok");
-        match a {
-            StartupAction::Create {
-                profile_idx,
-                container,
-            } => {
-                assert_eq!(profile_idx, 0);
-                assert_eq!(container, "ou=people,dc=example,dc=org");
-            }
-            _ => panic!("expected Create"),
-        }
-    }
-
-    #[test]
-    fn container_override_wins() {
-        let a = build_startup_action(
-            &profiles(),
-            Some("Users"),
-            Some("ou=staff,ou=people,dc=example,dc=org".into()),
-        )
-        .expect("ok");
-        match a {
-            StartupAction::Create { container, .. } => {
-                assert_eq!(container, "ou=staff,ou=people,dc=example,dc=org")
-            }
-            _ => panic!("expected Create"),
-        }
-    }
-
-    #[test]
-    fn no_profile_yields_choose_then_create() {
-        let a = build_startup_action(&profiles(), None, None).expect("ok");
-        assert!(matches!(
-            a,
-            StartupAction::ChooseThenCreate { container: None }
-        ));
-    }
-
-    #[test]
-    fn unknown_profile_errors() {
-        let e = build_startup_action(&profiles(), Some("Admins"), None).unwrap_err();
-        assert!(e.to_string().contains("Admins"));
-    }
+    use edaptor::ui::StartupRequest;
 
     #[test]
     fn blank_container_errors() {
-        let e = build_startup_action(&profiles(), Some("Users"), Some("   ".into())).unwrap_err();
+        let e = build_startup_request(Some("Users".into()), Some("   ".into())).unwrap_err();
         assert!(e.to_string().contains("container"));
     }
 
     #[test]
-    fn empty_search_base_without_container_errors() {
-        let ps = vec![EntryProfile {
-            name: "NoBase".into(),
-            search_base: String::new(),
-            ..Default::default()
-        }];
-        let e = build_startup_action(&ps, Some("NoBase"), None).unwrap_err();
-        assert!(e.to_string().contains("search_base"));
+    fn no_profile_yields_choose() {
+        let r = build_startup_request(None, None).expect("ok");
+        assert!(matches!(r, StartupRequest::Choose { container: None }));
+    }
+
+    #[test]
+    fn named_profile_yields_create() {
+        let r = build_startup_request(Some("users".into()), Some("ou=x".into())).expect("ok");
+        assert!(matches!(
+            r,
+            StartupRequest::Create { profile, container: Some(c) } if profile == "users" && c == "ou=x"
+        ));
     }
 }

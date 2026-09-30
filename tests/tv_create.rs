@@ -79,6 +79,8 @@ fn test_config(uri: String) -> (Config, String) {
             password_source: PasswordSource::Env("EDAPTOR_TEST_ADMIN_PW".to_string()),
         },
         profiles: Vec::new(),
+        overrides: Vec::new(),
+        detect: Default::default(),
         meta: Default::default(),
         samba: Default::default(),
         tree: Default::default(),
@@ -218,6 +220,7 @@ fn create_entry_via_neutral_create_path() {
         widgets: Default::default(),
         label: None,
         companion: None,
+        scope: Default::default(),
     };
 
     let (mut create_form, _autonum) = build_create_form(&schema, &profile, 0, container);

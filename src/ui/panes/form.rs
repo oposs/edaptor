@@ -1361,6 +1361,7 @@ impl View for FormPane {
     }
 
     fn handle_event(&mut self, ev: &mut Event, ctx: &mut Context) {
+        super::dismiss_notice_on_click(&self.state, ev);
         // Render whenever the form needs it, on ANY event. The dispatch closure
         // (Discard, re-read) only sets `form_needs_render` — it cannot broadcast
         // REFRESH (Program has no broadcast) — and the 50ms pump timer reaches

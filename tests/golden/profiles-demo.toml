@@ -1,0 +1,113 @@
+# detection: 6 containers sampled (up to 200 entries each); notes: none
+
+[[profile]]
+name = "user-people"  # detected: 200 entries in ou=people,dc=example,dc=org (partial sample)
+object_classes = ["inetOrgPerson", "posixAccount", "sambaSamAccount", "shadowAccount"]  # detected: 200/200
+rdn_attr = "uid"  # detected: 200/200
+search_base = "ou=people,dc=example,dc=org"  # detected: 200/200
+show = ["uid", "cn", "givenName", "sn", "userPassword", "gidNumber", "homeDirectory", "sambaSID", "uidNumber", "departmentNumber", "loginShell", "mail", "ou", "sambaAcctFlags", "sambaPwdLastSet"]  # detected: 200/200
+search_attrs = ["uid", "cn", "sn", "mail"]  # detected: 200/200
+label = "{cn} ({uid})"  # detected: 200/200
+[profile.defaults]
+cn = "{givenName} {sn}"  # detected: 200/200
+homeDirectory = "/home/{uid}"  # detected: 200/200
+loginShell = "/bin/bash"  # detected: 200/200
+sambaSID = "{auto:sambaSID}"  # detected: 200/200 sambaSamAccount profile
+uidNumber = "{next:10000-60000}"  # detected at dump time: in use 10000-10599; no higher block
+[profile.widget.gidNumber]
+kind = "lookup"  # detected: 200/200 posix-group profile
+candidate = "posixgroup-groups"
+store = "gidNumber"
+label = "{cn}"
+[profile.widget.loginShell]
+kind = "choice"  # detected: 200/200 login shells in use
+select = "single"
+format = "plain"
+options = [{ value = "/bin/bash", label = "Bash" }, { value = "/bin/sh", label = "POSIX sh" }, { value = "/bin/zsh", label = "Zsh" }, { value = "/bin/false", label = "Disabled (false)" }, { value = "/sbin/nologin", label = "Disabled (nologin)" }]
+
+[[profile]]
+name = "user-users"  # detected: 2 entries in ou=users,dc=example,dc=org
+object_classes = ["inetOrgPerson", "posixAccount", "shadowAccount"]  # detected: 2/2
+rdn_attr = "cn"  # detected: 2/2
+search_base = "ou=users,dc=example,dc=org"  # detected: 2/2
+show = ["cn", "uid", "sn", "userPassword", "gidNumber", "homeDirectory", "uidNumber"]  # detected: 2/2
+search_attrs = ["cn", "uid", "sn"]  # detected: 2/2
+label = "{cn} ({uid})"  # detected: 2/2
+[profile.defaults]
+uidNumber = "{next:1000-9999}"  # detected at dump time: in use 1000-1001; next block at 10000
+[profile.widget.gidNumber]
+kind = "lookup"  # detected: 2/2 posix-group profile
+candidate = "posixgroup-groups"
+store = "gidNumber"
+label = "{cn}"
+[profile.widget.loginShell]
+kind = "choice"  # assumed: no login shells in the sample; built-in list
+select = "single"
+format = "plain"
+options = [{ value = "/bin/bash", label = "Bash" }, { value = "/bin/sh", label = "POSIX sh" }, { value = "/bin/zsh", label = "Zsh" }, { value = "/bin/false", label = "Disabled (false)" }, { value = "/sbin/nologin", label = "Disabled (nologin)" }]
+
+[[profile]]
+name = "organizationalrole-services"  # detected: 3 entries in ou=services,dc=example,dc=org
+object_classes = ["organizationalRole", "simpleSecurityObject"]  # detected: 3/3
+rdn_attr = "cn"  # detected: 3/3
+search_base = "ou=services,dc=example,dc=org"  # detected: 3/3
+show = ["cn", "description"]  # detected: 3/3
+search_attrs = ["cn", "description"]  # detected: 3/3
+label = "{cn}"  # detected: 3/3
+
+[[profile]]
+name = "person-policies"  # detected: 2 entries in ou=policies,dc=example,dc=org
+object_classes = ["person", "pwdPolicy"]  # detected: 2/2
+rdn_attr = "cn"  # detected: 2/2
+search_base = "ou=policies,dc=example,dc=org"  # detected: 2/2
+show = ["cn", "pwdAttribute", "sn", "pwdAllowUserChange", "pwdCheckQuality", "pwdExpireWarning", "pwdGraceAuthNLimit", "pwdInHistory", "pwdLockout", "pwdLockoutDuration", "pwdMaxAge", "pwdMaxFailure", "pwdMinAge", "pwdMinLength", "pwdSafeModify"]  # detected: 2/2
+search_attrs = ["cn", "sn"]  # detected: 2/2
+label = "{cn}"  # detected: 2/2
+
+[[profile]]
+name = "group-groups"  # detected: 21 entries in ou=groups,dc=example,dc=org
+object_classes = ["groupOfNames"]  # detected: 21/21
+rdn_attr = "cn"  # detected: 21/21
+search_base = "ou=groups,dc=example,dc=org"  # detected: 21/21
+show = ["cn", "member", "description"]  # detected: 21/21
+search_attrs = ["cn", "description"]  # detected: 21/21
+label = "{cn}"  # detected: 21/21
+[profile.widget.member]
+kind = "picker"  # detected: 2114/2116 member DNs in ou=people,dc=example,dc=org
+candidate = "user-people"
+store = "dn"
+select = "multi"
+
+[[profile]]
+name = "organizationalunit-example"  # detected: 5 entries in dc=example,dc=org
+object_classes = ["organizationalUnit"]  # detected: 5/5
+rdn_attr = "ou"  # detected: 5/5
+search_base = "dc=example,dc=org"  # detected: 5/5
+show = ["ou"]  # detected: 5/5
+search_attrs = ["ou"]  # detected: 5/5
+label = "{ou}"  # detected: 5/5
+
+[[profile]]
+name = "posixgroup-groups"  # detected: 5 entries in ou=groups,dc=example,dc=org
+object_classes = ["posixGroup"]  # detected: 5/5
+rdn_attr = "cn"  # detected: 5/5
+search_base = "ou=groups,dc=example,dc=org"  # detected: 5/5
+show = ["cn", "gidNumber", "description", "memberUid"]  # detected: 5/5
+search_attrs = ["cn", "description"]  # detected: 5/5
+label = "{cn}"  # detected: 5/5
+[profile.defaults]
+gidNumber = "{next:5000-60000}"  # detected at dump time: in use 5000-5004; no higher block
+[profile.widget.memberUid]
+kind = "picker"  # detected: 5/5 posix-user profile
+candidate = "user-people"
+store = "uid"
+select = "multi"
+
+[[profile]]
+name = "sambadomain-example"  # detected: 1 entries in dc=example,dc=org
+object_classes = ["sambaDomain"]  # detected: 1/1
+rdn_attr = "sambaDomainName"  # detected: 1/1
+search_base = "dc=example,dc=org"  # detected: 1/1
+show = ["sambaDomainName", "sambaSID", "sambaAlgorithmicRidBase"]  # detected: 1/1
+search_attrs = ["sambaDomainName"]  # detected: 1/1
+label = "{sambaDomainName}"  # detected: 1/1

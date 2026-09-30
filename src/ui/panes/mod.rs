@@ -9,6 +9,17 @@ pub(crate) mod value_lines;
 
 use tvision_rs::{Event, ViewState};
 
+use crate::ui::Shared;
+
+/// A click in a pane is operator input: it dismisses the startup notice. Each
+/// pane calls this first in `handle_event` (clicks are positional, so the pump
+/// never sees them; it handles keys and the wheel).
+pub(crate) fn dismiss_notice_on_click(state: &Shared, ev: &Event) {
+    if matches!(ev, Event::MouseDown(_)) {
+        state.borrow_mut().dismiss_startup_notice();
+    }
+}
+
 /// True when `ev` is a mouse wheel whose (pane-local) position falls OUTSIDE the
 /// pane's own extent — i.e. the cursor is over a *different* pane.
 ///

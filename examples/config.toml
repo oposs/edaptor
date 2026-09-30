@@ -31,6 +31,13 @@ bind_dn         = "cn=ldapmanager,dc=example,dc=com"
 #   "command:some cmd"  -> run a command and read its stdout
 password_source = "prompt"
 
+# Profile detection (on by default). eDAPtor derives profiles from the
+# directory; the [[profile]] blocks below override what it detects.
+# `edaptor profiles` prints the result. `enabled = false` restores the old
+# behaviour, where every [[profile]] needs name and object_classes.
+[detect]
+enabled = true
+
 # ---------------------------------------------------------------------------
 # Entry profiles: what a "user", "group", and "posixgroup" mean here.
 # ---------------------------------------------------------------------------
@@ -187,3 +194,10 @@ label          = "{cn}"
 kind      = "picker"
 candidate = "user"
 store     = "uid"
+
+# Change a detected profile without restating it: drop single detected parts
+# (companion, companion.<attr>, defaults.<attr>, widget.<attr>, label, show,
+# search_attrs), or the whole profile with `enabled = false`.
+[[profile]]
+name     = "posixgroup-groups"
+suppress = ["widget.memberUid"]

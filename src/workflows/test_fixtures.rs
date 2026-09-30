@@ -18,6 +18,7 @@ pub(crate) fn bare_profile(name: &str) -> EntryProfile {
         widgets: Default::default(),
         label: None,
         companion: None,
+        scope: Default::default(),
     }
 }
 
@@ -50,5 +51,6 @@ pub(crate) fn create_user_profile() -> EntryProfile {
         widgets: Default::default(),
         label: None,
         companion: None,
+        scope: Default::default(),
     }
 }

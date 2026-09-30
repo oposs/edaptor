@@ -193,7 +193,11 @@ impl<'a> WidgetResolver<'a> {
                     "_posix_account_" => Some("posixAccount"),
                     "_any_" => None,
                     other => {
-                        return self.profiles.iter().find(|p| p.name == other).map(scope_of);
+                        return self
+                            .profiles
+                            .iter()
+                            .find(|p| p.name.eq_ignore_ascii_case(other))
+                            .map(scope_of);
                     }
                 };
                 match target_oc {
