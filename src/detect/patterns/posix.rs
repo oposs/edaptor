@@ -3,7 +3,7 @@
 use std::collections::{BTreeMap, HashSet};
 
 use crate::config::defaults::{parse_default_value, DefaultValue};
-use crate::config::CompanionSpec;
+use crate::config::{ChoiceOption, CompanionSpec, WidgetSpecCfg};
 use crate::detect::model::{Detected, DetectedProfile, Evidence, Sample, SampleEntry};
 use crate::detect::private::PrivateIndex;
 use crate::detect::{more_than_half, most_common, rule_applies, MIN_SAMPLE};
@@ -117,6 +117,82 @@ pub fn apply_private_group(p: &mut DetectedProfile, index: &PrivateIndex) -> boo
     p.companion = Some(Detected::new(companion, ev));
     p.private_groups = true;
     true
+}
+
+/// At most this many shells in use are added to the built-in `loginShell` options.
+const MAX_EXTRA_SHELLS: usize = 10;
+
+/// A `loginShell` value worth offering: an absolute path without blanks or
+/// control characters.
+fn plausible_shell(s: &str) -> bool {
+    s.starts_with('/') && s.len() > 1 && !s.chars().any(|c| c.is_whitespace() || c.is_control())
+}
+
+/// `/usr/bin/fish` → `Fish`.
+fn shell_label(path: &str) -> String {
+    let base = path.rsplit('/').next().unwrap_or(path);
+    let mut chars = base.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().chain(chars).collect(),
+        None => path.to_string(),
+    }
+}
+
+/// The `loginShell` choice of a user profile: the built-in options plus the
+/// shells in use (most frequent first, at most [`MAX_EXTRA_SHELLS`]), the
+/// detected default first. Entries whose shell is left out are exceptions.
+pub fn apply_login_shell(p: &mut DetectedProfile) {
+    let Some(WidgetSpecCfg::Choice { options, .. }) = crate::config::builtin::builtin_schema()
+        .get("posixaccount")
+        .and_then(|m| m.get("loginshell"))
+    else {
+        return;
+    };
+    let mut counts: BTreeMap<&str, usize> = BTreeMap::new();
+    for sh in p.entries.iter().filter_map(|u| u.first("loginShell")) {
+        if plausible_shell(sh) && !options.iter().any(|o| o.value == sh) {
+            *counts.entry(sh).or_default() += 1;
+        }
+    }
+    let mut extras: Vec<(&str, usize)> = counts.into_iter().collect();
+    extras.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(b.0)));
+    extras.truncate(MAX_EXTRA_SHELLS);
+    let mut all: Vec<ChoiceOption> = options.clone();
+    all.extend(extras.iter().map(|(v, _)| ChoiceOption {
+        value: v.to_string(),
+        label: shell_label(v),
+    }));
+    if let Some(Detected {
+        value: DefaultValue::Literal(d),
+        ..
+    }) = p.defaults.get("loginShell")
+    {
+        if let Some(i) = all.iter().position(|o| &o.value == d) {
+            let first = all.remove(i);
+            all.insert(0, first);
+        }
+    }
+    let mut matched = 0;
+    let mut exceptions = Vec::new();
+    for u in &p.entries {
+        if let Some(sh) = u.first("loginShell") {
+            if all.iter().any(|o| o.value == sh) {
+                matched += 1;
+            } else {
+                exceptions.push(u.dn.clone());
+            }
+        }
+    }
+    let ev = Evidence::new(matched, p.entries.len())
+        .with_exceptions(exceptions)
+        .with_note("login shells in use");
+    let spec = WidgetSpecCfg::Choice {
+        select: "single".to_string(),
+        format: "plain".to_string(),
+        options: all,
+    };
+    p.widgets
+        .insert("loginShell".to_string(), Detected::new(spec, ev));
 }
 
 /// B3 (a shared `gidNumber` becomes a literal), else the gid = uid note.

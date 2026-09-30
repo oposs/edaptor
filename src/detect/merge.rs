@@ -781,6 +781,46 @@ mod tests {
             .any(|w| w.contains("unknown suppress path \"bogus\"")));
     }
 
+    /// The detected `loginShell` choice yields to a config widget and to
+    /// `suppress = ["widget.loginShell"]`.
+    #[test]
+    fn detected_login_shell_choice_yields_to_config_and_suppress() {
+        let d = detect(&schema(), &argus_sample()).profiles;
+        let m = merge(&schema(), &d, &[]);
+        let (p, prov) = get(&m, "user-people");
+        assert!(matches!(
+            p.widgets["loginShell"],
+            WidgetSpecCfg::Choice { .. }
+        ));
+        assert!(matches!(
+            prov.fields["widget.loginShell"],
+            Source::Detected(_)
+        ));
+        let m = merge(&schema(), &d, &overrides(
+            "[[profile]]\nname = \"user-people\"\n[profile.widget.loginShell]\nkind = \"choice\"\nselect = \"single\"\nformat = \"plain\"\noptions = [{ value = \"/bin/ksh\", label = \"Ksh\" }]\n",
+        ));
+        let (p, prov) = get(&m, "user-people");
+        match &p.widgets["loginShell"] {
+            WidgetSpecCfg::Choice { options, .. } => {
+                assert_eq!(options.len(), 1);
+                assert_eq!(options[0].value, "/bin/ksh");
+            }
+            other => panic!("{other:?}"),
+        }
+        assert!(matches!(
+            prov.fields["widget.loginShell"],
+            Source::ConfigOverDetected { .. }
+        ));
+        let m = merge(
+            &schema(),
+            &d,
+            &overrides("[[profile]]\nname = \"user-people\"\nsuppress = [\"widget.loginShell\"]\n"),
+        );
+        let (p, prov) = get(&m, "user-people");
+        assert!(!p.widgets.contains_key("loginShell"));
+        assert_eq!(prov.suppressed, vec!["widget.loginShell"]);
+    }
+
     #[test]
     fn suppress_never_removes_config_parts() {
         let m = merge(&schema(), &demo(), &overrides(

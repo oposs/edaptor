@@ -51,6 +51,7 @@ pub fn apply(
             if !(lookups_ok && posix::apply_private_group(p, &index)) {
                 posix::apply_shared_gid(p);
             }
+            posix::apply_login_shell(p);
         }
         samba::apply(p);
     }
@@ -231,6 +232,106 @@ mod tests {
         assert!(!u.defaults.contains_key("loginShell"));
         assert!(!u.defaults.contains_key("gidNumber"));
         assert_eq!(cand(&u.widgets["gidNumber"].value), "posixgroup-grp");
+    }
+
+    fn shell_options(p: &DetectedProfile) -> Vec<(String, String)> {
+        match &p.widgets["loginShell"].value {
+            WidgetSpecCfg::Choice {
+                select,
+                format,
+                options,
+            } => {
+                assert_eq!((select.as_str(), format.as_str()), ("single", "plain"));
+                options
+                    .iter()
+                    .map(|o| (o.value.clone(), o.label.clone()))
+                    .collect()
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn user_profiles_get_a_login_shell_choice_with_the_shells_in_use() {
+        let d = detect(&schema(), &argus_sample());
+        let u = p(&d, "user-people");
+        let opts = shell_options(u);
+        let values: Vec<&str> = opts.iter().map(|(v, _)| v.as_str()).collect();
+        assert_eq!(
+            values,
+            vec![
+                "/bin/bash",
+                "/bin/sh",
+                "/bin/zsh",
+                "/bin/false",
+                "/sbin/nologin",
+                "/bin/tcsh"
+            ]
+        );
+        assert_eq!(opts[0].1, "Bash");
+        assert_eq!(opts[5].1, "Tcsh");
+        let ev = &u.widgets["loginShell"].evidence;
+        assert_eq!(ev.ratio(), "12/12");
+        assert!(ev.exceptions.is_empty());
+        assert!(!p(&d, "posixgroup-groups")
+            .widgets
+            .contains_key("loginShell"));
+    }
+
+    #[test]
+    fn login_shell_choice_puts_the_default_first_and_caps_extras() {
+        let base = "ou=people,dc=x";
+        let mut shells: Vec<String> = vec!["/bin/zsh".into(); 30];
+        shells.extend(["/usr/bin/fish".into(), "/usr/bin/fish".into()]);
+        shells.extend((1..=11).map(|i| format!("/opt/sh{i:02}")));
+        shells.extend(["".into(), "bash".into(), "/bin/b ash".into()]);
+        let entries = shells
+            .iter()
+            .enumerate()
+            .map(|(i, sh)| {
+                let uid = format!("u{i}");
+                let num = (10000 + i).to_string();
+                e(
+                    &format!("uid={uid},{base}"),
+                    &[
+                        ("objectClass", &["inetOrgPerson", "posixAccount"]),
+                        ("uid", &[uid.as_str()]),
+                        ("cn", &[uid.as_str()]),
+                        ("sn", &["s"]),
+                        ("uidNumber", &[num.as_str()]),
+                        ("gidNumber", &["100"]),
+                        ("loginShell", &[sh.as_str()]),
+                    ],
+                )
+            })
+            .collect();
+        let s = Sample {
+            containers: vec![container(base, entries)],
+            ..Default::default()
+        };
+        let d = detect(&schema(), &s);
+        let u = p(&d, "user-people");
+        assert_eq!(dflt(u, "loginShell").as_deref(), Some("/bin/zsh"));
+        let opts = shell_options(u);
+        let values: Vec<&str> = opts.iter().map(|(v, _)| v.as_str()).collect();
+        let mut want = vec![
+            "/bin/zsh",
+            "/bin/bash",
+            "/bin/sh",
+            "/bin/false",
+            "/sbin/nologin",
+            "/usr/bin/fish",
+        ];
+        let extra: Vec<String> = (1..=9).map(|i| format!("/opt/sh{i:02}")).collect();
+        want.extend(extra.iter().map(String::as_str));
+        assert_eq!(values, want);
+        assert_eq!(opts[0].1, "Zsh");
+        assert_eq!(opts[5].1, "Fish");
+        let ev = &u.widgets["loginShell"].evidence;
+        // 30 zsh + 2 fish + 9 kept extras; sh10, sh11 and two garbage values
+        // are exceptions; the empty value counts as no shell.
+        assert_eq!(ev.ratio(), format!("41/{}", shells.len()));
+        assert_eq!(ev.exceptions.len(), 4, "{:?}", ev.exceptions);
     }
 
     #[test]

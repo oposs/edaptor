@@ -19,6 +19,11 @@ kind = "lookup"  # detected: 12/12 posix-group profile
 candidate = "posixgroup-groups"
 store = "gidNumber"
 label = "{cn}"
+[profile.widget.loginShell]
+kind = "choice"  # detected: 12/12 login shells in use
+select = "single"
+format = "plain"
+options = [{ value = "/bin/bash", label = "Bash" }, { value = "/bin/sh", label = "POSIX sh" }, { value = "/bin/zsh", label = "Zsh" }, { value = "/bin/false", label = "Disabled (false)" }, { value = "/sbin/nologin", label = "Disabled (nologin)" }, { value = "/bin/tcsh", label = "Tcsh" }]
 [profile.companion]
 object_classes = ["posixGroup"]  # detected: 12/12 have a private group
 rdn_attr = "cn"
