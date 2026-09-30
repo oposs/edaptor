@@ -351,6 +351,54 @@ mod tests {
         assert_eq!(ev.exceptions.len(), 4, "{:?}", ev.exceptions);
     }
 
+    /// Extras whose basename label repeats another option's label carry the
+    /// full path; built-in labels stay.
+    #[test]
+    fn colliding_login_shell_labels_show_the_path() {
+        let base = "ou=people,dc=x";
+        let shells = [
+            "/bin/tcsh",
+            "/bin/tcsh",
+            "/usr/bin/tcsh",
+            "/usr/bin/zsh",
+            "/usr/bin/fish",
+        ];
+        let entries = shells
+            .iter()
+            .enumerate()
+            .map(|(i, sh)| {
+                let uid = format!("u{i}");
+                e(
+                    &format!("uid={uid},{base}"),
+                    &[
+                        ("objectClass", &["inetOrgPerson", "posixAccount"]),
+                        ("uid", &[uid.as_str()]),
+                        ("cn", &[uid.as_str()]),
+                        ("sn", &["s"]),
+                        ("loginShell", &[sh]),
+                    ],
+                )
+            })
+            .collect();
+        let s = Sample {
+            containers: vec![container(base, entries)],
+            ..Default::default()
+        };
+        let d = detect(&schema(), &s);
+        let opts = shell_options(p(&d, "user-people"));
+        let label = |v: &str| {
+            opts.iter()
+                .find(|(ov, _)| ov == v)
+                .map(|(_, l)| l.clone())
+                .unwrap()
+        };
+        assert_eq!(label("/bin/tcsh"), "Tcsh (/bin/tcsh)");
+        assert_eq!(label("/usr/bin/tcsh"), "Tcsh (/usr/bin/tcsh)");
+        assert_eq!(label("/usr/bin/zsh"), "Zsh (/usr/bin/zsh)");
+        assert_eq!(label("/bin/zsh"), "Zsh");
+        assert_eq!(label("/usr/bin/fish"), "Fish");
+    }
+
     #[test]
     fn lower_case_server_spelling_still_detects_private_groups() {
         let mut s = argus_sample();

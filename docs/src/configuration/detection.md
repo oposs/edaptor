@@ -31,7 +31,8 @@ A `posixAccount` profile gets a single-choice `loginShell` field. It lists the
 detected default shell first, then the built-in shells (Bash, POSIX sh, Zsh,
 `/bin/false`, `/sbin/nologin`), then up to 10 other shells the sampled users
 have, most common first, each labelled after its file name (`/bin/tcsh` shows
-as "Tcsh"). Values that are not an absolute path, or contain blanks, are left
+as "Tcsh"; when two shells share a name, such as `/bin/tcsh` and
+`/usr/bin/tcsh`, the added ones show their path: "Tcsh (/usr/bin/tcsh)"). Values that are not an absolute path, or contain blanks, are left
 out. A user whose shell is not in the list keeps it until you pick another one.
 When no sampled user has a shell, the built-in list is still offered and
 `edaptor profiles` marks it `# assumed: no login shells in the sample; built-in list`.

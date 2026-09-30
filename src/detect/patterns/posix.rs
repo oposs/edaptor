@@ -148,11 +148,31 @@ pub fn apply_login_shell(p: &mut DetectedProfile) {
     let mut extras: Vec<(&str, usize)> = counts.into_iter().collect();
     extras.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(b.0)));
     extras.truncate(MAX_EXTRA_SHELLS);
+    // An extra whose basename label repeats another option's label (built-in
+    // or extra) shows its path: /bin/tcsh and /usr/bin/tcsh are both "Tcsh".
+    let labels: Vec<String> = extras.iter().map(|(v, _)| shell_label(v)).collect();
+    let taken = |l: &str, own: usize| {
+        options.iter().any(|o| o.label.eq_ignore_ascii_case(l))
+            || labels
+                .iter()
+                .enumerate()
+                .any(|(i, other)| i != own && other.eq_ignore_ascii_case(l))
+    };
     let mut all: Vec<ChoiceOption> = options.clone();
-    all.extend(extras.iter().map(|(v, _)| ChoiceOption {
-        value: v.to_string(),
-        label: shell_label(v),
-    }));
+    all.extend(
+        extras
+            .iter()
+            .zip(&labels)
+            .enumerate()
+            .map(|(i, ((v, _), l))| ChoiceOption {
+                value: v.to_string(),
+                label: if taken(l, i) {
+                    format!("{l} ({v})")
+                } else {
+                    l.clone()
+                },
+            }),
+    );
     if let Some(Detected {
         value: DefaultValue::Literal(d),
         ..
