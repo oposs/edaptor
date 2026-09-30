@@ -5,7 +5,7 @@ name = "user-people"  # detected: 12 entries in ou=people,dc=argus,dc=ch
 object_classes = ["inetOrgPerson", "posixAccount"]  # detected: 12/12
 rdn_attr = "cn"  # detected: 12/12
 search_base = "ou=people,dc=argus,dc=ch"  # detected: 12/12
-show = ["cn", "gidNumber", "homeDirectory", "sn", "uid", "uidNumber", "givenName", "loginShell"]  # detected: 12/12
+show = ["cn", "gidNumber", "homeDirectory", "sn", "uid", "uidNumber", "givenName", "userPassword", "loginShell"]  # detected: 12/12
 search_attrs = ["cn", "uid", "sn"]  # detected: 12/12
 label = "{cn}"  # detected: 12/12
 [profile.defaults]

@@ -559,7 +559,9 @@ mod tests {
     #[test]
     fn dump_never_contains_secrets() {
         let t = argus_dump().to_lowercase();
-        assert!(!t.contains("userpassword"), "{t}");
+        // The password field is named in `show`, never given a value.
+        let named: Vec<&str> = t.lines().filter(|l| l.contains("userpassword")).collect();
+        assert!(named.iter().all(|l| l.starts_with("show = [")), "{named:?}");
         assert!(!t.contains("{ssha}") && !t.contains("ntpassword"), "{t}");
     }
 

@@ -4,6 +4,7 @@
 
 use std::collections::BTreeMap;
 
+use crate::config::WidgetSpecCfg;
 use crate::detect::model::{
     ContainerSample, Detected, DetectedProfile, Evidence, Sample, SampleEntry,
 };
@@ -175,9 +176,33 @@ fn common_rdn_attr(entries: &[&SampleEntry]) -> Detected<String> {
     Detected::new(attr, Evidence::new(matched, n).with_exceptions(exceptions))
 }
 
+/// Attributes that come right before a password field in `show`.
+const NAMING_ATTRS: &[&str] = &["uid", "cn", "sn", "givenName", "displayName", "mail"];
+
+/// Attributes the built-in widget bundle turns into a password field for these
+/// classes (classes in name order, the last match wins, as in the resolver).
+fn password_widget_attrs(object_classes: &[String]) -> Vec<String> {
+    let mut classes: Vec<String> = object_classes.iter().map(|c| c.to_lowercase()).collect();
+    classes.sort();
+    let mut kinds: BTreeMap<&str, bool> = BTreeMap::new();
+    let bundle = crate::config::builtin::builtin_schema();
+    for oc in &classes {
+        for (attr, spec) in bundle.get(oc).into_iter().flatten() {
+            kinds.insert(attr, matches!(spec, WidgetSpecCfg::Password { .. }));
+        }
+    }
+    kinds
+        .into_iter()
+        .filter(|(_, pw)| *pw)
+        .map(|(a, _)| a.to_string())
+        .collect()
+}
+
 /// `rdn_attr`, then MUST attributes, then MAY attributes present in more than
 /// half the group (by frequency, then name); operational, binary and secret
-/// attributes excluded.
+/// attributes excluded. A password field (the built-in password widget) the
+/// classes allow follows the last naming attribute, whether or not entries
+/// reveal it.
 fn show_list(
     schema: &SchemaModel,
     object_classes: &[String],
@@ -218,6 +243,18 @@ fn show_list(
     for (_, a) in may {
         push(&mut show, &a);
     }
+    let passwords = password_widget_attrs(object_classes);
+    let mut at = show
+        .iter()
+        .rposition(|a| NAMING_ATTRS.iter().any(|n| n.eq_ignore_ascii_case(a)))
+        .map_or(show.len().min(1), |i| i + 1);
+    for a in resolved.must.iter().chain(&resolved.may) {
+        let is_password = passwords.iter().any(|p| p.eq_ignore_ascii_case(a));
+        if is_password && !show.iter().any(|s| s.eq_ignore_ascii_case(a)) {
+            show.insert(at, a.clone());
+            at += 1;
+        }
+    }
     show
 }
 
@@ -239,22 +276,48 @@ mod tests {
             })
     }
 
-    /// Password hashes are never proposed for `show`, however common: the
-    /// names would pull the hash fields to the top of every form.
+    /// A password field is proposed for `show` right after the naming
+    /// attributes, even when no sampled entry reveals one; password hashes
+    /// are never proposed, however common.
     #[test]
-    fn show_never_lists_secret_attributes() {
+    fn show_lists_the_password_field_but_never_hashes() {
         let ocs: Vec<String> = ["inetOrgPerson", "posixAccount", "sambaSamAccount"]
             .iter()
             .map(|s| s.to_string())
             .collect();
-        let show = show_list(&schema(), &ocs, "uid", 10, &|_| 10);
-        for secret in ["userPassword", "sambaNTPassword"] {
-            assert!(
-                !show.iter().any(|a| a.eq_ignore_ascii_case(secret)),
-                "{secret} in {show:?}"
-            );
-        }
+        let presence = |a: &str| {
+            if a.eq_ignore_ascii_case("userPassword") {
+                0
+            } else {
+                10
+            }
+        };
+        let show = show_list(&schema(), &ocs, "uid", 10, &presence);
+        assert!(
+            !show
+                .iter()
+                .any(|a| a.eq_ignore_ascii_case("sambaNTPassword")),
+            "{show:?}"
+        );
         assert!(show.iter().any(|a| a == "sambaAcctFlags"), "{show:?}");
+        let pw = show.iter().position(|a| a == "userPassword");
+        let last_name = show
+            .iter()
+            .rposition(|a| {
+                ["uid", "cn", "sn", "givenName", "displayName", "mail"].contains(&a.as_str())
+            })
+            .unwrap();
+        assert_eq!(pw, Some(last_name + 1), "{show:?}");
+        assert_eq!(show.iter().filter(|a| *a == "userPassword").count(), 1);
+    }
+
+    /// Only a password widget brings a password attribute into `show`: a class
+    /// that allows `userPassword` without one (posixGroup) gets none.
+    #[test]
+    fn show_has_no_password_field_without_a_password_widget() {
+        let ocs = vec!["posixGroup".to_string()];
+        let show = show_list(&schema(), &ocs, "cn", 10, &|_| 10);
+        assert!(!show.iter().any(|a| a == "userPassword"), "{show:?}");
     }
 
     #[test]
