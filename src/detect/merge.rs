@@ -983,8 +983,8 @@ mod tests {
             "[[profile]]\nname = \"user-people\"\n[profile.widget.description]\nkind = \"password\"\n",
         ));
         let show = &get(&m, "user-people").0.show;
-        let g = show.iter().position(|a| a == "givenName").unwrap();
-        let mut next: Vec<&str> = show[g + 1..g + 3].iter().map(String::as_str).collect();
+        assert_eq!(show[..4], ["cn", "uid", "givenName", "sn"], "{show:?}");
+        let mut next: Vec<&str> = show[4..6].iter().map(String::as_str).collect();
         next.sort();
         assert_eq!(next, vec!["description", "userPassword"], "{show:?}");
         // A config `show` is never touched.

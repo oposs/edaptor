@@ -178,11 +178,18 @@ fn common_rdn_attr(entries: &[&SampleEntry]) -> Detected<String> {
 }
 
 /// Identity attributes a password field follows in `show` (with `rdn_attr`).
-const IDENTITY_ATTRS: &[&str] = &["uid", "cn", "sn", "givenName", "displayName"];
+/// In this order they also lead the `show` list of an account profile.
+const IDENTITY_ATTRS: &[&str] = &["uid", "cn", "givenName", "sn", "displayName"];
 
 /// Classes whose profiles get the built-in password field: accounts, not
 /// every `person` (a password policy entry is one too).
 const ACCOUNT_CLASSES: &[&str] = &["posixAccount", "inetOrgPerson", "sambaSamAccount"];
+
+fn is_account(object_classes: &[String]) -> bool {
+    object_classes
+        .iter()
+        .any(|c| ACCOUNT_CLASSES.iter().any(|a| a.eq_ignore_ascii_case(c)))
+}
 
 /// Lowercased attributes the effective widgets turn into a password field: the
 /// built-in bundle for account classes (classes in name order, the last match
@@ -192,10 +199,7 @@ pub(crate) fn password_fields<'a>(
     widgets: impl IntoIterator<Item = (&'a String, &'a WidgetSpecCfg)>,
 ) -> Vec<String> {
     let mut kinds: BTreeMap<String, bool> = BTreeMap::new();
-    let account = object_classes
-        .iter()
-        .any(|c| ACCOUNT_CLASSES.iter().any(|a| a.eq_ignore_ascii_case(c)));
-    if account {
+    if is_account(object_classes) {
         let mut classes: Vec<String> = object_classes.iter().map(|c| c.to_lowercase()).collect();
         classes.sort();
         let bundle = crate::config::builtin::builtin_schema();
@@ -220,7 +224,9 @@ pub(crate) fn password_fields<'a>(
 
 /// Put every attribute of `passwords` (lowercased) the classes allow right
 /// after the last identity attribute of `show` (else after the first
-/// entry), moving it there when `show` already lists it.
+/// entry), moving it there when `show` already lists it. An account profile
+/// first moves its identity attributes to the front (`rdn_attr`, then
+/// [`IDENTITY_ATTRS`] in order), as hand-written configs do.
 pub(crate) fn place_password_fields(
     schema: &SchemaModel,
     show: &mut Vec<String>,
@@ -229,6 +235,20 @@ pub(crate) fn place_password_fields(
     passwords: &[String],
 ) {
     show.retain(|a| !passwords.contains(&a.to_lowercase()));
+    if is_account(object_classes) {
+        let mut front: Vec<String> = Vec::new();
+        for id in std::iter::once(rdn_attr).chain(IDENTITY_ATTRS.iter().copied()) {
+            let present = show.iter().find(|a| a.eq_ignore_ascii_case(id));
+            if let Some(a) = present {
+                if !front.iter().any(|f| f.eq_ignore_ascii_case(a)) {
+                    front.push(a.clone());
+                }
+            }
+        }
+        show.retain(|a| !front.iter().any(|f| f.eq_ignore_ascii_case(a)));
+        front.append(show);
+        *show = front;
+    }
     let mut at = show
         .iter()
         .rposition(|a| {
@@ -338,16 +358,26 @@ mod tests {
             "{show:?}"
         );
         assert!(show.iter().any(|a| a == "sambaAcctFlags"), "{show:?}");
-        let pw = show.iter().position(|a| a == "userPassword");
-        let last_name = show
-            .iter()
-            .rposition(|a| ["uid", "cn", "sn", "givenName", "displayName"].contains(&a.as_str()))
-            .unwrap();
-        assert_eq!(pw, Some(last_name + 1), "{show:?}");
+        // Identity attributes first in a fixed order, then the password
+        // field, then the rest in frequency order (mirrors hand configs).
+        assert_eq!(
+            show[..6],
+            [
+                "uid",
+                "cn",
+                "givenName",
+                "sn",
+                "displayName",
+                "userPassword"
+            ],
+            "{show:?}"
+        );
         assert_eq!(show.iter().filter(|a| *a == "userPassword").count(), 1);
-        // After the identity attributes, not after mail or loginShell.
-        let mail = show.iter().position(|a| a == "mail").unwrap();
-        assert!(pw.unwrap() < mail, "{show:?}");
+        assert_eq!(
+            show[6..9],
+            ["gidNumber", "homeDirectory", "sambaSID"],
+            "{show:?}"
+        );
     }
 
     /// Only account profiles get the built-in password field: a `person`

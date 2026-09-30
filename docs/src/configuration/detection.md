@@ -12,7 +12,7 @@ and `[auth]` can browse, edit and create.
 |---|---|
 | object classes | classes carried by more than half of the group |
 | `rdn_attr` | the most common RDN attribute |
-| `show`, `search_attrs`, `label` | MUST attributes and the optional attributes most entries carry; `label = "{cn} ({uid})"` when the two differ. Account profiles (`posixAccount`, `inetOrgPerson` or `sambaSamAccount`) always have the password field (`userPassword`) in `show`, right after the identity fields (the RDN attribute, `uid`, `cn`, `sn`, `givenName`, `displayName`); so does any attribute your config gives a `password` widget, and a config widget of another kind on `userPassword` keeps it out |
+| `show`, `search_attrs`, `label` | MUST attributes and the optional attributes most entries carry; `label = "{cn} ({uid})"` when the two differ. An account profile (`posixAccount`, `inetOrgPerson` or `sambaSamAccount`) starts `show` with its identity fields in a fixed order (the RDN attribute, `uid`, `cn`, `givenName`, `sn`, `displayName`), followed by the password field (`userPassword`) and then the other fields; the password field is there even if no entry reveals one. An attribute your config gives a `password` widget is placed the same way, and a config widget of another kind on `userPassword` keeps it out |
 | defaults | templates such as `uid = "{cn}"`, `cn = "{givenName} {sn}"`, `homeDirectory = "/home/{uid}"`, and shared values such as `loginShell = "/bin/bash"` |
 | user-private groups | when users have a `posixGroup` named after them with `gidNumber = uidNumber`: `gidNumber = "{uidNumber}"` and a companion group with `cn = "{uid}"`, `gidNumber = "{uidNumber}"` and `memberUid = "{uid}"` |
 | shared primary group | when most users share one `gidNumber`, that value |
