@@ -400,7 +400,14 @@ pub fn render(
             if !c.attributes.is_empty() {
                 out.push_str("[profile.companion.attributes]\n");
                 for (k, v) in &c.attributes {
-                    line(&mut out, &key(k), &q(v), "");
+                    if crate::detect::is_secret_attr(k) {
+                        comment_line(
+                            &mut out,
+                            &format!("# {} = (set by config, value not shown)", key(k)),
+                        );
+                    } else {
+                        line(&mut out, &key(k), &q(v), "");
+                    }
                 }
             }
         }
@@ -521,6 +528,28 @@ mod tests {
             &BTreeMap::new(),
         );
         assert!(!t.contains("hunter2"), "{t}");
+        assert!(
+            t.contains("# userPassword = (set by config, value not shown)\n"),
+            "{t}"
+        );
+    }
+
+    /// A companion attribute that is a password is named, never printed.
+    #[test]
+    fn a_config_secret_companion_attribute_is_not_echoed() {
+        let s = argus_sample();
+        let d = crate::detect::infer::detect(&schema(), &s);
+        let o = overrides("[[profile]]\nname = \"user-people\"\n[profile.companion]\nobject_classes = [\"posixGroup\"]\nrdn_attr = \"cn\"\nsearch_base = \"ou=groups,dc=argus,dc=ch\"\n[profile.companion.attributes]\ncn = \"{uid}\"\nuserPassword = \"{SSHA}hunter2\"\n");
+        let m = crate::detect::merge::merge(&schema(), &d.profiles, &o);
+        let t = render(
+            &m.profiles,
+            &m.provenance,
+            &m.disabled,
+            "# h",
+            &BTreeMap::new(),
+        );
+        assert!(!t.contains("hunter2"), "{t}");
+        assert!(t.contains("cn = \"{uid}\"\n"), "{t}");
         assert!(
             t.contains("# userPassword = (set by config, value not shown)\n"),
             "{t}"
