@@ -32,6 +32,9 @@ pub enum DefaultValue {
     /// `{auto:NAME}` — filled asynchronously once its inputs resolve (see
     /// [`ComputedKind`]); never filled by the synchronous defaults pass.
     Computed(ComputedKind),
+    /// A number range detected from the directory (spec §2C); resolved at create
+    /// time by a full number scan. Never written in a config file.
+    DetectedRange(crate::detect::range::RangeSpec),
 }
 
 /// Per-target live-template latch (see the live-templated-defaults spec). `segs`
@@ -54,8 +57,19 @@ pub struct ProfileDefaults {
 /// A planned action for one defaulted attribute (see `plan_defaults`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Resolution {
-    Fill { attr: String, value: String },
-    NeedsAutonumber { attr: String, min: u64, max: u64 },
+    Fill {
+        attr: String,
+        value: String,
+    },
+    NeedsAutonumber {
+        attr: String,
+        min: u64,
+        max: u64,
+    },
+    NeedsDetectedRange {
+        attr: String,
+        spec: crate::detect::range::RangeSpec,
+    },
 }
 
 /// Parse one config value string into a `DefaultValue`.
@@ -130,6 +144,26 @@ pub fn parse_default_value(s: &str) -> Result<DefaultValue, String> {
     Ok(DefaultValue::Template(segs))
 }
 
+impl DefaultValue {
+    /// The config spelling of this value (inverse of [`parse_default_value`]).
+    pub fn to_config_string(&self) -> String {
+        match self {
+            DefaultValue::Literal(s) => s.clone(),
+            DefaultValue::Template(segs) => segs
+                .iter()
+                .map(|s| match s {
+                    Seg::Lit(l) => l.clone(),
+                    Seg::Field(f) => format!("{{{f}}}"),
+                })
+                .collect(),
+            DefaultValue::AutoNumber { min, max } => format!("{{next:{min}-{max}}}"),
+            DefaultValue::Computed(ComputedKind::SambaSid) => "{auto:sambaSID}".to_string(),
+            // Only ever shown in comments; not parseable on purpose.
+            DefaultValue::DetectedRange(s) => format!("(detected {} range)", s.attr),
+        }
+    }
+}
+
 impl<'de> Deserialize<'de> for ProfileDefaults {
     fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
         let raw: BTreeMap<String, String> = BTreeMap::deserialize(d)?;
@@ -169,7 +203,11 @@ fn is_empty(current: &BTreeMap<String, Vec<String>>, attr: &str) -> bool {
         .unwrap_or(true)
 }
 
-/// Resolve a template against a values map; `None` if any `{field}` is empty. Pure.
+/// Placeholder text set in autonumber fields while the background scan is pending.
+pub const ALLOC_PLACEHOLDER: &str = "‹allocating…›";
+
+/// Resolve a template against a values map; `None` if any `{field}` is empty or
+/// still shows the allocation placeholder. Pure.
 /// Reused by `plan_defaults` (create-form defaults) and `create::plan_companion`.
 pub fn resolve_template(segs: &[Seg], current: &BTreeMap<String, Vec<String>>) -> Option<String> {
     let mut out = String::new();
@@ -182,7 +220,7 @@ pub fn resolve_template(segs: &[Seg], current: &BTreeMap<String, Vec<String>>) -
                     .find(|(k, _)| k.eq_ignore_ascii_case(name))
                     .and_then(|(_, v)| v.first())
                     .map(|s| s.trim())
-                    .filter(|s| !s.is_empty())?;
+                    .filter(|s| !s.is_empty() && *s != ALLOC_PLACEHOLDER)?;
                 out.push_str(v);
             }
         }
@@ -221,6 +259,10 @@ pub fn plan_defaults(
             // Computed defaults are filled asynchronously once their inputs resolve
             // (see `computed_defaults` + the alloc hook), not by this pass.
             DefaultValue::Computed(_) => {}
+            DefaultValue::DetectedRange(spec) => out.push(Resolution::NeedsDetectedRange {
+                attr: attr.clone(),
+                spec: spec.clone(),
+            }),
         }
     }
     out
@@ -323,6 +365,21 @@ pub fn recompute_live(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn to_config_string_round_trips() {
+        for s in [
+            "/bin/bash",
+            "/home/{uid}",
+            "{givenName} {sn}",
+            "{next:5000-7999}",
+            "{auto:sambaSID}",
+        ] {
+            let v = parse_default_value(s).unwrap();
+            assert_eq!(v.to_config_string(), s, "round trip of {s}");
+            assert_eq!(parse_default_value(&v.to_config_string()).unwrap(), v);
+        }
+    }
 
     #[test]
     fn parses_auto_samba_sid() {
@@ -542,6 +599,60 @@ mod tests {
         );
     }
 
+    #[test]
+    fn detected_range_surfaces_as_needs_detected_range() {
+        let spec = crate::detect::range::RangeSpec {
+            attr: "uidNumber".into(),
+            container: "ou=p,dc=x".into(),
+            structural: "inetOrgPerson".into(),
+            unified: false,
+            exclude_private: false,
+        };
+        let mut d = ProfileDefaults::default();
+        d.entries.insert(
+            "uidNumber".into(),
+            DefaultValue::DetectedRange(spec.clone()),
+        );
+        assert_eq!(
+            plan_defaults(&d, &cur(&[("uidNumber", "")])),
+            vec![Resolution::NeedsDetectedRange {
+                attr: "uidNumber".into(),
+                spec
+            }]
+        );
+        assert!(plan_defaults(&d, &cur(&[("uidNumber", "12")])).is_empty());
+    }
+
+    /// `gidNumber = "{uidNumber}"` next to an allocated `uidNumber`: the target
+    /// follows the source through the `‹allocating…›` placeholder to the number.
+    #[test]
+    fn templated_gid_follows_the_allocated_uid() {
+        let mut states = live_templates(&{
+            let mut d = ProfileDefaults::default();
+            d.entries.insert(
+                "gidNumber".into(),
+                parse_default_value("{uidNumber}").unwrap(),
+            );
+            d
+        });
+        // Nothing yet: the source is empty, so the target stays empty.
+        assert!(
+            recompute_live(&mut states, &cur(&[("uidNumber", ""), ("gidNumber", "")])).is_empty()
+        );
+        // The scan lands: uidNumber = 5003 and gidNumber still shows what we last wrote.
+        let placeholder = "\u{2039}allocating\u{2026}\u{203a}";
+        let changes = recompute_live(
+            &mut states,
+            &cur(&[("uidNumber", placeholder), ("gidNumber", "")]),
+        );
+        let last = changes.last().map(|(_, v)| v.clone()).unwrap_or_default();
+        let changes = recompute_live(
+            &mut states,
+            &cur(&[("uidNumber", "5003"), ("gidNumber", &last)]),
+        );
+        assert_eq!(changes, vec![("gidNumber".to_string(), "5003".to_string())]);
+    }
+
     // --- live templated defaults ---
 
     fn defs(pairs: &[(&str, &str)]) -> ProfileDefaults {
@@ -574,6 +685,26 @@ mod tests {
         assert_eq!(changes, vec![("cn".to_string(), "John Doe".to_string())]);
         assert_eq!(states["cn"].last_written, "John Doe");
         assert!(states["cn"].auto);
+    }
+
+    /// While `uidNumber` still shows the allocation placeholder, a template that
+    /// reads it stays empty; it fills once the number lands.
+    #[test]
+    fn recompute_treats_the_alloc_placeholder_as_missing() {
+        let mut states = live_templates(&defs(&[
+            ("gidNumber", "{uidNumber}"),
+            ("homeDirectory", "/home/{uidNumber}"),
+        ]));
+        let changes = recompute_live(&mut states, &cur(&[("uidNumber", ALLOC_PLACEHOLDER)]));
+        assert!(changes.is_empty(), "{changes:?}");
+        let changes = recompute_live(&mut states, &cur(&[("uidNumber", "10001")]));
+        assert_eq!(
+            changes,
+            vec![
+                ("gidNumber".to_string(), "10001".to_string()),
+                ("homeDirectory".to_string(), "/home/10001".to_string()),
+            ]
+        );
     }
 
     #[test]

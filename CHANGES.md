@@ -8,10 +8,24 @@ All notable changes to eDAPtor are documented here. The format follows
 
 ### New
 
+- **eDAPtor works out users, groups and their rules from the directory.** A config with only `[server]` and `[auth]` can now browse, edit and create entries: at startup eDAPtor samples each container and detects object classes, naming, the fields a form shows (for user accounts, the name fields first, then the password field), defaults such as `homeDirectory = "/home/{uid}"`, a login-shell list that adds the shells users already have (such as `/bin/tcsh`) to the built-in ones, user-private groups that list their user as `memberUid`, pickers and free `uidNumber`/`gidNumber` ranges. Startup prints `detecting profiles…` and can take up to 10 seconds longer on a slow server; if detection fails or leaves containers unsampled, a widget whose `candidate` names a detected profile is left out, with a `warning:` line and a note in the status line.
+- **`edaptor profiles` prints the profiles in effect as TOML you can paste into the config.** Each value carries a comment saying whether it was detected (with how many entries agree), assumed, or set by the config; `--detected-only` shows detection before the config is applied. Warnings and notes go to stderr, and no password values are ever printed.
+- **A new, empty directory gets useradd-style defaults.** With no users yet, eDAPtor numbers users and groups from 10000 up (client machines use 1000 and up for their local users) and gives every new user a private group, placed in `ou=groups` when there is no group profile; no private group is assumed when users already under the profile's `search_base` show otherwise or when detection failed. `edaptor profiles` marks these values `# assumed`, and `suppress` removes them.
+- **`edaptor tui-create <profile>` accepts detected profile names** such as `user-people`.
+- **Startup prints a `warning:` line on stderr for each detection problem caused by the config,** such as a `[[profile]]` block that matches no detected profile or a `suppress` path that matches nothing. Routine notes about the sample, such as a container it could not read or a sample cut short, are summed up in one `note:` line; `edaptor profiles` lists them one by one. When detection fails or drops parts, the TUI's status line says so until the first key press or a click in a pane.
+
 ### Changed
+
+- **Detection is on for existing configs too and adds to hand-written profiles.** Creating a user may now also write a second entry, its user-private group, because a `[[profile]]` matching a detected profile receives the detected defaults, widgets and companion it does not set itself. Remove one part with `suppress = ["companion"]` (or only the private group's `memberUid` with `"companion.memberUid"`), a whole profile with `enabled = false`, or all detection with `[detect] enabled = false`; `edaptor profiles` shows what was added.
+- **The profile chooser of `edaptor tui-create` hides detected organizational-unit and domain profiles** unless `--container` is exactly their container.
+- **`edaptor passwd <user>` prints `detecting profiles…` on stderr and searches only profiles with a password field or a password-bearing object class.** A user whose private group has the same name no longer fails with "matches multiple entries".
+- **Any profile that includes `sambaSamAccount` now looks up the Samba domain,** so the `sambaSID` field generates the SID without `[samba] domain_sid`; it stays off with `[detect] enabled = false`.
+- **Profile names in widget `candidate` settings are matched without regard to case.** `candidate = "PosixGroup"` now finds the profile `posixgroup` instead of failing with `unknown candidate profile`.
 
 ### Fixed
 
+- **Picking a login shell for a user whose shell is not in the list now saves the pick.** For a user with `/bin/tcsh`, choosing "Zsh" or "Disabled (nologin)" kept `/bin/tcsh`; the same held for any single-choice field with a value outside its options. An unchanged value outside the options is still kept as it is.
+- **Saving a new entry while its `uidNumber` is still being allocated no longer writes the text `‹allocating…›` to the server.** The save is refused with `Still allocating uidNumber; save again in a moment.`, and fields filled from the number, such as `gidNumber = "{uidNumber}"` or the private group's `gidNumber`, stay empty until it arrives. If the allocation cannot start, the field is emptied and the status line says `Could not allocate uidNumber: …`.
 - **The manual now describes `{next:MIN-MAX}` correctly.** It said the lowest
   unused number is picked; eDAPtor actually takes one above the highest number in
   range and never refills gaps. The page also notes that a `gidNumber` range sees

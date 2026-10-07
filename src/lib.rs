@@ -2,6 +2,7 @@
 //! browser (tree / leaf list / entry form).
 
 pub mod config;
+pub mod detect;
 pub mod form;
 pub mod ldap;
 pub mod passwd;
@@ -140,17 +141,6 @@ fn is_samba_account(object_classes: &[String]) -> bool {
         .any(|oc| oc.eq_ignore_ascii_case("sambaSamAccount"))
 }
 
-/// Set a synced Unix + Samba password on `target_dn` (spec §9/§10).
-///
-/// TLS-gated: refuses with an `Err` (before any network I/O) when the server
-/// connection is not encrypted (`!samba::password::is_secure`). Then binds,
-/// reads the target's `objectClass` to detect a `sambaSamAccount`, builds the
-/// synced mod-set (`userPassword` always; `sambaNTPassword` + `sambaPwdLastSet`
-/// for samba accounts), applies it in one atomic MODIFY, and re-reads the entry
-/// to confirm (no silent success). Returns a human confirmation string.
-///
-/// Factored out of `main` (no `rpassword`, no terminal) so the live test can drive
-/// it with a known password.
 /// Search `base` (subtree/base scope per `scope`) for `filter`, returning the
 /// matching entries with their `objectClass` values. The shared LDAP round-trip
 /// behind both passwd-target resolution branches.
@@ -179,7 +169,7 @@ fn search_object_classes(
 
 /// Resolve the `passwd` argument to a concrete `(dn, objectClass values)`. A DN
 /// argument is base-read to confirm it exists; a bare username is searched across
-/// every configured profile's `search_base`, requiring a single match.
+/// every account profile's `search_base`, requiring a single match.
 fn resolve_passwd_target(
     worker: &WorkerHandle,
     profiles: &[crate::config::EntryProfile],
@@ -215,7 +205,7 @@ fn resolve_passwd_target(
             Ok((dn, ocs))
         }
         passwd::Resolution::NotFound => Err(anyhow!(
-            "no entry found for username \"{arg}\" in any configured profile; \
+            "no entry found for username \"{arg}\" in any account profile; \
              pass a full DN instead"
         )),
         passwd::Resolution::Ambiguous(dns) => Err(anyhow!(
@@ -225,6 +215,85 @@ fn resolve_passwd_target(
     }
 }
 
+/// `edaptor profiles` output: TOML for stdout, notes for stderr.
+pub struct ProfilesReport {
+    pub toml: String,
+    /// Sampling and detection notes (`note:` on stderr).
+    pub notes: Vec<String>,
+    /// Config-caused messages (`warning:` on stderr).
+    pub warnings: Vec<String>,
+}
+
+/// Load (and detect) the profiles, run the number scan for detected ranges,
+/// and render the dump. A failed detection is an error (non-zero exit).
+pub fn run_profiles(
+    config: Config,
+    password: String,
+    detected_only: bool,
+) -> Result<ProfilesReport> {
+    use crate::detect::{dump, model::SampleEntry, range};
+    let inputs = crate::detect::load::ProfileInputs::from_config(&config);
+    let worker = WorkerHandle::spawn(config, password)?;
+    let loaded = crate::detect::load::load_profiles(&worker, &inputs)?;
+    if let Some(e) = &loaded.detection_error {
+        return Err(anyhow!("profile detection failed: {e}"));
+    }
+    let (profiles, provenance, disabled) = if detected_only {
+        let m = crate::detect::merge::merge(&loaded.schema, &loaded.detected, &[]);
+        (m.profiles, m.provenance, Vec::new())
+    } else {
+        (loaded.profiles, loaded.provenance, loaded.disabled)
+    };
+    let needs_scan = profiles.iter().any(|p| {
+        p.defaults
+            .entries
+            .values()
+            .any(|d| matches!(d, crate::config::defaults::DefaultValue::DetectedRange(_)))
+    });
+    let ranges = if !needs_scan {
+        Default::default()
+    } else {
+        match worker.request(Request::Search {
+            id: 1,
+            base: inputs.base_dn.clone(),
+            scope: SearchScope::Subtree,
+            filter: range::SCAN_FILTER.to_string(),
+            attrs: range::SCAN_ATTRS.iter().map(|s| s.to_string()).collect(),
+            size_limit: None,
+        })? {
+            Response::Entries {
+                entries, truncated, ..
+            } => {
+                let scan: Vec<SampleEntry> = entries.iter().map(SampleEntry::from).collect();
+                dump::compute_ranges(&profiles, &scan, truncated)
+            }
+            Response::SearchError { msg, .. } => dump::failed_ranges(&profiles, &msg),
+            other => dump::failed_ranges(&profiles, describe_response(&other)),
+        }
+    };
+    let header = dump::header_line(
+        inputs.detect_enabled,
+        loaded.containers_sampled,
+        loaded.notes.len() + loaded.warnings.len(),
+    );
+    Ok(ProfilesReport {
+        toml: dump::render(&profiles, &provenance, &disabled, &header, &ranges),
+        notes: loaded.notes,
+        warnings: loaded.warnings,
+    })
+}
+
+/// Set a synced Unix + Samba password on `target_dn` (spec §9/§10).
+///
+/// TLS-gated: refuses with an `Err` (before any network I/O) when the server
+/// connection is not encrypted (`!samba::password::is_secure`). Then binds,
+/// reads the target's `objectClass` to detect a `sambaSamAccount`, builds the
+/// synced mod-set (`userPassword` always; `sambaNTPassword` + `sambaPwdLastSet`
+/// for samba accounts), applies it in one atomic MODIFY, and re-reads the entry
+/// to confirm (no silent success). Returns a human confirmation string.
+///
+/// Factored out of `main` (no `rpassword`, no terminal) so the live test can drive
+/// it with a known password.
 pub fn run_passwd(
     config: Config,
     bind_password: String,
@@ -239,15 +308,15 @@ pub fn run_passwd(
         ));
     }
 
-    // Profiles are needed for username resolution after `config` moves into the
-    // worker, so capture them first.
-    let profiles = config.profiles.clone();
+    // Inputs are captured before `config` moves into the worker.
+    let inputs = crate::detect::load::ProfileInputs::from_config(&config);
     let worker = WorkerHandle::spawn(config, bind_password)?;
+    let loaded = crate::detect::load::load_profiles(&worker, &inputs)?;
 
     // Resolve the target to a concrete DN (and its objectClass values, used for
     // samba detection) BEFORE prompting for the new password, so an unknown or
     // ambiguous username fails fast instead of after two password entries.
-    let (target_dn, object_classes) = resolve_passwd_target(&worker, &profiles, target_arg)?;
+    let (target_dn, object_classes) = resolve_passwd_target(&worker, &loaded.profiles, target_arg)?;
     let is_samba = is_samba_account(&object_classes);
 
     // Now that the target is known, prompt for the new password.

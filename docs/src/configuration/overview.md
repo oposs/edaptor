@@ -47,19 +47,35 @@ authenticate, and what an entry of each kind (a "user", a "group") is made of �
 its object classes, where it lives, how it is named, and which related entries
 its membership attributes draw from. The forms then follow from the schema.
 
+## Minimal config
+
+Connection settings are enough; eDAPtor detects the profiles
+([Profile Detection](detection.md)):
+
+    [server]
+    uri     = "ldaps://ldap.example.com"
+    base_dn = "dc=example,dc=com"
+
+    [auth]
+    bind_dn         = "cn=ldapmanager,dc=example,dc=com"
+    password_source = "prompt"
+
+`[[profile]]` blocks are optional overrides of what detection found; run
+`edaptor profiles` to see it.
+
 ## Top-level shape
 
-A config file has three connection tables and one or more repeated profile
-tables:
+A config file has three connection tables and optional profile tables:
 
 ```toml
 [server]        # where the directory is and how to reach it
 [server.tls]    # optional TLS trust settings
 [auth]          # how to bind
-[[profile]]     # what a "user" / "group" / … means (repeatable)
+[detect]        # optional: switch profile detection off
+[[profile]]     # optional overrides of detected profiles (repeatable)
 ```
 
-`[[profile]]` is an *array of tables* — you write it once per kind of entry you
+`[[profile]]` is an *array of tables*: you write it once per kind of entry you
 manage. Each profile may carry sub-tables (`[profile.defaults]`,
 `[profile.widget.<attr>]`) that refine how its entries are created and edited.
 
@@ -68,6 +84,7 @@ manage. Each profile may carry sub-tables (`[profile.defaults]`,
 | Section | What it covers |
 |---|---|
 | [Server & Authentication](server-auth.md) | `[server]`, `[server.tls]`, `[auth]` — the connection, TLS trust, and bind credentials. |
+| [Profile Detection](detection.md) | What eDAPtor detects, how `[[profile]]` blocks override it, `suppress`, `[detect]`, `edaptor profiles`. |
 | [Entry Profiles](entry-profiles.md) | `[[profile]]` — name, object classes, RDN attribute, search base, displayed/searched attributes, and labels. |
 | [Defaults](defaults.md) | `[profile.defaults]` — literal, templated, and auto-numbered values that fill empty fields on create. |
 | [Widgets](widgets.md) | `[profile.widget.<attr>]` — give a field a richer editor: a `choice` checklist (e.g. `sambaAcctFlags`, `loginShell`), a `password` set-password popup (with optional Samba sync), a `picker` that populates an attribute from a live candidate search, or a `membership` fan-out that writes back-references on each picked candidate. |

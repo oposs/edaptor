@@ -85,16 +85,23 @@ A `gidNumber` range therefore also sees the `gidNumber` of user accounts, not on
 that of groups. Give each kind of number its own range, e.g. user-private groups
 in `5000-5999` and shared groups in `8000-9999`.
 
-### Allocating during create (Enter to allocate)
+### Allocating during create
 
-By default an auto-numbered field is resolved at **save** time. In a create form
-the field is initially empty and shows the affordance **`⟨Enter to allocate⟩`**;
-pressing **Enter** runs the scan immediately and fills in the number. This is
-useful when another field depends on the value before save — for example the
+When a create form opens, eDAPtor starts the scan for every auto-numbered field
+at once and fills in the number when the scan returns. Fields that depend on the
+number fill in then, for example `gidNumber = "{uidNumber}"` or the
 [`sambaSID` auto-generate](widgets.md#sambasid-auto-generate-auto-injected)
-widget needs a concrete `uidNumber`. Skipping it is fine: the value is still
-allocated automatically at save. The field stays editable, so you can also type a
-number by hand to override.
+widget. Saving does not allocate again. The field stays editable, so you can
+type a number by hand to override the allocated one.
+
+### While the number is being allocated
+
+While the scan runs, the field shows `‹allocating…›`. Templates that read it,
+such as `gidNumber = "{uidNumber}"` or a companion group's `gidNumber`, stay
+empty until the number arrives. Pressing **`Alt+S`** in that moment saves
+nothing and the status line reads `Still allocating uidNumber; save again in a
+moment.` If the scan cannot be started, the field is left empty and the status
+line reads `Could not allocate uidNumber: …`.
 
 ### Size-limit caveat
 

@@ -133,6 +133,7 @@ mod tests {
             widgets: Default::default(),
             label: None,
             companion: None,
+            scope: Default::default(),
         }
     }
 

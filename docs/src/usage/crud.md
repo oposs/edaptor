@@ -112,9 +112,11 @@ profile, skipping the browse-and-navigate step:
 
     edaptor tui-create Users
 
-- `<profile>` is matched case-insensitively against the configured profile names. Omit
-  it to be shown a profile chooser at launch. An unknown name prints the list of valid
-  names and exits before the TUI starts.
+- `<profile>` is matched case-insensitively against the configured and detected
+  profile names (for example `user-people`). Omit it to be shown a profile
+  chooser at launch. The chooser hides detected organizational-unit and domain
+  profiles unless `--container` is exactly their container. An unknown name
+  prints the list of valid names and exits before the TUI starts.
 - `--container <DN>` overrides where the new object is created; by default it lands in
   the profile's `search_base`.
 

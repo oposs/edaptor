@@ -99,6 +99,11 @@ pub fn plan_companion(
                      which is unsupported"
                 ))
             }
+            DefaultValue::DetectedRange(_) => {
+                return Err(format!(
+                "companion attribute '{attr}' uses a detected number range, which is unsupported"
+            ))
+            }
         };
         if let Some(v) = resolved {
             if !v.is_empty() {
@@ -238,12 +243,32 @@ pub fn profile_for_entry<'a>(
     })
 }
 
+/// A number the create form still needs from a directory scan.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AllocRequest {
+    /// `{next:MIN-MAX}` from the config.
+    Range { attr: String, min: u64, max: u64 },
+    /// A detected range (rule C), resolved from a full number scan.
+    Detected {
+        attr: String,
+        spec: crate::detect::range::RangeSpec,
+    },
+}
+
+impl AllocRequest {
+    pub fn attr(&self) -> &str {
+        match self {
+            AllocRequest::Range { attr, .. } | AllocRequest::Detected { attr, .. } => attr,
+        }
+    }
+}
+
 /// Apply literal/template defaults to still-empty fields (pure); return the
-/// autonumber requests `(attr, min, max)` that still need a directory scan.
+/// allocation requests that still need a directory scan.
 pub fn apply_static_defaults(
     defaults: &crate::config::defaults::ProfileDefaults,
     attrs: &mut BTreeMap<String, Vec<String>>,
-) -> Vec<(String, u64, u64)> {
+) -> Vec<AllocRequest> {
     use crate::config::defaults::{plan_defaults, Resolution};
     let mut autonum = Vec::new();
     for res in plan_defaults(defaults, attrs) {
@@ -251,7 +276,12 @@ pub fn apply_static_defaults(
             Resolution::Fill { attr, value } => {
                 attrs.insert(attr, vec![value]);
             }
-            Resolution::NeedsAutonumber { attr, min, max } => autonum.push((attr, min, max)),
+            Resolution::NeedsAutonumber { attr, min, max } => {
+                autonum.push(AllocRequest::Range { attr, min, max })
+            }
+            Resolution::NeedsDetectedRange { attr, spec } => {
+                autonum.push(AllocRequest::Detected { attr, spec })
+            }
         }
     }
     autonum
@@ -260,13 +290,22 @@ pub fn apply_static_defaults(
 /// Indices of profiles whose `search_base` matches `container_dn` at a DN-component
 /// boundary: equal, or one is a proper suffix of the other (case-insensitive). So
 /// `ou=people,…` matches but `ou=people2,…` does not. Profiles with an empty
-/// `search_base` never match. Pure.
+/// `search_base` never match, and `Exact`-scoped profiles only match their own
+/// container. Pure.
 pub fn profiles_for_container(profiles: &[EntryProfile], container_dn: &str) -> Vec<usize> {
     profiles
         .iter()
         .enumerate()
         .filter(|(_, p)| {
-            !p.search_base.is_empty() && dn_boundary_match(&p.search_base, container_dn)
+            !p.search_base.is_empty()
+                && match p.scope {
+                    crate::config::ContainerScope::Boundary => {
+                        dn_boundary_match(&p.search_base, container_dn)
+                    }
+                    crate::config::ContainerScope::Exact => {
+                        crate::detect::dn_eq(&p.search_base, container_dn)
+                    }
+                }
         })
         .map(|(i, _)| i)
         .collect()
@@ -319,6 +358,21 @@ pub fn resolve_create_container(current_branch: &str, search_base: &str) -> Crea
     CreateContainer::Unambiguous(cur.to_string())
 }
 
+/// Indices of the profiles the all-profiles chooser (`tui-create` without a
+/// profile) offers: everything except detected infrastructure profiles, which
+/// appear only when `container` is exactly theirs. Pure.
+pub fn chooser_profiles(profiles: &[EntryProfile], container: Option<&str>) -> Vec<usize> {
+    profiles
+        .iter()
+        .enumerate()
+        .filter(|(_, p)| {
+            !crate::detect::is_infrastructure(p)
+                || container.is_some_and(|c| crate::detect::dn_eq(c, &p.search_base))
+        })
+        .map(|(i, _)| i)
+        .collect()
+}
+
 /// Resolve the optional `<profile>` argument of `tui-create` against the configured
 /// profiles. `Some(name)` → the matching index (case-insensitive), or an error listing
 /// the valid names when unknown. `None` → `Ok(None)` (the caller shows the chooser).
@@ -338,7 +392,7 @@ pub fn resolve_profile_arg(
     }
     let valid: Vec<&str> = profiles.iter().map(|p| p.name.as_str()).collect();
     Err(format!(
-        "unknown profile '{name}'. Configured profiles: {}",
+        "unknown profile '{name}'. Available profiles: {}",
         if valid.is_empty() {
             "(none)".to_string()
         } else {
@@ -406,17 +460,14 @@ pub fn build_add_entry(
 /// empty form (`empty_form_for_profile`), with an editable `objectClass` field seeded
 /// with `["top"] + profile.object_classes` (deduped, case-insensitive) so the picker
 /// can edit it and `sync_schema_fields` injects the effective MUST/MAY fields; then
-/// static defaults are applied. Returns the form plus the autonumber requests
-/// `(attr, min, max)` that still need a directory scan (Block B fills them). Pure.
+/// static defaults are applied. Returns the form plus the allocation requests
+/// that still need a directory scan. Pure.
 pub fn build_create_form(
     schema: &SchemaModel,
     profile: &EntryProfile,
     profile_idx: usize,
     container: &str,
-) -> (
-    crate::workflows::edit_form::EditForm,
-    Vec<(String, u64, u64)>,
-) {
+) -> (crate::workflows::edit_form::EditForm, Vec<AllocRequest>) {
     use crate::schema::FieldKind;
     use crate::workflows::edit_form::{build_edit_form, EditField, FormMode};
     use crate::workflows::form_model::WidgetSpec;
@@ -561,6 +612,7 @@ mod tests {
             widgets: Default::default(),
             label: None,
             companion: None,
+            scope: Default::default(),
         }
     }
 
@@ -724,6 +776,15 @@ mod tests {
         );
         // A parent container offers all profiles whose search_base is under it.
         assert_eq!(profiles_for_container(&ps, "dc=example,dc=org"), vec![0, 1]);
+    }
+
+    #[test]
+    fn exact_scope_matches_only_its_own_container() {
+        let mut p = prof("dc=example,dc=org");
+        p.scope = crate::config::ContainerScope::Exact;
+        let ps = vec![p];
+        assert_eq!(profiles_for_container(&ps, "DC=Example, dc=org"), vec![0]);
+        assert!(profiles_for_container(&ps, "ou=people,dc=example,dc=org").is_empty());
     }
 
     #[test]
@@ -968,6 +1029,7 @@ mod tests {
             widgets: Default::default(),
             label: None,
             companion: None,
+            scope: Default::default(),
         };
         let (form, autonum) =
             build_create_form(&schema, &profile, 0, "ou=people,dc=example,dc=org");
@@ -1017,8 +1079,42 @@ mod tests {
             Some(&vec!["/home/alice".to_string()])
         );
         // autonumber is NOT filled here (needs a worker scan); it's surfaced.
-        assert_eq!(autonum, vec![("uidNumber".to_string(), 10000, 60000)]);
+        assert_eq!(
+            autonum,
+            vec![AllocRequest::Range {
+                attr: "uidNumber".to_string(),
+                min: 10000,
+                max: 60000
+            }]
+        );
         assert!(!attrs.contains_key("uidNumber"));
+    }
+
+    #[test]
+    fn apply_static_defaults_surfaces_detected_ranges() {
+        use crate::config::defaults::{DefaultValue, ProfileDefaults};
+        let spec = crate::detect::range::RangeSpec {
+            attr: "gidNumber".into(),
+            container: "ou=g,dc=x".into(),
+            structural: "posixGroup".into(),
+            unified: true,
+            exclude_private: true,
+        };
+        let mut d = ProfileDefaults::default();
+        d.entries.insert(
+            "gidNumber".into(),
+            DefaultValue::DetectedRange(spec.clone()),
+        );
+        let mut attrs = BTreeMap::new();
+        let reqs = apply_static_defaults(&d, &mut attrs);
+        assert_eq!(
+            reqs,
+            vec![AllocRequest::Detected {
+                attr: "gidNumber".into(),
+                spec
+            }]
+        );
+        assert_eq!(reqs[0].attr(), "gidNumber");
     }
 
     #[test]
@@ -1080,6 +1176,27 @@ mod tests {
         let ps = vec![named("Users"), named("Groups")];
         assert_eq!(resolve_profile_arg(&ps, Some("users")), Ok(Some(0)));
         assert_eq!(resolve_profile_arg(&ps, Some("GROUPS")), Ok(Some(1)));
+    }
+
+    #[test]
+    fn chooser_hides_detected_infrastructure_outside_its_container() {
+        let mut ou = prof("dc=example,dc=org");
+        ou.name = "organizationalunit-example".into();
+        ou.object_classes = vec!["organizationalUnit".into()];
+        ou.scope = crate::config::ContainerScope::Exact;
+        let mut cfg_ou = ou.clone();
+        cfg_ou.scope = crate::config::ContainerScope::Boundary;
+        let user = prof("ou=people,dc=example,dc=org");
+        let ps = vec![ou, cfg_ou, user];
+        assert_eq!(chooser_profiles(&ps, None), vec![1, 2]);
+        assert_eq!(
+            chooser_profiles(&ps, Some("ou=people,dc=example,dc=org")),
+            vec![1, 2]
+        );
+        assert_eq!(
+            chooser_profiles(&ps, Some("DC=example,dc=org")),
+            vec![0, 1, 2]
+        );
     }
 
     #[test]
@@ -1158,6 +1275,24 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.to_lowercase().contains("cn") || err.to_lowercase().contains("rdn"));
+    }
+
+    /// A companion template must never copy the allocation placeholder: a
+    /// source still showing `‹allocating…›` counts as missing, so a string
+    /// attribute stays unset instead of storing the placeholder text.
+    #[test]
+    fn plan_companion_treats_the_alloc_placeholder_as_missing() {
+        let mut spec = companion_spec();
+        spec.attributes.insert("gidNumber".into(), "10001".into());
+        spec.attributes
+            .insert("memberUid".into(), "{uidNumber}".into());
+        let mut primary = primary_attrs_with("alice", None);
+        primary.insert(
+            "uidNumber".into(),
+            vec![crate::config::defaults::ALLOC_PLACEHOLDER.into()],
+        );
+        let add = plan_companion(&spec, &primary, &group_schema()).expect("plans");
+        assert_eq!(add.attrs.get("memberUid"), None, "{:?}", add.attrs);
     }
 
     #[test]

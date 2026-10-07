@@ -95,6 +95,24 @@ pub struct LdapEntry {
     pub bin_attrs: BTreeMap<String, usize>,
 }
 
+/// A detection sample search: like `Search`, plus types-only and a time limit
+/// (server `timelimit` in whole seconds and a client timeout, both `time_limit`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SampleParams {
+    pub base: String,
+    pub scope: SearchScope,
+    pub filter: String,
+    pub attrs: Vec<String>,
+    pub size_limit: Option<i32>,
+    pub types_only: bool,
+    pub time_limit: std::time::Duration,
+}
+
+/// Whole seconds for the server time limit, at least 1.
+pub fn time_limit_secs(d: std::time::Duration) -> i32 {
+    d.as_secs().clamp(1, i32::MAX as u64) as i32
+}
+
 /// A request to the worker. Each is paired with a reply `Sender` in the channel.
 #[derive(Debug)]
 pub enum Request {
@@ -116,6 +134,14 @@ pub enum Request {
         attrs: Vec<String>,
         /// Optional server-side size limit (picker type-ahead caps at ~20).
         size_limit: Option<i32>,
+    },
+    /// A detection sample search (types-only and time-limited). Replies like
+    /// [`Request::Search`]; `truncated` also covers a client timeout.
+    SampleSearch {
+        /// Correlation id, echoed in the reply.
+        id: u64,
+        /// The search to run.
+        params: SampleParams,
     },
     /// Eagerly load the entire subtree structure under `base` (paged). `id` is
     /// echoed in the reply for correlation.
@@ -450,6 +476,20 @@ fn worker_loop(conn: &mut LdapConn, config: &Config, rx: Receiver<Job>) {
                         supported_controls,
                     },
                     Err(e) => Response::Error(e.to_string()),
+                };
+                let _ = reply.send(resp);
+            }
+            Request::SampleSearch { id, params } => {
+                let resp = match run_sample_search(conn, &params) {
+                    Ok((entries, truncated)) => Response::Entries {
+                        id,
+                        entries,
+                        truncated,
+                    },
+                    Err(e) => Response::SearchError {
+                        id,
+                        msg: format!("{e:#}"),
+                    },
                 };
                 let _ = reply.send(resp);
             }
@@ -1017,6 +1057,44 @@ fn run_search(
     ))
 }
 
+/// Streaming search that keeps what arrived before a client timeout: a limit
+/// (rc 3/4/11) or a timeout returns the entries so far with `truncated = true`.
+fn run_sample_search(conn: &mut LdapConn, p: &SampleParams) -> Result<(Vec<LdapEntry>, bool)> {
+    let mut opts = SearchOptions::new()
+        .typesonly(p.types_only)
+        .timelimit(time_limit_secs(p.time_limit));
+    if let Some(n) = p.size_limit {
+        opts = opts.sizelimit(n);
+    }
+    conn.with_search_options(opts)
+        .with_timeout(p.time_limit.max(std::time::Duration::from_secs(1)));
+    let adapters: Vec<Box<dyn Adapter<_, _>>> = vec![Box::new(EntriesOnly::new())];
+    let mut stream = conn
+        .streaming_search_with(
+            adapters,
+            &p.base,
+            scope_to_ldap3(p.scope),
+            &p.filter,
+            p.attrs.clone(),
+        )
+        .with_context(|| format!("searching {}", p.base))?;
+    let mut out = Vec::new();
+    loop {
+        match stream.next() {
+            Ok(Some(re)) => out.push(to_ldap_entry(SearchEntry::construct(re))),
+            Ok(None) => break,
+            Err(ldap3::LdapError::Timeout { .. }) => return Ok((out, true)),
+            Err(e) => return Err(anyhow!(e)).with_context(|| format!("searching {}", p.base)),
+        }
+    }
+    let res = stream.result();
+    if res.rc != 0 && !is_limit_rc(res.rc) {
+        return Err(anyhow!(result_code_message(res.rc, &res.text)))
+            .with_context(|| format!("searching {}", p.base));
+    }
+    Ok((out, is_limit_rc(res.rc)))
+}
+
 fn fetch_subschema(conn: &mut LdapConn, base_dn: &str) -> Result<RawSubschema> {
     // 1. Find the subschema subentry DN (operational attribute on the base entry).
     let (entries, _res) = conn
@@ -1095,6 +1173,13 @@ fn fetch_root_dse(conn: &mut LdapConn) -> Result<(Vec<String>, Vec<String>)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn time_limit_is_whole_seconds_at_least_one() {
+        assert_eq!(time_limit_secs(std::time::Duration::from_millis(300)), 1);
+        assert_eq!(time_limit_secs(std::time::Duration::from_millis(2900)), 2);
+        assert_eq!(time_limit_secs(std::time::Duration::from_secs(10)), 10);
+    }
 
     #[test]
     fn run_search_truncated_flag_tracks_limit_rc() {

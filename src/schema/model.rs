@@ -4,7 +4,9 @@
 use std::collections::{BTreeSet, HashMap, HashSet};
 
 use chumsky::Parser;
-use ldap_types::schema::{attribute_type_parser, object_class_parser, AttributeType, ObjectClass};
+use ldap_types::schema::{
+    attribute_type_parser, object_class_parser, AttributeType, ObjectClass, ObjectClassType,
+};
 
 use crate::ldap::worker::RawSubschema;
 use crate::schema::syntax::{classify_syntax, FieldKind};
@@ -198,6 +200,58 @@ impl SchemaModel {
         self.attribute_type(attr_name)
             .map(|at| at.no_user_modification)
             .unwrap_or(false)
+    }
+
+    /// Whether `name` is a STRUCTURAL object class. Unknown classes → `false`.
+    pub fn is_structural(&self, name: &str) -> bool {
+        self.object_class(name)
+            .map(|oc| oc.object_class_type == ObjectClassType::Structural)
+            .unwrap_or(false)
+    }
+
+    /// Every (transitive) superclass of `name`, as lowercased names (primary names
+    /// and aliases, plus the spelling the SUP reference used). Excludes `name`
+    /// itself. Guarded against SUP cycles.
+    pub fn superclasses(&self, name: &str) -> HashSet<String> {
+        let mut out = HashSet::new();
+        let mut stack: Vec<String> = self
+            .object_class(name)
+            .map(|oc| oc.sup.iter().map(|s| s.to_string()).collect())
+            .unwrap_or_default();
+        while let Some(s) = stack.pop() {
+            if !out.insert(s.to_lowercase()) {
+                continue;
+            }
+            if let Some(oc) = self.object_class(&s) {
+                for n in &oc.name {
+                    out.insert(n.to_string().to_lowercase());
+                }
+                stack.extend(oc.sup.iter().map(|x| x.to_string()));
+            }
+        }
+        out
+    }
+
+    /// The structural class of an entry with object classes `ocs`: among the
+    /// STRUCTURAL ones, the most specific (the one that is no other's superclass
+    /// along the SUP chain). Unrelated structural classes: the first in `ocs`
+    /// order. Returns the schema's primary name. `None` when no class is known
+    /// to be structural.
+    pub fn structural_class(&self, ocs: &[String]) -> Option<String> {
+        let structurals: Vec<&String> = ocs.iter().filter(|o| self.is_structural(o)).collect();
+        let supers: HashSet<String> = structurals
+            .iter()
+            .flat_map(|o| self.superclasses(o))
+            .collect();
+        let pick = structurals
+            .into_iter()
+            .find(|o| !supers.contains(&o.to_lowercase()))?;
+        Some(
+            self.object_class(pick)
+                .and_then(|oc| oc.name.first())
+                .map(|n| n.to_string())
+                .unwrap_or_else(|| pick.clone()),
+        )
     }
 
     /// All known objectClass primary names, sorted case-insensitively.
@@ -413,5 +467,55 @@ mod tests {
         assert!(m.is_readonly_attr("createTimestamp")); // flag present
         assert!(!m.is_readonly_attr("cn")); // defined but modifiable
         assert!(!m.is_readonly_attr("unknownAttr")); // unknown → false
+    }
+
+    fn structural_raw() -> RawSubschema {
+        RawSubschema {
+            object_classes: vec![
+                "( 2.5.6.0 NAME 'top' ABSTRACT MUST objectClass )".to_string(),
+                "( 2.5.6.6 NAME 'person' SUP top STRUCTURAL MUST ( sn $ cn ) )".to_string(),
+                "( 2.5.6.7 NAME 'organizationalPerson' SUP person STRUCTURAL )".to_string(),
+                "( 2.16.840.1.113730.3.2.2 NAME 'inetOrgPerson' SUP organizationalPerson STRUCTURAL )"
+                    .to_string(),
+                "( 1.3.6.1.1.1.2.0 NAME 'posixAccount' SUP top AUXILIARY )".to_string(),
+                "( 2.5.6.9 NAME 'groupOfNames' SUP top STRUCTURAL )".to_string(),
+            ],
+            attribute_types: vec![],
+            ldap_syntaxes: vec![],
+        }
+    }
+
+    fn strings(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn structural_class_picks_the_most_specific_structural() {
+        let m = SchemaModel::from_raw(&structural_raw());
+        assert!(m.is_structural("inetorgperson"));
+        assert!(!m.is_structural("posixAccount"));
+        assert!(!m.is_structural("top"));
+        assert!(m.superclasses("inetOrgPerson").contains("person"));
+        assert_eq!(
+            m.structural_class(&strings(&[
+                "top",
+                "person",
+                "organizationalPerson",
+                "inetOrgPerson",
+                "posixAccount"
+            ])),
+            Some("inetOrgPerson".to_string())
+        );
+        // Server spelling differs: the schema's primary name is returned.
+        assert_eq!(
+            m.structural_class(&strings(&["INETORGPERSON", "person"])),
+            Some("inetOrgPerson".to_string())
+        );
+        assert_eq!(m.structural_class(&strings(&["posixAccount"])), None);
+        // Two unrelated structural classes: the first in entry order wins.
+        assert_eq!(
+            m.structural_class(&strings(&["groupOfNames", "person"])),
+            Some("groupOfNames".to_string())
+        );
     }
 }

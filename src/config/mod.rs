@@ -23,23 +23,157 @@ pub struct MetaConfig {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(try_from = "RawConfig")]
 pub struct Config {
-    #[serde(default)]
     pub meta: MetaConfig,
     pub server: ServerConfig,
     pub auth: AuthConfig,
-    /// Entry profiles drive the menu and read-form ordering. A minimal slice is
-    /// pulled forward into M3 (the rich profile metadata stays in M4). `[[profile]]`
-    /// TOML blocks parse here; absent profiles default to empty.
-    #[serde(default, rename = "profile")]
+    /// The config's own complete profiles (blocks with `object_classes`, not
+    /// disabled), in file order: what eDAPtor uses when detection is off.
     pub profiles: Vec<EntryProfile>,
+    /// Every `[[profile]]` block as written (input to the merge).
+    pub overrides: Vec<ProfileOverride>,
+    /// The `[detect]` table.
+    pub detect: DetectConfig,
     /// Samba lifecycle fallback settings. Used only when no `sambaDomain` entry
-    /// is discovered in the directory (spec §9). Absent `[samba]` table is fine.
-    #[serde(default)]
+    /// is discovered in the directory (spec section 9). Absent `[samba]` table is fine.
     pub samba: SambaConfig,
     /// Configurable DIT-tree (pane 1) branch labels. Absent `[tree]` is fine.
-    #[serde(default)]
     pub tree: TreeConfig,
+}
+
+#[derive(Deserialize)]
+struct RawConfig {
+    #[serde(default)]
+    meta: MetaConfig,
+    server: ServerConfig,
+    auth: AuthConfig,
+    #[serde(default, rename = "profile")]
+    profiles: Vec<ProfileOverride>,
+    #[serde(default)]
+    detect: DetectConfig,
+    #[serde(default)]
+    samba: SambaConfig,
+    #[serde(default)]
+    tree: TreeConfig,
+}
+
+impl TryFrom<RawConfig> for Config {
+    type Error = String;
+
+    fn try_from(raw: RawConfig) -> Result<Self, String> {
+        let mut profiles = Vec::new();
+        for o in &raw.profiles {
+            if o.object_class.is_some() {
+                return Err(format!(
+                    "profile \"{}\": `object_class` is not supported, use object_classes = [\"…\"]",
+                    o.name
+                ));
+            }
+            if o.object_classes.is_none() && !raw.detect.enabled {
+                return Err(format!(
+                    "profile \"{}\": missing field `object_classes` (required when [detect] enabled = false)",
+                    o.name
+                ));
+            }
+            if !o.is_enabled() {
+                continue;
+            }
+            if let Some(p) = o.to_entry_profile() {
+                profiles.push(p);
+            }
+        }
+        Ok(Config {
+            meta: raw.meta,
+            server: raw.server,
+            auth: raw.auth,
+            profiles,
+            overrides: raw.profiles,
+            detect: raw.detect,
+            samba: raw.samba,
+            tree: raw.tree,
+        })
+    }
+}
+
+/// Where a profile's `New` is offered: `Boundary` = the container, its ancestors
+/// and descendants (config and matched profiles); `Exact` = only the container
+/// itself (detected-only profiles, spec 2A "Container scope").
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ContainerScope {
+    #[default]
+    Boundary,
+    Exact,
+}
+
+/// The `[detect]` table.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct DetectConfig {
+    /// `false` = no sampling at all; profiles come from the config only.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+}
+
+impl Default for DetectConfig {
+    fn default() -> Self {
+        DetectConfig { enabled: true }
+    }
+}
+
+/// One `[[profile]]` block as written: every key optional, so "not set" differs
+/// from "empty" and a block may only name a detected profile to change it.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct ProfileOverride {
+    pub name: String,
+    #[serde(default)]
+    pub enabled: Option<bool>,
+    #[serde(default)]
+    pub suppress: Vec<String>,
+    #[serde(default)]
+    pub object_classes: Option<Vec<String>>,
+    #[serde(default)]
+    pub rdn_attr: Option<String>,
+    #[serde(default)]
+    pub search_base: Option<String>,
+    #[serde(default)]
+    pub show: Option<Vec<String>>,
+    #[serde(default)]
+    pub search_attrs: Option<Vec<String>>,
+    #[serde(default)]
+    pub defaults: Option<ProfileDefaults>,
+    #[serde(default, rename = "widget")]
+    pub widgets: Option<std::collections::BTreeMap<String, WidgetSpecCfg>>,
+    #[serde(default)]
+    pub label: Option<String>,
+    #[serde(default)]
+    pub companion: Option<CompanionSpec>,
+    /// The removed single-string key; present only to reject it with a hint.
+    #[serde(default)]
+    object_class: Option<toml::Value>,
+}
+
+impl ProfileOverride {
+    pub fn is_enabled(&self) -> bool {
+        self.enabled != Some(false)
+    }
+
+    /// The block as a stand-alone profile (today's semantics); `None` without
+    /// `object_classes`.
+    pub fn to_entry_profile(&self) -> Option<EntryProfile> {
+        Some(EntryProfile {
+            name: self.name.clone(),
+            object_classes: self.object_classes.clone()?,
+            rdn_attr: self.rdn_attr.clone().unwrap_or_default(),
+            search_base: self.search_base.clone().unwrap_or_default(),
+            show: self.show.clone().unwrap_or_default(),
+            search_attrs: self.search_attrs.clone().unwrap_or_default(),
+            defaults: self.defaults.clone().unwrap_or_default(),
+            widgets: self.widgets.clone().unwrap_or_default(),
+            label: self.label.clone(),
+            companion: self.companion.clone(),
+            scope: ContainerScope::Boundary,
+        })
+    }
 }
 
 /// The optional `[tree]` table: ordered, presence-keyed labelling rules for the
@@ -218,6 +352,9 @@ pub struct EntryProfile {
     /// Optional companion entry created atomically with the primary (`[profile.companion]`).
     #[serde(default)]
     pub companion: Option<CompanionSpec>,
+    /// Container scope for `New`; never read from TOML.
+    #[serde(skip)]
+    pub scope: ContainerScope,
 }
 
 /// A declarative companion entry created alongside the primary on `New`
@@ -341,38 +478,45 @@ impl AuthConfig {
 /// must appear as an `attributes` key (so the RDN has a value source); and every
 /// attribute value must parse as a literal / `{attr}` template — a `{next:…}`
 /// autonumber is rejected (companions carry no independent allocation).
-fn validate_companions(profiles: &[EntryProfile]) -> Result<()> {
+fn validate_companions(overrides: &[ProfileOverride]) -> Result<()> {
+    for o in overrides {
+        if let Some(c) = &o.companion {
+            check_companion(&format!("profile '{}' companion", o.name), c)
+                .map_err(|e| anyhow::anyhow!(e))?;
+        }
+    }
+    Ok(())
+}
+
+/// Offline companion checks (see `validate_companions`). `who` prefixes messages.
+pub fn check_companion(who: &str, c: &CompanionSpec) -> Result<(), String> {
     use crate::config::defaults::{parse_default_value, DefaultValue};
-    for p in profiles {
-        let Some(c) = &p.companion else { continue };
-        let who = format!("profile '{}' companion", p.name);
-        if c.object_classes.is_empty() {
-            anyhow::bail!("{who}: object_classes must not be empty");
-        }
-        if c.rdn_attr.trim().is_empty() {
-            anyhow::bail!("{who}: rdn_attr must not be empty");
-        }
-        if c.search_base.trim().is_empty() {
-            anyhow::bail!("{who}: search_base must not be empty");
-        }
-        if !c
-            .attributes
-            .keys()
-            .any(|k| k.eq_ignore_ascii_case(&c.rdn_attr))
+    if c.object_classes.is_empty() {
+        return Err(format!("{who}: object_classes must not be empty"));
+    }
+    if c.rdn_attr.trim().is_empty() {
+        return Err(format!("{who}: rdn_attr must not be empty"));
+    }
+    if c.search_base.trim().is_empty() {
+        return Err(format!("{who}: search_base must not be empty"));
+    }
+    if !c
+        .attributes
+        .keys()
+        .any(|k| k.eq_ignore_ascii_case(&c.rdn_attr))
+    {
+        return Err(format!(
+            "{who}: rdn_attr '{}' must be one of the companion attributes",
+            c.rdn_attr
+        ));
+    }
+    for (attr, tmpl) in &c.attributes {
+        if let DefaultValue::AutoNumber { .. } =
+            parse_default_value(tmpl).map_err(|e| format!("{who} attribute '{attr}': {e}"))?
         {
-            anyhow::bail!(
-                "{who}: rdn_attr '{}' must be one of the companion attributes",
-                c.rdn_attr
-            );
-        }
-        for (attr, tmpl) in &c.attributes {
-            if let DefaultValue::AutoNumber { .. } = parse_default_value(tmpl)
-                .map_err(|e| anyhow::anyhow!("{who} attribute '{attr}': {e}"))?
-            {
-                anyhow::bail!(
-                    "{who} attribute '{attr}': {{next:…}} autonumber is not supported for companions"
-                );
-            }
+            return Err(format!(
+                "{who} attribute '{attr}': {{next:…}} autonumber is not supported for companions"
+            ));
         }
     }
     Ok(())
@@ -382,9 +526,14 @@ impl Config {
     pub fn load(path: &Path) -> Result<Config> {
         let text = std::fs::read_to_string(path)
             .with_context(|| format!("reading config {}", path.display()))?;
+        Self::from_toml_str(&text, &path.display().to_string())
+    }
+
+    /// Parse and check config text; `origin` names it in a parse error.
+    pub fn from_toml_str(text: &str, origin: &str) -> Result<Config> {
         let config: Config =
-            toml::from_str(&text).with_context(|| format!("parsing config {}", path.display()))?;
-        validate_companions(&config.profiles)?;
+            toml::from_str(text).with_context(|| format!("parsing config {origin}"))?;
+        validate_companions(&config.overrides)?;
         Ok(config)
     }
 
@@ -406,6 +555,42 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const CONN: &str =
+        "[server]\nuri = \"ldap://x\"\nbase_dn = \"dc=x\"\n[auth]\nbind_dn = \"cn=a,dc=x\"\n";
+
+    #[test]
+    fn override_with_only_name_and_enabled_parses() {
+        let cfg: Config = toml::from_str(&format!(
+            "{CONN}[[profile]]\nname = \"user-people\"\nenabled = false\n"
+        ))
+        .unwrap();
+        assert!(cfg.profiles.is_empty());
+        assert_eq!(cfg.overrides.len(), 1);
+        assert_eq!(cfg.overrides[0].enabled, Some(false));
+        assert!(cfg.detect.enabled);
+    }
+
+    #[test]
+    fn detection_off_requires_object_classes() {
+        let err = toml::from_str::<Config>(&format!(
+            "{CONN}[detect]\nenabled = false\n[[profile]]\nname = \"user\"\nsuppress = [\"companion\"]\n"
+        ))
+        .unwrap_err();
+        assert!(err.to_string().contains("object_classes"), "{err}");
+    }
+
+    #[test]
+    fn config_profiles_keep_file_order_and_boundary_scope() {
+        let cfg: Config = toml::from_str(&format!(
+            "{CONN}[[profile]]\nname = \"a\"\nobject_classes = [\"x\"]\n[[profile]]\nname = \"b\"\n[[profile]]\nname = \"c\"\nobject_classes = [\"y\"]\nenabled = false\n"
+        ))
+        .unwrap();
+        let names: Vec<&str> = cfg.profiles.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(names, vec!["a"]);
+        assert_eq!(cfg.profiles[0].scope, ContainerScope::Boundary);
+        assert_eq!(cfg.overrides.len(), 3);
+    }
 
     #[test]
     fn parses_minimal_config() {
@@ -690,6 +875,7 @@ mod tests {
             widgets: Default::default(),
             label: None,
             companion: None,
+            scope: Default::default(),
         };
         assert_eq!(
             p.search_attributes(),
@@ -1205,12 +1391,18 @@ mod meta_tests {
     }
 
     fn parse_config_str(toml: &str) -> anyhow::Result<Config> {
-        let dir = std::env::temp_dir();
-        let path = dir.join(format!("edaptor-cfg-test-{}.toml", toml.len()));
-        std::fs::write(&path, toml)?;
-        let cfg = Config::load(&path);
-        let _ = std::fs::remove_file(&path);
-        cfg
+        Config::from_toml_str(toml, "test")
+    }
+
+    #[test]
+    fn check_rejects_a_next_autonumber_in_an_override_only_companion() {
+        const CONN: &str =
+            "[server]\nuri = \"ldap://x\"\nbase_dn = \"dc=x\"\n[auth]\nbind_dn = \"cn=a,dc=x\"\n";
+        let toml = format!(
+            "{CONN}[[profile]]\nname = \"user-people\"\n[profile.companion]\nobject_classes = [\"posixGroup\"]\nrdn_attr = \"cn\"\nsearch_base = \"ou=g,dc=x\"\n[profile.companion.attributes]\ncn = \"{{uid}}\"\ngidNumber = \"{{next:1-9}}\"\n"
+        );
+        let err = parse_config_str(&toml).unwrap_err();
+        assert!(err.to_string().contains("autonumber"), "{err}");
     }
 
     #[test]

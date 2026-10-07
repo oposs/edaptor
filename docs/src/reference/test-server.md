@@ -30,15 +30,18 @@ scripts/test-ldap.sh stop    # stop and remove the container
 ```
 
 `start` is idempotent: it removes any leftover container from a prior run, waits
-for the server to accept connections, then provisions and seeds it.
+until the image has finished its own setup and the server accepts connections,
+then provisions and seeds it and checks that the seed data is there. If any of
+this fails, `start` exits non-zero with an `ERROR:` line and stops the
+container, so no half-seeded server is left behind for the tests.
 
 ## Connecting
 
-The server listens on `ldap://localhost:1389`. Set these environment variables
+The server listens on `ldap://localhost:11389`. Set these environment variables
 to point eDAPtor and the live tests at it:
 
 ```bash
-export EDAPTOR_TEST_LDAP_URI=ldap://localhost:1389
+export EDAPTOR_TEST_LDAP_URI=ldap://localhost:11389
 export EDAPTOR_TEST_ADMIN_PW=adminpassword
 ```
 
@@ -62,7 +65,7 @@ against the provisioned server:
 
 ```bash
 scripts/test-ldap.sh start
-export EDAPTOR_TEST_LDAP_URI=ldap://localhost:1389
+export EDAPTOR_TEST_LDAP_URI=ldap://localhost:11389
 export EDAPTOR_TEST_ADMIN_PW=adminpassword
 cargo test -p edaptor        # live_* tests now run
 scripts/test-ldap.sh stop

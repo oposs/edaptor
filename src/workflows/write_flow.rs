@@ -20,6 +20,17 @@ use crate::workflows::save::{
     stage_pending_password, CombinedSave, PlanCombined, PrepareSave,
 };
 
+/// The status a Save gets while an autonumber field still shows the allocation
+/// placeholder, or `None` when every number has landed. Both save paths check
+/// it first, so `‹allocating…›` never reaches the server.
+pub fn alloc_pending_status(form: &EditForm) -> Option<String> {
+    use crate::config::defaults::ALLOC_PLACEHOLDER;
+    form.fields
+        .iter()
+        .find(|f| f.values.iter().any(|v| v == ALLOC_PLACEHOLDER))
+        .map(|f| format!("Still allocating {}; save again in a moment.", f.label))
+}
+
 /// Blocking, schema-gated populate of the `group_members` map that
 /// [`WriteFlow::submit_combined`] consumes. For each fan-out `Delete` op, fetch
 /// the group's `objectClass` + membership attr (a single Base-scoped search) and
@@ -994,6 +1005,24 @@ mod tests {
             wf.prepare(&f, &schema(), None, &[]),
             PrepareSave::NoChanges
         ));
+    }
+
+    /// A Save while an autonumber scan is still running must not submit the
+    /// `‹allocating…›` placeholder: it is refused with a status naming the field.
+    #[test]
+    fn a_pending_allocation_blocks_the_save() {
+        use crate::config::defaults::ALLOC_PLACEHOLDER;
+        let f = form_with(vec![
+            oc_field(),
+            field("cn", "Alice", ""),
+            field("uidNumber", ALLOC_PLACEHOLDER, ""),
+        ]);
+        assert_eq!(
+            alloc_pending_status(&f).as_deref(),
+            Some("Still allocating uidNumber; save again in a moment.")
+        );
+        let done = form_with(vec![oc_field(), field("uidNumber", "10001", "")]);
+        assert_eq!(alloc_pending_status(&done), None);
     }
 
     #[test]

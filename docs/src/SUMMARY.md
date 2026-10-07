@@ -10,6 +10,7 @@
 # Configuration
 
 - [Overview](configuration/overview.md)
+- [Profile Detection](configuration/detection.md)
 - [Server & Authentication](configuration/server-auth.md)
 - [Entry Profiles](configuration/entry-profiles.md)
 - [Defaults](configuration/defaults.md)

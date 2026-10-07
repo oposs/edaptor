@@ -41,7 +41,7 @@ fn init_status_line(r: Rect, state: Shared) -> Option<Box<dyn View>> {
         // it across the `hint_for` call below.
         match state.try_borrow() {
             Ok(st) => {
-                let status = st.status.clone();
+                let status = st.status_text().to_string();
                 drop(st);
                 status_or_hint(&status, ctx)
             }
@@ -397,12 +397,15 @@ pub(crate) fn dispatch(prog: &mut Program, cmd: Command, state: &Shared) {
                 open_create(state, profile_idx, &container);
             }
             Some(StartupAction::ChooseThenCreate { container }) => {
-                let names: Vec<String> = state
-                    .borrow()
-                    .profiles
-                    .iter()
-                    .map(|p| p.name.clone())
-                    .collect();
+                let (idxs, names): (Vec<usize>, Vec<String>) = {
+                    let st = state.borrow();
+                    let idxs = crate::workflows::create::chooser_profiles(
+                        &st.profiles,
+                        container.as_deref(),
+                    );
+                    let names = idxs.iter().map(|i| st.profiles[*i].name.clone()).collect();
+                    (idxs, names)
+                };
                 if names.is_empty() {
                     state.borrow_mut().status = "No profiles configured.".into();
                     return;
@@ -410,7 +413,7 @@ pub(crate) fn dispatch(prog: &mut Program, cmd: Command, state: &Shared) {
                 let (view, focus) = crate::ui::dialog::profile_chooser::build(names, state.clone());
                 if prog.exec_view_focused(view, focus) == Command::OK {
                     let chosen = state.borrow_mut().chosen_profile.take();
-                    if let Some(idx) = chosen {
+                    if let Some(idx) = chosen.and_then(|rel| idxs.get(rel).copied()) {
                         let dn = container
                             .clone()
                             .unwrap_or_else(|| state.borrow().profiles[idx].search_base.clone());
@@ -538,11 +541,11 @@ fn open_create(state: &Shared, profile_idx: usize, container: &str) {
     };
     let (mut form, autonum) = form_and_reqs;
     // Set placeholder text in each autonumber field before installing the form.
-    for (attr, _, _) in &autonum {
+    for req in &autonum {
         if let Some(f) = form
             .fields
             .iter_mut()
-            .find(|f| f.label.eq_ignore_ascii_case(attr))
+            .find(|f| f.label.eq_ignore_ascii_case(req.attr()))
         {
             f.values = vec![crate::ui::state::ALLOC_PLACEHOLDER.to_string()];
         }
@@ -585,16 +588,34 @@ fn open_create(state: &Shared, profile_idx: usize, container: &str) {
     st.focus_form_request = true;
     // Post a background scan for each autonumber field (split-borrow idiom: worker
     // and alloc_flow are borrowed disjointly from st).
+    // A scan that cannot be submitted fails like a scan that failed: the
+    // placeholder goes and the status line says why.
+    let mut failed = Vec::new();
     if !autonum.is_empty() {
         let base_dn = st.base_dn.clone();
         let crate::ui::state::UiState {
             worker, alloc_flow, ..
         } = &mut *st;
-        if let Some(w) = worker.as_ref() {
-            for (attr, min, max) in &autonum {
-                let _ = alloc_flow.request(w, &base_dn, attr, *min, *max);
+        for req in &autonum {
+            let submitted = match (worker.as_ref(), req) {
+                (None, _) => Err(anyhow::anyhow!("not connected")),
+                (Some(w), crate::workflows::create::AllocRequest::Range { attr, min, max }) => {
+                    alloc_flow.request(w, &base_dn, attr, *min, *max)
+                }
+                (Some(w), crate::workflows::create::AllocRequest::Detected { attr, spec }) => {
+                    alloc_flow.request_detected(w, &base_dn, attr, spec.clone())
+                }
+            };
+            if let Err(e) = submitted {
+                failed.push(crate::workflows::alloc_flow::AllocOutcome::Failed {
+                    attr: req.attr().to_string(),
+                    msg: format!("Could not allocate {}: {e}", req.attr()),
+                });
             }
         }
+    }
+    for out in failed {
+        st.apply_alloc_outcome(out);
     }
 }
 
@@ -616,6 +637,20 @@ fn do_save(
     nav: Option<(String, Vec<String>)>,
     quit_after: bool,
 ) -> SaveOutcome {
+    // A number still being allocated must not be saved as its placeholder. Checked
+    // before the combined-save branch, so both save paths are covered.
+    {
+        let mut st = state.borrow_mut();
+        let pending = st
+            .edit_form
+            .as_ref()
+            .and_then(crate::workflows::write_flow::alloc_pending_status);
+        if let Some(msg) = pending {
+            st.status = msg;
+            st.guard_target = None;
+            return SaveOutcome::NotSubmitted;
+        }
+    }
     // Fix 3: TLS gate — belt-and-suspenders (editor already refuses when unencrypted).
     {
         let st = state.borrow();
@@ -1150,6 +1185,44 @@ mod tests {
     use super::*;
     use crate::form::validate::ValidationError;
     use crate::workflows::save::PrepareSave;
+
+    /// An autonumber scan that cannot be submitted (here: no worker) must not
+    /// leave `‹allocating…›` in the field forever: the placeholder goes and the
+    /// status line says why.
+    #[test]
+    fn open_create_clears_the_placeholder_when_the_scan_cannot_start() {
+        use crate::ui::state::UiState;
+        use crate::workflows::structure::Structure;
+        let cfg: crate::config::Config = toml::from_str(
+            "[server]\nuri = \"ldap://x\"\nbase_dn = \"dc=x\"\n[auth]\nbind_dn = \"cn=a\"\n\
+             [[profile]]\nname = \"user\"\nobject_classes = [\"inetOrgPerson\", \"posixAccount\"]\n\
+             search_base = \"ou=p,dc=x\"\n[profile.defaults]\nuidNumber = \"{next:1000-2000}\"\n",
+        )
+        .unwrap();
+        let mut st = UiState::new_for_test(
+            Structure::build("dc=x", vec![]),
+            crate::detect::fixtures::schema(),
+            "dc=x".into(),
+            Vec::new(),
+            Vec::new(),
+        );
+        st.profiles = cfg.profiles.clone();
+        let state: Shared = std::rc::Rc::new(std::cell::RefCell::new(st));
+
+        open_create(&state, 0, "ou=p,dc=x");
+
+        let st = state.borrow();
+        let uid = st
+            .edit_form
+            .as_ref()
+            .unwrap()
+            .fields
+            .iter()
+            .find(|f| f.label == "uidNumber")
+            .expect("uidNumber on the form");
+        assert!(uid.values.iter().all(|v| v.is_empty()), "{:?}", uid.values);
+        assert_eq!(st.status, "Could not allocate uidNumber: not connected");
+    }
 
     /// Guard "Stay" on a Branch target marks the tree for rebuild (its highlight
     /// re-resolves to `current_branch` via `branch_highlight_plan`) and drops the

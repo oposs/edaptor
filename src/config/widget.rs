@@ -50,13 +50,6 @@ pub enum WidgetKind {
     /// configured. Enter on the (empty) field auto-generates the SID from the
     /// entry's `uidNumber` and the domain context. Never written to config.
     SambaSid,
-    /// Auto-injected on a create-form field whose `[profile.defaults]` value is
-    /// `{next:MIN-MAX}`. Enter on the (empty) field allocates the next free
-    /// number in range via a directory scan. Never written to config.
-    NextNumber {
-        min: u64,
-        max: u64,
-    },
     /// The attribute is displayed but not operator-editable. Used for
     /// NO-USER-MODIFICATION attributes and for values maintained elsewhere (e.g.
     /// the Samba hashes derived from the password). `note`, when set, is shown in
@@ -88,7 +81,7 @@ fn resolve_candidate(
     match c {
         CandidateRef::Profile(name) => profiles
             .iter()
-            .find(|p| &p.name == name)
+            .find(|p| p.name.eq_ignore_ascii_case(name))
             .map(crate::config::relation::scope_of)
             .ok_or_else(|| format!("unknown candidate profile \"{name}\"")),
         CandidateRef::Inline(s) => Ok(crate::config::relation::CandidateScope {
@@ -335,6 +328,11 @@ impl ChoiceWidget {
     /// per `checked`. For single-select, `checked` holds at most one value.
     pub fn commit_value(&self, current: &str, checked: &[String]) -> String {
         let mut set = self.parse(current);
+        // A plain value holds one token: a picked option replaces an off-list
+        // value instead of competing with it in `serialize`.
+        if matches!(self.format, ChoiceFormat::Plain) && !checked.is_empty() {
+            set.clear();
+        }
         if matches!(self.select, Cardinality::Single) {
             for o in &self.options {
                 set.remove(&o.value);
@@ -372,6 +370,23 @@ impl ChoiceWidget {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn candidate_profile_names_are_case_insensitive() {
+        let mut target = crate::workflows::test_fixtures::bare_profile("posixgroup");
+        target.search_base = "ou=g,dc=x".into();
+        let mut owner = crate::workflows::test_fixtures::bare_profile("user");
+        owner.object_classes = vec!["posixAccount".into()];
+        owner.widgets.insert(
+            "gidNumber".into(),
+            crate::config::WidgetSpecCfg::Lookup {
+                candidate: crate::config::CandidateRef::Profile("PosixGroup".into()),
+                store: "gidNumber".into(),
+                label: None,
+            },
+        );
+        assert!(resolve_widgets(&[owner, target]).is_ok());
+    }
+
     use super::*;
     use crate::config::{CandidateRef, ChoiceOption, EntryProfile, WidgetSpecCfg};
 
@@ -523,6 +538,36 @@ mod tests {
         );
         assert_eq!(w.present_summary("/bin/sh"), "POSIX sh");
         assert_eq!(w.present_summary("/bin/zsh"), "/bin/zsh");
+    }
+
+    /// A stored value outside the options is kept until an option is picked,
+    /// and then replaced whatever its sort order relative to the pick.
+    #[test]
+    fn plain_single_pick_replaces_an_off_list_value() {
+        let w = ChoiceWidget {
+            select: crate::config::relation::Cardinality::Single,
+            format: ChoiceFormat::Plain,
+            options: vec![
+                ChoiceOption {
+                    value: "/bin/bash".into(),
+                    label: "Bash".into(),
+                },
+                ChoiceOption {
+                    value: "/sbin/nologin".into(),
+                    label: "Disabled (nologin)".into(),
+                },
+            ],
+        };
+        assert!(w.seed_checked("/bin/tcsh").is_empty());
+        assert_eq!(w.commit_value("/bin/tcsh", &[]), "/bin/tcsh");
+        assert_eq!(
+            w.commit_value("/bin/tcsh", &["/sbin/nologin".to_string()]),
+            "/sbin/nologin"
+        );
+        assert_eq!(
+            w.commit_value("/bin/tcsh", &["/bin/bash".to_string()]),
+            "/bin/bash"
+        );
     }
 
     #[test]
