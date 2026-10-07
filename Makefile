@@ -67,7 +67,7 @@ coverage-text:
 # Clean build artifacts
 clean:
 	cargo clean
-	rm -rf docs/book
+	rm -rf docs/book man
 	rm -f lcov.info
 
 # =============================================================================
@@ -81,6 +81,10 @@ docs:
 # Start documentation dev server
 docs-dev:
 	cd docs && mdbook serve
+
+# Man page: man/edaptor.1 from docs/manual.md (`make man`, needs pandoc)
+MAN_NAME = edaptor
+include build/man.mk
 
 # =============================================================================
 # Development Helpers
@@ -116,5 +120,6 @@ help:
 	@echo "Documentation:"
 	@echo "  make docs         Build documentation"
 	@echo "  make docs-dev     Start docs dev server"
+	@echo "  make man          Build man/edaptor.1 from docs/manual.md (needs pandoc)"
 	@echo ""
 	@echo "  make help         Show this help"
