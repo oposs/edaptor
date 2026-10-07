@@ -1,0 +1,345 @@
+name: Release build (edaptor)
+
+# Called by release-build.yml (repo-infra D26). Builds every file the release
+# ships, uploads each as a `release-asset-*` artifact, and uploads the
+# rewritten Formula/edaptor.rb as the artifact `release-files`.
+# Read-only: nothing here writes the repository.
+#
+# Adapted from oetiker/mdmost's release-build-local.yml; the Homebrew and
+# package jobs are candidates for repo-infra pieces (oposs/repo-infra#53).
+on:
+  workflow_call:
+    inputs:
+      version:
+        type: string
+        required: true
+      ref:
+        type: string
+        required: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  binaries:
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+            cross: true
+            static: true
+            package: true
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-latest
+            cross: true
+            static: true
+            package: true
+          # illumos has no static libc, so this binary is dynamically linked
+          # against the base system libraries only.
+          - target: x86_64-unknown-illumos
+            os: ubuntu-latest
+            cross: true
+          - target: x86_64-apple-darwin
+            os: macos-latest
+          - target: aarch64-apple-darwin
+            os: macos-14
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            windows: true
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref }}
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      # man/ is not in git; it is generated from docs/manual.md. The tarball,
+      # the deb and the rpm all carry the page. The Windows zip does not, so
+      # that leg skips pandoc.
+      - name: Build the man page
+        if: '!matrix.windows'
+        run: |
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            brew install pandoc
+          else
+            sudo apt-get update && sudo apt-get install -y pandoc
+          fi
+          make man
+        shell: bash
+
+      - name: Install cross
+        if: matrix.cross
+        # Pinned to a released version, the same as ri-ci-rust-musl: the
+        # cross builds cannot be rehearsed locally, so they must not rest on
+        # a moving dependency.
+        run: cargo install cross --version 0.2.5 --locked
+
+      - name: Build binary
+        run: |
+          if [ "${{ matrix.cross }}" = "true" ]; then
+            if [ "${{ matrix.static }}" = "true" ]; then
+              export RUSTFLAGS="-C target-feature=+crt-static"
+            fi
+            cross build --release --bin edaptor --target ${{ matrix.target }}
+          else
+            cargo build --release --bin edaptor --target ${{ matrix.target }}
+          fi
+        shell: bash
+
+      - name: Create tarball
+        if: '!matrix.windows'
+        run: |
+          set -euo pipefail
+          mkdir -p dist staging/edaptor/man
+          ARCHIVE="edaptor-${{ inputs.version }}-${{ matrix.target }}.tar.gz"
+          cp "target/${{ matrix.target }}/release/edaptor" staging/edaptor/
+          cp man/edaptor.1 staging/edaptor/man/
+          cp -R examples staging/edaptor/
+          cp README.md LICENSE staging/edaptor/
+          tar -czvf "dist/${ARCHIVE}" -C staging edaptor
+        shell: bash
+
+      - name: Create zip (Windows)
+        if: matrix.windows
+        run: |
+          mkdir dist
+          mkdir staging/edaptor
+          $ARCHIVE = "edaptor-${{ inputs.version }}-${{ matrix.target }}.zip"
+          Copy-Item "target/${{ matrix.target }}/release/edaptor.exe" staging/edaptor/
+          Copy-Item -Recurse examples staging/edaptor/
+          Copy-Item README.md staging/edaptor/
+          Copy-Item LICENSE staging/edaptor/
+          Compress-Archive -Path staging/edaptor -DestinationPath "dist/$ARCHIVE"
+        shell: pwsh
+
+      # cargo-deb and cargo-generate-rpm read target/release/edaptor from the
+      # assets in Cargo.toml and map it to target/<triple>/release/ on their
+      # own when --target is given.
+      - name: Build deb and rpm
+        if: matrix.package
+        run: |
+          set -euo pipefail
+          cargo install cargo-deb --version '^3.7' --locked
+          cargo install cargo-generate-rpm --version '^0.21' --locked
+          cargo deb --no-build --no-strip --target ${{ matrix.target }}
+          cargo generate-rpm --target ${{ matrix.target }}
+          cp target/${{ matrix.target }}/debian/*.deb dist/
+          cp target/${{ matrix.target }}/generate-rpm/*.rpm dist/
+        shell: bash
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: release-asset-${{ matrix.target }}
+          path: dist/*
+
+  # Nothing is compiled here, but a formula with no bottle is a source build
+  # to Homebrew, and a source build refuses to install on a Mac whose Command
+  # Line Tools are older than its macOS. Bottling skips that check.
+  #
+  # This runs after `binaries`: the release does not exist yet, so it installs
+  # the formula from a local tap that points at the tarballs `binaries` built.
+  bottles:
+    name: Bottle on ${{ matrix.os }}
+    needs: binaries
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 40
+    # Only the Intel leg may fail quietly: a missing Intel bottle is a slow
+    # install, a broken arm64 bottle is a defect. continue-on-error does
+    # nothing for a leg that never starts. mdmost v0.1.2 shipped with an empty
+    # bottle block because a retired runner label left a leg queued until
+    # GitHub cancelled it after 24 hours, so the labels below are kept current
+    # by hand, and a release build stuck in `queued` is the symptom.
+    continue-on-error: ${{ matrix.optional || false }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # The oldest image per architecture: Homebrew lets a bottle serve a
+          # newer macOS of the same architecture, never an older one.
+          # macos-15-intel is the last x86_64 image GitHub offers (until
+          # August 2027); its bottle serves Sequoia and later only.
+          - os: macos-14
+          - os: macos-15-intel
+            optional: true
+    env:
+      HOMEBREW_NO_AUTO_UPDATE: 1
+      HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK: 1
+      VERSION: ${{ inputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref }}
+
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: release-asset-*-apple-darwin
+          path: dist
+          merge-multiple: true
+
+      # `@main`: Homebrew renamed the default branch of Homebrew/actions, and
+      # `@master` stopped resolving (both bottle legs of mdmost v0.3.2 failed
+      # in "Prepare all required actions"). The tags are dated, so a branch is
+      # what tracks them.
+      - uses: Homebrew/actions/setup-homebrew@main
+
+      # The formula's GitHub url would 404 before the release exists. The
+      # local tap points it at the tarballs this run built; `brew bottle`
+      # still records the GitHub root url.
+      - name: Local tap with the built tarballs
+        run: |
+          set -euo pipefail
+          arm="$PWD/dist/edaptor-${VERSION}-aarch64-apple-darwin.tar.gz"
+          x86="$PWD/dist/edaptor-${VERSION}-x86_64-apple-darwin.tar.gz"
+          brew tap-new --no-git local/edaptor
+          TAP="$(brew --repository)/Library/Taps/local/homebrew-edaptor"
+          sed -e "s|^  version \".*\"|  version \"${VERSION}\"|" \
+              -e "s|url \"https://github.com/oposs/edaptor/releases/download/v#{version}/edaptor-#{version}-aarch64-apple-darwin.tar.gz\"|url \"file://${arm}\"|" \
+              -e "s|url \"https://github.com/oposs/edaptor/releases/download/v#{version}/edaptor-#{version}-x86_64-apple-darwin.tar.gz\"|url \"file://${x86}\"|" \
+              -e "s|sha256 \"[0-9a-f]*\" # mac-arm|sha256 \"$(shasum -a 256 "$arm" | cut -d' ' -f1)\" # mac-arm|" \
+              -e "s|sha256 \"[0-9a-f]*\" # mac-x86|sha256 \"$(shasum -a 256 "$x86" | cut -d' ' -f1)\" # mac-x86|" \
+              Formula/edaptor.rb \
+            | awk '/# BOTTLE-START/{print; skip=1; next} /# BOTTLE-END/{skip=0} !skip' \
+            > "$TAP/Formula/edaptor.rb"
+          # Homebrew 6.0 loads formulae from third-party taps only once they
+          # are trusted. `brew trust` does not exist before 6.0; the `||`
+          # keeps this working on a runner image still on Homebrew 5.
+          brew trust --formula local/edaptor/edaptor || true
+
+      - name: Build the bottle
+        run: |
+          set -euo pipefail
+          brew install --build-bottle local/edaptor/edaptor
+          brew bottle --json --no-rebuild \
+            --root-url="https://github.com/oposs/edaptor/releases/download/v${VERSION}" \
+            local/edaptor/edaptor
+          # `brew bottle` writes `name--version.tag.bottle.tar.gz` (two
+          # dashes, the GitHub Packages name); a plain root_url is fetched as
+          # `name-version.tag.bottle.tar.gz`. The json carries both names, so
+          # the rename is read from it.
+          mkdir -p bottle
+          for json in ./*.bottle.json; do
+            jq -r '.[].bottle.tags[] | "\(.local_filename)\t\(.filename)"' "$json" \
+            | while IFS=$'\t' read -r local_name upload_name; do
+                mv "$local_name" "bottle/$upload_name"
+              done
+          done
+          cp ./*.bottle.json bottle/
+          ls -la bottle
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: release-asset-bottle-${{ matrix.os }}
+          path: bottle/*.bottle.tar.gz
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: bottle-json-${{ matrix.os }}
+          path: bottle/*.bottle.json
+
+  formula:
+    name: Rewrite the formula
+    needs: [binaries, bottles]
+    # One architecture's bottle is worth publishing alone (the optional leg).
+    if: ${{ !cancelled() && needs.binaries.result == 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      VERSION: ${{ inputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref }}
+
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: release-asset-*
+          path: artifacts
+          merge-multiple: true
+
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: bottle-json-*
+          path: bottles
+          merge-multiple: true
+
+      - name: Version, sha256 lines and the bottle block
+        run: |
+          set -euo pipefail
+          sha() { sha256sum "artifacts/edaptor-${VERSION}-$1.tar.gz" | cut -d' ' -f1; }
+          MAC_ARM=$(sha aarch64-apple-darwin)
+          MAC_X86=$(sha x86_64-apple-darwin)
+          LINUX_X86=$(sha x86_64-unknown-linux-musl)
+          LINUX_ARM=$(sha aarch64-unknown-linux-musl)
+          # Each sha256 line ends in a marker comment naming its artifact,
+          # which is what this rewrite matches on.
+          sed -i \
+            -e "s/^  version \".*\"/  version \"${VERSION}\"/" \
+            -e "s|sha256 \"[0-9a-f]*\" # mac-arm|sha256 \"${MAC_ARM}\" # mac-arm|" \
+            -e "s|sha256 \"[0-9a-f]*\" # mac-x86|sha256 \"${MAC_X86}\" # mac-x86|" \
+            -e "s|sha256 \"[0-9a-f]*\" # linux-x86|sha256 \"${LINUX_X86}\" # linux-x86|" \
+            -e "s|sha256 \"[0-9a-f]*\" # linux-arm|sha256 \"${LINUX_ARM}\" # linux-arm|" \
+            Formula/edaptor.rb
+
+          # Zero bottles fails the release. The formula arrives carrying the
+          # previous release's block, and leaving it would publish a root_url
+          # pointing at the previous tag: mdmost v0.3.2 shipped like that and
+          # every `brew install` got a 404.
+          shopt -s nullglob
+          jsons=(bottles/*.bottle.json)
+          [ ${#jsons[@]} -gt 0 ] || { echo "::error::no bottles were built"; exit 1; }
+          for json in "${jsons[@]}"; do
+            jq -r '.[].bottle.tags[].filename' "$json" | while read -r name; do
+              [ -f "artifacts/$name" ] || { echo "::error::bottle $name was not built under that name"; exit 1; }
+            done
+          done
+
+          # Generated, not patched: which architectures produced a bottle is
+          # not known ahead of time, and a sha256 line for a missing bottle
+          # sends Homebrew after a file that does not exist.
+          {
+            echo "  # BOTTLE-START"
+            echo "  bottle do"
+            echo "    root_url \"https://github.com/oposs/edaptor/releases/download/v${VERSION}\""
+            for json in "${jsons[@]}"; do
+              jq -r '.[].bottle as $b | $b.tags | to_entries[]
+                     | "    sha256 cellar: :\(.value.cellar // $b.cellar), \(.key): \"\(.value.sha256)\""' "$json"
+            done
+            echo "  end"
+            echo "  # BOTTLE-END"
+          } > bottle-block.txt
+          cat bottle-block.txt
+          grep -q '# BOTTLE-START' Formula/edaptor.rb || {
+            echo "::error::the bottle markers are gone from Formula/edaptor.rb"
+            exit 1
+          }
+          awk '
+            /# BOTTLE-START/ {
+              while ((getline line < "bottle-block.txt") > 0) print line
+              inside = 1
+              next
+            }
+            /# BOTTLE-END/ { inside = 0; next }
+            !inside
+          ' Formula/edaptor.rb > Formula/edaptor.rb.new
+          mv Formula/edaptor.rb.new Formula/edaptor.rb
+
+          # upload-artifact strips the common parent, so the repository path
+          # is staged under its own directory tree.
+          mkdir -p release-files/Formula
+          cp Formula/edaptor.rb release-files/Formula/edaptor.rb
+          cat release-files/Formula/edaptor.rb
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: release-files
+          path: release-files/

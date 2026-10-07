@@ -1,0 +1,123 @@
+name: Publish release (automatic)
+
+# Tags and publishes the release once its pull request merges (D28).
+#
+# There is deliberately no workflow_dispatch. Publishing should be a
+# consequence of merging a release pull request, never something started from
+# a dropdown. A failed run is recovered with "Re-run failed jobs".
+on:
+  push:
+    branches: [main]
+    paths:
+      - CHANGES.md
+
+concurrency:
+  group: release-publish
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    uses: ./.github/workflows/ri-publish-tag.yml
+    permissions:
+      contents: write
+      pull-requests: read
+
+  gitea:
+    needs: [publish]
+    if: needs.publish.outputs.release_id != ''
+    uses: ./.github/workflows/ri-publish-gitea.yml
+    permissions:
+      contents: write
+    with:
+      release_id: ${{ needs.publish.outputs.release_id }}
+      head: ${{ needs.publish.outputs.head }}
+    secrets: inherit
+
+  # The versioned manual at https://oposs.github.io/edaptor/vX.Y.Z/, built
+  # from the tagged commit. docs.yml deploys /dev/ from main; both mirror the
+  # live site first and share the `pages` group, so neither drops the other's
+  # pages. A re-run rebuilds and redeploys the same version.
+  docs:
+    name: Deploy release documentation
+    needs: [publish]
+    if: needs.publish.outputs.release_id != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    concurrency:
+      group: pages
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    env:
+      PAGES_URL: "https://oposs.github.io/edaptor"
+      TAG: ${{ needs.publish.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.publish.outputs.head }}
+
+      - name: Install mdBook and plugins
+        run: |
+          mkdir -p ~/bin
+          curl -sSL https://github.com/rust-lang/mdBook/releases/download/v0.5.2/mdbook-v0.5.2-x86_64-unknown-linux-gnu.tar.gz | tar -xz -C ~/bin
+          curl -sSL https://github.com/badboy/mdbook-mermaid/releases/download/v0.17.0/mdbook-mermaid-v0.17.0-x86_64-unknown-linux-gnu.tar.gz | tar -xz -C ~/bin
+          echo "$HOME/bin" >> $GITHUB_PATH
+
+      - name: Build documentation
+        run: |
+          mdbook-mermaid install docs
+          cd docs && mdbook build
+
+      - name: Mirror existing GitHub Pages
+        run: |
+          mkdir -p site
+          wget --mirror --no-parent --no-host-directories \
+               --directory-prefix=site \
+               --reject="index.html?*" \
+               --execute robots=off \
+               --quiet \
+               "$PAGES_URL/" 2>/dev/null || echo "No existing site to mirror"
+          find site -name "*.tmp" -delete 2>/dev/null || true
+          find site -name "index.html\?*" -delete 2>/dev/null || true
+
+      - name: Add this version and update the index
+        run: |
+          rm -rf "site/edaptor/$TAG"
+          mkdir -p "site/edaptor/$TAG"
+          cp -r docs/book/* "site/edaptor/$TAG/"
+          chmod +x .github/scripts/manage-doc-versions.sh
+          .github/scripts/manage-doc-versions.sh site/edaptor cull
+          .github/scripts/manage-doc-versions.sh site/edaptor update-json
+          .github/scripts/manage-doc-versions.sh site/edaptor generate-redirect
+          cat site/edaptor/versions.json
+
+      - uses: actions/configure-pages@v4
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site/edaptor
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
+
+  # finalize needs every other job of this file; check verifies it (D30).
+  finalize:
+    needs: [publish, gitea, docs]
+    if: needs.publish.outputs.release_id != ''
+    uses: ./.github/workflows/ri-publish-finalize.yml
+    permissions:
+      contents: write
+      actions: write
+    with:
+      release_id: ${{ needs.publish.outputs.release_id }}
+      tag: ${{ needs.publish.outputs.tag }}
+      head: ${{ needs.publish.outputs.head }}
