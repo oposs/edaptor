@@ -36,6 +36,31 @@ multi-value attributes are edited in place as a bulleted list — no modal). See
 the [documentation](https://oposs.github.io/edaptor) for usage, and
 `docs/superpowers/specs/` for the design specifications.
 
+## Install
+
+From the next release on, each release ships packages and archives; see the
+[installation guide](https://oposs.github.io/edaptor/getting-started/installation.html).
+
+```bash
+# macOS and Linux, with Homebrew
+brew tap oposs/edaptor https://github.com/oposs/edaptor
+brew install edaptor
+
+# Debian and Ubuntu
+sudo install -d -m 0755 /etc/apt/keyrings
+sudo curl -o /etc/apt/keyrings/gitea-oposs.asc https://gitea.oetiker.ch/api/packages/oposs/debian/repository.key
+echo "deb [signed-by=/etc/apt/keyrings/gitea-oposs.asc] https://gitea.oetiker.ch/api/packages/oposs/debian stable main" | sudo tee /etc/apt/sources.list.d/oposs.list
+sudo apt update && sudo apt install edaptor
+
+# Fedora 41 and later
+sudo dnf config-manager addrepo --from-repofile=https://gitea.oetiker.ch/api/packages/oposs/rpm.repo
+sudo dnf install edaptor
+```
+
+Archives for Linux, macOS, illumos and Windows are on the
+[releases page](https://github.com/oposs/edaptor/releases). `man edaptor` covers
+the command line.
+
 ## Highlights of the design
 
 - **Two-tier object model:** a generic schema-driven entry engine, with a

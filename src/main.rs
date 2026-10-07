@@ -10,7 +10,11 @@ use edaptor::config::Config;
 use edaptor::SchemaReport;
 
 #[derive(Parser)]
-#[command(name = "edaptor", about = "TUI for editing OpenLDAP directories")]
+#[command(
+    name = "edaptor",
+    version,
+    about = "TUI for editing OpenLDAP directories"
+)]
 struct Cli {
     /// Path to the configuration file.
     /// Without this flag, edaptor searches ~/.config/edaptor/ and /etc/edaptor/
