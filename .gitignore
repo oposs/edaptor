@@ -17,3 +17,6 @@ examples/ds-fugu-speag.toml
 
 # SDD / superpowers scratch artifacts
 .superpowers/
+
+# Generated man page (make man)
+man/

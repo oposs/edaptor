@@ -4,7 +4,7 @@ All notable changes to eDAPtor are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project aims to follow
 [Semantic Versioning](https://semver.org/).
 
-## Unreleased
+## [Unreleased]
 
 ### New
 
@@ -13,6 +13,9 @@ All notable changes to eDAPtor are documented here. The format follows
 - **A new, empty directory gets useradd-style defaults.** With no users yet, eDAPtor numbers users and groups from 10000 up (client machines use 1000 and up for their local users) and gives every new user a private group, placed in `ou=groups` when there is no group profile; no private group is assumed when users already under the profile's `search_base` show otherwise or when detection failed. `edaptor profiles` marks these values `# assumed`, and `suppress` removes them.
 - **`edaptor tui-create <profile>` accepts detected profile names** such as `user-people`.
 - **Startup prints a `warning:` line on stderr for each detection problem caused by the config,** such as a `[[profile]]` block that matches no detected profile or a `suppress` path that matches nothing. Routine notes about the sample, such as a container it could not read or a sample cut short, are summed up in one `note:` line; `edaptor profiles` lists them one by one. When detection fails or drops parts, the TUI's status line says so until the first key press or a click in a pane.
+- **eDAPtor is available from Homebrew and as Debian and RPM packages.** `brew tap oposs/edaptor https://github.com/oposs/edaptor && brew install edaptor` works on macOS and Linux; `.deb` (amd64, arm64) and `.rpm` (x86_64, aarch64) packages are in the OETIKER+PARTNER registry at `gitea.oetiker.ch`. The installation guide has the commands.
+- **`man edaptor` documents the command line.** The page ships in the Homebrew formula, in the packages and, except on Windows, in the release archives.
+- **`edaptor --version` prints the version.**
 
 ### Changed
 

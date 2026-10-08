@@ -2,6 +2,7 @@
 name = "edaptor"
 version = "1.7.0"
 edition = "2021"
+default-run = "edaptor"
 description = "TUI for editing OpenLDAP directories (users, groups, memberships)"
 license = "MIT"
 
@@ -55,3 +56,38 @@ path = "src/bin/gen-testdata.rs"
 [lib]
 name = "edaptor"
 path = "src/lib.rs"
+
+# .deb and .rpm packages, built by .github/workflows/release-build-local.yml
+# for the static musl targets and uploaded to the Gitea package registry.
+[package.metadata.deb]
+maintainer = "Tobias Oetiker <tobi@oetiker.ch>"
+copyright = "2026, Tobias Oetiker <tobi@oetiker.ch>"
+license-file = ["LICENSE", "0"]
+extended-description = """\
+A schema-driven terminal editor for OpenLDAP directories. It browses the \
+directory in three panes and creates, edits, renames and deletes users, \
+groups and their memberships, with forms derived from the server schema and \
+from the entries already in the directory. A single static binary."""
+section = "admin"
+priority = "optional"
+assets = [
+    ["target/release/edaptor", "usr/bin/", "755"],
+    ["man/edaptor.1", "usr/share/man/man1/", "644"],
+    ["README.md", "usr/share/doc/edaptor/README.md", "644"],
+    ["LICENSE", "usr/share/doc/edaptor/LICENSE", "644"],
+    ["examples/config.toml", "usr/share/doc/edaptor/examples/config.toml", "644"],
+]
+
+[package.metadata.generate-rpm]
+summary = "Schema-driven terminal editor for OpenLDAP directories"
+license = "MIT"
+# The musl builds are statically linked, so there is nothing to depend on, and
+# the host's find-requires cannot inspect a cross-built aarch64 binary anyway.
+auto-req = "no"
+assets = [
+    { source = "target/release/edaptor", dest = "/usr/bin/edaptor", mode = "755" },
+    { source = "man/edaptor.1", dest = "/usr/share/man/man1/edaptor.1", mode = "644", doc = true },
+    { source = "README.md", dest = "/usr/share/doc/edaptor/README.md", mode = "644", doc = true },
+    { source = "LICENSE", dest = "/usr/share/doc/edaptor/LICENSE", mode = "644", doc = true },
+    { source = "examples/config.toml", dest = "/usr/share/doc/edaptor/examples/config.toml", mode = "644", doc = true },
+]

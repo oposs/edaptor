@@ -74,6 +74,16 @@ cargo clippy --all-targets -- -D warnings
 make run            # run the TUI against the podman demo server
 ```
 
+## Releases
+
+The release flow is the oposs repo-infra standard (`.github/workflows/ri-*`,
+`release-pr.yml`, `lib/` are pieces: never edit them; run
+`/repo-infra:check` / `/repo-infra:apply`). To release, dispatch **Create
+release PR** (bugfix/feature/major) and merge the pull request it opens. The
+repository-owned parts are `ci.yml`, `release-build*.yml`,
+`release-publish.yml`, `.github/repo-infra.json` and `Formula/edaptor.rb`.
+`CHANGES.md` keeps the `## [Unreleased]` heading the release roller expects.
+
 ## Local test server
 
 `scripts/test-ldap.sh start` launches a podman OpenLDAP mirroring the
