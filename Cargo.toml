@@ -2,6 +2,7 @@
 name = "edaptor"
 version = "1.7.0"
 edition = "2021"
+default-run = "edaptor"
 description = "TUI for editing OpenLDAP directories (users, groups, memberships)"
 license = "MIT"
 

@@ -92,7 +92,7 @@ All generated users share the password `test123`.
 
 ## Configuration
 
-A single TOML file (`--config <path>`, default `~/.config/edaptor/config.toml`)
+A single TOML file (`--config <path>`, or the one `*.toml` found in `~/.config/edaptor/` or `/etc/edaptor/`)
 declares the LDAP connection, how to authenticate, and a set of *entry profiles*
 describing what a "user", "group", or "posixgroup" means in your directory. The
 skeleton is:
