@@ -60,7 +60,7 @@ jobs:
       PAGES_URL: "https://oposs.github.io/edaptor"
       TAG: ${{ needs.publish.outputs.tag }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ needs.publish.outputs.head }}
 
