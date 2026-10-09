@@ -4,12 +4,13 @@ A schema-driven TUI LDAP editor (Rust + tvision-rs). Read this before touching t
 
 ## Start here: read the controller handoff
 
-`docs/controller-handoff.md` is the starter pack carried into each session — the
-mission, where things stand, what to do next, and the judgment that git can't
-reconstruct. Read it first, then `git log <handoff-commit>..HEAD` (the commit is
-named in its header) for everything that changed since. Write a fresh one via the
-`controller-handoff` skill before rolling over. (This supersedes the old
-`docs/HANDOVER.md` convention.)
+The controller handoff — mission, where things stand, what to do next, and the
+judgment that git can't reconstruct — lives in the private handoff store managed by
+the `oep-handoff` plugin, never in this (public) repo. Find it with
+`~/checkouts/handoffs/bin/handoff-index --pull`, read it, then
+`git log <handoff-commit>..HEAD` (the commit is named in its header) for everything
+that changed since. Write a fresh one via the `oep-handoff:controller-handoff`
+skill before rolling over.
 
 ## At the start of every session: pull first
 
