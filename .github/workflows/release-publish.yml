@@ -99,7 +99,7 @@ jobs:
           .github/scripts/manage-doc-versions.sh site/edaptor generate-redirect
           cat site/edaptor/versions.json
 
-      - uses: actions/configure-pages@v4
+      - uses: actions/configure-pages@v6
 
       - uses: actions/upload-pages-artifact@v3
         with:
