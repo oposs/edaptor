@@ -316,13 +316,13 @@ jobs:
 
       # A called workflow's jobs belong to this run, so their artifacts are
       # found here by pattern.
-      - uses: actions/download-artifact@v8
+      - uses: actions/download-artifact@v7
         with:
           pattern: release-asset-*
           path: ${{ runner.temp }}/assets
           merge-multiple: true
 
-      - uses: actions/download-artifact@v8
+      - uses: actions/download-artifact@v7
         with:
           pattern: release-files
           path: ${{ runner.temp }}/release-files

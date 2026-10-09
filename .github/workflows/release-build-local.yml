@@ -180,7 +180,7 @@ jobs:
         with:
           ref: ${{ inputs.ref }}
 
-      - uses: actions/download-artifact@v8
+      - uses: actions/download-artifact@v7
         with:
           pattern: release-asset-*-apple-darwin
           path: dist
@@ -260,13 +260,13 @@ jobs:
         with:
           ref: ${{ inputs.ref }}
 
-      - uses: actions/download-artifact@v8
+      - uses: actions/download-artifact@v7
         with:
           pattern: release-asset-*
           path: artifacts
           merge-multiple: true
 
-      - uses: actions/download-artifact@v8
+      - uses: actions/download-artifact@v7
         with:
           pattern: bottle-json-*
           path: bottles
