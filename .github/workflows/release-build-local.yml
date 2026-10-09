@@ -137,7 +137,7 @@ jobs:
           cp target/${{ matrix.target }}/generate-rpm/*.rpm dist/
         shell: bash
 
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@v6
         with:
           name: release-asset-${{ matrix.target }}
           path: dist/*
@@ -236,12 +236,12 @@ jobs:
           cp ./*.bottle.json bottle/
           ls -la bottle
 
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@v6
         with:
           name: release-asset-bottle-${{ matrix.os }}
           path: bottle/*.bottle.tar.gz
 
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@v6
         with:
           name: bottle-json-${{ matrix.os }}
           path: bottle/*.bottle.json
@@ -339,7 +339,7 @@ jobs:
           cp Formula/edaptor.rb release-files/Formula/edaptor.rb
           cat release-files/Formula/edaptor.rb
 
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@v6
         with:
           name: release-files
           path: release-files/
