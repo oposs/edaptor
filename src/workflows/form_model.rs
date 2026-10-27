@@ -145,7 +145,10 @@ pub fn build_form_model(
 
     let mut ordered: Vec<String> = Vec::new();
     for attr in profile_show {
-        if in_effective(attr) && !already(&ordered, attr) {
+        // An operational attribute (e.g. `memberOf`) is in no class's MUST∪MAY, so
+        // it only appears when the profile names it.
+        let shown = in_effective(attr) || schema.is_operational_attr(attr);
+        if shown && !already(&ordered, attr) {
             ordered.push(attr.clone());
         }
     }
@@ -306,6 +309,42 @@ mod tests {
             attrs,
             bin_attrs: BTreeMap::new(),
         }
+    }
+
+    #[test]
+    fn show_keeps_an_operational_attr_outside_the_classes() {
+        // memberOf as OpenLDAP 2.4 declares it: in no class's MUST∪MAY.
+        let raw = RawSubschema {
+            object_classes: vec![
+                "( 2.5.6.0 NAME 'top' ABSTRACT MUST objectClass )".to_string(),
+                "( 2.5.6.6 NAME 'person' SUP top STRUCTURAL MUST ( sn $ cn ) )".to_string(),
+            ],
+            attribute_types: vec![
+                "( 2.5.4.3 NAME 'cn' SYNTAX 1.3.6.1.4.1.1466.115.121.1.15 )".to_string(),
+                "( 2.5.4.4 NAME 'sn' SYNTAX 1.3.6.1.4.1.1466.115.121.1.15 )".to_string(),
+                "( 1.2.840.113556.1.2.102 NAME 'memberOf' \
+                  SYNTAX 1.3.6.1.4.1.1466.115.121.1.12 USAGE dSAOperation )"
+                    .to_string(),
+                "( 1.1.2 NAME 'uid' SYNTAX 1.3.6.1.4.1.1466.115.121.1.15 )".to_string(),
+            ],
+            ldap_syntaxes: vec![],
+        };
+        let schema = SchemaModel::from_raw(&raw);
+        let mut e = entry();
+        e.attrs.insert(
+            "memberOf".to_string(),
+            vec!["cn=staff,ou=groups,dc=example,dc=org".to_string()],
+        );
+        let show = vec!["cn".to_string(), "memberOf".to_string(), "uid".to_string()];
+        let model = build_form_model(&schema, &["top", "person"], &e, &show);
+        let labels: Vec<&str> = model.fields.iter().map(|f| f.label.as_str()).collect();
+        assert_eq!(labels[..2], ["cn", "memberOf"], "memberOf in show order");
+        assert_eq!(
+            model.fields[1].values,
+            vec!["cn=staff,ou=groups,dc=example,dc=org"]
+        );
+        // uid is a user attribute the classes do not allow: still left out.
+        assert!(!labels.contains(&"uid"));
     }
 
     /// The same entry plus the operational audit attributes a server returns when

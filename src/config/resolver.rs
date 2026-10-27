@@ -37,7 +37,9 @@ impl<'a> WidgetResolver<'a> {
     pub fn resolve_kind(&self, attr: &str, entry_ocs: &[String]) -> Option<WidgetKind> {
         // Layer 1: schema introspection hints (weakest).
         let mut result: Option<WidgetKind> = None;
-        if self.schema.is_readonly_attr(attr) {
+        // Operational attributes are server-maintained even when the schema omits
+        // NO-USER-MODIFICATION (OpenLDAP 2.4's `memberOf`).
+        if self.schema.is_readonly_attr(attr) || self.schema.is_operational_attr(attr) {
             result = Some(WidgetKind::Readonly { note: None });
         } else if self.schema.field_kind(attr) == FieldKind::Boolean {
             result = Some(WidgetKind::Choice(ChoiceWidget {
@@ -259,6 +261,27 @@ mod tests {
         let widgets = no_widgets();
         let resolver = WidgetResolver::new(&schema, &profiles, &widgets, false);
         let kind = resolver.resolve_kind("opAttr", &["top".into()]);
+        assert!(
+            matches!(kind, Some(WidgetKind::Readonly { .. })),
+            "got {kind:?}"
+        );
+    }
+
+    #[test]
+    fn schema_operational_usage_is_readonly() {
+        // OpenLDAP 2.4's memberOf: operational, but no NO-USER-MODIFICATION.
+        let raw = RawSubschema {
+            object_classes: vec![],
+            attribute_types: vec!["( 1.2.840.113556.1.2.102 NAME 'memberOf' \
+                 SYNTAX 1.3.6.1.4.1.1466.115.121.1.12 USAGE dSAOperation )"
+                .into()],
+            ldap_syntaxes: vec![],
+        };
+        let schema = SchemaModel::from_raw(&raw);
+        let profiles = no_profiles();
+        let widgets = no_widgets();
+        let resolver = WidgetResolver::new(&schema, &profiles, &widgets, false);
+        let kind = resolver.resolve_kind("memberOf", &["top".into()]);
         assert!(
             matches!(kind, Some(WidgetKind::Readonly { .. })),
             "got {kind:?}"
