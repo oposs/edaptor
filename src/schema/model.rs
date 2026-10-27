@@ -28,13 +28,91 @@ pub struct ResolvedAttributes {
     pub may: BTreeSet<String>,
 }
 
+/// Remove every RFC 4512 extension (`X-NAME qdstrings`) from a schema description
+/// except the ones in `keep`. `ldap-types` rejects any extension it does not know,
+/// and a rejected definition is dropped from the model: OpenLDAP 2.4's memberof
+/// overlay tags `memberOf` with `X-ORIGIN`, so the attribute vanished. Quoted text
+/// (e.g. a `DESC` that mentions `X-`) is copied untouched.
+fn strip_unknown_extensions(desc: &str, keep: &[&str]) -> String {
+    let b = desc.as_bytes();
+    let mut out = String::with_capacity(desc.len());
+    let mut i = 0;
+    while i < b.len() {
+        match b[i] {
+            b'\'' => {
+                // Copy a quoted string verbatim.
+                let end = desc[i + 1..].find('\'').map_or(b.len(), |e| i + 1 + e + 1);
+                out.push_str(&desc[i..end]);
+                i = end;
+            }
+            b'X' if desc[i..].starts_with("X-") && (i == 0 || b[i - 1].is_ascii_whitespace()) => {
+                let name_end = desc[i..]
+                    .find(|c: char| c.is_ascii_whitespace() || c == '\'' || c == '(')
+                    .map_or(b.len(), |e| i + e);
+                if keep
+                    .iter()
+                    .any(|k| k.eq_ignore_ascii_case(&desc[i..name_end]))
+                {
+                    out.push_str(&desc[i..name_end]);
+                    i = name_end;
+                    continue;
+                }
+                // Skip the name, then its qdstrings: one `'..'` or a `( '..' .. )` list.
+                let mut j = name_end;
+                while j < b.len() && b[j].is_ascii_whitespace() {
+                    j += 1;
+                }
+                if j < b.len() && b[j] == b'(' {
+                    let mut in_quote = false;
+                    while j < b.len() {
+                        match b[j] {
+                            b'\'' => in_quote = !in_quote,
+                            b')' if !in_quote => {
+                                j += 1;
+                                break;
+                            }
+                            _ => {}
+                        }
+                        j += 1;
+                    }
+                } else if j < b.len() && b[j] == b'\'' {
+                    j = desc[j + 1..].find('\'').map_or(b.len(), |e| j + 1 + e + 1);
+                }
+                // Drop the whitespace before the extension too.
+                while out.ends_with(' ') {
+                    out.pop();
+                }
+                i = j;
+            }
+            _ => {
+                let c = desc[i..].chars().next().expect("in bounds");
+                out.push(c);
+                i += c.len_utf8();
+            }
+        }
+    }
+    out
+}
+
 impl SchemaModel {
     pub fn from_raw(raw: &RawSubschema) -> SchemaModel {
         let mut warnings = Vec::new();
 
+        // Stripped up front: the parsers borrow their input for their lifetime.
+        let ocs: Vec<String> = raw
+            .object_classes
+            .iter()
+            .map(|d| strip_unknown_extensions(d, &[]))
+            .collect();
+        let ats: Vec<String> = raw
+            .attribute_types
+            .iter()
+            .map(|d| strip_unknown_extensions(d, &["X-ORDERED"]))
+            .collect();
+
         let oc_parser = object_class_parser();
         let mut object_classes = Vec::new();
-        for desc in &raw.object_classes {
+        for desc in &ocs {
             match oc_parser.parse(desc.as_str()).into_result() {
                 Ok(oc) => object_classes.push(oc),
                 Err(errs) => {
@@ -45,7 +123,7 @@ impl SchemaModel {
 
         let at_parser = attribute_type_parser();
         let mut attribute_types = Vec::new();
-        for desc in &raw.attribute_types {
+        for desc in &ats {
             match at_parser.parse(desc.as_str()).into_result() {
                 Ok(at) => attribute_types.push(at),
                 Err(errs) => {
@@ -480,13 +558,46 @@ mod tests {
     }
 
     #[test]
+    fn strip_unknown_extensions_keeps_known_and_quoted_text() {
+        let s = |d: &str| strip_unknown_extensions(d, &["X-ORDERED"]);
+        assert_eq!(
+            s("( 1.2 NAME 'm' DESC 'see X-ORIGIN' SYNTAX 1.3 X-ORIGIN 'iPlanet DA' )"),
+            "( 1.2 NAME 'm' DESC 'see X-ORIGIN' SYNTAX 1.3 )"
+        );
+        assert_eq!(
+            s("( 1.2 NAME 'm' X-ORIGIN ( 'RFC 4519' 'user defined' ) X-ORDERED 'VALUES' )"),
+            "( 1.2 NAME 'm' X-ORDERED 'VALUES' )"
+        );
+        assert_eq!(
+            s("( 1.2 NAME 'cn' SUP name )"),
+            "( 1.2 NAME 'cn' SUP name )"
+        );
+    }
+
+    #[test]
+    fn x_origin_no_longer_drops_object_classes() {
+        // 389 DS tags every definition with X-ORIGIN.
+        let m = SchemaModel::from_raw(&RawSubschema {
+            object_classes: vec![
+                "( 2.5.6.0 NAME 'top' ABSTRACT MUST objectClass X-ORIGIN 'RFC 4512' )".into(),
+            ],
+            attribute_types: vec![],
+            ldap_syntaxes: vec![],
+        });
+        assert!(m.object_class("top").is_some(), "{:?}", m.warnings);
+    }
+
+    #[test]
     fn is_operational_attr_reads_usage() {
         let raw = RawSubschema {
             object_classes: vec![],
             attribute_types: vec![
                 // OpenLDAP 2.4 memberof overlay: operational, but no NO-USER-MODIFICATION
-                "( 1.2.840.113556.1.2.102 NAME 'memberOf' \
-                 SYNTAX 1.3.6.1.4.1.1466.115.121.1.12 USAGE dSAOperation )"
+                // Verbatim from an OpenLDAP 2.4.48 subschema.
+                "( 1.2.840.113556.1.2.102 NAME 'memberOf' DESC 'Group that the entry \
+                 belongs to' EQUALITY distinguishedNameMatch \
+                 SYNTAX 1.3.6.1.4.1.1466.115.121.1.12 USAGE dSAOperation \
+                 X-ORIGIN 'iPlanet Delegated Administrator' )"
                     .into(),
                 "( 2.5.4.3 NAME 'cn' SUP name USAGE userApplications )".into(),
                 "( 2.5.4.4 NAME 'sn' SUP name )".into(),
