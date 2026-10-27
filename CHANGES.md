@@ -11,6 +11,8 @@ All notable changes to eDAPtor are documented here. The format follows
 ### Changed
 
 ### Fixed
+- **Schema definitions with an `X-ORIGIN` tag (or any other `X-` tag besides `X-ORDERED`) were ignored.** eDAPtor treated such an attribute or object class as unknown, so its field type, single-value rule and read-only state were lost. OpenLDAP 2.4's memberof overlay tags `memberOf` this way, and 389 Directory Server tags every definition.
+- **User forms on OpenLDAP 2.4 servers did not show the `memberOf` field**, although the memberof overlay sets it. The 2.4 overlay marks `memberOf` as an operational attribute, which the server sends only on request; eDAPtor now requests every operational attribute a profile names in `show` or as a widget, and shows it read-only (or with its configured widget, such as `membership`). The check that detects changes made by another client while you edit requests the same attributes, so such a field is not reported as changed by someone else.
 
 ## 1.8.0 - 2026-10-09
 ### New

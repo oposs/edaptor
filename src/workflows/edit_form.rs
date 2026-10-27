@@ -189,6 +189,13 @@ impl EditForm {
                 field.must = false;
                 continue;
             }
+            // Same for an operational attribute a profile shows (e.g. `memberOf`):
+            // it is server-maintained and outside MUST∪MAY whatever the classes.
+            if schema.is_operational_attr(&field.label) {
+                field.orphaned = false;
+                field.must = false;
+                continue;
+            }
             let in_allowed = allowed.contains(&key);
             field.orphaned = !in_allowed;
             field.must = in_allowed
@@ -699,6 +706,32 @@ mod tests {
             fields: vec![oc_field],
             baseline_csn: None,
         }
+    }
+
+    #[test]
+    fn sync_never_orphans_an_operational_field() {
+        let raw = RawSubschema {
+            object_classes: vec![
+                "( 2.5.6.0 NAME 'top' ABSTRACT MUST objectClass )".into(),
+                "( 2.5.6.6 NAME 'person' SUP top STRUCTURAL MUST ( sn $ cn ) )".into(),
+            ],
+            attribute_types: vec!["( 1.2.840.113556.1.2.102 NAME 'memberOf' \
+                 SYNTAX 1.3.6.1.4.1.1466.115.121.1.12 USAGE dSAOperation )"
+                .into()],
+            ldap_syntaxes: vec![],
+        };
+        let mut f = form_with_ocs(&["top", "person"]);
+        let mut m = EditField::injected("memberOf".into(), false, &SchemaModel::from_raw(&raw));
+        m.values = vec!["cn=staff,dc=example,dc=org".into()];
+        m.baseline = m.values.clone();
+        f.fields.push(m);
+        f.sync_schema_fields(&SchemaModel::from_raw(&raw));
+        let m = f.fields.iter().find(|x| x.label == "memberOf").unwrap();
+        assert!(
+            !m.orphaned,
+            "a server-maintained attr must never be deleted"
+        );
+        assert_eq!(m.current_values(), vec!["cn=staff,dc=example,dc=org"]);
     }
 
     #[test]
