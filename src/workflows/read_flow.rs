@@ -39,6 +39,44 @@ pub enum ReadOutcome {
     Ignored,
 }
 
+/// The attribute list for a base read of an entry. `*` is *user* attributes only,
+/// so every operational attribute has to be named: `entryCSN` for optimistic
+/// concurrency, the META_ATTRS for the form's audit block, and each attribute of
+/// `named` the schema marks operational (e.g. a profile showing `memberOf`, which
+/// OpenLDAP 2.4 declares `USAGE dSAOperation`).
+pub fn read_attrs<'a>(
+    schema: &SchemaModel,
+    named: impl IntoIterator<Item = &'a str>,
+) -> Vec<String> {
+    let mut attrs: Vec<String> = std::iter::once("*".to_string())
+        .chain(std::iter::once("entryCSN".to_string()))
+        .chain(
+            crate::workflows::form_model::META_ATTRS
+                .iter()
+                .map(|a| a.to_string()),
+        )
+        .collect();
+    for name in named {
+        if schema.is_operational_attr(name) && !attrs.iter().any(|a| a.eq_ignore_ascii_case(name)) {
+            attrs.push(name.to_string());
+        }
+    }
+    attrs
+}
+
+/// Every attribute a profile names: its `show` list and its widget keys.
+fn profile_attr_names(profile: Option<&EntryProfile>) -> Vec<&str> {
+    profile
+        .map(|p| {
+            p.show
+                .iter()
+                .chain(p.widgets.keys())
+                .map(String::as_str)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// Tracks in-flight base reads and turns their results into form models, using
 /// the server schema for typing and the active profile for field ordering.
 pub struct ReadFlow {
@@ -75,17 +113,7 @@ impl ReadFlow {
             base: dn.to_string(),
             scope: SearchScope::Base,
             filter: "(objectClass=*)".to_string(),
-            // `*` is *user* attributes only — every operational attribute has to
-            // be named: `entryCSN` for optimistic concurrency, the META_ATTRS for
-            // the form's audit block.
-            attrs: std::iter::once("*".to_string())
-                .chain(std::iter::once("entryCSN".to_string()))
-                .chain(
-                    crate::workflows::form_model::META_ATTRS
-                        .iter()
-                        .map(|a| a.to_string()),
-                )
-                .collect(),
+            attrs: read_attrs(&self.schema, profile_attr_names(profile)),
             size_limit: None,
         })?;
         let show = profile.map(|p| p.show.clone()).unwrap_or_default();
@@ -185,6 +213,43 @@ mod tests {
             ldap_syntaxes: vec![],
         };
         SchemaModel::from_raw(&raw)
+    }
+
+    #[test]
+    fn read_attrs_names_operational_profile_attrs() {
+        let raw = RawSubschema {
+            object_classes: vec![],
+            attribute_types: vec![
+                "( 2.5.4.3 NAME 'cn' SYNTAX 1.3.6.1.4.1.1466.115.121.1.15 )".to_string(),
+                "( 1.2.840.113556.1.2.102 NAME 'memberOf' \
+                 SYNTAX 1.3.6.1.4.1.1466.115.121.1.12 USAGE dSAOperation )"
+                    .to_string(),
+                "( 2.5.18.1 NAME 'createTimestamp' \
+                 SYNTAX 1.3.6.1.4.1.1466.115.121.1.24 USAGE directoryOperation )"
+                    .to_string(),
+            ],
+            ldap_syntaxes: vec![],
+        };
+        let s = SchemaModel::from_raw(&raw);
+        let attrs = read_attrs(
+            &s,
+            ["cn", "memberOf", "MEMBEROF", "createTimestamp", "nope"],
+        );
+        // memberOf is added once; cn (user attr), the already-listed
+        // createTimestamp and the unknown attr are not.
+        assert_eq!(
+            attrs,
+            vec![
+                "*",
+                "entryCSN",
+                "createTimestamp",
+                "creatorsName",
+                "modifyTimestamp",
+                "modifiersName",
+                "memberOf",
+            ]
+        );
+        assert_eq!(read_attrs(&s, []).len(), 6); // no profile → base list only
     }
 
     fn entry() -> LdapEntry {

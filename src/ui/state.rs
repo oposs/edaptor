@@ -13,7 +13,7 @@ use crate::workflows::edit_form::{build_edit_form, EditForm};
 use crate::workflows::labels::LabelRule;
 use crate::workflows::leaf_search::{LeafSearchFlow, LeafSearchOutcome};
 use crate::workflows::pick_state::Candidate;
-use crate::workflows::read_flow::ReadFlow;
+use crate::workflows::read_flow::{read_attrs, ReadFlow};
 use crate::workflows::resolve_flow::{LookupKey, ResolveFlow, ResolveOutcome};
 use crate::workflows::search_flow::{SearchFlow, SearchOutcome};
 use crate::workflows::structure::{Structure, StructureInput};
@@ -927,7 +927,8 @@ impl UiState {
             .unwrap_or_default()
     }
 
-    /// Synchronous base-scope re-read of `dn` requesting `*` + `entryCSN`, used on a
+    /// Synchronous base-scope re-read of `dn` requesting `*` + `entryCSN` (plus any
+    /// operational attribute the form shows, see [`read_attrs`]), used on a
     /// write conflict to learn (fresh per-attribute values, the attribute names that
     /// differ from the form's stored baseline = the other client's changes, the
     /// fresh `entryCSN`). `None` when there is no worker or the read fails/returns
@@ -941,7 +942,15 @@ impl UiState {
                 base: dn.to_string(),
                 scope: SearchScope::Base,
                 filter: "(objectClass=*)".to_string(),
-                attrs: vec!["*".to_string(), "entryCSN".to_string()],
+                // Same attribute list as the original read, so an operational
+                // field (e.g. 2.4's `memberOf`) is not mistaken for a change by
+                // the other client just because `*` left it out.
+                attrs: read_attrs(
+                    self.read_flow.schema(),
+                    self.edit_form
+                        .iter()
+                        .flat_map(|f| f.fields.iter().map(|f| f.label.as_str())),
+                ),
                 size_limit: Some(1),
             })
             .ok()?;

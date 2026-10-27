@@ -35,6 +35,10 @@ label          = "{cn} ({uid})"               # e.g. "Bob Baker (bob)"
   in the order given, in the browse view **and** in the create/edit form;
   everything else follows automatically (mandatory and populated fields first,
   then the rest, alphabetically).
+  An operational attribute (one the server schema declares with a `USAGE`
+  other than `userApplications`) is only fetched when the profile names it, in
+  `show` or as a widget key. OpenLDAP 2.4 declares `memberOf` this way, so a
+  profile there must list `memberOf` to see it.
 - **`search_attrs`** — the attributes a picker's substring search matches
   against when this profile is a candidate. It follows a **fallback chain**: if
   `search_attrs` is omitted, eDAPtor falls back to `show`; if `show` is also

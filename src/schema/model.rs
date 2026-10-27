@@ -202,6 +202,16 @@ impl SchemaModel {
             .unwrap_or(false)
     }
 
+    /// Returns `true` if the server marks this attribute type operational (a `USAGE`
+    /// other than `userApplications`). A `*` read never returns such an attribute;
+    /// the client has to name it. OpenLDAP 2.4's memberof overlay declares
+    /// `memberOf` this way (`USAGE dSAOperation`). Unknown attrs → `false`.
+    pub fn is_operational_attr(&self, attr_name: &str) -> bool {
+        self.attribute_type(attr_name)
+            .and_then(|at| at.usage.as_ref())
+            .is_some_and(|u| !u.0.eq_ignore_ascii_case("userApplications"))
+    }
+
     /// Whether `name` is a STRUCTURAL object class. Unknown classes → `false`.
     pub fn is_structural(&self, name: &str) -> bool {
         self.object_class(name)
@@ -467,6 +477,28 @@ mod tests {
         assert!(m.is_readonly_attr("createTimestamp")); // flag present
         assert!(!m.is_readonly_attr("cn")); // defined but modifiable
         assert!(!m.is_readonly_attr("unknownAttr")); // unknown → false
+    }
+
+    #[test]
+    fn is_operational_attr_reads_usage() {
+        let raw = RawSubschema {
+            object_classes: vec![],
+            attribute_types: vec![
+                // OpenLDAP 2.4 memberof overlay: operational, but no NO-USER-MODIFICATION
+                "( 1.2.840.113556.1.2.102 NAME 'memberOf' \
+                 SYNTAX 1.3.6.1.4.1.1466.115.121.1.12 USAGE dSAOperation )"
+                    .into(),
+                "( 2.5.4.3 NAME 'cn' SUP name USAGE userApplications )".into(),
+                "( 2.5.4.4 NAME 'sn' SUP name )".into(),
+            ],
+            ldap_syntaxes: vec![],
+        };
+        let m = SchemaModel::from_raw(&raw);
+        assert!(m.is_operational_attr("memberOf"));
+        assert!(m.is_operational_attr("MEMBEROF")); // case-insensitive lookup
+        assert!(!m.is_operational_attr("cn")); // explicit userApplications
+        assert!(!m.is_operational_attr("sn")); // USAGE absent → userApplications
+        assert!(!m.is_operational_attr("unknownAttr")); // unknown → false
     }
 
     fn structural_raw() -> RawSubschema {
