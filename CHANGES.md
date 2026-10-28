@@ -12,6 +12,8 @@ All notable changes to eDAPtor are documented here. The format follows
 
 ### Fixed
 
+- **On a create form, `sambaSID` kept the value computed from the suggested `uidNumber` after `uidNumber` was changed by hand.** Two users created this way got the same `sambaSID`. An auto-filled `sambaSID` now follows every `uidNumber` change; a value typed into the field is still never overwritten.
+
 ## 1.8.1 - 2026-10-27
 ### Fixed
 - **Schema definitions with an `X-ORIGIN` tag (or any other `X-` tag besides `X-ORDERED`) were ignored.** eDAPtor treated such an attribute or object class as unknown, so its field type, single-value rule and read-only state were lost. OpenLDAP 2.4's memberof overlay tags `memberOf` this way, and 389 Directory Server tags every definition.

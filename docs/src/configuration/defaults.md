@@ -145,4 +145,6 @@ Currently one computed value is supported:
 
 The field stays editable and (when a Samba domain is configured) still offers the
 manual *Enter-to-generate* action, so you can regenerate or override it by hand.
-Only an **empty** target is auto-filled — a value you type is never overwritten.
+An empty target is auto-filled, and an auto-filled value follows later changes to
+`uidNumber` (for example when you replace the suggested number by hand). A value
+you type into the field is never overwritten.

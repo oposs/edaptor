@@ -154,9 +154,15 @@ pub struct UiState {
         std::collections::BTreeMap<String, crate::config::defaults::LiveTemplateState>,
     /// Create-mode `{auto:…}` computed defaults (attr → kind), built by
     /// `open_create` from the profile's `[profile.defaults]`. Re-evaluated after
-    /// each autonumber allocation so e.g. `sambaSID` fills once `uidNumber` resolves.
+    /// each autonumber allocation and each form edit, so e.g. `sambaSID` fills once
+    /// `uidNumber` resolves and follows later `uidNumber` changes.
     pub computed_defaults:
         std::collections::BTreeMap<String, crate::config::defaults::ComputedKind>,
+    /// The value each `{auto:…}` target was last filled with (attr → value).
+    /// While a target still holds that value it counts as auto-filled and is
+    /// recomputed when its inputs change; a value the operator typed differs from
+    /// it and is left alone. Cleared by `open_create`.
+    pub computed_written: std::collections::BTreeMap<String, String>,
     /// Async write flow (validate/diff/submit/correlate).
     pub write_flow: WriteFlow,
     /// Async autonumber allocation flow (scan + pick next-free).
@@ -285,6 +291,7 @@ impl UiState {
             edit_form: None,
             live_templates: std::collections::BTreeMap::new(),
             computed_defaults: std::collections::BTreeMap::new(),
+            computed_written: std::collections::BTreeMap::new(),
             write_flow: WriteFlow::new(),
             alloc_flow: AllocFlow::new(),
             search_flow: SearchFlow::new(),
@@ -475,10 +482,6 @@ impl UiState {
         self.recompute_computed_defaults();
     }
 
-    /// Fill any create-mode `{auto:…}` computed default whose inputs are now ready.
-    /// Currently: `sambaSID`, derived from the sibling `uidNumber` and the Samba
-    /// domain. Only *empty* targets are filled, so an operator-typed value (or an
-    /// earlier compute) is never overwritten. No-op outside create mode.
     /// Consume the one-shot "focus the form pane" request, returning whether it was
     /// set. The form pane calls this on each event; a `true` result means it should
     /// pull pane-level focus to itself (a create form just opened).
@@ -486,30 +489,55 @@ impl UiState {
         std::mem::take(&mut self.focus_form_request)
     }
 
+    /// Fill any create-mode `{auto:…}` computed default whose inputs are now ready
+    /// and flag the form for a re-render. See
+    /// [`fill_computed_defaults`](Self::fill_computed_defaults).
     pub fn recompute_computed_defaults(&mut self) {
+        if !self.fill_computed_defaults().is_empty() {
+            self.form_needs_render = true;
+        }
+    }
+
+    /// Fill or refresh the create-mode `{auto:…}` computed defaults in the form
+    /// model and return the indices of the fields that changed. Currently:
+    /// `sambaSID`, derived from the sibling `uidNumber` and the Samba domain.
+    ///
+    /// A target is (re)filled while it is empty or still holds the value this
+    /// method last wrote, so editing `uidNumber` after the SID was computed
+    /// updates the SID too. A value the operator typed is never overwritten. When
+    /// the inputs are not ready (no domain, `uidNumber` empty or not a number) the
+    /// target keeps its value. No-op outside create mode.
+    pub fn fill_computed_defaults(&mut self) -> Vec<usize> {
         use crate::config::defaults::ComputedKind;
         if self.computed_defaults.is_empty() {
-            return;
+            return Vec::new();
         }
         let Some(form) = self.edit_form.as_ref() else {
-            return;
+            return Vec::new();
         };
         if !matches!(
             form.mode,
             crate::workflows::edit_form::FormMode::Create { .. }
         ) {
-            return;
+            return Vec::new();
         }
         // Compute against the current (immutably-borrowed) form; collect fills.
-        let mut fills: Vec<(String, String)> = Vec::new();
+        let mut fills: Vec<(usize, String, String)> = Vec::new();
         for (attr, kind) in &self.computed_defaults {
-            let target_empty = form
+            let Some(idx) = form
                 .fields
                 .iter()
-                .find(|f| f.label.eq_ignore_ascii_case(attr))
-                .map(|f| f.values.iter().all(|s| s.trim().is_empty()));
-            // Skip if the attr isn't on the form or already has a value.
-            if target_empty != Some(true) {
+                .position(|f| f.label.eq_ignore_ascii_case(attr))
+            else {
+                continue;
+            };
+            let current = &form.fields[idx].values;
+            let empty = current.iter().all(|s| s.trim().is_empty());
+            let auto = match self.computed_written.get(attr) {
+                Some(written) => current.len() == 1 && &current[0] == written,
+                None => false,
+            };
+            if !empty && !auto {
                 continue;
             }
             let computed = match kind {
@@ -520,26 +548,20 @@ impl UiState {
                 .ok(),
             };
             if let Some(v) = computed {
-                if !v.trim().is_empty() {
-                    fills.push((attr.clone(), v));
+                if !v.trim().is_empty() && current.as_slice() != std::slice::from_ref(&v) {
+                    fills.push((idx, attr.clone(), v));
                 }
             }
         }
-        if fills.is_empty() {
-            return;
-        }
+        let mut changed = Vec::new();
         if let Some(form) = self.edit_form.as_mut() {
-            for (attr, v) in fills {
-                if let Some(f) = form
-                    .fields
-                    .iter_mut()
-                    .find(|f| f.label.eq_ignore_ascii_case(&attr))
-                {
-                    f.values = vec![v];
-                }
+            for (idx, attr, v) in fills {
+                form.fields[idx].values = vec![v.clone()];
+                self.computed_written.insert(attr, v);
+                changed.push(idx);
             }
         }
-        self.form_needs_render = true;
+        changed
     }
 
     /// Submit a candidate search under `base` for entries of object class `oc`
@@ -1794,6 +1816,7 @@ pub(crate) fn bootstrap(config: Config, password: String) -> Result<UiState> {
         edit_form: None,
         live_templates: std::collections::BTreeMap::new(),
         computed_defaults: std::collections::BTreeMap::new(),
+        computed_written: std::collections::BTreeMap::new(),
         write_flow: WriteFlow::new(),
         alloc_flow: AllocFlow::new(),
         search_flow: SearchFlow::new(),
@@ -2256,6 +2279,113 @@ mod tests {
             vec!["S-1-5-21-1-2-3-3000".to_string()],
             "sambaSID auto-computed from the resolved uidNumber"
         );
+    }
+
+    /// Build a create-mode state with a `{auto:sambaSID}` default and a form of
+    /// `uidNumber` + `sambaSID`, for the computed-default refresh tests.
+    fn samba_create_state(uid: &str, sid: &str) -> UiState {
+        use crate::config::defaults::ComputedKind;
+        use crate::schema::FieldKind;
+        use crate::workflows::edit_form::{EditField, EditForm, FormMode};
+        use crate::workflows::form_model::WidgetSpec;
+
+        let schema = SchemaModel::from_raw(&RawSubschema::default());
+        let structure = Structure::build("dc=x", vec![]);
+        let mut st =
+            UiState::new_for_test(structure, schema, "dc=x".into(), Vec::new(), Vec::new());
+        st.samba_domain = Some(crate::samba::SambaDomainInfo {
+            domain_sid: "S-1-5-21-1-2-3".into(),
+            algorithmic_rid_base: 1000,
+        });
+        st.computed_defaults
+            .insert("sambaSID".into(), ComputedKind::SambaSid);
+        let mk = |label: &str, val: &str| EditField {
+            label: label.into(),
+            must: false,
+            editable: true,
+            multi: false,
+            secret: false,
+            ordered: false,
+            orphaned: false,
+            kind: FieldKind::Text,
+            widget: WidgetSpec::ReadOnlyText,
+            widget_binding: None,
+            values: if val.is_empty() {
+                vec![]
+            } else {
+                vec![val.into()]
+            },
+            baseline: vec![],
+        };
+        st.edit_form = Some(EditForm {
+            dn: String::new(),
+            mode: FormMode::Create {
+                profile_idx: 0,
+                container: "ou=people,dc=x".into(),
+            },
+            object_classes: vec![],
+            fields: vec![mk("uidNumber", uid), mk("sambaSID", sid)],
+            baseline_csn: None,
+        });
+        st
+    }
+
+    fn set_uid(st: &mut UiState, uid: &str) {
+        st.edit_form.as_mut().unwrap().fields[0].values = vec![uid.into()];
+    }
+
+    fn sid_of(st: &UiState) -> Vec<String> {
+        st.edit_form.as_ref().unwrap().fields[1].values.clone()
+    }
+
+    #[test]
+    fn computed_samba_sid_follows_a_uidnumber_edit() {
+        // The autonumber suggested 3000; the operator then changed uidNumber to
+        // 2119. The auto-filled SID must follow, or two users created this way
+        // both keep the SID of 3000.
+        let mut st = samba_create_state("3000", "");
+        assert_eq!(st.fill_computed_defaults(), vec![1]);
+        assert_eq!(sid_of(&st), vec!["S-1-5-21-1-2-3-7000".to_string()]);
+
+        set_uid(&mut st, "2119");
+        assert_eq!(st.fill_computed_defaults(), vec![1]);
+        assert_eq!(sid_of(&st), vec!["S-1-5-21-1-2-3-5238".to_string()]);
+
+        // Nothing changed since: no fill reported.
+        assert!(st.fill_computed_defaults().is_empty());
+    }
+
+    #[test]
+    fn computed_samba_sid_keeps_an_operator_typed_value() {
+        let mut st = samba_create_state("3000", "");
+        st.fill_computed_defaults();
+        // The operator overrides the SID by hand; a later uidNumber edit keeps it.
+        st.edit_form.as_mut().unwrap().fields[1].values = vec!["S-1-5-21-1-2-3-2119".into()];
+        set_uid(&mut st, "2119");
+        assert!(st.fill_computed_defaults().is_empty());
+        assert_eq!(sid_of(&st), vec!["S-1-5-21-1-2-3-2119".to_string()]);
+    }
+
+    #[test]
+    fn computed_samba_sid_keeps_its_value_while_uidnumber_is_not_a_number() {
+        let mut st = samba_create_state("3000", "");
+        st.fill_computed_defaults();
+        set_uid(&mut st, "");
+        assert!(st.fill_computed_defaults().is_empty());
+        assert_eq!(sid_of(&st), vec!["S-1-5-21-1-2-3-7000".to_string()]);
+        // Typing a new number afterwards still updates the auto-filled SID.
+        set_uid(&mut st, "2120");
+        st.fill_computed_defaults();
+        assert_eq!(sid_of(&st), vec!["S-1-5-21-1-2-3-5240".to_string()]);
+    }
+
+    #[test]
+    fn computed_samba_sid_does_not_touch_a_prefilled_value() {
+        // A create form opened with a SID already present (not written by the
+        // computed default) is treated as operator data.
+        let mut st = samba_create_state("3000", "S-1-5-21-1-2-3-9999");
+        assert!(st.fill_computed_defaults().is_empty());
+        assert_eq!(sid_of(&st), vec!["S-1-5-21-1-2-3-9999".to_string()]);
     }
 
     /// A field holding a user-typed value (NOT the placeholder) must be left
