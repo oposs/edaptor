@@ -1,24 +1,14 @@
-# Homebrew formula for edaptor. This repository is its own tap:
+# Homebrew formula for edaptor. This repository is its own tap.
 #
-#   brew tap oposs/edaptor https://github.com/oposs/edaptor
-#   brew install edaptor
-#
-# The version, the four sha256 lines and the bottle block are rewritten by
-# .github/workflows/release-build-local.yml once a release's files exist. The
-# trailing marker comments and the BOTTLE-START/BOTTLE-END lines are what that
-# rewrite matches on; do not remove them. The values below are placeholders
-# until the first release built by that workflow.
+# The release build rewrites the version line, the four sha256 lines by their
+# marker comments and the bottle block between the BOTTLE markers. Keep the
+# markers, and keep each url line directly above its sha256 line.
 class Edaptor < Formula
   desc "Schema-driven terminal editor for OpenLDAP directories"
   homepage "https://github.com/oposs/edaptor"
   version "1.8.2"
   license "MIT"
 
-  # Without a bottle Homebrew treats this formula as a source build and
-  # refuses to install on a Mac whose Command Line Tools are older than its
-  # macOS, although nothing is compiled. One bottle per architecture is
-  # enough: Homebrew falls back to a bottle built for an older macOS of the
-  # same architecture.
   # BOTTLE-START
   bottle do
     root_url "https://github.com/oposs/edaptor/releases/download/v1.8.2"
@@ -51,7 +41,7 @@ class Edaptor < Formula
 
   def install
     bin.install "edaptor"
-    man1.install "man/edaptor.1"
+    Dir["man/*.[1-9]"].each { |page| (man/"man#{page[-1]}").install page }
     pkgshare.install "examples"
   end
 
