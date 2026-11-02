@@ -49,9 +49,11 @@ tempfile = "3"
 name = "edaptor"
 path = "src/main.rs"
 
-[[bin]]
+# A developer tool that writes scripts/ldap-provision/data/testdata.ldif.
+# An example, not a [[bin]]: the release archives carry edaptor alone.
+[[example]]
 name = "gen-testdata"
-path = "src/bin/gen-testdata.rs"
+path = "tools/gen-testdata.rs"
 
 [lib]
 name = "edaptor"

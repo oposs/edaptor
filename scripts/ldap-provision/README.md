@@ -25,9 +25,9 @@ password `test123`.
 ## Regenerating `testdata.ldif`
 
 ```bash
-cargo run --bin gen-testdata            # 600 users, dc=example,dc=org
-cargo run --bin gen-testdata -- --users 150
-cargo run --bin gen-testdata -- --out - # to stdout
+cargo run --example gen-testdata            # 600 users, dc=example,dc=org
+cargo run --example gen-testdata -- --users 150
+cargo run --example gen-testdata -- --out - # to stdout
 ```
 
 Output is deterministic (no RNG, fixed timestamp), so regenerating with the same
