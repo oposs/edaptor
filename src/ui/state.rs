@@ -160,8 +160,8 @@ pub struct UiState {
         std::collections::BTreeMap<String, crate::config::defaults::ComputedKind>,
     /// The value each `{auto:…}` target was last filled with (attr → value).
     /// While a target still holds that value it counts as auto-filled and is
-    /// recomputed when its inputs change; a value the operator typed differs from
-    /// it and is left alone. Cleared by `open_create`.
+    /// recomputed when its inputs change; a value the operator typed (or an
+    /// emptied field) differs from it and is left alone. Cleared by `open_create`.
     pub computed_written: std::collections::BTreeMap<String, String>,
     /// Async write flow (validate/diff/submit/correlate).
     pub write_flow: WriteFlow,
@@ -502,9 +502,10 @@ impl UiState {
     /// model and return the indices of the fields that changed. Currently:
     /// `sambaSID`, derived from the sibling `uidNumber` and the Samba domain.
     ///
-    /// A target is (re)filled while it is empty or still holds the value this
-    /// method last wrote, so editing `uidNumber` after the SID was computed
-    /// updates the SID too. A value the operator typed is never overwritten. When
+    /// A target is filled while it is empty and was never filled, and refreshed
+    /// while it still holds the value last written, so editing `uidNumber` after
+    /// the SID was computed updates the SID too. A value the operator typed, or a
+    /// field the operator emptied, is never overwritten. When
     /// the inputs are not ready (no domain, `uidNumber` empty or not a number) the
     /// target keeps its value. No-op outside create mode.
     pub fn fill_computed_defaults(&mut self) -> Vec<usize> {
@@ -532,12 +533,16 @@ impl UiState {
                 continue;
             };
             let current = &form.fields[idx].values;
-            let empty = current.iter().all(|s| s.trim().is_empty());
-            let auto = match self.computed_written.get(attr) {
+            // Before the first fill only an empty target is ours to fill. After
+            // it, only a target still holding the written value is: anything
+            // else, an emptied field included, is the operator's. (This runs on
+            // every form event, so refilling an emptied field would undo a
+            // delete while the operator is still typing.)
+            let fillable = match self.computed_written.get(attr) {
                 Some(written) => current.len() == 1 && &current[0] == written,
-                None => false,
+                None => current.iter().all(|s| s.trim().is_empty()),
             };
-            if !empty && !auto {
+            if !fillable {
                 continue;
             }
             let computed = match kind {
@@ -2377,6 +2382,25 @@ mod tests {
         set_uid(&mut st, "2120");
         st.fill_computed_defaults();
         assert_eq!(sid_of(&st), vec!["S-1-5-21-1-2-3-5240".to_string()]);
+    }
+
+    #[test]
+    fn computed_samba_sid_stays_cleared_once_the_operator_empties_it() {
+        // The operator deletes the auto-filled SID to type another one or to
+        // leave it blank. The form pumps on every event, so a refill here would
+        // put the old SID back while the field is still being edited.
+        let mut st = samba_create_state("3000", "");
+        st.fill_computed_defaults();
+        for cleared in [vec![], vec![String::new()]] {
+            st.edit_form.as_mut().unwrap().fields[1].values = cleared.clone();
+            assert!(st.fill_computed_defaults().is_empty());
+            assert_eq!(sid_of(&st), cleared);
+            // A later uidNumber edit does not bring it back either.
+            set_uid(&mut st, "2119");
+            assert!(st.fill_computed_defaults().is_empty());
+            assert_eq!(sid_of(&st), cleared);
+            set_uid(&mut st, "3000");
+        }
     }
 
     #[test]

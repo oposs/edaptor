@@ -147,4 +147,4 @@ The field stays editable and (when a Samba domain is configured) still offers th
 manual *Enter-to-generate* action, so you can regenerate or override it by hand.
 An empty target is auto-filled, and an auto-filled value follows later changes to
 `uidNumber` (for example when you replace the suggested number by hand). A value
-you type into the field is never overwritten.
+you type into the field is never overwritten, and a field you empty stays empty.

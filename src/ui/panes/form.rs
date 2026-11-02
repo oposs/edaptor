@@ -3998,6 +3998,86 @@ mod tests {
         assert_eq!(cn.values, vec!["John Doe".to_string()]);
     }
 
+    /// A create pane with `uidNumber` 3000 and the given `sambaSID` field, the
+    /// `{auto:sambaSID}` default filled and the first render done.
+    fn samba_sid_pane(sid_field: EditField) -> (Shared, FormPane) {
+        use crate::config::defaults::ComputedKind;
+        let (shared, mut pane) = build_pane_with_create_form(
+            0,
+            "dc=x",
+            "uid",
+            vec![ef("uidNumber", "3000", true), sid_field],
+        );
+        {
+            let mut st = shared.borrow_mut();
+            st.samba_domain = Some(crate::samba::SambaDomainInfo {
+                domain_sid: "S-1-5-21-1-2-3".into(),
+                algorithmic_rid_base: 1000,
+            });
+            st.computed_defaults
+                .insert("sambaSID".into(), ComputedKind::SambaSid);
+            st.recompute_computed_defaults();
+        }
+        pump(&mut pane);
+        (shared, pane)
+    }
+
+    /// Deliver one REFRESH broadcast to `pane` (one event-pump tick).
+    fn pump(pane: &mut FormPane) {
+        let mut out = VecDeque::new();
+        let mut timers = tv::timer::TimerQueue::new();
+        let mut deferred = Vec::new();
+        let mut ctx = headless_ctx(&mut out, &mut timers, &mut deferred);
+        let mut ev = Event::Broadcast {
+            command: REFRESH,
+            source: None,
+        };
+        pane.handle_event(&mut ev, &mut ctx);
+    }
+
+    #[test]
+    fn create_computed_samba_sid_stays_cleared_in_a_text_cell() {
+        // Samba widget off, domain still resolved: sambaSID is a text cell. The
+        // operator empties it; the next pump must not put the old SID back.
+        let (shared, mut pane) = samba_sid_pane(ef("sambaSID", "", true));
+        assert_eq!(
+            shared.borrow().edit_form.as_ref().unwrap().fields[1].values,
+            vec!["S-1-5-21-1-2-3-7000".to_string()]
+        );
+        pane.set_value_text(1, String::new());
+        pump(&mut pane);
+        pump(&mut pane);
+        let st = shared.borrow();
+        let v = &st.edit_form.as_ref().unwrap().fields[1].values;
+        assert!(v.iter().all(|s| s.is_empty()), "SID refilled: {v:?}");
+    }
+
+    #[test]
+    fn create_computed_samba_sid_follows_uidnumber_in_a_launch_cell() {
+        // Samba widget on: sambaSID renders as a Launch block, which takes the
+        // `ValueKind::Launch` branch of `apply_computed_defaults`.
+        let mut sid = ef("sambaSID", "", true);
+        sid.widget_binding = Some(crate::config::widget::WidgetKind::SambaSid);
+        let (shared, mut pane) = samba_sid_pane(sid);
+        assert!(
+            pane.launch_line_for_test(1).contains("S-1-5-21-1-2-3-7000"),
+            "initial: {}",
+            pane.launch_line_for_test(1)
+        );
+        pane.set_value_text(0, "2119".into());
+        pump(&mut pane);
+        let want = "S-1-5-21-1-2-3-5238";
+        assert!(
+            pane.launch_line_for_test(1).contains(want),
+            "after edit: {}",
+            pane.launch_line_for_test(1)
+        );
+        assert_eq!(
+            shared.borrow().edit_form.as_ref().unwrap().fields[1].values,
+            vec![want.to_string()]
+        );
+    }
+
     #[test]
     fn create_computed_samba_sid_follows_typed_uidnumber() {
         use crate::config::defaults::ComputedKind;
