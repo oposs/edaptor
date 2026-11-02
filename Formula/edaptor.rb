@@ -6,36 +6,35 @@
 class Edaptor < Formula
   desc "Schema-driven terminal editor for OpenLDAP directories"
   homepage "https://github.com/oposs/edaptor"
-  version "1.8.2"
+  version "1.9.0"
   license "MIT"
 
   # BOTTLE-START
   bottle do
-    root_url "https://github.com/oposs/edaptor/releases/download/v1.8.2"
-    sha256 cellar: :any_skip_relocation, arm64_sonoma: "ecae1ced87b021e82faf680be03b4caa6c902c7ab59fd61610e727a1a72b0dd0"
-    sha256 cellar: :any_skip_relocation, sequoia: "2dfc5a4cfb33e53535e3db57a5ba2ceb14f20667e58251b256be97efd32274b2"
+    root_url "https://github.com/oposs/edaptor/releases/download/v1.9.0"
+    sha256 cellar: :any_skip_relocation, arm64_big_sur: "7573f22e4f15788ed77884c2fdb6a0651b895b442f1696c46ad2f907eac13af1"
   end
   # BOTTLE-END
 
   on_macos do
     on_arm do
       url "https://github.com/oposs/edaptor/releases/download/v#{version}/edaptor-#{version}-aarch64-apple-darwin.tar.gz"
-      sha256 "fc5199d3a67379b8bd839ee434a00ca3c2a2f995623ee4605ddecc08c0fc49cd" # mac-arm
+      sha256 "f5e9e20a2592121d696e2558de5703f2fd9c2c05e84153fa21e4476e9b2f42b0" # mac-arm
     end
     on_intel do
       url "https://github.com/oposs/edaptor/releases/download/v#{version}/edaptor-#{version}-x86_64-apple-darwin.tar.gz"
-      sha256 "adc118b373736090923f647cec1fca1c1a3fbe46fc62ddb58472f506dc45837f" # mac-x86
+      sha256 "cfc2901a2cbe4141fde99b7c19935ab6b77e9bb87b57378d191000ca0fa9edff" # mac-x86
     end
   end
 
   on_linux do
     on_intel do
       url "https://github.com/oposs/edaptor/releases/download/v#{version}/edaptor-#{version}-x86_64-unknown-linux-musl.tar.gz"
-      sha256 "12fa5be506cedce382103804bc4d843608f1ca943eebca4f28cd2872cc224695" # linux-x86
+      sha256 "a8a5bd956a319bd226e0ba3f36ca7576d676300678d1f82f0bb1242ef145e2ab" # linux-x86
     end
     on_arm do
       url "https://github.com/oposs/edaptor/releases/download/v#{version}/edaptor-#{version}-aarch64-unknown-linux-musl.tar.gz"
-      sha256 "a2016a685429bd16cd062a8c6eb8f9763d1d6ba497bb80e8f024bc071083aa53" # linux-arm
+      sha256 "9ab9808659f82ad1ef72e0f862c9ece867dcffc6419820bd1218e1c34373951b" # linux-arm
     end
   end
 
