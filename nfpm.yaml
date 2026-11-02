@@ -1,0 +1,52 @@
+# The .deb and .rpm of edaptor, built by repo-infra's ri-release-nfpm from the
+# static musl archives. The piece fills in VERSION, MTIME and ARCH, and STAGE,
+# the unpacked edaptor/ folder of one archive, before nfpm reads this file.
+# Write no dollar-brace name in a comment either: the piece fills in the whole
+# file and stops at a name it does not know. nfpm adds no automatic
+# requirements, so the static binary depends on nothing.
+name: edaptor
+arch: "${ARCH}"
+platform: linux
+version: "${VERSION}"
+release: "1"
+# nfpm 2.47.0 ignores SOURCE_DATE_EPOCH, so the timestamp is set here.
+mtime: "${MTIME}"
+section: admin
+priority: optional
+maintainer: Tobias Oetiker <tobi@oetiker.ch>
+license: MIT
+homepage: https://github.com/oposs/edaptor
+description: |
+  Schema-driven terminal editor for OpenLDAP directories
+  A schema-driven terminal editor for OpenLDAP directories. It browses the
+  directory in three panes and creates, edits, renames and deletes users,
+  groups and their memberships, with forms derived from the server schema and
+  from the entries already in the directory. A single static binary.
+contents:
+  - src: ${STAGE}/edaptor
+    dst: /usr/bin/edaptor
+    file_info:
+      mode: 0755
+  - src: ${STAGE}/man/edaptor.1.gz
+    dst: /usr/share/man/man1/edaptor.1.gz
+    file_info:
+      mode: 0644
+  - src: ${STAGE}/README.md
+    dst: /usr/share/doc/edaptor/README.md
+    file_info:
+      mode: 0644
+  - src: ${STAGE}/examples/config.toml
+    dst: /usr/share/doc/edaptor/examples/config.toml
+    file_info:
+      mode: 0644
+  - src: ${STAGE}/LICENSE
+    dst: /usr/share/doc/edaptor/copyright
+    packager: deb
+    file_info:
+      mode: 0644
+  - src: ${STAGE}/LICENSE
+    dst: /usr/share/doc/edaptor/LICENSE
+    packager: rpm
+    type: doc
+    file_info:
+      mode: 0644
