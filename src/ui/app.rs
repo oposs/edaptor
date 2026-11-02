@@ -208,9 +208,25 @@ pub(crate) fn dispatch(prog: &mut Program, cmd: Command, state: &Shared) {
             };
             match res {
                 Some(Ok(sid)) => {
-                    state
-                        .borrow_mut()
-                        .apply_commit(idx, crate::ui::widget::CommitOutcome::SetValues(vec![sid]));
+                    let mut st = state.borrow_mut();
+                    // Record the generated SID as auto-filled so a later uidNumber
+                    // edit on a create form recomputes it.
+                    // Keyed like `computed_defaults` (the config's spelling), which
+                    // may differ in case from the schema's field label.
+                    let key = st
+                        .edit_form
+                        .as_ref()
+                        .and_then(|f| f.fields.get(idx))
+                        .and_then(|f| {
+                            st.computed_defaults
+                                .keys()
+                                .find(|k| k.eq_ignore_ascii_case(&f.label))
+                                .cloned()
+                        });
+                    if let Some(key) = key {
+                        st.computed_written.insert(key, sid.clone());
+                    }
+                    st.apply_commit(idx, crate::ui::widget::CommitOutcome::SetValues(vec![sid]));
                 }
                 Some(Err(msg)) => {
                     let (view, ok) = error::build(&msg);
@@ -578,6 +594,7 @@ fn open_create(state: &Shared, profile_idx: usize, container: &str) {
     st.edit_form = Some(form);
     st.live_templates = live;
     st.computed_defaults = computed;
+    st.computed_written.clear();
     // Compute any `{auto:…}` default whose inputs are already available (e.g. a
     // literal `uidNumber`); autonumber-backed inputs fill later via the alloc hook.
     st.recompute_computed_defaults();

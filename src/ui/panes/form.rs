@@ -1313,6 +1313,47 @@ impl FormPane {
         }
     }
 
+    /// Create-mode only: refresh `{auto:…}` computed defaults (e.g. `sambaSID`
+    /// from `uidNumber`) in the model and push the changed values into their
+    /// cells. Routed per cell kind, like [`apply_live_templates`](Self::apply_live_templates),
+    /// rather than via `form_needs_render`, which would reset the editor the
+    /// operator is typing in.
+    fn apply_computed_defaults(&mut self) {
+        let changes: Vec<(usize, EditField)> = {
+            let mut st = self.state.borrow_mut();
+            let changed = st.fill_computed_defaults();
+            let Some(form) = st.edit_form.as_ref() else {
+                return;
+            };
+            changed
+                .into_iter()
+                .filter_map(|i| form.fields.get(i).map(|f| (i, f.clone())))
+                .collect()
+        };
+        for (i, field) in changes {
+            match self.kinds.get(i) {
+                Some(ValueKind::List { .. }) => self.set_list_value(i, &field.values),
+                Some(ValueKind::Launch) => {
+                    let Some(&vid) = self.value_ids.get(i) else {
+                        continue;
+                    };
+                    if let Some(lv) = self
+                        .scroll_mut()
+                        .and_then(|sg| sg.child_mut(vid))
+                        .and_then(|v| v.as_any_mut())
+                        .and_then(|a| a.downcast_mut::<LaunchValueView>())
+                    {
+                        lv.set_lines(launch_lines(&field));
+                    }
+                }
+                _ => {
+                    let text = field.values.first().cloned().unwrap_or_default();
+                    self.set_value_text(i, text);
+                }
+            }
+        }
+    }
+
     /// Rebuild the inline `ListValueView` for field `i` from `values`. The list
     /// sibling of [`set_value_text`], used by the live-template hook to push an
     /// auto-computed value into a multi-valued target cell.
@@ -1570,6 +1611,9 @@ impl View for FormPane {
         // Create mode: mirror live templated defaults (cn/displayName) into the
         // still-auto target fields.
         self.apply_live_templates(ctx);
+        // Create mode: refresh `{auto:…}` computed defaults (sambaSID) whose input
+        // (uidNumber) the operator just edited.
+        self.apply_computed_defaults();
     }
 }
 
@@ -3952,6 +3996,139 @@ mod tests {
         let cn = cn.edit_form.as_ref().unwrap();
         let cn = cn.fields.iter().find(|f| f.label == "cn").unwrap();
         assert_eq!(cn.values, vec!["John Doe".to_string()]);
+    }
+
+    /// A create pane with `uidNumber` 3000 and the given `sambaSID` field, the
+    /// `{auto:sambaSID}` default filled and the first render done.
+    fn samba_sid_pane(sid_field: EditField) -> (Shared, FormPane) {
+        use crate::config::defaults::ComputedKind;
+        let (shared, mut pane) = build_pane_with_create_form(
+            0,
+            "dc=x",
+            "uid",
+            vec![ef("uidNumber", "3000", true), sid_field],
+        );
+        {
+            let mut st = shared.borrow_mut();
+            st.samba_domain = Some(crate::samba::SambaDomainInfo {
+                domain_sid: "S-1-5-21-1-2-3".into(),
+                algorithmic_rid_base: 1000,
+            });
+            st.computed_defaults
+                .insert("sambaSID".into(), ComputedKind::SambaSid);
+            st.recompute_computed_defaults();
+        }
+        pump(&mut pane);
+        (shared, pane)
+    }
+
+    /// Deliver one REFRESH broadcast to `pane` (one event-pump tick).
+    fn pump(pane: &mut FormPane) {
+        let mut out = VecDeque::new();
+        let mut timers = tv::timer::TimerQueue::new();
+        let mut deferred = Vec::new();
+        let mut ctx = headless_ctx(&mut out, &mut timers, &mut deferred);
+        let mut ev = Event::Broadcast {
+            command: REFRESH,
+            source: None,
+        };
+        pane.handle_event(&mut ev, &mut ctx);
+    }
+
+    #[test]
+    fn create_computed_samba_sid_stays_cleared_in_a_text_cell() {
+        // Samba widget off, domain still resolved: sambaSID is a text cell. The
+        // operator empties it; the next pump must not put the old SID back.
+        let (shared, mut pane) = samba_sid_pane(ef("sambaSID", "", true));
+        assert_eq!(
+            shared.borrow().edit_form.as_ref().unwrap().fields[1].values,
+            vec!["S-1-5-21-1-2-3-7000".to_string()]
+        );
+        pane.set_value_text(1, String::new());
+        pump(&mut pane);
+        pump(&mut pane);
+        let st = shared.borrow();
+        let v = &st.edit_form.as_ref().unwrap().fields[1].values;
+        assert!(v.iter().all(|s| s.is_empty()), "SID refilled: {v:?}");
+    }
+
+    #[test]
+    fn create_computed_samba_sid_follows_uidnumber_in_a_launch_cell() {
+        // Samba widget on: sambaSID renders as a Launch block, which takes the
+        // `ValueKind::Launch` branch of `apply_computed_defaults`.
+        let mut sid = ef("sambaSID", "", true);
+        sid.widget_binding = Some(crate::config::widget::WidgetKind::SambaSid);
+        let (shared, mut pane) = samba_sid_pane(sid);
+        assert!(
+            pane.launch_line_for_test(1).contains("S-1-5-21-1-2-3-7000"),
+            "initial: {}",
+            pane.launch_line_for_test(1)
+        );
+        pane.set_value_text(0, "2119".into());
+        pump(&mut pane);
+        let want = "S-1-5-21-1-2-3-5238";
+        assert!(
+            pane.launch_line_for_test(1).contains(want),
+            "after edit: {}",
+            pane.launch_line_for_test(1)
+        );
+        assert_eq!(
+            shared.borrow().edit_form.as_ref().unwrap().fields[1].values,
+            vec![want.to_string()]
+        );
+    }
+
+    #[test]
+    fn create_computed_samba_sid_follows_typed_uidnumber() {
+        use crate::config::defaults::ComputedKind;
+        let (shared, mut pane) = build_pane_with_create_form(
+            0,
+            "dc=x",
+            "uid",
+            vec![ef("uidNumber", "3000", true), ef("sambaSID", "", true)],
+        );
+        {
+            let mut st = shared.borrow_mut();
+            st.samba_domain = Some(crate::samba::SambaDomainInfo {
+                domain_sid: "S-1-5-21-1-2-3".into(),
+                algorithmic_rid_base: 1000,
+            });
+            st.computed_defaults
+                .insert("sambaSID".into(), ComputedKind::SambaSid);
+            st.recompute_computed_defaults();
+        }
+        let mut out = VecDeque::new();
+        let mut timers = tv::timer::TimerQueue::new();
+        let mut deferred = Vec::new();
+        let mut ctx = headless_ctx(&mut out, &mut timers, &mut deferred);
+        let mut refresh = Event::Broadcast {
+            command: REFRESH,
+            source: None,
+        };
+        pane.handle_event(&mut refresh, &mut ctx); // initial render seeds editors
+
+        // The operator replaces the suggested uidNumber; one event pump later the
+        // SID in both the model and the on-screen editor follows it.
+        pane.set_value_text(0, "2119".into());
+        let mut tick = Event::Broadcast {
+            command: REFRESH,
+            source: None,
+        };
+        pane.handle_event(&mut tick, &mut ctx);
+        let want = "S-1-5-21-1-2-3-5238".to_string();
+        {
+            let st = shared.borrow();
+            let f = st.edit_form.as_ref().unwrap();
+            assert_eq!(f.fields[1].values, vec![want.clone()]);
+        }
+        // A second pump reads the editor back into the model: the SID must survive.
+        let mut tick = Event::Broadcast {
+            command: REFRESH,
+            source: None,
+        };
+        pane.handle_event(&mut tick, &mut ctx);
+        let st = shared.borrow();
+        assert_eq!(st.edit_form.as_ref().unwrap().fields[1].values, vec![want]);
     }
 
     #[test]
