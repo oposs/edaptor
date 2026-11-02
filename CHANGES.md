@@ -7,12 +7,17 @@ All notable changes to eDAPtor are documented here. The format follows
 ## [Unreleased]
 
 ### New
+
+### Changed
+
+### Fixed
+
+## 1.9.0 - 2026-11-02
+### New
 - Releases now include a Windows on ARM archive, `edaptor-<version>-aarch64-pc-windows-msvc.zip`.
 
 ### Changed
 - The Homebrew bottle is built for Apple Silicon only. On an Intel Mac, `brew install edaptor` installs from the release archive and needs Command Line Tools that match the installed macOS.
-
-### Fixed
 
 ## 1.8.2 - 2026-11-02
 ### Fixed
