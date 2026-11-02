@@ -12,6 +12,8 @@ All notable changes to eDAPtor are documented here. The format follows
 
 ### Fixed
 
+## 1.8.2 - 2026-11-02
+### Fixed
 - **On a create form, `sambaSID` kept the value computed from the suggested `uidNumber` after `uidNumber` was changed by hand.** Two users created this way got the same `sambaSID`. An auto-filled `sambaSID` now follows every `uidNumber` change; a value typed into the field, or a field emptied by hand, is left as it is.
 
 ## 1.8.1 - 2026-10-27
