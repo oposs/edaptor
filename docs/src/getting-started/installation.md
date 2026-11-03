@@ -9,8 +9,11 @@ The eDAPtor repository is its own tap:
 
 ```bash
 brew tap oposs/edaptor https://github.com/oposs/edaptor
+brew trust --formula oposs/edaptor/edaptor
 brew install edaptor
 ```
+
+`brew trust` exists from Homebrew 6 on; skip it on older versions.
 
 The formula installs the binary, the man page and the annotated example
 configuration under `$(brew --prefix)/share/edaptor/examples/`.

@@ -1,5 +1,8 @@
 # eDAPtor
 
+[![CI](https://github.com/oposs/edaptor/actions/workflows/ci.yml/badge.svg)](https://github.com/oposs/edaptor/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/oposs/edaptor)](https://github.com/oposs/edaptor/releases/latest)
+
 *The TUI LDAP editor* — a terminal UI for administering an OpenLDAP directory —
 adding, modifying and removing **users** and **groups**, and managing **group
 memberships** — built in Rust with [tvision-rs](https://github.com/oetiker/tvision-rs).
@@ -38,28 +41,44 @@ the [documentation](https://oposs.github.io/edaptor) for usage, and
 
 ## Install
 
-From the next release on, each release ships packages and archives; see the
-[installation guide](https://oposs.github.io/edaptor/getting-started/installation.html).
+The [installation guide](https://oposs.github.io/edaptor/getting-started/installation.html)
+has the details.
 
-```bash
-# macOS and Linux, with Homebrew
+Homebrew, on macOS and Linux:
+
+```sh
 brew tap oposs/edaptor https://github.com/oposs/edaptor
+brew trust --formula oposs/edaptor/edaptor
 brew install edaptor
+```
 
-# Debian and Ubuntu
+`brew trust` exists from Homebrew 6 on; skip it on older versions.
+
+Debian and Ubuntu:
+
+```sh
 sudo install -d -m 0755 /etc/apt/keyrings
-sudo curl -o /etc/apt/keyrings/gitea-oposs.asc https://gitea.oetiker.ch/api/packages/oposs/debian/repository.key
+sudo curl -fsSL -o /etc/apt/keyrings/gitea-oposs.asc https://gitea.oetiker.ch/api/packages/oposs/debian/repository.key
 echo "deb [signed-by=/etc/apt/keyrings/gitea-oposs.asc] https://gitea.oetiker.ch/api/packages/oposs/debian stable main" | sudo tee /etc/apt/sources.list.d/oposs.list
 sudo apt update && sudo apt install edaptor
+```
 
-# Fedora 41 and later
-sudo dnf config-manager addrepo --from-repofile=https://gitea.oetiker.ch/api/packages/oposs/rpm.repo
+Fedora, RHEL, Rocky and Alma, with dnf4 and dnf5 alike:
+
+```sh
+sudo curl -fsSL -o /etc/yum.repos.d/oposs.repo https://gitea.oetiker.ch/api/packages/oposs/rpm.repo
 sudo dnf install edaptor
 ```
 
-Archives for Linux, macOS, illumos and Windows are on the
-[releases page](https://github.com/oposs/edaptor/releases). `man edaptor` covers
-the command line.
+mise:
+
+```sh
+mise use -g github:oposs/edaptor
+```
+
+Archives for Linux, macOS, illumos and Windows (x86_64 and ARM) are on the
+[releases page](https://github.com/oposs/edaptor/releases/latest). `man edaptor`
+covers the command line.
 
 ## Highlights of the design
 
